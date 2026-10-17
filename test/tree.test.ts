@@ -303,3 +303,72 @@ test('a _sessions_ folder is not a node, and its sessions come first in the bran
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('archived sessions are hidden by default, shown on request, and alone when only they are asked for', () => {
+  const root = scaffold(['_tools_/some-tool/_sessions_/alpha', '_tools_/some-tool/_sessions_/beta', '_tools_/some-tool/_sessions_/gamma'])
+  try {
+    for (const [name, id, created] of [
+      ['alpha', 'session-1', '2026-10-17T10:00:00.000Z'],
+      ['beta', 'session-2', '2026-10-17T11:00:00.000Z'],
+      ['gamma', 'session-3', '2026-10-17T12:00:00.000Z'],
+    ] as const) {
+      writeFileSync(
+        join(root, '_tools_/some-tool/_sessions_', name, 'session.json'),
+        JSON.stringify({ id, log: `/logs/${id}`, cwd: join(root, '_tools_/some-tool'), createdAt: created }),
+      )
+    }
+    const sessions = [
+      { ...session('session-1', join(root, '_tools_/some-tool'), '2026-10-17T10:00:00.000Z'), archived: true },
+      session('session-2', join(root, '_tools_/some-tool'), '2026-10-17T11:00:00.000Z'),
+      { ...session('session-3', join(root, '_tools_/some-tool'), '2026-10-17T12:00:00.000Z'), pinned: true },
+    ]
+    const at = (mode: 'hide' | 'show' | 'only'): string[] => {
+      const input: TreeInput = { roots: [{ path: root, title: 'fixture' }], sessions, ...(mode === undefined ? {} : { archived: mode }) }
+      const node = tree(join(root, '_tools_/some-tool'), input)
+      return (node.children ?? []).filter((child) => child.kind === 'session').map((child) => child.label)
+    }
+
+    /**
+     * The default is a promise: a row a person put away is not one they asked for. `show` is the way back, and
+     * `only` is the state a person reaches for when a session has vanished — a two-state toggle cannot express it.
+     */
+    assert.deepEqual(at('hide'), ['gamma', 'beta'], 'the archived session is not drawn by default')
+    assert.deepEqual(at('show'), ['gamma', 'beta', 'alpha'], 'and is drawn with its siblings when asked for: pinned first, then newest name first')
+    assert.deepEqual(at('only'), ['alpha'], 'while "only" answers with nothing but the archived ones')
+
+    const shown = (tree(join(root, '_tools_/some-tool'), { roots: [{ path: root, title: 'fixture' }], sessions, archived: 'show' }).children ?? [])
+    assert.equal(shown.find((child) => child.label === 'alpha')?.archived, true, 'an archived row says so, so a list can dim it')
+    assert.equal(shown.find((child) => child.label === 'gamma')?.pinned, true, 'and a pinned row says so')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a pinned session sorts above newer ones, and the flags come from the store rather than the definition', () => {
+  const root = scaffold(['_tools_/some-tool/_sessions_/older', '_tools_/some-tool/_sessions_/newer'])
+  try {
+    /** The definition carries no flags — and a hand-written one that does must not be believed. */
+    writeFileSync(
+      join(root, '_tools_/some-tool/_sessions_/older', 'session.json'),
+      JSON.stringify({ id: 'session-older', log: '/logs/older', cwd: join(root, '_tools_/some-tool'), createdAt: '2026-10-17T09:00:00.000Z', archived: true }),
+    )
+    writeFileSync(
+      join(root, '_tools_/some-tool/_sessions_/newer', 'session.json'),
+      JSON.stringify({ id: 'session-newer', log: '/logs/newer', cwd: join(root, '_tools_/some-tool'), createdAt: '2026-10-17T10:00:00.000Z' }),
+    )
+    const meta = { ...session('session-older', join(root, '_tools_/some-tool'), '2026-10-17T09:00:00.000Z'), pinned: true }
+    const input: TreeInput = { roots: [{ path: root, title: 'fixture' }], sessions: [meta, session('session-newer', join(root, '_tools_/some-tool'), '2026-10-17T10:00:00.000Z')] }
+
+    const children = tree(join(root, '_tools_/some-tool'), input).children ?? []
+    const labels = children.filter((child) => child.kind === 'session').map((child) => child.label)
+    assert.deepEqual(labels, ['older', 'newer'], 'the pin outranks the clock')
+    assert.equal(children.find((child) => child.label === 'older')?.pinned, true, 'and the row carries the pin')
+    assert.equal(
+      children.find((child) => child.label === 'older')?.archived,
+      undefined,
+      'while the stale flag in the definition is ignored: the store is the one place a flag lives',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

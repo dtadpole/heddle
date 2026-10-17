@@ -34,7 +34,7 @@ export interface Config {
  * The same shape DSH shows in its session list. It is a *label*, so it may be lossy; the id stays the identity
  * and the full message stays in the log.
  */
-function titleFrom(text: string): string {
+export function titleFrom(text: string): string {
   const line = text.replace(/\s+/g, ' ').trim()
   if (line.length === 0) return ''
   const limit = 48
@@ -42,6 +42,19 @@ function titleFrom(text: string): string {
   const cut = line.slice(0, limit)
   const at = cut.lastIndexOf(' ')
   return (at > limit / 2 ? cut.slice(0, at) : cut).replace(/[.,;:!?]+$/, '') + '…'
+}
+
+/**
+ * A fork's name: DSH's `<title> (1)`, with the ordinal rising past whatever the store already holds.
+ *
+ * A pure function rather than a loop inside `fork`, because the rule is what a person reads and a fork that reused
+ * an existing name would be a fork nobody could tell apart in a list.
+ */
+export function forkTitle(base: string, taken: readonly string[]): string {
+  const trimmed = base.trim().length > 0 ? base.trim() : 'session'
+  let ordinal = 1
+  while (taken.includes(`${trimmed} (${ordinal})`)) ordinal += 1
+  return `${trimmed} (${ordinal})`
 }
 
 export class SessionService extends Service {
@@ -114,10 +127,7 @@ export class SessionService extends Service {
     if (handle === null) return null
     const created = this.store.list().find((one) => one.id === handle.id)
     const base = source.title !== undefined && source.title.trim().length > 0 ? source.title.trim() : 'session'
-    const takenTitles = this.store.list().map((one) => one.title ?? '')
-    let ordinal = 1
-    while (takenTitles.includes(`${base} (${ordinal})`)) ordinal += 1
-    const title = `${base} (${ordinal})`
+    const title = forkTitle(base, this.store.list().map((one) => one.title ?? ''))
     this.store.rename(handle.id, title)
     const definition = writeSessionDefinition(handle, source.cwd, {
       createdAt: created?.created ?? new Date().toISOString(),
