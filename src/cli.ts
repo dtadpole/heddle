@@ -524,8 +524,8 @@ async function runWeb(args: Args): Promise<void> {
         .map((meta) => app.ctx.session.store.open(meta.id))
         .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
       const recovered = await app.ctx.team.recoverAll(handles)
-      if (recovered.recovered > 0) {
-        process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered)\n`)
+      if (recovered.recovered > 0 || recovered.failed > 0) {
+        process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
       }
     }
     process.stdout.write(`heddle web: ${server.url}\n`)

@@ -25,14 +25,15 @@ doubles. Nothing here needs a display, so it runs unattended.
 ## What decides it
 
 - [`check.mjs`](check.mjs) — the port, the page, the API and the live stream.
-- [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into one
-  turn, and one element drawn for it, with the person and the model keeping their own.
-- [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report per
-  session, its provenance, and the span a compaction stands in for.
+- [`check-team-view.mjs`](check-team-view.mjs) — a Lead's team as the Web UI shows it: the roster with live status,
+  the shared board with its revisions and the mailbox ledger, read from the same `/api/team` projection the
+  tools use; and no panel at all for a session with no team.
+- [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
+  one turn, and one element drawn for it, with the person and the model keeping their own.
+- [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report
+  per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
   extension, and a file's own script tags shown rather than obeyed.
-- [`check-goal.mjs`](check-goal.mjs) — goal management: the model's tool creates a goal inside a real
-  turn, and a person drives it from the bar — including resuming what a person paused.
 - [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's two workspace controls: registering
   a folder over the API the button posts to, the refusals that keep the controls honest, the split
   between a chosen root and one adopted because a session ran in it, and a browser clicking both

@@ -63,6 +63,8 @@ export interface TeamDeps {
   readonly limits?: TeamLimits
   /** Called after every journal write, so a Web UI or a waiter can refresh. */
   readonly notify?: (lead: SessionId) => void
+  /** Where a recovery failure is reported; recovery must not stop a server from booting. */
+  readonly warn?: (message: string) => void
 }
 
 export type TeamMemberStatus = 'running' | 'inactive' | 'provisioning' | 'failed'
@@ -345,19 +347,30 @@ export class TeamService {
    * The server calls this at boot; it is the startup edge of the reentrant team. Sessions with no team events are
    * skipped, so a large store costs one scan of the session metadata and one fold per actual team.
    */
-  async recoverAll(leads: readonly SessionHandle[]): Promise<{ readonly recovered: number; readonly settled: number; readonly delivered: number }> {
+  async recoverAll(leads: readonly SessionHandle[]): Promise<{ readonly recovered: number; readonly settled: number; readonly delivered: number; readonly failed: number }> {
     let recovered = 0
     let settled = 0
     let delivered = 0
+    let failed = 0
     for (const lead of leads) {
       const events = this.deps.store.read(lead)
       if (!events.some((event) => event.type.startsWith('team/'))) continue
-      const result = await this.recover(lead)
-      recovered += 1
-      settled += result.settled
-      delivered += result.delivered
+      /**
+       * One broken team must not keep a server from booting: a log the fold refuses is reported and skipped,
+       * and every other team is still recovered. Measured: a crafted team whose member was active without ever
+       * being provisioning made the web command exit before it printed its URL.
+       */
+      try {
+        const result = await this.recover(lead)
+        recovered += 1
+        settled += result.settled
+        delivered += result.delivered
+      } catch (error) {
+        failed += 1
+        this.deps.warn?.(`team ${lead.id} could not be recovered: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
-    return { recovered, settled, delivered }
+    return { recovered, settled, delivered, failed }
   }
 
   /** The status of one member, from durable phase and the live registry. */

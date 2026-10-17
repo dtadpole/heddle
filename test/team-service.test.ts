@@ -25,6 +25,7 @@ interface Harness {
   readonly service: TeamService
   readonly running: Set<string>
   readonly aborted: string[]
+  readonly warnings: string[]
   readonly runCalls: { readonly session: string; readonly prompt: string; readonly source: unknown }[]
 }
 
@@ -34,10 +35,12 @@ function harness(limits: TeamDeps['limits'] = {}): Harness {
   const lead = store.create({ cwd: root, endpoint: 'scripted', model: 'm' })
   const running = new Set<string>()
   const aborted: string[] = []
+  const warnings: string[] = []
   const runCalls: { session: string; prompt: string; source: unknown }[] = []
   const deps: TeamDeps = {
     store,
-    limits,
+    limits: limits ?? {},
+    warn: (message) => warnings.push(message),
     turns: {
       isRunning: (id) => running.has(id),
       abort: (id) => {
@@ -51,7 +54,7 @@ function harness(limits: TeamDeps['limits'] = {}): Harness {
       store.append(child, { type: 'assistant/chunk', chunk: { type: 'text-delta', text: `answer:${prompt}` } })
     },
   }
-  return { store, lead, running, aborted, runCalls, service: new TeamService(deps) }
+  return { store, lead, running, aborted, warnings, runCalls, service: new TeamService(deps) }
 }
 
 const memberMeta = (store: SessionStore, id: string) => store.list().find((meta) => meta.id === id)
@@ -270,4 +273,26 @@ test('a teammate can message its Lead through the same mailbox', async () => {
   const leadLog = h.store.read(h.lead)
   assert.ok(leadLog.some((event) => JSON.stringify(event).includes('reporting in')), 'the Lead’s own log accepted the message')
   assert.equal(h.service.leadOf(child).id, h.lead.id, 'a teammate resolves its team’s Lead')
+})
+
+test('a corrupt team is reported by recoverAll and does not stop the healthy ones', async () => {
+  const h = harness()
+  // A team whose log the fold refuses: a member that is active without ever being provisioning.
+  const broken = h.store.create({ cwd: root, endpoint: 'scripted' })
+  const ghost = h.store.create({ id: `session-broken-${counter}`, cwd: root, parentSession: broken.id, origin: 'subagent', delegationDepth: 1, teamId: broken.id })
+  h.store.append(broken, {
+    type: 'team/member',
+    version: TEAM_EVENT_VERSION,
+    teamId: broken.id,
+    member: { id: ghost.id, name: 'broken', description: 'x', context: 'fresh', phase: 'active' },
+  })
+  h.service.spawn(h.lead, { name: 'alpha', description: 'x', prompt: 'go' })
+
+  const recovered = await h.service.recoverAll([broken, h.lead])
+  assert.equal(recovered.failed, 1, 'the corrupt team is counted as failed')
+  assert.equal(recovered.recovered, 1, 'the healthy team was still recovered')
+  assert.equal(h.warnings.length, 1)
+  assert.match(h.warnings[0] ?? '', /must start provisioning/)
+
+  assert.deepEqual(await h.service.recoverAll([]), { recovered: 0, settled: 0, delivered: 0, failed: 0 })
 })
