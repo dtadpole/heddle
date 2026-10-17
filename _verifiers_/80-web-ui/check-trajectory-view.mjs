@@ -138,6 +138,69 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
 
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    // The split bar, judged by its agentcloud feel and by actually resizing: a 6px band with a grip that
+    // appears on drag, a real width change, a double-click reset and arrow keys.
+    const idle = JSON.parse(
+      await browser.evaluate(`(() => {
+        const gutter = document.getElementById('gutter-left')
+        const rect = gutter.getBoundingClientRect()
+        return JSON.stringify({
+          hitWidth: rect.width,
+          cursor: getComputedStyle(gutter).cursor,
+          band: getComputedStyle(gutter, '::before').opacity,
+          grip: getComputedStyle(gutter, '::after').opacity,
+        })
+      })()`),
+    )
+    await browser.evaluate(`(() => {
+      const gutter = document.getElementById('gutter-left')
+      const rect = gutter.getBoundingClientRect()
+      gutter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: rect.left + 1, clientY: rect.top + 120, pointerId: 11 }))
+    })()`)
+    // The affordances fade in over 120ms; a computed style read mid-transition would see the old value.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const draggingAffordance = JSON.parse(
+      await browser.evaluate(`(() => {
+        const gutter = document.getElementById('gutter-left')
+        return JSON.stringify({
+          band: getComputedStyle(gutter, '::before').opacity,
+          grip: getComputedStyle(gutter, '::after').opacity,
+          gripWidth: getComputedStyle(gutter, '::after').width,
+          gripRadius: getComputedStyle(gutter, '::after').borderRadius,
+        })
+      })()`),
+    )
+    assert.equal(draggingAffordance.band, '1', 'dragging shows the band')
+    assert.equal(draggingAffordance.grip, '1', 'and the grip')
+    assert.equal(draggingAffordance.gripWidth, '2.5px', 'the grip is agentcloud’s 2.5px')
+    assert.equal(draggingAffordance.gripRadius, '9999px', 'rounded, as agentcloud draws it')
+    await browser.screenshot(join(repoRoot, '_context_', 'dsh-mechanisms', 'heddle-split-bar.png'))
+    const split = JSON.parse(
+      await browser.evaluate(`(() => {
+        const gutter = document.getElementById('gutter-left')
+        const width = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'))
+        const before = width()
+        const rect = gutter.getBoundingClientRect()
+        const idleBand = getComputedStyle(gutter, '::before').opacity
+        gutter.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + 121, clientY: rect.top + 120, pointerId: 11 }))
+        gutter.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: rect.left + 121, clientY: rect.top + 120, pointerId: 11 }))
+        const afterDrag = width()
+        gutter.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        const afterReset = width()
+        gutter.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }))
+        const afterKey = width()
+        return JSON.stringify({ before, afterDrag, afterReset, afterKey, idleBand, hitWidth: rect.width, cursor: getComputedStyle(gutter).cursor })
+      })()`),
+    )
+    assert.equal(idle.hitWidth, 6, 'the hit band is agentcloud’s 6px')
+    assert.equal(idle.cursor, 'col-resize')
+    assert.equal(idle.band, '0', 'the band is invisible until you are near it')
+    assert.equal(idle.grip, '0', 'and so is the grip')
+    assert.ok(split.afterDrag > split.before + 3, `dragging the bar resizes the sidebar (${split.before}rem to ${split.afterDrag}rem)`)
+    assert.equal(split.afterReset, 22, 'a double-click restores the default width')
+    assert.ok(split.afterKey < split.afterReset, 'and an arrow key nudges it from there')
+
+
     const drawn = JSON.parse(
       await browser.evaluate(`(() => {
         document.querySelector('#views button[data-view="trajectory"]').click()
