@@ -105,7 +105,22 @@ test('a real configured backend answers one short request, or is unjudged', asyn
   const target = real ?? local
   if (!skipUnless(context, target !== undefined, 'a configured endpoint this machine can reach, which the environment did not provide')) return
 
-  const run = await runCli(['--endpoint', target.name, '--turn', 'Reply with the single word: ready', '--max-output-tokens', '24', '--json'], { timeoutMs: 120_000 })
+  /**
+   * A **fresh session root**, because this is meant to be one short request. Measured: run against the
+   * owner's store, the turn resumed the last session there and replayed its history — including an
+   * assistant turn that was reasoning only, which a real gateway rejects with "Invalid assistant
+   * message" — so the check judged the machine's session history rather than one request.
+   */
+  const home = isolatedHome('backends-real')
+  let run
+  try {
+    run = await runCli(
+      ['--session-root', join(home, 'sessions'), '--endpoint', target.name, '--turn', 'Reply with the single word: ready', '--max-output-tokens', '24', '--json'],
+      { timeoutMs: 120_000 },
+    )
+  } finally {
+    removeDir(home)
+  }
   if (run.code !== 0) {
     // An unreachable gateway is a fact about the machine, not a failure of the harness, and the
     // check says which it is rather than guessing.

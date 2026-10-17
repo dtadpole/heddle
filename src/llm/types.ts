@@ -195,3 +195,22 @@ declare module '@deepseek-ai/cordis' {
     'session/event'(payload: { readonly session: string; readonly event: { readonly seq: number; readonly at: string; readonly type: string; readonly [key: string]: unknown } }): void
   }
 }
+
+/**
+ * The messages a provider may actually be sent.
+ *
+ * A reasoning part is **not replayed**: its thinking block belongs to the provider that issued it (see
+ * the Anthropic adapter's note), so an assistant turn whose only parts are reasoning has nothing to say
+ * on the wire. Measured against a real OpenAI-compatible gateway: resuming a session that held such a
+ * turn produced `{role: 'assistant', content: null}` and the gateway refused the whole request with
+ * "Invalid assistant message: content or tool_calls must be set". The turn is therefore dropped at the
+ * provider boundary rather than mapped to an empty message — a rule about what a model can be sent, not
+ * about what a session records, so the log and the views keep the turn.
+ */
+export function requestMessages(messages: readonly Message[]): readonly Message[] {
+  return messages.filter(
+    (message) =>
+      message.role !== 'assistant' ||
+      message.content.some((part) => part.type === 'text' || part.type === 'tool-call'),
+  )
+}
