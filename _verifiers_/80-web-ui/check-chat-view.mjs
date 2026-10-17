@@ -327,7 +327,7 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     )
 
     // Typography and the column, against DSH's measured values.
-    assert.equal(measured.column, '680px', 'the conversation column is DSH\'s 680px')
+    assert.ok(Number.parseFloat(measured.column) >= 640, 'the conversation column is at least its 640 floor')
     assert.equal(measured.logFont, '14px', `the chat is 14px, as DSH\\'s content font is — MEASURED ${JSON.stringify(measured)}`)
     assert.equal(measured.logLine, '24px', 'on a 24px line')
     assert.equal(measured.logGap, '6px', 'with DSH\'s 6px flow gap')
@@ -471,7 +471,7 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
         return {
           column,
           area: area.clientWidth,
-          expectedDefault: Math.min(area.clientWidth - 48, Math.max(680, Math.min(area.clientWidth * 0.64, 920))),
+          expectedDefault: Math.min(Number(document.querySelector('.column-grip').getAttribute('aria-valuemax')), Math.max(640, Math.round(window.innerWidth * 0.825))),
           grips: [...document.querySelectorAll('.column-grip')].map((grip) => ({
             side: grip.dataset.side, cursor: getComputedStyle(grip).cursor,
             width: Math.round(grip.getBoundingClientRect().width),
@@ -493,7 +493,7 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
       assert.equal(grip.aria, 'separator', 'announced as a separator')
       assert.equal(grip.now, String(grips.column), 'and it reports the width in force')
     }
-    assert.equal(grips.column, grips.expectedDefault, 'the default follows DSH\'s `clamp(area × .64, 680, 920)`')
+    assert.equal(grips.column, grips.expectedDefault, 'the default is 80–85% of the window, clamped to the view area')
 
     // The line appears under the pointer: DSH sets `--dsh-width-handle-pointer-y` while the pointer is on it.
     const point = JSON.parse(
@@ -531,14 +531,29 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
           }
         })())`),
       )
+    /** Narrow first: the default now sits at the ceiling, so there has to be room before widening proves anything. */
+    const narrowed = await drag('right', -60)
+    assert.equal(narrowed.column, grips.column - 120, 'an inward drag narrows by twice the travel, both edges moving')
+    assert.match(narrowed.during.gripY, /^\d+px$/, 'and the grip line follows the pointer while dragging')
+    assert.equal(narrowed.during.dragging, 'true', 'the grip says it is being dragged')
+    assert.equal(narrowed.stored, narrowed.column, 'the width is committed on release')
+
     const widened = await drag('left', -30)
-    assert.equal(widened.column, grips.column + 60, 'pulling the left grip left widens by twice the travel, as DSH does')
-    assert.match(widened.during.gripY, /^\d+px$/, 'and the grip line follows the pointer while dragging')
-    assert.equal(widened.during.dragging, 'true', 'the grip says it is being dragged')
-    assert.equal(widened.stored, widened.column, 'the width is committed on release')
+    assert.equal(widened.column, narrowed.column + 60, 'pulling the left grip left widens by twice the travel, as DSH does')
 
     const floored = await drag('right', -400)
     assert.equal(floored.column, 640, 'and the floor is DSH\'s 640')
+
+    /**
+     * The owner asked for the size to be remembered in the browser. It is a `localStorage` preference committed on
+     * release, so this is judged where a person would notice it: reload and read the column back.
+     */
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelectorAll(".column-grip").length === 2', 20_000)
+    const remembered = await browser.evaluate(
+      'Math.round(Number.parseFloat(getComputedStyle(document.querySelector("main")).getPropertyValue("--chat-column")))',
+    )
+    assert.equal(remembered, 640, 'and the chosen width survives a reload')
 
     await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
   } finally {
