@@ -12,6 +12,11 @@ Instance of this project's `_verifiers_`. **The claim it decides:** tools are co
 
 The extension point is the claim, not the catalogue. This part judges that a configuration chooses which tools exist, that a tool from outside this project can be added without editing `src/`, that every tool carries a description the model can read, and that a configuration naming a tool that does not exist fails where it is written.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check-tools.mjs` lists and calls the built-in tools, and `check-plugins.mjs` adds a fixture tool through a layer file.

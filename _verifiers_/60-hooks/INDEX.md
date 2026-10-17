@@ -12,6 +12,11 @@ Instance of this project's `_verifiers_`. **The claim it decides:** hooks interc
 
 A hook is what lets a policy attach without the caller knowing. This part judges that named hook points exist around a model call and a tool call, that a listener can rewrite a request or refuse a call, and that a listener is released with the fiber that registered it.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check.mjs` installs a hook plugin through a layer file and observes its effect on a scripted turn.

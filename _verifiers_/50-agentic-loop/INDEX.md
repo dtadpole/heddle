@@ -12,6 +12,11 @@ Instance of this project's `_verifiers_`. **The claim it decides:** the agentic 
 
 A single model call is not a loop. This part judges that a turn completes a multi-step task, that each tool result is fed back for the next round, that the loop stops when the model stops asking for tools, that the round limit stops one that does not, and that an end-to-end run records and resumes.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check.mjs` drives a scripted multi-round turn and reads the transcript, and `check-end-to-end.mjs` runs the whole thing from configuration.

@@ -12,6 +12,11 @@ Instance of this project's `_verifiers_`. **The claim it decides:** streaming te
 
 A stream that is only visible after it ends is not a stream. This part judges that main content and reasoning arrive as **distinct deltas**, that they are emitted **before** the turn completes, and that the same deltas are in the session record. It needs no browser and no server, so the streaming claim holds on its own.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check.mjs` drives a turn against a local double that emits its deltas with gaps, watches `heddle --stream`, and asserts that reasoning and content deltas both arrive before the completion -- first observed at the delta, not at the end.

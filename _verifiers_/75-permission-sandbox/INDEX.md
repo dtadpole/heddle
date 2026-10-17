@@ -12,6 +12,11 @@ Instance of this project's `_verifiers_`. **The claim it decides:** a permission
 
 A sandbox that has never refused anything is a sandbox nobody has tested. This part judges three modes that behave differently — a write inside the workspace, a write outside it, and the same write under each mode — and judges that a refusal names the boundary it enforced.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check-sandbox.mjs` drives writes through the tools under each mode against a scripted endpoint.

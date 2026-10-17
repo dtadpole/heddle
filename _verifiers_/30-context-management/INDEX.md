@@ -21,6 +21,11 @@ shadows the system prompt; a summary that does not shrink is refused and the con
 alone; a provider that says the conversation did not fit gets one reduction and one retry; and the
 project's instruction files arrive as one durable baseline that follows an edit inside a byte budget.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check.mjs` drives turns against a scripted endpoint and a local HTTP double, and reads three

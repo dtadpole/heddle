@@ -17,6 +17,12 @@ It sits beside [`90-web-ui-token`](../90-web-ui-token/INDEX.md) rather than insi
 different thing: not who may read a session, but whether the session's own record is *legible*. The
 mechanism is copied from DSH's `dsh-client-ui-trajectory`, which the owner asked heddle to match.
 
+## Where it runs
+
+**Headless browser.** The checks that need a page open a real Chrome with no window, through
+[`_tools_/browser-tool/`](../../_tools_/browser-tool/INDEX.md); the rest drive the CLI and local HTTP
+doubles. Nothing here needs a display, so it runs unattended.
+
 ## What the two views are
 
 DSH's right panel offers a **view ring**: the Chat view is the conversation as a reader follows it, and the
