@@ -35,6 +35,8 @@ export interface TreeSession {
   readonly id: string
   readonly turns: number
   readonly title?: string
+  /** When it started, so a row can say how long ago it was — DSH's own session rows carry an age. */
+  readonly created: string
 }
 
 export interface TreeNode {
@@ -48,6 +50,10 @@ export interface TreeNode {
   readonly children: readonly TreeNode[] | null
   /** A file's size, so a row can say how big it is without opening it. */
   readonly bytes?: number
+  /** A session's pin, so it can be held at the top and marked there. */
+  readonly pinned?: boolean
+  /** A session the owner put away — only drawn when archived sessions were asked for. */
+  readonly archived?: boolean
   /**
    * The adopted roots, on the virtual root node only.
    *
@@ -72,6 +78,13 @@ export interface TreeInput {
   readonly sessions: readonly SessionMeta[]
   /** Folder names a tool writes, matched by name, as the conventions linter's `--generated` names one. */
   readonly generated?: readonly string[]
+  /**
+   * Which archived sessions to draw — DSH's three states, not a boolean.
+   *
+   * `hide` is the default because a row a person put away is not one they asked for; `show` adds them back with
+   * their marker; `only` answers "where did it go", which a two-state toggle cannot.
+   */
+  readonly archived?: 'hide' | 'show' | 'only'
 }
 
 /** A plural noun wrapped in underscores. A single underscore is not enough. */
@@ -235,6 +248,8 @@ interface Context {
   readonly sessions: Map<string, SessionMeta>
   /** The same store records, by session id, for the sessions a `_sessions_` instance names. */
   readonly byId: Map<string, SessionMeta>
+  /** Which archived sessions are drawn. */
+  readonly archived: 'hide' | 'show' | 'only'
   /** The nearest root strictly above a path, or `undefined` when there is none. */
   ownerOf(path: string): TreeRoot | undefined
 }
@@ -253,6 +268,7 @@ function buildContext(input: TreeInput): Context {
     generated: new Set(input.generated ?? []),
     sessions: currentByFolder(input.sessions),
     byId: new Map(input.sessions.map((session) => [session.id, session])),
+    archived: input.archived === 'show' || input.archived === 'only' ? input.archived : 'hide',
     ownerOf: (path) => ordered.find((root) => root.path !== path && isUnder(root.path, path)),
   }
 }
@@ -281,7 +297,7 @@ function row(
     session:
       meta === undefined
         ? null
-        : { id: meta.id, turns: meta.turns, ...(meta.title !== undefined ? { title: meta.title } : {}) },
+        : { id: meta.id, turns: meta.turns, created: meta.created, ...(meta.title !== undefined ? { title: meta.title } : {}) },
   }
 }
 
@@ -321,6 +337,7 @@ function sessionOf(dir: string, context: Context): TreeNode['session'] {
   return {
     id: definition.id,
     turns: meta?.turns ?? 0,
+    created: meta?.created ?? definition.createdAt,
     ...(title !== undefined ? { title } : {}),
   }
 }
@@ -353,10 +370,32 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
        * descending name order is a descending time order — and the session a person just started is the one
        * they are looking for, which is what "at the top of the branch" means once the group is there.
        */
-      for (const session of entries(path).sort((left, right) => collator.compare(right.name, left.name))) {
-        if (!session.directory) continue
-        const sessionPath = canonicalPath(join(path, session.name))
-        const node = row(sessionPath, 'session', session.name, context)
+      /**
+       * **Pinned first, then newest.** A pin is a statement that this session matters more than its neighbours,
+       * so it outranks the clock; within each group the names are chronological by construction, so a descending
+       * name order is a descending time order.
+       */
+      const drawn = entries(path).filter((entry) => entry.directory)
+      const flagged = drawn.map((entry) => {
+        const dir = canonicalPath(join(path, entry.name))
+        const definition = readSessionDefinition(dir)
+        const meta = definition === null ? undefined : context.byId.get(definition.id)
+        /**
+         * The flags come from the **store** and nowhere else. Pinning and archiving are this reader's state,
+         * not facts about the run: wrote them into the definition and the repository's record starts claiming
+         * a session is archived, while the tree and the store can disagree — measured, two sessions were
+         * flagged in their definitions and vanished from the tree because of it.
+         */
+        return { entry, dir, definition, pinned: meta?.pinned === true, archived: meta?.archived === true }
+      })
+      const visible = flagged.filter((one) =>
+        context.archived === 'show' ? true : context.archived === 'only' ? one.archived : !one.archived,
+      )
+      for (const one of visible.sort((left, right) => {
+        if (left.pinned !== right.pinned) return left.pinned ? -1 : 1
+        return collator.compare(right.entry.name, left.entry.name)
+      })) {
+        const node = row(one.dir, 'session', one.entry.name, context)
         /**
          * A session is a **leaf**, and the files in its definition folder are deliberately not shown — the
          * owner's rule of 2026-10-11: what a person wants from a session is the conversation and its
@@ -364,7 +403,13 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
          * the folder. `children: []` is the leaf's answer ("asked for, and there is nothing to show"), as
          * opposed to the `null` of a folder nobody has opened yet.
          */
-        sessions.push({ ...node, session: sessionOf(sessionPath, context), children: [] })
+        sessions.push({
+          ...node,
+          session: sessionOf(one.dir, context),
+          ...(one.pinned ? { pinned: true } : {}),
+          ...(one.archived ? { archived: true } : {}),
+          children: [],
+        })
       }
       continue
     }

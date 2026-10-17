@@ -108,9 +108,15 @@ Ordered so that each phase is useful alone and testable alone. Every phase ends 
    DSH's two fields because a store can hold many sessions with the same first message — measured: a search for
    `ready` returned 34 rows with one title between them. The earlier in-place filter is gone: it could not find
    a session whose branch was closed, and it never said where a hit lived.
-4. **View options.** A `View options` control holding: archive visibility (`Hide archived` /
-   `Show archived` / `Archived only`), ordering (`Last updated` / `Manual`), and — if it earns its
-   keep — grouping (`By workspace` / `One list`).
+4. **View options — archive visibility done 2026-10-17; grouping and ordering not planned.** The sidebar header
+   has a `View options` control holding DSH's three archive states — `Hide archived`, `All conversations (show
+   archived)`, `Archived only` — with the current one marked, and the filter is now a **mode** rather than a flag
+   (`/api/tree?archived=hide|show|only`, with `1` still meaning `show`). Verified live on a fixture holding one
+   archived session: `hide` drew the two live ones, `show` drew all three, `only` drew exactly the archived one.
+   The other two groups are **deliberately not implemented**: Heddle's tree *is* the grouping DSH offers
+   (`Workspace Tree` — a flat "in one list" mode would throw away the conventions tree that is the point of this
+   UI), and `Manual` ordering would need drag-and-drop plus a persisted order, which is a feature of its own
+   rather than a switch. Saying so is better than shipping three controls of which two do nothing.
 5. **The session's facts.** A footer for the open session: turns and steps, tokens, and the share of
    the context window used. Heddle's context service can answer the last one; the first two are in
    the log.

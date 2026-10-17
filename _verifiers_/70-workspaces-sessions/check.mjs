@@ -1876,6 +1876,19 @@ test('a session is pinned and archived in the store, and the tree follows both',
     assert.equal(definition.pinned, undefined, 'the definition does not carry the pin')
     assert.equal(definition.archived, undefined, 'nor the archive')
 
+    /**
+     * The archive filter is a **mode**, not a flag — DSH offers three states and two cannot express the third.
+     * `only` is the state a person reaches for when a session has vanished, so it has to answer.
+     */
+    const onlyArchived = async () => {
+      const url = new URL(branch)
+      url.searchParams.set('archived', 'only')
+      const body = await (await fetch(url, { headers: { cookie } })).json()
+      return (body.children ?? []).filter((node) => node.kind === 'session')
+    }
+    const only = await onlyArchived()
+    assert.deepEqual(only.map((node) => node.label), [older.name], `archived only draws the archived sessions, and none of the live ones\nsaw: ${only.map((node) => node.label).join(', ')}`)
+
     /** And both are reversible, which is what makes them safe items in a menu. */
     await commit(older.session, { archived: false, pinned: false })
     const restored = await listed(false)
@@ -1996,6 +2009,13 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           buttons: [...target.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
         }
 
+        /** DSH's View options control, where the archive filter lives: one control, three states, the current one marked. */
+        const viewButton = document.querySelector('#view-options button')
+        viewButton.click(); await wait(250)
+        const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].map((b) => b.textContent.trim())
+        document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await wait(100)
+
         const input = document.getElementById('session-search')
         input.value = 'the same opening'
         input.dispatchEvent(new Event('input', { bubbles: true }))
@@ -2015,7 +2035,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           treeHidden: document.getElementById('tree').hidden,
           resultsHidden: document.getElementById('search-results').hidden,
         }
-        return { controls, focused, search, cleared }
+        return { controls, focused, viewItems, search, cleared }
       })().then((value) => JSON.stringify(value))`),
     )
 
@@ -2055,6 +2075,14 @@ test("a session row's controls appear on hover, and a search replaces the tree w
       assert.equal(hit.title, 'the same opening line', 'a hit is named by its title')
       assert.match(String(hit.where), /·/, 'and says where it lives, beside its age')
     }
+    /**
+     * And the filter is one control with DSH's three states, not a toggle that has to be toggled twice to learn
+     * what it is: the current one is marked, and `Archived only` exists at all.
+     */
+    assert.equal(reading.viewItems.length, 3, `View options holds the three archive states\nsaw: ${JSON.stringify(reading.viewItems)}`)
+    assert.ok(reading.viewItems.some((item) => item.includes('Archived only')), 'including the one a vanished session is found under')
+    assert.ok(reading.viewItems.some((item) => item.startsWith('✓')), 'with the current state marked')
+
     assert.equal(reading.cleared.treeHidden, false, 'clearing the query restores the tree')
     assert.equal(reading.cleared.resultsHidden, true, 'and puts the results away')
   } finally {

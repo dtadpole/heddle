@@ -1194,13 +1194,85 @@ function settleChat() {
  * **closed** by default, because reasoning and tool arguments are the two things a reader wants out of the
  * way until asked for, while the answer itself is not.
  */
+/**
+ * What a process row says, in DSH's grammar.
+ *
+ * DSH's tool row is a **phrase**, not a bare name (`Ran commands`, `Ran commands and updated the plan`), with
+ * the detail behind it. The tool's own name is kept as the row's one-line hint after a 2px dot separator —
+ * the same separator DSH puts between a title and its summary (`lcKema_separator`) — because this is a
+ * transcript of the harness's own calls, and the person reading is the one who configured those tools.
+ */
+const TOOL_PHRASES = { bash: 'Ran commands', read_file: 'Read files', list_dir: 'Read files', write_file: 'Wrote files' }
+
+function toolTitle(name) {
+  if (!name) return 'Ran a tool'
+  return TOOL_PHRASES[name] ?? name.replace(/_/g, ' ')
+}
+
+/** The first line of a body, stripped of the markdown emphasis DSH's reasoning summary strips too. */
+function firstLine(text) {
+  const line = String(text || '').replace(/\r/g, '').split('\n').map((entry) => entry.trim()).find((entry) => entry.length > 0) ?? ''
+  const clean = line.replace(/\*\*/g, '').replace(/`/g, '').replace(/^[#>*\-\s]+/, '')
+  return clean.length > 80 ? clean.slice(0, 79) + '…' : clean
+}
+
+/**
+ * The leading glyph: the kind at rest, a chevron once the row is hovered, focused or open.
+ *
+ * DSH does exactly this swap by opacity in one box (`O_Ebla_activityIcon` → `O_Ebla_chevron`), so the row
+ * never changes width and the affordance appears only when a person is looking at it.
+ */
+function glyph(kind) {
+  const box = document.createElement('span')
+  box.className = 'glyph'
+  box.setAttribute('aria-hidden', 'true')
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('width', '14'); svg.setAttribute('height', '14'); svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '1')
+  svg.setAttribute('stroke-linejoin', 'round'); svg.setAttribute('stroke-linecap', 'round')
+  const path = (d) => { const node = document.createElementNS('http://www.w3.org/2000/svg', 'path'); node.setAttribute('d', d); return node }
+  const kindIcon = svg.cloneNode(false)
+  kindIcon.setAttribute('class', 'kind')
+  // A shell prompt for a tool (DSH's own two paths), a sparkle for a thought.
+  if (kind === 'tool') { kindIcon.append(path('M3 4L7 8L3 12'), path('M9 12H13')) }
+  else { kindIcon.append(path('M8 2.5 9.3 6.7 13.5 8 9.3 9.3 8 13.5 6.7 9.3 2.5 8 6.7 6.7Z')) }
+  const chevron = svg.cloneNode(false)
+  chevron.setAttribute('class', 'chevron')
+  chevron.append(path('M4 6.5 8 10.5 12 6.5'))
+  box.append(kindIcon, chevron)
+  return box
+}
+
+/** One row line: glyph, title, and the one-line hint a reader sees while it is closed. */
+function summaryLine(kind, text, tool, label) {
+  const line = document.createElement('summary')
+  line.append(glyph(kind))
+  const name = tool && tool.name ? tool.name : label ? label.replace(/^→\s*/, '') : ''
+  const title = document.createElement('span')
+  title.className = 'title'
+  title.textContent = kind === 'reasoning' ? 'Think' : toolTitle(name)
+  line.append(title)
+  const hintText = kind === 'reasoning' ? firstLine(text) : name
+  if (hintText) {
+    const sep = document.createElement('span')
+    sep.className = 'sep'
+    sep.setAttribute('aria-hidden', 'true')
+    const hint = document.createElement('span')
+    hint.className = 'hint'
+    hint.textContent = hintText
+    line.append(sep, hint)
+  }
+  return line
+}
+
 function addBlock(kind, text, merge, label, tool) {
   const last = log.lastElementChild
   if (merge && last && last.dataset.kind === kind) {
     const body = last.querySelector('[data-body]')
     body.textContent += text
     if (kind === 'reasoning') last.dataset.state = 'running'
-    last.querySelector('summary').textContent = oneLiner(kind, body.textContent, label)
+    const hint = last.querySelector('summary .hint')
+    if (hint) hint.textContent = firstLine(body.textContent)
     log.scrollTop = log.scrollHeight
     return
   }
@@ -1227,8 +1299,7 @@ function addBlock(kind, text, merge, label, tool) {
   }
   // Named line, not summary: a local called summary shadows the global summary() for the type stripper,
   // which then read the call below as a call on a string. Measured.
-  const line = document.createElement('summary')
-  line.textContent = oneLiner(kind, text, label)
+  const line = summaryLine(kind, text, tool, label)
   const body = document.createElement('div')
   body.setAttribute('data-body', '')
   if (kind === 'tool') {
@@ -1272,17 +1343,10 @@ function fillToolResult(toolCallId, result, failed) {
   }
   answer.textContent += result
   open.dataset.state = failed ? 'error' : 'ok'
-  const name = open.dataset.toolName ?? ''
-  open.querySelector('summary').textContent = oneLiner('tool', open.querySelector('[data-args]')?.textContent ?? '', name ? '→ ' + name : undefined)
   return true
 }
 
-/** The one line a closed block shows: a label and how much there is, which is DSH's title/summary row. */
-function oneLiner(kind, text, label) {
-  const size = text.length + ' chars'
-  if (label) return label + ' · ' + size
-  return (kind === 'reasoning' ? 'reasoning' : kind) + ' · ' + size
-}
+
 
 /**
  * Which view is showing.
