@@ -162,11 +162,17 @@ Ordered so that each phase is useful alone and testable alone. Every phase ends 
    (`Workspace Tree` — a flat "in one list" mode would throw away the conventions tree that is the point of this
    UI), and `Manual` ordering would need drag-and-drop plus a persisted order, which is a feature of its own
    rather than a switch. Saying so is better than shipping three controls of which two do nothing.
-5. **The session's facts.** A footer for the open session: turns and steps, tokens, and the share of
-   the context window used. Heddle's context service can answer the last one; the first two are in
-   the log.
-6. **Shortcuts**, once the actions exist: `Alt+Meta+A` archive, `Shift+Meta+F` fork, `Alt+Meta+G`
-   rename, `Alt+Meta+K` search.
+5. **The session's facts — already present.** The composer's status line (built by the other session working in
+   this checkout) shows turns, steps, streaming tokens per second and the share of the context window, from the
+   log and from the provider's own usage report — the same facts DSH puts under its composer. Nothing was added to
+   it; what this round did was confirm it is the same set of readings and leave it alone rather than build a second
+   footer beside it.
+6. **Shortcuts — done 2026-10-17.** The four chords are DSH's own, read from its menu: `Alt+Meta+A` archive,
+   `Shift+Meta+F` fork, `Alt+Meta+G` rename, `Alt+Meta+K` search. They act on the **row the panel is showing**, one
+   listener on the document, a table of chords rather than four `if`s, and a chord that needs a session and has none
+   says so instead of doing nothing silently. Verified by dispatching the four events in a browser and reading the
+   effects: the search chord focuses the field, the rename chord renames the row, the fork chord adds `<name> (1)`,
+   and the archive chord puts the selected row away with the same flag the menu writes.
 
 ## Deliberate differences, kept
 

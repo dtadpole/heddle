@@ -2135,3 +2135,115 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     removeDir(h.work)
   }
 })
+
+test('the four session shortcuts act on the selected session, and say so when there is none', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-shortcuts')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, made.stderr)
+    const created = parseJson(made.stdout)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
+        const sessions = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.querySelector(':scope > .row > .label')?.textContent)
+        /** One press helper, so every chord is dispatched the same way a keyboard would send it. */
+        const press = (key, mods) => {
+          const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods })
+          document.dispatchEvent(event)
+          return event.defaultPrevented
+        }
+        rows()[0].click(); await wait(700)
+        rowFor('_tools_').click(); await wait(700)
+        rowFor('some-tool').click(); await wait(800)
+
+        /** Nothing is selected: the chords that need a session refuse, and say why. */
+        const beforeSelect = { note: '', prevented: press('a', { altKey: true, metaKey: true }) }
+        await wait(200)
+        beforeSelect.note = document.getElementById('tree-note').textContent
+
+        /** Search needs no session and focuses its field. */
+        const preventedSearch = press('k', { altKey: true, metaKey: true })
+        await wait(150)
+        const searchFocused = document.activeElement !== null && document.activeElement.id === 'session-search'
+        document.getElementById('session-search').value = ''
+        document.getElementById('session-search').dispatchEvent(new Event('input', { bubbles: true }))
+        document.activeElement.blur()
+        await wait(100)
+
+        /** Rename: the chord reaches the row the panel is showing. */
+        const sessionRow = [...document.querySelectorAll('#tree li[data-kind="session"]')][0]
+        sessionRow.querySelector(':scope > .row').click()
+        await wait(1200)
+        window.prompt = () => 'a name from a chord'
+        press('g', { altKey: true, metaKey: true })
+        await wait(1600)
+        const renamed = sessions()
+
+        /** Fork: a second row appears named after the first. */
+        press('f', { shiftKey: true, metaKey: true })
+        await wait(1800)
+        const forked = sessions()
+
+        /** Archive: the selected row leaves the list. */
+        press('a', { altKey: true, metaKey: true })
+        await wait(1800)
+        const archived = sessions()
+
+        return {
+          beforeSelect,
+          preventedSearch,
+          searchFocused,
+          renamed,
+          forked,
+          archived,
+        }
+      })().then((value) => JSON.stringify(value))`),
+    )
+
+    /** A shortcut that needs a session says so instead of doing nothing silently. */
+    assert.equal(reading.beforeSelect.prevented, true, 'the chord is claimed even when it cannot act')
+    assert.match(String(reading.beforeSelect.note), /select a session first/, 'and the row note explains what it needs')
+
+    /** ⌥⌘K reaches the search box, which is DSH\'s own chord for it. */
+    assert.equal(reading.preventedSearch, true, 'the search chord is claimed')
+    assert.equal(reading.searchFocused, true, 'and puts the cursor in the search box')
+
+    /** ⇧⌘G renames, ⇧⌘F forks, ⌥⌘A archives — each on the selected session. */
+    assert.ok(reading.renamed.includes('a name from a chord'), `the rename chord renamed the row\nsaw: ${JSON.stringify(reading.renamed)}`)
+    assert.ok(
+      reading.forked.some((label) => label.startsWith('a name from a chord (')),
+      `the fork chord forked the session\nsaw: ${JSON.stringify(reading.forked)}`,
+    )
+    assert.ok(
+      !reading.archived.includes('a name from a chord'),
+      `the archive chord put the selected session away\nsaw: ${JSON.stringify(reading.archived)}`,
+    )
+    assert.ok(reading.archived.length >= 1, 'while its fork is still in the list')
+
+    /** And the store agrees: the archived session is archived, not gone. */
+    const listed = await sessionsOf(h)
+    const archivedMeta = listed.find((meta) => meta.id === created.session)
+    assert.equal(archivedMeta?.archived, true, 'the shortcut wrote the same flag the menu does')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
