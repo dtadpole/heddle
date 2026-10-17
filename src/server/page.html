@@ -338,6 +338,27 @@
   #goal-actions { display: flex; gap: .25rem; }
   #goal-actions button { font: inherit; font-size: 12px; padding: .1rem .45rem; }
   /**
+   * The team panel: who is on this session's team, what the shared board holds, and how much mail is queued.
+   *
+   * It sits under the goal bar and reads the same folded state the tools do (`/api/team`), because a view that
+   * recomputed the roster or the board would be a second truth. Hidden when the session has no team, so an
+   * ordinary conversation is unchanged.
+   */
+  #team-panel { padding: .4rem .75rem; border-bottom: 1px solid var(--line); font-size: 12px; display: grid; gap: .3rem; }
+  #team-panel[hidden] { display: none; }
+  #team-head { display: flex; gap: .5rem; align-items: baseline; }
+  #team-title { font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 11px; opacity: .8; }
+  #team-summary { opacity: .7; }
+  #team-roster, #team-tasks { display: flex; flex-wrap: wrap; gap: .35rem; list-style: none; margin: 0; padding: 0; }
+  .team-member, .team-task { border: 1px solid var(--line); border-radius: 999px; padding: .05rem .5rem; display: inline-flex; gap: .3rem; align-items: baseline; }
+  .team-member[data-status='running'] { border-color: #2fa36b; }
+  .team-member[data-status='provisioning'] { border-color: #b7791f; }
+  .team-member[data-status='failed'] { border-color: #d14343; }
+  .team-member[data-role='lead'] { font-weight: 600; }
+  .team-task[data-status='completed'] { opacity: .6; }
+  .team-task[data-status='deleted'] { opacity: .4; text-decoration: line-through; }
+  #team-mail { opacity: .7; }
+  /**
    * The person's own message: **a right-aligned bubble**, DSH's `Sixlwa_bubble`.
    *
    * Meaured on two of DSH's live session pages (this is the one its DOM is unambiguous about): the bubble is
@@ -347,14 +368,16 @@
    * small radius; that was wrong, and the measurement is written here so it is not "fixed" back.
    */
   /**
-   * DSH's user turn, measured on its own chat on 2026-10-17: **the full width of the reading column, left-aligned**, on a
-   * quiet surface with a 12px radius. A right-hand bubble is the shape a chat app uses; a session reader is reading a
-   * transcript, so the column stays one column and the surface marks whose turn it is. This rule was aligned once and a
-   * later whole-file pass replaced it back into a bubble, which is why the checks now assert the alignment.
+   * **Right-aligned and content-width**, which is what DSH's own chat shows and what the owner confirmed against it:
+   * `align-self: flex-end` inside the flex column puts the bubble against the right edge of the reading column, and
+   * with `width: auto` it hugs its text instead of stretching. The full-width 12px-radius reading that briefly
+   * replaced this rule was wrong for DSH — its bubble is 20px on `#2c2c2e` with 10px/16px padding, and its
+   * `userStack` is `align-items: flex-end`. A stretched block can have the same right edge as a right-aligned
+   * bubble, which is why the check measures the bubble's **own width** as well as its edge.
    */
   .turn.user {
-    align-self: stretch; max-width: 100%; padding: 10px 14px;
-    border: 0; border-radius: 12px;
+    align-self: flex-end; max-width: 100%; width: fit-content; padding: 10px 16px;
+    border: 0; border-radius: 20px;
     background: var(--chat-bubble); color: var(--chat-text);
     font-size: 14px; line-height: 22px; white-space: pre-wrap;
   }
@@ -475,13 +498,24 @@
    * selected tab is told apart by **colour alone** (`rgb(122,170,255)`) against the muted `rgb(173,178,184)` of the other.
    * This UI drew a bordered, tinted, rounded box, which is the shape of a segmented control rather than DSH's ring.
    */
-  nav#views { display: flex; gap: 1.5rem; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
+  /**
+   * Measured from DSH's own tablist, property by property: a **36px gap** between tabs, tabs at 13px/500 with
+   * `padding: 0 0 9px`, and the selected tab marked two ways — the accent colour (`rgb(122,170,255)`) **and** a 2px
+   * `::after` underline sitting 1px below the padding box. The underline is a pseudo-element, which a first pass missed
+   * because it read only the element's own background and border.
+   */
+  nav#views { display: flex; gap: 36px; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
   nav#views button {
+    position: relative;
     font: inherit; font-size: 13px; font-weight: 500; padding: 0 0 9px;
     background: none; border: 0; border-radius: 0; color: var(--text-3); cursor: pointer;
   }
-  nav#views button:hover { color: var(--text-2); }
+  nav#views button:hover { color: var(--text); }
   nav#views button[aria-selected='true'] { color: #7aaaff; }
+  nav#views button[aria-selected='true']::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; border-radius: 2px 2px 0 0; background: #7aaaff;
+  }
   /**
    * `hidden` has to win over this file's own display rules.
    *
@@ -780,6 +814,11 @@
   #tree li { display: block; padding: 0; }
   #tree ul[role='group'] { padding-left: .85rem; border-left: 1px solid var(--line); }
   #tree .row { position: relative; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border-radius: var(--radius-md); cursor: pointer; }
+  /**
+   * DSH's two row heights, measured: a workspace (its `projectRow`) is 34px and a session is **32px**. This UI drew
+   * every row at 34px, so a list of sessions was 2px denser in DSH than here.
+   */
+  #tree li[data-kind='session'] > .row { height: 32px; }
   /**
    * The row's three states, read from DSH's own rows on 2026-10-17 and copied rather than invented:
    *
@@ -1114,6 +1153,8 @@
     cursor: pointer;
   }
   #sidebar-toggle:hover, #sidebar-toggle:focus-visible { opacity: 1; background: color-mix(in oklab, currentColor 10%, transparent); }
+  /** The icon is the collapsed rail's top control, so it is hidden while the panel is wide. */
+  #sidebar-toggle-mark { display: none; width: 24px; height: 24px; }
   #sidebar-search {
     display: none;
     align-items: center;
@@ -1229,8 +1270,13 @@
   }
   body[data-sidebar='collapsed'] #workspaces-row .menu-wrap { display: inline-flex; }
   /** The icons are 18 pixels, which is what DSH draws, so the four controls read as one family. */
-  body[data-sidebar='collapsed'] #sidebar-toggle svg,
   body[data-sidebar='collapsed'] #sidebar-search svg { width: 18px; height: 18px; }
+  /**
+   * Collapsed, the toggle **is** the Heddle icon — the same arrangement DSH uses, where the top control of the rail is
+   * the brand mark and its accessible name is "Open sidebar".
+   */
+  body[data-sidebar='collapsed'] #sidebar-toggle-mark { display: block; width: 24px; height: 24px; }
+  body[data-sidebar='collapsed'] #sidebar-toggle-glyph { display: none; }
   body[data-sidebar='collapsed'] #sidebar-search { width: 36px; height: 36px; border-radius: 12px; }
   #brand-name { font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; font-size: 1.06rem; font-weight: 600; letter-spacing: .01em; }
   /**
@@ -1472,7 +1518,14 @@
     -->
     <button id="sidebar-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true"
             aria-controls="workspace-sidebar" title="Collapse sidebar (⌥⌘B)">
-      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <!--
+        Two glyphs for two jobs. Expanded, the control is a panel with a divider — the shape of a sidebar, because the
+        action is "put this panel away". Collapsed, it is the **Heddle icon**, which is what the first control of DSH's
+        rail is: measured at x=10, y=18, 36x36, `aria-label="Open sidebar"`, containing the brand mark (an SVG of its
+        whale). A rail whose top control is a generic panel glyph loses the one thing that says which app this is.
+      -->
+      <img id="sidebar-toggle-mark" src="/favicon.svg" alt="" width="24" height="24">
+      <svg id="sidebar-toggle-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
         <rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
         <line x1="6.5" y1="3" x2="6.5" y2="13" stroke="currentColor" stroke-width="1.3"/>
       </svg>
@@ -1556,6 +1609,19 @@
     <span id="goal-objective"></span>
     <span id="goal-rounds"></span>
     <span id="goal-actions"></span>
+  </div>
+  <!--
+    The team panel: the roster with live status, the shared task board, and the mailbox ledger. It reads the
+    same `/api/team` projection the tools see; it is hidden when the session has no team.
+  -->
+  <div id="team-panel" hidden>
+    <div id="team-head">
+      <span id="team-title">Team</span>
+      <span id="team-summary"></span>
+    </div>
+    <ul id="team-roster" aria-label="Team members"></ul>
+    <ul id="team-tasks" aria-label="Shared tasks"></ul>
+    <div id="team-mail" aria-live="polite"></div>
   </div>
   <div id="log" data-view="chat" role="tabpanel" aria-labelledby="tab-chat"></div>
   <!--
@@ -3089,6 +3155,73 @@ function wireTrajectoryToolbar() {
 }
 wireTrajectoryToolbar()
 
+/** Team status is live even when the log is quiet, so the panel is re-read while a session is open. */
+setInterval(() => {
+  if (current !== null) void refreshTeam()
+}, 3000)
+
+/**
+ * The team panel, from the same projection the tools read.
+ *
+ * A session with no team hides the panel, so an ordinary conversation looks unchanged. Live status is the one
+ * field that can change without a new event in this session's log, so the panel is also refreshed on a timer
+ * while a session is open.
+ */
+async function refreshTeam() {
+  const panel = document.getElementById('team-panel')
+  if (panel === null) return
+  if (current === null) {
+    panel.hidden = true
+    return
+  }
+  let body = null
+  try {
+    const response = await fetch('/api/team?session=' + encodeURIComponent(current))
+    if (response.ok) body = await response.json()
+  } catch {
+    body = null
+  }
+  const teammates = body === null ? [] : body.members.filter((member) => member.role === 'teammate')
+  const tasks = body === null ? [] : body.tasks.filter((task) => task.status !== 'deleted')
+  if (body === null || (teammates.length === 0 && tasks.length === 0 && body.messages.length === 0)) {
+    panel.hidden = true
+    return
+  }
+  panel.hidden = false
+  document.getElementById('team-summary').textContent =
+    `${teammates.length} teammate(s) \u00b7 ${tasks.length} task(s)`
+
+  const roster = document.getElementById('team-roster')
+  roster.replaceChildren()
+  for (const member of body.members) {
+    const item = document.createElement('li')
+    item.className = 'team-member'
+    item.dataset.status = member.status
+    item.dataset.role = member.role
+    item.dataset.name = member.name
+    item.textContent = `${member.name} \u00b7 ${member.role} \u00b7 ${member.status}`
+    roster.append(item)
+  }
+
+  const board = document.getElementById('team-tasks')
+  board.replaceChildren()
+  for (const task of tasks) {
+    const item = document.createElement('li')
+    item.className = 'team-task'
+    item.dataset.status = task.status
+    item.dataset.taskId = task.id
+    const owner = task.ownerName === undefined ? '' : ` \u00b7 ${task.ownerName}`
+    const ready = task.status === 'pending' && task.ready ? ' \u00b7 ready' : ''
+    item.textContent = `${task.id} ${task.subject} \u00b7 ${task.status}${owner}${ready}`
+    item.title = task.writeScopeWarnings.join('\n')
+    board.append(item)
+  }
+
+  const queued = body.messages.filter((message) => !body.delivered.includes(message.id)).length
+  document.getElementById('team-mail').textContent =
+    `${queued} queued \u00b7 ${body.delivered.length} delivered`
+}
+
 async function refreshGoal() {
   const bar = document.getElementById('goal-bar')
   if (bar === null) return
@@ -3144,6 +3277,8 @@ async function refreshGoal() {
         setNote(answer.error ?? 'could not update the goal')
       }
       await refreshGoal()
+  await refreshTeam()
+      await refreshTeam()
     }
     actions.append(button)
   }
