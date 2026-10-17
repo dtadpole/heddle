@@ -76,6 +76,13 @@ A `View options` menu with three groups, each a radio-ish list:
 - A footer of live facts: `25 turns 643 steps · 209 tok/s`, `226M tok · Cache hit 99%`,
   `33% of context used`.
 
+The procedure this document is the output of now lives in the project's skills, so the next session runs the same
+checklist instead of rediscovering it: [`_skills_/ui-parity-audit`](_skills_/ui-parity-audit/INDEX.md) holds the
+instruments, the dimensions that have ever differed (including cursor affordance, the three states, order, names,
+ARIA, keyboard and the periphery), and the table of misses already paid for. Its companion
+[`_skills_/full-loop-goal`](_skills_/full-loop-goal/INDEX.md) says how a job of this size becomes a goal whose rounds
+each produce evidence.
+
 ## The audit, surface by surface
 
 Both UIs opened side by side on 2026-10-17; every row is a thing a person can point at, and each verdict is either a
@@ -102,6 +109,9 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Row's leading content | `Running` / `Completed` in the muted body type, then the tagged name | an icon, and now **`Running`** for a session a turn is streaming into (from the same `model/request` / `turn/completed` pair the composer uses), then the name | **fixed for the live half**: `Running` is painted and removed as the stream says so; `Completed` is DSH's stored status, and a session's finished state is its `turns` count here rather than a word |
 | Workspace row's controls | `Workspace actions for <name>` (the `…`) then `New session in <name>` | `…` only | **fixed**: the same pair in the same order, the second one hover-revealed like the session rows |
 | Search field | a `Search sessions` button (`Alt+Meta+K`) that expands into a text field | a field that is always there, focused by the same chord | **difference kept**: one control instead of two, reached by the same key — a field that is visible costs nothing and the button only hides it |
+| Cursor affordance | rows and **every control inside them** are `cursor: pointer`; a disabled control keeps the arrow | rows were pointer but the `…`, pin, archive, both header menus' triggers and Send were `default` — the difference the owner felt with a mouse | **fixed this round**, and asserted |
+| Text selection | rows are `user-select: none` (they are draggable) | rows and their text are selectable | **difference kept**: copying a session's name out of the list is useful here, and nothing drags |
+| Focus | the tree is not focusable, so focus lives on controls; ring by the platform | rows, menu triggers and tabs take focus and show the browser's 1px ring | match in effect; this UI is reachable by keyboard where DSH is click-only |
 | Tree ARIA | `role="tree"` named "Sessions"; branch rows `aria-expanded`; session rows `aria-selected` and **no** `aria-expanded`; rows carry `draggable="true"` | `role="tree"`; branch rows `aria-expanded`; session and file rows `aria-selected` and no `aria-expanded` — **fixed this round**; rows are `tabindex="0"` | match on the state attributes, **difference kept** on `draggable` (drag-to-move is a feature) and on the label, which says "workspace folders" because this tree holds folders too |
 | Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |

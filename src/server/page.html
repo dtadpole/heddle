@@ -55,6 +55,37 @@
   }
   * { box-sizing: border-box; }
   /**
+   * **Everything a person can click is a hand.** Measured on 2026-10-17: a tree row had `cursor: pointer`, but every
+   * control inside it — the `…`, pin, archive, both header menus' triggers, Send — computed `cursor: default`, because a
+   * `<button>`'s initial cursor is the platform's arrow and no rule said otherwise. DSH's own rows and every control in
+   * them are `pointer`, which is the difference the owner felt with a mouse. A disabled control keeps the arrow, because
+   * a hand there would promise something the control refuses.
+   */
+  button:not(:disabled):not([aria-disabled='true']),
+  summary,
+  a[href],
+  [role='tab'],
+  .untwisty,
+  .menu-wrap > button,
+  .row,
+  [role='treeitem'] {
+    cursor: pointer;
+  }
+  /**
+   * A resize grip is the exception, and it needs to be stated **after** the rule above because that rule is more
+   * specific than the grips' own: `button:not(:disabled):not([aria-disabled])` counts two pseudo-classes and beats a
+   * plain class, so a grip measured `pointer` and promised a click where it offers a drag. Measured on the column grip:
+   * expected `col-resize`, computed `pointer`.
+   */
+  button.column-grip[role='separator'],
+  #gutter-left[role='separator'] {
+    cursor: col-resize;
+  }
+  button:disabled,
+  [aria-disabled='true'] {
+    cursor: default;
+  }
+  /**
    * The page paints its own surface and its own ink, in both appearances.
    *
    * Measured: the body had no background and no colour, so both came from the platform's default — and in a dark
