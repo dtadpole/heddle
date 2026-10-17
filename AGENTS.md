@@ -72,7 +72,7 @@ and these are the articles that bind here.
 Heddle's **own** conventions live in [`_conventions_/`](_conventions_/INDEX.md) — rules that are specific to
 this repository rather than borrowed from `reflection`, each with the instance that made it necessary and the
 test that judges it. The first is
-[reentrant conditions](_conventions_/heddle-conventions/reentrant-conditions.md).
+[reentrant components](_conventions_/heddle-conventions/reentrant-components.md).
 
 ## The rules that are local to this repository
 

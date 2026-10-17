@@ -14,7 +14,7 @@ can fail is a preference, not a convention.
 
 | Article | The rule |
 |---|---|
-| [`reentrant-conditions.md`](reentrant-conditions.md) | major state tracking and resumption are **level-triggered conditions re-evaluated against durable state**, never a point event that must be delivered exactly once |
+| [`reentrant-components.md`](reentrant-components.md) | every major component is reentrant — re-evaluable, restartable, replaceable and fault-tolerant — deriving state and progress from durable records, never from event delivery or one process lifetime |
 
 ## How a convention gets here
 
@@ -27,5 +27,5 @@ can fail is a preference, not a convention.
 
 ## Read next
 
-[`./reentrant-conditions.md`](reentrant-conditions.md), and
+[`./reentrant-components.md`](reentrant-components.md), and
 [`../INDEX.md`](../INDEX.md) for the folder's own entry point.
