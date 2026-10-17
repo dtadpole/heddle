@@ -176,3 +176,22 @@ export function readSessionDefinition(dir: string): SessionDefinitionFields | nu
     return null
   }
 }
+
+/**
+ * Retitle a definition, so the tracked record and the label a person reads do not disagree.
+ *
+ * A session's title is a label rather than a fact about the run, which is why the log is never touched; the
+ * definition file is the other half of that reasoning — it *is* the place a session's name is written down for
+ * a reader of the repository, so a rename that stopped at the store would leave a committed record calling the
+ * session something else.
+ */
+export function updateSessionDefinitionTitle(dir: string, title: string | undefined): boolean {
+  const current = readSessionDefinition(dir)
+  if (current === null) return false
+  const next: SessionDefinitionFields = { ...current }
+  const trimmed = (title ?? '').trim()
+  if (trimmed.length === 0) delete (next as { title?: string }).title
+  else (next as { title?: string }).title = trimmed
+  writeFileSync(join(dir, DEFINITION_FILE), `${JSON.stringify(next, null, 2)}\n`)
+  return true
+}

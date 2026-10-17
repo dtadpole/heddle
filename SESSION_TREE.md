@@ -119,6 +119,14 @@ choice of thing.*
 | a **file** | nothing | that file, and **only** its preview: no `Chat`, no `Trajectory`, no `Docs`, because all three are statements about a session and a file has none |
 | anything else — a folder | it opens or closes | nothing changes: the panel keeps showing whatever it was showing |
 
+**A session's own `…` holds its name.** The owner's request of 2026-10-17: a session row offers
+`Rename…`, which sets the session's **title** — the label a person reads — and the row then shows that
+title instead of the folder it lives in. The folder stays the identity, and stays reachable as the row's
+tooltip, because the conventions require an instance name and a person is not expected to type one. One
+rename writes **both** halves: the store's meta record, which this UI and a listing read, and the session's
+`session.json`, which is the record a reader of the repository reads — a rename that stopped at the store
+would leave the committed definition calling the session something else.
+
 **A conversation is shown once.** A session can be attached to a folder twice over — bound by its `cwd`, and
 captured as an instance under that folder's `_sessions_` — and then the tree drew one conversation as two
 rows, with the instance row coming first. Measured: clicking the session row moved the selection mark to the

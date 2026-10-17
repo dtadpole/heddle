@@ -1746,3 +1746,68 @@ test('the page wears the project icon, and its name sits above the workspaces', 
     removeDir(h.work)
   }
 })
+
+test('a session is renamed from its own menu, and the row and its definition follow', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-rename')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const created = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(created.code, 0, `the session was created\n${created.stdout}${created.stderr}`)
+    const made = parseJson(created.stdout)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
+        ;[...document.querySelectorAll('#tree .row')][0].click(); await wait(600)
+        rowFor('_tools_').click(); await wait(700)
+        rowFor('some-tool').click(); await wait(800)
+        const sessionRow = rows().find((entry) => entry.parentElement.dataset.kind === 'session')
+        if (sessionRow === undefined) return { error: 'no session row' }
+        const label = sessionRow.querySelector('.label').textContent
+        const menu = [...sessionRow.querySelectorAll('button')].find((button) => button.textContent === '…')
+        if (menu === undefined) return { error: 'the session row carries no menu', label }
+        menu.click(); await wait(250)
+        const items = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].map((button) => button.textContent)
+        /** The prompt is stubbed, so the whole handler runs — the fetch, the redraw and the label — without a dialog. */
+        window.prompt = () => 'a session with a name'
+        const item = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].find((button) => button.textContent === 'Rename…')
+        if (item === undefined) return { error: 'no rename item', items }
+        item.click(); await wait(1800)
+        const after = rows().find((entry) => entry.parentElement.dataset.kind === 'session')
+        return { label, items, renamed: after.querySelector('.label').textContent, folder: after.title }
+      })().then((value) => JSON.stringify(value))`),
+    )
+
+    assert.equal(reading.error, undefined, `the session row offers its menu\nsaw: ${JSON.stringify(reading)}`)
+    assert.ok(reading.items.includes('Rename…'), `the menu holds the rename\nsaw: ${reading.items.join(', ')}`)
+    assert.match(reading.label, /^session-\d{8}-\d{4}$/, 'the row starts with the folder name, because nothing has named it yet')
+    assert.equal(reading.renamed, 'a session with a name', 'after the rename the row shows the name it was given')
+    assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', reading.label), 'while the folder stays reachable as the tooltip, because it is the identity')
+
+    /** Both halves hold the new name: the store the UI reads, and the definition a reader of the repository reads. */
+    const listed = await sessionsOf(h)
+    assert.equal(listed.find((meta) => meta.id === made.session)?.title, 'a session with a name', 'the store holds the title')
+    const definition = JSON.parse(readFileSync(join(String(made.definition).replace('/session.json', ''), 'session.json'), 'utf8'))
+    assert.equal(definition.title, 'a session with a name', 'and so does the definition, so the tracked record does not disagree')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})

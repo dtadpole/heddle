@@ -14,6 +14,7 @@ import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints } from '../endpoints.ts'
 import { canonicalPath } from '../paths.ts'
+import { readSessionDefinition, updateSessionDefinitionTitle } from '../session/definition.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import {
@@ -800,11 +801,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
-   * Retitle a conversation — the `Rename` item in an instance row's menu.
+   * Retitle a conversation — the `Rename…` item in a session's or an instance's menu.
    *
    * The session's own log is append-only and stays that way: this rewrites the meta record, which is
    * what a listing and a tree row read. The title is a label rather than a fact about the run, and the
    * empty string clears it.
+   *
+   * `folder` is the session's **definition** folder when the caller knows it, and it is why one rename
+   * reaches both halves: the store holds the label this UI reads, while the definition is the record a
+   * reader of the repository reads, and a rename that stopped at the store would leave the two disagreeing.
    */
   if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/title') && request.method === 'POST') {
     const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/title'.length))
@@ -818,11 +823,21 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a title is required' })}\n`)
       return
     }
+    const folder = typeof body.folder === 'string' && body.folder.length > 0 ? canonicalPath(body.folder) : undefined
+    if (folder !== undefined) {
+      const definition = readSessionDefinition(folder)
+      if (definition === null || definition.id !== id) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `${folder} does not hold ${id}` })}\n`)
+        return
+      }
+    }
     const meta = ctx.session.rename(id, body.title)
     if (meta === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
+    /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
+    if (folder !== undefined) updateSessionDefinitionTitle(folder, body.title)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
