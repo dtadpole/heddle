@@ -452,6 +452,20 @@ export class Page {
     return { x, y, width, height, centerX: x + width / 2, centerY: y + height / 2 }
   }
 
+  /**
+   * The CSS domain's own node id for a backend node.
+   *
+   * The accessibility tree and `DOM.getBoxModel` speak `backendNodeId`; `CSS.getMatchedStylesForNode`
+   * speaks the frontend `nodeId`. `DOM.pushNodesByBackendIdsToFrontend` is the translation, and it can
+   * answer `null` for a node that has gone away — which is a stale uid, reported as such by the caller.
+   */
+  async frontendNodeId(backendNodeId) {
+    const reply = await this.send('DOM.pushNodesByBackendIdsToFrontend', { backendNodeIds: [backendNodeId] })
+    const nodeId = reply.result?.nodeIds?.[0]
+    if (nodeId === undefined || nodeId === null) throw new Error('the element is no longer on the page; take a new snapshot')
+    return nodeId
+  }
+
   /** Save an image, naming the path when the caller gave one. */
   static write(path, buffer) {
     writeFileSync(path, buffer)

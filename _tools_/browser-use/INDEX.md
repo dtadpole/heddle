@@ -97,13 +97,26 @@ a check that passes through `openPage` has exercised what the command line runs.
   second start with `--no-sandbox`, and `status` says which start it was. Silently weakening a browser
   would be wrong; failing on every confined machine would be useless.
 
-## What it deliberately does not replicate
+## Coverage of the DSH browser surface
 
-`lighthouse_audit` needs the Lighthouse engine, the `performance_*` tools need the DevTools frontend's
-trace model, and `get_css_styles` needs its style model; none of that is a protocol call a
-dependency-free driver can make. `screencast_start`/`screencast_stop`, `take_heapsnapshot` and the
-extension/PWA/third-party groups are left out for the same reason — a declared tool that does not work
-is worse than a named absence. Everything else in the advertised surface is implemented.
+The harness profile advertises **32 tools** from `chrome-devtools-mcp`. The tool replicates the
+protocol-callable ones and names the rest rather than leaving them to be discovered.
+
+| Group | State |
+|---|---|
+| pages, navigation, interaction, screenshot, script, console, network, emulation | **implemented** (24 tools) |
+| `get_css_styles` | **implemented** — `CSS.getMatchedStylesForNode`, with the pagination the DSH tool always applies |
+| `take_heapsnapshot` | **implemented** — the `HeapProfiler` stream, written as a `.heapsnapshot` file |
+| `screencast_start`, `screencast_stop` | **implemented** — `Page.startScreencast` frames written as JPEGs, acknowledged per frame |
+| `performance_start_trace`, `performance_stop_trace` | **implemented** — `Tracing` events written as the file the Performance panel opens, with a summary |
+| `lighthouse_audit` | **excluded** — it is the Lighthouse engine, not a protocol call; running it means shipping or requiring Lighthouse, which this tool deliberately does not |
+| `performance_analyze_insight` | **excluded** — it interprets a trace with the DevTools frontend's insight model; the trace is captured by the start/stop tools, the analysis is not a protocol call |
+
+**Measured coverage: 30 of the 32 advertised tools implemented, 2 named as excluded**, and the
+component test `every advertised DSH tool is implemented or named as excluded` fails if that stops
+being true.
+
+`click_at` is implemented as well although DSH advertises it only under `--experimentalVision`.
 
 ## Component tests and delivery verifiers
 
