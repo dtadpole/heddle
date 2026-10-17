@@ -10,7 +10,7 @@ grounded_in:
 
 Holds [`lib.mjs`](lib.mjs), the library every check file imports, and
 [`browser.mjs`](browser.mjs), the one-page wrapper over
-[`../browser-tool/`](../browser-tool/INDEX.md) that the checks which need a real page import. The
+[`../browser-use/`](../browser-use/INDEX.md) that the checks which need a real page import. The
 wrapper is deliberately thin: the driver, the snapshot and the session belong to the tool, and a check
 that used a second implementation would be judging the wrong code.
 

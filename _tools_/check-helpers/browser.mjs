@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { browserAvailable, browserPath, openBrowser as openToolBrowser } from '../browser-tool/lib.mjs'
+import { browserAvailable, browserPath, openBrowser as openToolBrowser } from '../browser-use/lib.mjs'
 
 /**
  * A browser, driven over the browser tool, for the checks that need a page.
  *
- * This is the **one-page wrapper** over [`_tools_/browser-tool/`](../browser-tool/INDEX.md): the tool
+ * This is the **one-page wrapper** over [`_tools_/browser-use/`](../browser-use/INDEX.md): the tool
  * owns the protocol, the snapshot and the session, and this file keeps the small API the checks were
  * written against — `goto`, `evaluate`, `waitFor`, `screenshot`, `close` — so that a check exercises
  * the same driver the command line runs rather than a second implementation of it.

@@ -17,7 +17,7 @@ content: not what a view says, but how much of the window it is given.
 ## Where it runs
 
 **Headless browser.** The checks that need a page open a real Chrome with no window, through
-[`_tools_/browser-tool/`](../../_tools_/browser-tool/INDEX.md); the rest drive the CLI and local HTTP
+[`_tools_/browser-use/`](../../_tools_/browser-use/INDEX.md); the rest drive the CLI and local HTTP
 doubles. Nothing here needs a display, so it runs unattended.
 
 ## What is resizable today, and what is not
