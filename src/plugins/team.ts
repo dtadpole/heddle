@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
 import { runTurn } from '../agent/loop.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import { TEAM_POLICY, TEAM_POLICY_NOTE_ORIGIN } from '../team/policy.ts'
 import { TeamService } from '../team/service.ts'
 import { TeamError } from '../team/state.ts'
@@ -69,8 +70,13 @@ export function apply(ctx: Context, config: Config = {}): void {
      * a profile may leave `turns` out entirely.
      */
     turns: {
-      isRunning: (id) => ctx.turns?.isRunning(id) ?? false,
-      abort: (id) => ctx.turns?.abort(id) ?? false,
+      /**
+       * `ctx.get` is the store read **without** the inject requirement: the `turns` row is optional, and the
+       * guarded property access (`ctx.turns`) throws in a fiber that did not declare it, which turned every
+       * status check into `TEAM_FAILED: cannot get property "turns" without inject`.
+       */
+      isRunning: (id) => (ctx.get('turns') as TurnRegistry | undefined)?.isRunning(id) ?? false,
+      abort: (id) => (ctx.get('turns') as TurnRegistry | undefined)?.abort(id) ?? false,
     },
     limits: {
       maxMembers: config.maxMembers,
@@ -90,6 +96,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         session: child,
         endpoint,
         prompt,
+        /** A teammate's automatic turn, distinguishable from the Lead's by a backend that cares. */
+        purpose: 'team',
         ...(source !== undefined ? { source } : {}),
         ...(meta?.model !== undefined ? { model: meta.model } : {}),
         ...(signal !== undefined ? { signal } : {}),

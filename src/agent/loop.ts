@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
 import type { SessionHandle } from '../session/store.ts'
+import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 
 /**
@@ -132,6 +133,13 @@ export interface RunTurnOptions {
   readonly maxOutputTokens?: number
   /** How many times one round may be retried after the provider refused it as too long. */
   readonly maxOverflowRetries?: number
+  /**
+   * What this turn is for, when it is not an ordinary person-to-agent turn.
+   *
+   * It reaches the model call unchanged, so a backend that distinguishes calls (a summariser, a test double, a
+   * teammate's automatic turn) can answer them differently. The team layer tags its turns `team`.
+   */
+  readonly purpose?: string
   readonly signal?: AbortSignal
 }
 
@@ -165,7 +173,13 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
    * present, the turn's own signal is **combined** with the caller's, so a person's stop and a Lead's
    * `interrupt_agent` both take effect, and the entry is removed whichever way the turn ends.
    */
-  const live = ctx.turns?.begin(options.session.id)
+  /**
+   * The registry is read **without** the inject requirement (`ctx.get`): a turn is also started from a plugin's
+   * own fiber — a teammate's automatic turn — where the guarded property access throws "cannot get property
+   * turns without inject". The row stays optional, which is the other half of why this is a store read.
+   */
+  const turns = ctx.get('turns') as TurnRegistry | undefined
+  const live = turns?.begin(options.session.id)
   const signal =
     live === undefined
       ? options.signal
@@ -277,6 +291,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         ...(options.model !== undefined ? { model: options.model } : {}),
         ...(maximumTokens !== undefined ? { maxOutputTokens: maximumTokens } : {}),
         ...(prepared.tools.length > 0 ? { tools: prepared.tools } : {}),
+        ...(options.purpose !== undefined ? { purpose: options.purpose } : {}),
         sessionId: options.session.id,
         round,
       }

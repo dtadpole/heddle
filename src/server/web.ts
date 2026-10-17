@@ -688,6 +688,38 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * One Lead session's team, for the view that shows the roster and the shared board.
+   *
+   * The answer is the same state the tools see — the folded journal, the live-turn statuses and the task views
+   * with readiness and write-scope warnings — because a view that recomputed any of it would be a second truth.
+   */
+  if (url.pathname === '/api/team' && request.method === 'GET') {
+    const team = ctx.team
+    if (team === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the team plugin' })}\n`)
+      return
+    }
+    const wanted = url.searchParams.get('session')
+    if (wanted === null || wanted.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a session is required' })}\n`)
+      return
+    }
+    const handle = ctx.session.store.open(wanted)
+    if (handle === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${wanted}` })}\n`)
+      return
+    }
+    const state = team.state(handle)
+    respond(
+      response,
+      200,
+      'application/json',
+      `${JSON.stringify({ session: handle.id, lead: state.id, members: team.list(handle), tasks: team.tasks(handle), messages: state.messages, delivered: state.delivered }, null, 2)}\n`,
+    )
+    return
+  }
+
+  /**
    * How one session's context was **composed**, for the view that shows it.
    *
    * The answer is the same report `heddle context <id>` prints, plus the two things a person cannot get

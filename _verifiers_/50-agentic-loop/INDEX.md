@@ -20,8 +20,11 @@ a display or a window.
 ## What decides it
 
 `check.mjs` drives a scripted multi-round turn and reads the transcript, `check-end-to-end.mjs` runs the whole thing
-from configuration, and `check-subagents.mjs` judges the delegation boundary: a child agent runs in its own
-session, attributed to its parent, and its final answer returns as the parent's tool result.
+from configuration, `check-subagents.mjs` judges the delegation boundary: a child agent runs in its own
+session, attributed to its parent, and its final answer returns as the parent's tool result, and
+`check-teams.mjs` judges Agent Teams end to end — a Lead's real turn spawns a teammate, creates and completes a
+shared task, mails the teammate and answers, the team survives a server restart, and boot recovery settles a
+previous process's provisioning members and delivers its queued mail.
 
 ## Running it
 
