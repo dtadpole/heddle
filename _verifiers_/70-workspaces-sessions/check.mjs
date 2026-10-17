@@ -9,8 +9,8 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/check-helpers/lib.mjs'
-import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
+import { fixtureDir, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
  * Whether `child` sits outside `parent`, **spelled independently of the implementation** (`src/paths.ts`
@@ -2129,6 +2129,48 @@ test("a session row's controls appear on hover, and a search replaces the tree w
             session: (() => { const row = document.querySelector('#tree li[data-kind="session"] > .row'); return row === null ? null : Math.round(row.getBoundingClientRect().height) })(),
             workspace: (() => { const row = document.querySelector('#tree li[data-kind="workspace"] > .row'); return row === null ? null : Math.round(row.getBoundingClientRect().height) })(),
           },
+          /** The live state: the same attribute the stream sets while an answer arrives. */
+          live: (() => {
+            const turn = document.querySelector('#log .turn.assistant')
+            if (turn === null) return { error: 'no assistant turn to measure' }
+            const before = getComputedStyle(turn, '::before')
+            const previous = turn.getAttribute('data-state')
+            turn.setAttribute('data-state', 'running')
+            /** Force the style recalculation, or the pseudo-element's computed style can be the one from before. */
+            void turn.offsetHeight
+            /**
+             * Snapshot the values before restoring the state. A CSSStyleDeclaration from getComputedStyle is LIVE: read after
+             * the attribute is put back, every property reports the settled state, which made this probe measure
+             * animation-name none on a rule that was working.
+             */
+            const live = getComputedStyle(turn, '::before')
+            const running = {
+              animationName: live.animationName,
+              animationDuration: live.animationDuration,
+              maskImage: live.maskImage || live.webkitMaskImage || '',
+              content: live.content,
+            }
+            turn.setAttribute('data-state', previous ?? 'settled')
+            return {
+              restingAnimation: before.animationName,
+              animationName: running.animationName,
+              duration: running.animationDuration,
+              mask: running.maskImage,
+              debug: {
+                className: turn.className,
+                state: turn.getAttribute('data-state'),
+                stateBefore: previous,
+                matchesRunning: turn.matches(".turn.assistant[data-state='running']"),
+                afterContent: getComputedStyle(turn, '::after').content,
+                tag: turn.tagName,
+                parent: turn.parentElement === null ? null : turn.parentElement.id + '.' + turn.parentElement.className,
+                rulePresent: [...document.styleSheets].some((sheet) => {
+                  try { return [...sheet.cssRules].some((rule) => (rule.cssText || '').includes('shimmer')) } catch (error) { return false }
+                }),
+                content: running.content,
+              },
+            }
+          })(),
           userTurn: (() => {
             const turn = document.querySelector('#log .turn.user')
             if (turn === null) return { alignSelf: null, radius: null, background: null, maxWidth: null, turnWidth: null, turnRight: null, logWidth: null, logRight: null, contentRight: null }
@@ -2277,6 +2319,16 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     /** **Two row heights**, measured: DSH's workspace rows are 34px and its session rows 32px. */
     assert.equal(reading.chrome.rowHeights.session, 32, `a session row is 32px\nsaw: ${JSON.stringify(reading.chrome.rowHeights)}`)
     assert.equal(reading.chrome.rowHeights.workspace, 34, 'while a workspace row is 34px')
+
+    /**
+     * **The live state**, measured from DSH's own stylesheets: a row that is still arriving carries a masked shimmer sweep
+     * (`mask-image: linear-gradient(105deg, ...)` driven by a `shimmer-sweep` keyframe), not only a caret. The runtime sets
+     * `data-state="running"` while deltas land; the same attribute is set here to measure the state it produces.
+     */
+    assert.match(String(reading.chrome.live.animationName), /heddle-shimmer-sweep/, `a running row sweeps\nsaw: ${JSON.stringify(reading.chrome.live)}`)
+    assert.equal(reading.chrome.live.duration, '1.6s', 'for a slow sweep')
+    assert.notEqual(reading.chrome.live.mask, 'none', 'masked to its 105-degree gradient')
+    assert.equal(reading.chrome.live.restingAnimation, 'none', 'and a settled row does not animate')
 
     /**
      * **The user's turn**, measured from DSH's own chat on 2026-10-17: a right-aligned bubble that hugs its text — its box

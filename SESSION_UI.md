@@ -112,6 +112,8 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Cursor affordance | rows and **every control inside them** are `cursor: pointer`; a disabled control keeps the arrow | rows were pointer but the `…`, pin, archive, both header menus' triggers and Send were `default` — the difference the owner felt with a mouse | **fixed this round**, and asserted |
 | Text selection | rows are `user-select: none` (they are draggable) | rows and their text are selectable | **difference kept**: copying a session's name out of the list is useful here, and nothing drags |
 | Focus | the tree is not focusable, so focus lives on controls; ring by the platform | rows, menu triggers and tabs take focus and show the browser's 1px ring | match in effect; this UI is reachable by keyboard where DSH is click-only |
+| Live state (a row still arriving) | a masked **shimmer sweep** over the row: `mask-image: linear-gradient(105deg, transparent 0, black 40%, black 60%, transparent 100%)` driven by a `shimmer-sweep` keyframe, at a slow rate | only a static caret (`▍`) | **fixed in cycle 3**: the same 105° masked sweep at 1.6s on a running assistant turn, the caret kept, and `prefers-reduced-motion` drops the sweep; measured `animation-name`, duration, mask and a settled row's `none`, then asserted |
+| Scroll state | the session tree scrolls natively (`overflow-y: auto`, `padding-bottom: 16px`, no scroll shadow, not scrollable when short) | the same, plain native scrolling | match |
 | Tree ARIA | `role="tree"` named "Sessions"; branch rows `aria-expanded`; session rows `aria-selected` and **no** `aria-expanded`; rows carry `draggable="true"` | `role="tree"`; branch rows `aria-expanded`; session and file rows `aria-selected` and no `aria-expanded` — **fixed this round**; rows are `tabindex="0"` | match on the state attributes, **difference kept** on `draggable` (drag-to-move is a feature) and on the label, which says "workspace folders" because this tree holds folders too |
 | Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
@@ -173,6 +175,36 @@ and that is why the lesson went into the skill: a probe is code and can be wrong
 
 **Not measured this cycle:** the twin on the sidebar's scroller and DSH's own session row's inner `gap: 0` arrangement
 (its children carry the spacing instead) — neither is claimed.
+
+
+### Cycle 3 — the live state, the scroll state, and closing the loop (2026-10-17)
+
+**Research.** Two state-matrix rows that earlier cycles had not walked. DSH's tree scroller: `overflow-y: auto`, a
+16px bottom padding, no scroll shadow, and — measured at rest — not scrollable while the list is short. Its **live**
+state, read from its stylesheets: a row that is still arriving carries a **masked shimmer sweep**
+(`mask-image: linear-gradient(105deg, transparent 0, black 40%, black 60%, transparent 100%)` driven by a
+`shimmer-sweep` keyframe), not only a blinking mark.
+
+**Understand.** The scroll state is the same on both sides — nothing to do, recorded as a match. The live state is a
+mechanism this UI lacked: it marks a running row with a caret and no movement.
+
+**Plan.** Add DSH's masked sweep to a running assistant turn at the same 105° angle, keep the caret (it marks the answer
+itself), and let `prefers-reduced-motion` keep the caret alone. Rejected: replacing the caret with the sweep, because the
+caret says *where* the answer is still growing and the sweep only says *that* something is.
+
+**Verify.** Measured with the same attribute the stream sets (`data-state="running"`): `animation-name:
+heddle-shimmer-sweep`, duration `1.6s`, a non-`none` mask, and `none` on a settled row. Asserted in part 7. The first
+two runs failed — **and the failures were the probe's, not the UI's**: `getComputedStyle` returns a **live**
+`CSSStyleDeclaration`, and reading it after the attribute had been restored reported the settled state on a rule that
+was working. The probe now snapshots the values before restoring, which is the lesson added to the skill.
+
+**Fix.** Nothing further after the probe was corrected; the loop's closing measurement produced **no fix row** — every row
+of the audit table is now *match* or *difference kept with a reason*, so the loop stops at cycle 3 as
+[`_skills_/full-loop-goal`](_skills_/full-loop-goal/INDEX.md) says it should.
+
+**Not measured this cycle:** the shimmer's rendering on a real streaming turn (a scripted turn finishes faster than a
+screenshot can catch it; the state was measured through the attribute the runtime sets), and DSH's sweep timing (its
+keyframes were read but no duration for the sweep was extracted).
 
 ## Presentation, measured
 
