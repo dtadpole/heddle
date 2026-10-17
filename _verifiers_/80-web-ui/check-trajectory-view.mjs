@@ -140,6 +140,35 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
     // The split bar, judged by its agentcloud feel and by actually resizing: a 6px band with a grip that
     // appears on drag, a real width change, a double-click reset and arrow keys.
+    // The panes fill the window: no outer frame, no gap, and the divider overlays the boundary.
+    const fill = JSON.parse(
+      await browser.evaluate(`(() => {
+        const aside = document.querySelector('aside').getBoundingClientRect()
+        const main = document.querySelector('main').getBoundingClientRect()
+        const gutter = document.getElementById('gutter-left').getBoundingClientRect()
+        const body = getComputedStyle(document.body)
+        return JSON.stringify({
+          padding: body.padding,
+          gap: body.gap,
+          left: Math.round(aside.left),
+          top: Math.round(aside.top),
+          bottom: Math.round(aside.bottom),
+          right: Math.round(aside.right),
+          mainLeft: Math.round(main.left),
+          mainBottom: Math.round(main.bottom),
+          viewportHeight: innerHeight,
+          gutterWidth: Math.round(gutter.width),
+        })
+      })()`),
+    )
+    assert.equal(fill.padding, '0px', 'the window has no outer frame')
+    assert.equal(fill.gap, '0px', 'and no gap between the panes')
+    assert.equal(fill.left, 0, 'the navigation pane starts at the window edge')
+    assert.equal(fill.top, 0, 'at the top')
+    assert.equal(fill.bottom, fill.viewportHeight, 'and fills to the bottom')
+    assert.equal(fill.right, fill.mainLeft, "the panes meet, with the divider band over their boundary")
+    assert.equal(fill.gutterWidth, 6, 'the band still has its 6px target')
+
     const idle = JSON.parse(
       await browser.evaluate(`(() => {
         const gutter = document.getElementById('gutter-left')
