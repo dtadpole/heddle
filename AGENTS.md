@@ -32,7 +32,7 @@ loads `AGENTS.md` and nothing else.
 | Where | What |
 |---|---|
 | [`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md) | what completes this project, part by part |
-| [`_verifiers_/`](_verifiers_/INDEX.md) | the twelve verifications that decide those parts |
+| [`_verifiers_/`](_verifiers_/INDEX.md) | the verifications that decide those parts, and the owner-requested views beside them |
 | [`_tools_/`](_tools_/INDEX.md) | the runner, the shared check helpers, and the Web UI daemon |
 | [`src/`](src/INDEX.md) | the harness itself |
 | [`test/`](test/INDEX.md) | the framework's own unit suite |

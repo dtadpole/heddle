@@ -42,5 +42,5 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
 
 ## Read next
 
-[`../INDEX.md`](../INDEX.md) for the ten verifications, and
+[`../INDEX.md`](../INDEX.md) for the verifications, and
 [`../../ULTIMATE_GOAL.md`](../../ULTIMATE_GOAL.md) for the part this one decides.
