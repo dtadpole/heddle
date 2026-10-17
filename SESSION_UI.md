@@ -88,7 +88,7 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Row's age | right edge, 8px inside, muted 11px | same | match |
 | Menu items, names | `Pin session`, `Rename`, `Fork session`, `Archive session` (reversed when set), with chords printed beside | the same four names; the chords work but are not printed | match on names, **difference kept** on printing the chords |
 | Search | a field that replaces the tree with a flat result list, each row `title · workspace · age` | same, with Clear and Escape | match |
-| View options | `Hide archived`, `All conversations (show archived)`, `Archived only` | the same three strings, current state by `aria-checked` | match |
+| View options | four groups: `WorkSpace` heading, `Workspace Tree` / `In one list`, `Manual` / `Last updated`, archive trio | the heading, both grouping items, `Last updated`, the archive trio — `Manual` left out (drag-to-order is a feature) | **mostly fixed this round**, after my earlier "three items" description was corrected by opening the menu |
 | Panel header | session name at the column's left, chips for subagents/jobs, then tabs | session name, the folder it belongs to, then tabs | match in shape; the chips have no heddle mechanism behind them |
 | Tabs | `Chat` / `Trajectory`, plus a turn-navigation strip in the chat | `Chat` / `Trajectory`; the turn strip lives in the Trajectory view | match in intent, **difference kept** in placement |
 | Composer | 28px card, `+`, access, model, send, then a status line of turns/steps/tok-s/context | the same, same order | match |
@@ -176,15 +176,24 @@ Ordered so that each phase is useful alone and testable alone. Every phase ends 
    DSH's two fields because a store can hold many sessions with the same first message — measured: a search for
    `ready` returned 34 rows with one title between them. The earlier in-place filter is gone: it could not find
    a session whose branch was closed, and it never said where a hit lived.
-4. **View options — archive visibility done 2026-10-17; grouping and ordering not planned.** The sidebar header
-   has a `View options` control holding DSH's three archive states — `Hide archived`, `All conversations (show
-   archived)`, `Archived only` — with the current one marked, and the filter is now a **mode** rather than a flag
-   (`/api/tree?archived=hide|show|only`, with `1` still meaning `show`). Verified live on a fixture holding one
-   archived session: `hide` drew the two live ones, `show` drew all three, `only` drew exactly the archived one.
-   The other two groups are **deliberately not implemented**: Heddle's tree *is* the grouping DSH offers
-   (`Workspace Tree` — a flat "in one list" mode would throw away the conventions tree that is the point of this
-   UI), and `Manual` ordering would need drag-and-drop plus a persisted order, which is a feature of its own
-   rather than a switch. Saying so is better than shipping three controls of which two do nothing.
+4. **View options — done 2026-10-17, corrected 2026-10-17.** The sidebar header
+   has a `View options` control, and **I first recorded the wrong thing about it**: from a snapshot I described it as
+   holding DSH's three archive states and wrote that grouping and ordering were "deliberately not implemented". Opening
+   DSH's menu on 2026-10-17 showed **four groups and eight items**: a `WorkSpace` heading, `Workspace Tree` / `In one
+   list`, `Manual` / `Last updated`, and the archive trio. The claim was an assumption, and it is corrected here.
+
+   What this UI now carries, in DSH's order: the `WorkSpace` heading (drawn as a section name, not an empty button), the
+   grouping pair, `Last updated`, and the three archive states. `In one list` draws every session in one flat column —
+   title, where it lives, its age, newest first and pinned first — with the rows chosen by the session they open; the
+   hover controls stay on the tree's rows, where a session's definition folder is known, because a flat row that offered
+   a rename it could not complete would be worse than a list that does not offer it. `Manual` is the one item still not
+   built: drag-to-order plus a persisted order is a feature rather than a switch, and a group with a single item would
+   be a control that cannot be chosen, so that group is left out of the menu and the difference is stated.
+
+   Verified live on a fixture: `In one list` drew 50 flat session rows and no workspace rows, `Workspace Tree` brought
+   the tree back, and the choice persisted. The archive tri-state is unchanged (`hide` / `show` / `only`), and
+   `/api/tree?archived=…` is still how the tree is read. The same round found and fixed a **real bug**: `closeMenus`
+   walked only `#tree`, so the two header menus never closed after an item was chosen and needed two clicks to reopen.
 5. **The session's facts — already present.** The composer's status line (built by the other session working in
    this checkout) shows turns, steps, streaming tokens per second and the share of the context window, from the
    log and from the provider's own usage report — the same facts DSH puts under its composer. Nothing was added to

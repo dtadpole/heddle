@@ -2063,10 +2063,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         /** DSH's View options control, where the archive filter lives: one control, three states, the current one marked. */
         const viewButton = document.querySelector('#view-options button')
         viewButton.click(); await wait(250)
-        const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].map((b) => ({
-          label: b.textContent.trim(),
+        const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) > *')].map((b) => ({
+          heading: b.tagName === 'BUTTON' ? null : b.textContent.trim(),
+          label: b.tagName === 'BUTTON' ? b.textContent.trim() : null,
           checked: b.getAttribute('aria-checked'),
-        }))
+        })).filter((item) => item.heading !== null || item.label !== null)
         document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
         await wait(100)
 
@@ -2166,15 +2167,29 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      * And the filter is one control with DSH's three states, named the way DSH names them — the labels are the
      * parity claim — with the current state carried by `aria-checked` rather than by a character in the name.
      */
+    /**
+     * DSH's View options, read from its own menu on 2026-10-17, is four groups: a `WorkSpace` heading, the grouping pair,
+     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, `Last updated` (the only
+     * order it has) and the archive trio, in DSH's order — asserted as the list, because the order is the claim.
+     */
     assert.deepEqual(
-      reading.viewItems.map((item) => item.label),
-      ['Hide archived', 'All conversations (show archived)', 'Archived only'],
+      reading.viewItems.filter((item) => item.label !== null).map((item) => item.label),
+      ['Workspace Tree', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
       `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
     )
+    assert.deepEqual(
+      reading.viewItems.filter((item) => item.heading !== null).map((item) => item.heading),
+      ['WorkSpace'],
+      `with DSH's group heading above the grouping pair\nsaw: ${JSON.stringify(reading.viewItems.map((item) => item.heading))}`,
+    )
+    /**
+     * One current state per group: a grouping, an order, and an archive filter. `WorkSpace` is a heading and carries no
+     * state, so the three marked items are the three groups DSH has.
+     */
     assert.equal(
       reading.viewItems.filter((item) => item.checked === 'true').length,
-      1,
-      `exactly one state is marked current\nsaw: ${JSON.stringify(reading.viewItems.map((item) => item.checked))}`,
+      3,
+      `one current state per group\nsaw: ${JSON.stringify(reading.viewItems.map((item) => [item.label, item.checked]))}`,
     )
 
     assert.equal(reading.cleared.treeHidden, false, 'clearing the query restores the tree')
@@ -2353,6 +2368,84 @@ test('a session log downloads as decoded JSONL, named after the session', async 
     const malformed = await fetch(new URL('/api/sessions/not-an-id/log', live.url), { headers: { cookie } })
     assert.equal(malformed.status, 400, 'and a name that is not a session id is a 400')
   } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('View options groups the sessions the two ways DSH offers: the tree, or one list', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-grouping')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    for (const name of ['one', 'two']) {
+      const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', name), '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, made.stderr)
+    }
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const openMenu = async () => { document.querySelector('#view-options button').click(); await wait(250) }
+        const choose = async (label) => {
+          await openMenu()
+          const button = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((item) => (item.textContent || '').trim() === label)
+          if (button === undefined) { document.dispatchEvent(new MouseEvent('click', { bubbles: true })); return false }
+          button.click(); await wait(1500)
+          return true
+        }
+        /**
+         * A tree first: the workspaces are drawn, which is the grouping this UI had before the choice existed. The
+         * sessions live under a type folder, so the tree is opened two levels before they are counted.
+         */
+        rows()[0].click(); await wait(800)
+        const rowFor = (label) => rows().find((row) => row.querySelector('.label')?.textContent === label)
+        rowFor('_tools_')?.click(); await wait(700)
+        rowFor('some-tool')?.click(); await wait(900)
+        const inTree = { workspaces: document.querySelectorAll('#tree li[data-kind="workspace"]').length, sessions: document.querySelectorAll('#tree li[data-kind="session"]').length }
+        const choseList = await choose('In one list')
+        const inList = {
+          workspaces: document.querySelectorAll('#tree li[data-kind="workspace"]').length,
+          sessions: document.querySelectorAll('#tree li[data-kind="session"]').length,
+          place: document.querySelector('#tree li[data-kind="session"] > .row > .age')?.textContent ?? null,
+          expanded: document.querySelectorAll('#tree li[aria-expanded]').length,
+        }
+        const choseTree = await choose('Workspace Tree')
+        const back = { workspaces: document.querySelectorAll('#tree li[data-kind="workspace"]').length }
+        return JSON.stringify({ inTree, choseList, inList, choseTree, back, persisted: localStorage.getItem('heddle.tree.grouping.v1') })
+      })().then((value) => JSON.stringify(value))`),
+    )
+    const result = JSON.parse(reading)
+
+    /** The tree before the choice: workspaces and their sessions, which is what `Workspace Tree` means. */
+    assert.ok(result.inTree.workspaces >= 1, `the tree draws its workspaces\nsaw: ${JSON.stringify(result.inTree)}`)
+    assert.ok(result.inTree.sessions >= 2, 'and the sessions under them')
+
+    /** `In one list`: no folders at all, one flat column of sessions, each with where it lives and its age. */
+    assert.equal(result.choseList, true, 'the list option is offered and chosen')
+    assert.equal(result.inList.workspaces, 0, `a flat list draws no workspace rows\nsaw: ${JSON.stringify(result.inList)}`)
+    assert.ok(result.inList.sessions >= 2, 'only the sessions, all of them')
+    assert.ok(result.inList.expanded === 0, 'and nothing claims to expand')
+    assert.match(String(result.inList.place), / · /, `a flat row says where its session lives and when\nsaw: ${result.inList.place}`)
+
+    /** And the choice is reversible: the tree comes back, and the choice is remembered. */
+    assert.equal(result.choseTree, true, 'the tree option is offered and chosen')
+    assert.ok(result.back.workspaces >= 1, `the tree is back\nsaw: ${JSON.stringify(result.back)}`)
+    assert.equal(result.persisted, 'tree', 'and the choice is remembered')
+  } finally {
+    browser?.close()
     live?.kill()
     removeDir(h.home)
     removeDir(h.work)

@@ -232,7 +232,6 @@
   }
   #minimap-preview[hidden] { display: none; }
   #minimap-preview[data-visible='true'] { opacity: 1; }
-  #minimap-preview .mm-role { display: block; font-size: 11px; line-height: 16px; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
   @media (max-width: 1180px) { #minimap { display: none; } }
   @media (prefers-reduced-motion: reduce) {
     #minimap, #minimap .mm-bar, #minimap-preview { transition: none; }
@@ -372,7 +371,7 @@
   details.turn.tool[data-state='running'] > summary { opacity: .6; }
   nav#views { display: flex; gap: .25rem; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
   nav#views button { font: inherit; font-size: .82rem; padding: .3rem .7rem; background: none; border: 1px solid transparent; border-bottom: none; border-radius: .35rem .35rem 0 0; color: inherit; opacity: .6; cursor: pointer; }
-  nav#views button[aria-current='true'] { opacity: 1; border-color: var(--line); background: color-mix(in oklab, currentColor 7%, transparent); }
+  nav#views button[aria-selected='true'] { opacity: 1; border-color: var(--line); background: color-mix(in oklab, currentColor 7%, transparent); }
   /**
    * `hidden` has to win over this file's own display rules.
    *
@@ -708,6 +707,8 @@
    * one, and it makes a list of names read unevenly.
    */
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
+  /** A section name inside a menu, as DSH's View options has for its `WorkSpace` group. */
+  .menu .menu-heading { padding: .3rem .5rem .1rem; font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; opacity: .55; }
   #session-head .menu-wrap { position: relative; display: inline-flex; margin-left: auto; }
   #session-head .menu { position: absolute; right: 0; top: 1.4rem; z-index: 6; display: flex; flex-direction: column; min-width: 12rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); }
   #session-head .menu[hidden] { display: none; }
@@ -1028,6 +1029,17 @@
   body[data-sidebar='collapsed'] #history { display: none; }
   body[data-sidebar='collapsed'] #sidebar-search { display: inline-flex; }
   body[data-sidebar='collapsed'] #gutter-left { display: none; }
+  /**
+   * The rail's controls are **32 pixels square**, which is the size a pointer can hit without aiming.
+   *
+   * Measured before this: they kept their expanded sizes (a 23-pixel `+` and a 20-pixel `…`) stacked 23 pixels apart,
+   * which is a column of small targets rather than a rail — and DSH's rail items are 36 pixels. The row is what gets
+   * the size, so the `…` menu inside it grows with it.
+   */
+  body[data-sidebar='collapsed'] #workspaces-row > button,
+  body[data-sidebar='collapsed'] #workspaces-row .untwisty { width: 32px; height: 32px; font-size: 1rem; }
+  body[data-sidebar='collapsed'] #workspaces-row .menu-wrap { display: inline-flex; }
+  body[data-sidebar='collapsed'] #brand { height: 52px; }
   #brand-name { font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; font-size: 1.06rem; font-weight: 600; letter-spacing: .01em; }
   /**
    * The `…` that opens a row's menu: **no chrome of its own**.
@@ -1330,9 +1342,16 @@
     -->
     <span id="session-more"></span>
   </header>
-  <nav id="views" aria-label="view">
-    <button type="button" data-view="chat" aria-current="true">Chat</button>
-    <button type="button" data-view="trajectory">Trajectory</button>
+  <!--
+    The ring is a **tablist**, which is what DSH uses for the same control and what this control actually is: one of
+    two panels is shown and the other is put away. `aria-current` said "this is the current one" without saying that
+    the two things are alternatives to each other; `role=tab` with `aria-selected` and `aria-controls` says both, and
+    gives a screen reader the count and the panel each tab belongs to. Arrow keys move between tabs, which is the
+    behaviour the pattern promises.
+  -->
+  <nav id="views" role="tablist" aria-label="view">
+    <button type="button" role="tab" id="tab-chat" data-view="chat" aria-selected="true" aria-controls="log" tabindex="0">Chat</button>
+    <button type="button" role="tab" id="tab-trajectory" data-view="trajectory" aria-selected="false" aria-controls="ledger" tabindex="-1">Trajectory</button>
   </nav>
   <!--
     The goal bar: what the session is working toward, above the conversation rather than inside it.
@@ -1346,7 +1365,7 @@
     <span id="goal-rounds"></span>
     <span id="goal-actions"></span>
   </div>
-  <div id="log" data-view="chat"></div>
+  <div id="log" data-view="chat" role="tabpanel" aria-labelledby="tab-chat"></div>
   <!--
     The conversation minimap, after the reference's: one 12px row per message, a bar whose thickness is the message's
     size, the visible window brightened with feathered edges, and a hover-neighbourhood that swells the bars and
@@ -1375,8 +1394,8 @@
     </label>
   </div>
   <div id="timeline" data-view="trajectory" aria-label="trajectory timeline" role="navigation" hidden></div>
-  <div id="ledger" data-view="trajectory" hidden></div>
-  <div id="file" data-view="file" hidden>
+  <div id="ledger" data-view="trajectory" role="tabpanel" aria-labelledby="tab-trajectory" hidden></div>
+  <div id="file" data-view="file" role="tabpanel" aria-labelledby="tab-file" hidden>
     <header id="file-head"></header>
     <!--
       A `div` rather than a `pre`: the pane shows three different things — a document, source with a
@@ -1861,15 +1880,20 @@ function renderRing(selection) {
   if (selection === 'file') {
     const button = document.createElement('button')
     button.type = 'button'
+    button.setAttribute('role', 'tab')
+    button.id = 'tab-file'
     button.dataset.view = 'file'
+    button.setAttribute('aria-selected', 'false')
+    button.setAttribute('aria-controls', 'file')
     button.textContent = 'File'
     ring.prepend(button)
   }
   const offered = selection === 'file' ? ['file'] : ['chat', 'trajectory']
   for (const button of ring.querySelectorAll('button')) button.hidden = !offered.includes(button.dataset.view)
   for (const button of ring.querySelectorAll('button')) {
-    if (button.dataset.view === view) button.setAttribute('aria-current', 'true')
-    else button.removeAttribute('aria-current')
+    button.setAttribute('aria-selected', String(button.dataset.view === view))
+    /** One tab in the Tab order, the rest reachable by the arrow keys — the pattern `role=tab` describes. */
+    button.tabIndex = button.dataset.view === view ? 0 : -1
   }
 }
 
@@ -1934,13 +1958,13 @@ function hideMinimapPreview() {
 function showMinimapPreview(index) {
   const entry = mmEntries[index]
   if (entry === undefined) return hideMinimapPreview()
-  const role = { user: 'You', assistant: 'Assistant', tool: 'Tool', reasoning: 'Thinking' }[entry.role] ?? entry.role
-  const label = document.createElement('span')
-  label.className = 'mm-role'
-  label.textContent = role
+  /**
+   * The card is the message's own text, as the reference's is: measured on the reference, its preview showed only
+   * "explain CER again" at 300×81 — no role heading. The rail already says who spoke through the bar's ink.
+   */
   const body = document.createElement('span')
   body.textContent = entry.text.slice(0, 220) || '(empty)'
-  minimapPreview.replaceChildren(label, body)
+  minimapPreview.replaceChildren(body)
   const rowBox = entry.row.getBoundingClientRect()
   const navBox = minimap.getBoundingClientRect()
   const top = rowBox.top - navBox.top
@@ -2115,8 +2139,9 @@ window.addEventListener('resize', scheduleMinimap)
 async function showView(next) {
   view = next
   for (const button of document.querySelectorAll('#views button')) {
-    if (button.dataset.view === view) button.setAttribute('aria-current', 'true')
-    else button.removeAttribute('aria-current')
+    button.setAttribute('aria-selected', String(button.dataset.view === view))
+    /** A tab stops being reachable by Tab once it is selected; the arrow keys are how the tablist is crossed. */
+    button.tabIndex = button.dataset.view === view ? 0 : -1
   }
   log.hidden = view !== 'chat'
   scheduleMinimap()
@@ -3165,6 +3190,72 @@ window.addEventListener('resize', () => setSidebarWidth(
 
 const rememberedSidebar = storedSidebarWidth()
 if (rememberedSidebar !== null) setSidebarWidth(rememberedSidebar, { persist: false })
+
+/**
+ * The sidebar **collapses to a rail**, which is DSH's gesture and the one thing this panel could not do.
+ *
+ * Measured from DSH on 2026-10-17: its sidebar is 280 pixels wide and 56 when collapsed, the control sits at the top
+ * of the panel, its chord is `Alt+Meta+B`, and the state is **not** remembered — a reload brings the wide panel back.
+ * Heddle remembers the *width* already, so it remembers this too; a panel a reader put away coming back by itself
+ * after every reload is the kind of small forgetfulness a reader stops trusting.
+ *
+ * Collapsed, `body[data-sidebar='collapsed']` is what the stylesheet reads, so there is one source of truth for the
+ * state and no class list to keep in step with an attribute.
+ */
+const SIDEBAR_COLLAPSED_KEY = 'heddle.layout.collapsed.v1'
+const sidebarToggle = document.getElementById('sidebar-toggle')
+
+/** Whether the sidebar is collapsed, read from the document rather than tracked twice. */
+function sidebarCollapsed() {
+  return document.body.dataset.sidebar === 'collapsed'
+}
+
+/**
+ * Apply the collapsed state, name the control for it, and remember it.
+ *
+ * The control's **accessible name changes with the state** — "Collapse sidebar" / "Open sidebar" — because the name
+ * of a toggle is the action, and a reader who hears "Collapse sidebar" while it is collapsed is being told to do
+ * something that is already done.
+ */
+function setSidebarCollapsed(collapsed, options = {}) {
+  document.body.dataset.sidebar = collapsed ? 'collapsed' : 'expanded'
+  sidebarToggle.setAttribute('aria-expanded', String(!collapsed))
+  const label = collapsed ? 'Open sidebar' : 'Collapse sidebar'
+  sidebarToggle.setAttribute('aria-label', label)
+  sidebarToggle.title = `${label} (⌥⌘B)`
+  if (options.persist !== false) {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? 'true' : 'false')
+    } catch {
+      // A browser that refuses storage still gets a working control; only the memory is lost.
+    }
+  }
+}
+
+sidebarToggle.addEventListener('click', () => {
+  setSidebarCollapsed(!sidebarCollapsed())
+  sidebarToggle.focus()
+})
+
+/**
+ * The rail's search control: put the panel back and hand the field the focus.
+ *
+ * A search control that only focuses a field the reader cannot see does nothing, so opening the panel is part of the
+ * gesture rather than a separate step.
+ */
+document.getElementById('sidebar-search').addEventListener('click', () => {
+  setSidebarCollapsed(false)
+  const field = document.getElementById('session-search')
+  field.focus()
+  field.select()
+})
+
+/** The state a previous visit left, or the wide panel when there is none. */
+try {
+  setSidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true', { persist: false })
+} catch {
+  setSidebarCollapsed(false, { persist: false })
+}
 
 /**
  * The composer: the draft, the queue it feeds, and the model seat — DSH's input bar, reduced to heddle's parts.
@@ -4367,6 +4458,28 @@ const ARCHIVED_KEY = 'heddle.tree.archived.v1'
  * marker, and `'only'` answers "where did it go", which a two-state toggle cannot. Persisted like the expansion
  * set, because it is a reading preference.
  */
+/**
+ * How the session list is grouped — DSH's other View options choice, measured on 2026-10-17: `Workspace Tree` (the
+ * folders this UI draws, which is the same idea) or `In one list` (every session flat, newest first, whatever folder it
+ * lives in). A reading preference, persisted beside the archive filter.
+ */
+const GROUPING_KEY = 'heddle.tree.grouping.v1'
+let groupingMode = (() => {
+  try {
+    return localStorage.getItem(GROUPING_KEY) === 'list' ? 'list' : 'tree'
+  } catch (error) {
+    return 'tree'
+  }
+})()
+
+function rememberGrouping() {
+  try {
+    localStorage.setItem(GROUPING_KEY, groupingMode)
+  } catch (error) {
+    /* A browser with no storage still draws the list; the preference is what is lost. */
+  }
+}
+
 let archiveMode = (() => {
   try {
     const stored = localStorage.getItem(ARCHIVED_KEY)
@@ -4396,20 +4509,56 @@ function viewOptionItems() {
    * character in the label: the name of the item has to be the action, and a name that changes with the state is two
    * names for one thing.
    */
-  const modes = [
+  const archiveModes = [
     ['hide', 'Hide archived'],
     ['show', 'All conversations (show archived)'],
     ['only', 'Archived only'],
   ]
-  return modes.map(([mode, label]) => ({
-    label,
-    current: archiveMode === mode,
-    run: async () => {
-      archiveMode = mode
-      rememberArchived()
-      await renderTree()
+  return [
+    /**
+     * DSH's View options is four groups, read from its own menu on 2026-10-17: a `WorkSpace` heading, the grouping
+     * pair (`Workspace Tree` / `In one list`), the ordering pair (`Manual` / `Last updated`), and the archive trio.
+     * This menu carries the grouping pair and the archive trio. `Manual` is **not** here: `Last updated` is the only
+     * order this UI has, and drag-to-order plus a persisted order is a feature rather than a switch. A group with one
+     * item would be a control that cannot be chosen, so that group is left out and the difference is written down.
+     */
+    { heading: 'WorkSpace' },
+    {
+      label: 'Workspace Tree',
+      current: groupingMode === 'tree',
+      run: async () => {
+        groupingMode = 'tree'
+        rememberGrouping()
+        await renderTree()
+      },
     },
-  }))
+    {
+      label: 'In one list',
+      current: groupingMode === 'list',
+      run: async () => {
+        groupingMode = 'list'
+        rememberGrouping()
+        await renderTree()
+      },
+    },
+    {
+      label: 'Last updated',
+      current: true,
+      run: async () => {
+        /** The only order there is; choosing it is a no-op rather than an error. */
+        await renderTree()
+      },
+    },
+    ...archiveModes.map(([mode, label]) => ({
+      label,
+      current: archiveMode === mode,
+      run: async () => {
+        archiveMode = mode
+        rememberArchived()
+        await renderTree()
+      },
+    })),
+  ]
 }
 
 function rememberExpanded() {
@@ -4802,6 +4951,11 @@ let selectedPath = null
 function markSelection() {
   for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
     if (!li.hasAttribute('aria-selected')) continue
+    /** A tree row is chosen by path; a flat list row by the session it opens, because it has no definition folder. */
+    if (li.dataset.sessionId !== undefined) {
+      li.setAttribute('aria-selected', li.dataset.sessionId === current ? 'true' : 'false')
+      continue
+    }
     const row = li.querySelector(':scope > .row')
     li.setAttribute('aria-selected', row !== null && row.dataset.path === selectedPath ? 'true' : 'false')
   }
@@ -4824,9 +4978,20 @@ function syncSelectionToSession() {
 }
 
 /** Close every open row menu; any click outside one is a dismissal. */
+/**
+ * Close every menu, wherever it is.
+ *
+ * Measured bug: this used to walk only `#tree`, so the two menus in the header — `View options` and the session's
+ * `More actions` — never closed when an item was chosen, and the next click on their button was read as "close this
+ * open one", which took two clicks to reopen. A menu that is not closed is a menu whose button lies about its state.
+ */
 function closeMenus() {
-  for (const list of document.querySelectorAll('#tree .menu')) list.hidden = true
-  for (const button of document.querySelectorAll('#tree [aria-haspopup="true"]')) button.setAttribute('aria-expanded', 'false')
+  for (const wrap of document.querySelectorAll('.menu-wrap')) {
+    const list = wrap.querySelector(':scope > .menu')
+    if (list !== null) list.hidden = true
+    const button = wrap.querySelector(':scope > button')
+    if (button !== null) button.setAttribute('aria-expanded', 'false')
+  }
 }
 
 /**
@@ -5060,6 +5225,8 @@ const SESSION_SHORTCUTS = [
   { key: 'g', alt: true, action: 'rename' },
   { key: 'k', alt: true, action: 'search' },
   { key: 'f', shift: true, action: 'fork' },
+  /** DSH's own chord for the same control: `Alt+Meta+B`. */
+  { key: 'b', alt: true, action: 'sidebar' },
 ]
 
 /**
@@ -5096,7 +5263,14 @@ document.addEventListener('keydown', (event) => {
   const action = shortcutFor(event)
   if (action === null) return
   event.preventDefault()
+  if (action === 'sidebar') {
+    setSidebarCollapsed(!sidebarCollapsed())
+    sidebarToggle.focus()
+    return
+  }
   if (action === 'search') {
+    /** The field is put away while the sidebar is a rail, so reaching it means putting the panel back first. */
+    if (sidebarCollapsed()) setSidebarCollapsed(false)
     const field = document.getElementById('session-search')
     field.focus()
     field.select()
@@ -5132,6 +5306,18 @@ function menuButton(node, items, options = {}) {
   list.setAttribute('role', 'menu')
   list.hidden = true
   for (const item of items) {
+    /**
+     * A section name rather than an action — DSH's `WorkSpace` group title. The item carries the name in `heading`
+     * itself, so the test is for the field being present rather than for `true`: an empty button in its place would be
+     * a control that does nothing, which is exactly what a section name must not look like.
+     */
+    if (item.heading !== undefined) {
+      const heading = document.createElement('span')
+      heading.className = 'menu-heading'
+      heading.textContent = typeof item.heading === 'string' ? item.heading : String(item.label ?? '')
+      list.append(heading)
+      continue
+    }
     const entry = document.createElement('button')
     entry.type = 'button'
     entry.setAttribute('role', item.current === true ? 'menuitemradio' : 'menuitem')
@@ -5504,7 +5690,59 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
   applySearch()
 })
 
+/**
+ * DSH's `In one list`: every session in one flat column, newest first, pinned first — the same order the tree uses
+ * inside a branch, without the folders.
+ *
+ * It is a **reading** list rather than a second tree: a row opens its session, and the hover controls that need a
+ * session's definition folder stay on the tree's rows, where that folder is known. A flat row that offered a rename it
+ * could not complete would be worse than a list that does not offer it.
+ */
+async function renderFlatList() {
+  treeList.replaceChildren()
+  rowIndex.clear()
+  const index = await loadSearchIndex()
+  const visible = index.sessions.filter((meta) => {
+    const archived = meta.archived === true
+    if (archiveMode === 'only') return archived
+    if (archiveMode === 'hide') return !archived
+    return true
+  })
+  visible.sort((left, right) => Number(right.pinned === true) - Number(left.pinned === true) || String(right.created).localeCompare(String(left.created)))
+  treeList.replaceChildren(
+    ...visible.map((meta) => {
+      const li = document.createElement('li')
+      li.setAttribute('role', 'treeitem')
+      li.dataset.kind = 'session'
+      li.dataset.sessionId = meta.id
+      li.setAttribute('aria-selected', meta.id === current ? 'true' : 'false')
+      const row = document.createElement('div')
+      row.className = 'row'
+      row.dataset.path = meta.cwd
+      row.tabIndex = 0
+      const icon = document.createElement('span')
+      icon.className = 'icon'
+      icon.append(kindIcon('session', false))
+      const label = document.createElement('span')
+      label.className = 'label'
+      label.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
+      const place = document.createElement('span')
+      place.className = 'age'
+      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      row.append(icon, label, place)
+      row.onclick = () => showSession(meta.id)
+      li.append(row)
+      return li
+    }),
+  )
+  setNote(visible.length === 0 ? 'no sessions to list' : '')
+}
+
 async function renderTree() {
+  if (groupingMode === 'list') {
+    await renderFlatList()
+    return
+  }
   rowIndex.clear()
   let body
   try {
@@ -5553,6 +5791,29 @@ async function renderTree() {
   if (selectedPath === null) syncSelectionToSession()
   markSelection()
 }
+
+/**
+ * Arrow keys cross the tablist, which is what `role=tab` promises a keyboard reader.
+ *
+ * The handler is on the tablist rather than on the document, so it only acts while focus is inside the ring — a page
+ * that moved its tabs whenever the arrow keys were pressed anywhere would be fighting a reader who was scrolling a
+ * conversation.
+ */
+document.getElementById('views').addEventListener('keydown', (keyEvent) => {
+  const tabs = [...document.querySelectorAll('#views button[role="tab"]')].filter((button) => !button.hidden)
+  if (tabs.length === 0) return
+  const index = tabs.indexOf(document.activeElement)
+  if (index === -1) return
+  let next = null
+  if (keyEvent.key === 'ArrowRight') next = tabs[(index + 1) % tabs.length]
+  else if (keyEvent.key === 'ArrowLeft') next = tabs[(index - 1 + tabs.length) % tabs.length]
+  else if (keyEvent.key === 'Home') next = tabs[0]
+  else if (keyEvent.key === 'End') next = tabs[tabs.length - 1]
+  if (next === null) return
+  keyEvent.preventDefault()
+  next.focus()
+  next.click()
+})
 
 document.getElementById('views').addEventListener('click', (clickEvent) => {
   const button = clickEvent.target.closest('button[data-view]')
