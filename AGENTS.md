@@ -70,9 +70,9 @@ and these are the articles that bind here.
   that needs a browser states in its `INDEX.md` whether it runs headless, headed or needs none.
 
 Heddle's **own** conventions live in [`_conventions_/`](_conventions_/INDEX.md) — rules that are specific to
-this repository rather than borrowed from `reflection`, each with the instance that made it necessary and the
-test that judges it. The first is
-[reentrant components](_conventions_/heddle-conventions/reentrant-components.md).
+this repository rather than borrowed from `reflection`, one folder per convention, each with the instance
+that made it necessary and the test that judges it. The first is
+[reentrant components](_conventions_/reentrant-components/INDEX.md).
 
 ## The rules that are local to this repository
 
