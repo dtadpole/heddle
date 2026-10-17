@@ -198,9 +198,24 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
         })
       })()`),
     )
-    assert.deepEqual(examined.tabs, ['Summary', 'Payload', 'Result', 'Timing'], 'the details pane has DSH’s four tabs')
+    assert.deepEqual(examined.tabs, ['Summary', 'Payload', 'Result', 'Schema', 'Timing'], 'the details pane has DSH’s five tabs')
     assert.match(examined.where, /Turn \d+/, 'and says which turn the row belongs to')
     assert.match(examined.result, /a\.txt/, 'the Result tab shows what the tool answered in full')
+    const schema = JSON.parse(
+      await browser.evaluate(`(() => {
+        const tab = [...document.querySelectorAll('#tr-details .tr-d-tab')].find((entry) => entry.textContent === 'Schema')
+        tab?.click()
+        return JSON.stringify({ found: tab !== undefined, body: document.querySelector('#tr-details .tr-d-body')?.textContent ?? '' })
+      })()`),
+    )
+    assert.ok(schema.found, 'the tool inspector has DSH’s Schema tab')
+    assert.match(schema.body, /list_dir/, 'it names the tool')
+    assert.match(schema.body, /Parameters/, 'and shows its parameter schema')
+    assert.match(schema.body, /"type"/, 'with the schema itself as JSON')
+    // A second screenshot, of the tool inspector itself, because the Schema tab is the feature this adds.
+    await browser.screenshot(join(repoRoot, '_context_', 'dsh-mechanisms', 'heddle-trajectory-schema.png'))
+
+
 
     // The toolbar's two collapse switches and the search box, as DSH's.
     /**

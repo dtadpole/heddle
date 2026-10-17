@@ -516,18 +516,36 @@
   #timeline button[data-leading='reasoning'] { background: color-mix(in oklab, #b7791f 45%, transparent); }
   #timeline button[data-leading='tool'] { background: color-mix(in oklab, #8b5cf6 45%, transparent); }
   /**
-   * The column's resize handle, DSH's `col-resize` grip: a thin strip at the edge of the text column that
-   * widens the transcript and the composer together, because they are one column.
+   * The column's resize grips — DSH's own pair (`wSkVaW_widthHandle`).
+   *
+   * Each sits **24px outside** its edge of the text column (`calc(50% ± content/2 + 24px)`), is 10px wide and
+   * full height, and shows a **2px line** only on hover, focus or drag. That line is not a block: DSH paints it
+   * with a gradient around the **pointer's Y** (`--dsh-width-handle-pointer-y`), so the grip appears under the
+   * hand rather than as a highlighted strip — which is why the variable is mirrored here as `--grip-y`.
    */
-  #gutter-column {
+  .column-grip {
     position: absolute; top: 0; bottom: 0; z-index: 4;
-    right: max(18px, calc((100% - var(--chat-column)) / 2 - 6px));
-    width: 12px; cursor: col-resize; background: transparent; border: none; padding: 0; touch-action: none;
+    width: max(4px, min(10px, calc((100% - var(--chat-column)) / 2 - 48px)));
+    cursor: col-resize; background: transparent; border: none; padding: 0; touch-action: none;
   }
-  #gutter-column:hover, #gutter-column:focus-visible, #gutter-column[data-dragging='true'] {
-    background: color-mix(in oklab, var(--text) 8%, transparent);
-    outline: none;
+  .column-grip[data-side='right'] { left: calc(50% + var(--chat-column) / 2 + 24px); }
+  .column-grip[data-side='left'] { right: calc(50% + var(--chat-column) / 2 + 24px); }
+  .column-grip::after {
+    content: ''; position: absolute; top: 0; bottom: 0; width: 2px; border-radius: 2px; opacity: 0;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      transparent calc(var(--grip-y, 50%) - 36px),
+      var(--border-strong) calc(var(--grip-y, 50%) - 8px),
+      var(--border-strong) calc(var(--grip-y, 50%) + 8px),
+      transparent calc(var(--grip-y, 50%) + 36px)
+    );
   }
+  .column-grip[data-side='right']::after { left: 4px; }
+  .column-grip[data-side='left']::after { right: 4px; }
+  .column-grip:hover::after, .column-grip:focus-visible::after, .column-grip[data-dragging='true']::after { opacity: 1; }
+  .column-grip:focus-visible { outline: 1px solid color-mix(in oklab, currentColor 40%, transparent); outline-offset: 2px; border-radius: 4px; }
+  .column-grip[data-dragging='true'] { z-index: 8; }
   #timeline button[data-running='true'] { background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, color-mix(in oklab, currentColor 25%, transparent) 4px, color-mix(in oklab, currentColor 25%, transparent) 8px); }
   #timeline button[aria-current='true'] { outline: 2px solid currentColor; outline-offset: -2px; }
   #timeline-legend { display: flex; gap: .75rem; font-size: .72rem; opacity: .6; margin: -.4rem 0 .7rem; }
@@ -1219,7 +1237,13 @@
     composer, which is where DSH's `conversation.input.dock` sits.
   -->
   <div id="queue" hidden></div>
-  <button id="gutter-column" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="560" aria-valuemax="1200" tabindex="0"></button>
+  <!--
+    The column's two resize grips, DSH's own pair: one 24px outside each edge of the text column, 10px wide,
+    full height, a 2px line that appears under the pointer. Keeping `#gutter-column` as the right-hand one
+    preserves the existing check that drags it.
+  -->
+  <button id="gutter-column-left" class="column-grip" data-side="left" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
+  <button id="gutter-column" class="column-grip" data-side="right" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <div id="composer">
   <form id="prompt">
     <div id="composer-card">
@@ -1888,6 +1912,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
   trajectory.timeline = timeline_
   trajectory.data = data
+  trajectory.tools = Array.isArray(data.tools) ? data.tools : []
   trajectory.selected = -1
   trajectory.expanded.clear()
   trajectory.focus = null
@@ -2162,10 +2187,16 @@ function renderDetails(row) {
   tabs.className = 'tr-d-tabs'
   const bodyBox = document.createElement('div')
   bodyBox.className = 'tr-d-body'
+  /**
+   * DSH's five tabs: Summary, Payload, Result, **Schema** and Timing. Schema is the tool's own definition —
+   * the name, what it says it does, and the JSON Schema its arguments must satisfy — which is what turns
+   * "it ran this" into "this is what running it means".
+   */
   const sections = [
     ['Summary', () => summarySection(row, record, step)],
     ['Payload', () => (String(record.text ?? '') === '' ? trEmpty('nothing was recorded as a payload') : trPre(String(record.text)))],
     ['Result', () => (String(record.result ?? '') === '' ? trEmpty('no result recorded') : trPre(String(record.result)))],
+    ...(row.kind === 'tool' ? [['Schema', () => schemaSection(record)]] : []),
     ['Timing', () => timingSection(record, turn, step)],
   ]
   const show = (index) => {
@@ -2206,6 +2237,23 @@ function summarySection(row, record, step) {
     box.append(trSection('Content'), trPre(String(record.text)))
   }
   if (record.note !== undefined) box.append(trEmpty(String(record.note)))
+  return box
+}
+
+/** The tool's own definition, as the profile declared it. */
+function schemaSection(record) {
+  const box = document.createElement('div')
+  const name = record.name ?? String(record.label ?? '').replace(/^→ /, '')
+  const tool = (trajectory.tools ?? []).find((entry) => entry.name === name)
+  if (tool === undefined) {
+    box.append(trEmpty('this profile does not describe that tool'))
+    return box
+  }
+  const heading = document.createElement('div')
+  heading.className = 'tr-d-where'
+  heading.textContent = tool.name
+  box.append(heading, trPre(tool.description ?? ''))
+  box.append(trSection('Parameters'), trPre(JSON.stringify(tool.parameters ?? {}, null, 2)))
   return box
 }
 
@@ -2740,28 +2788,34 @@ const statusBar = document.getElementById('composer-status')
  * the queue dock all follow one number instead of four that can disagree.
  */
 const chatMain = document.querySelector('main')
-const columnGutter = document.getElementById('gutter-column')
-const COLUMN_MIN = 560
-const COLUMN_MAX = 1200
+const columnGrips = [...document.querySelectorAll('.column-grip')]
+/** DSH's `CONTENT_MIN`, the floor of a dragged width. */
+const COLUMN_MIN = 640
+/** DSH's `CONTENT_EDGE_BUDGET`: the room its two handles and their safe edges need beside the column. */
+const COLUMN_EDGE_BUDGET = 176
 const COLUMN_STORAGE = 'heddle.chatColumn'
 
+/** The widest column the view area can hold: everything but the two grips' edge budget. */
+function columnMax() {
+  return Math.max(COLUMN_MIN, chatMain.clientWidth - COLUMN_EDGE_BUDGET)
+}
 /**
- * The width the column has when nobody has chosen one: **DSH's 680px**, which is its measured text column.
+ * The width the column has when nobody has chosen one: **DSH's own formula**, `clamp(area × .64, 680, 920)`.
  *
- * The default used to be "the view area, less its margins", which on a wide window made the transcript 830px
- * and broke the line length the typography was chosen for. A person can still widen it with the grip — the
- * default is just the reference width, not the maximum.
+ * Measured in `ConversationWidthControls.resolveContentWidth`: the default is 64% of the view area clamped to
+ * the 680–920 band, not the whole area — that is what keeps the reading line the typography was chosen for.
  */
 function columnDefault() {
-  return Math.min(680, chatMain.clientWidth - 48)
+  return Math.min(columnMax(), Math.max(680, Math.min(chatMain.clientWidth * 0.64, 920)))
 }
-/** Write the column, clamped, and report what was actually written. */
+/** Write the column, clamped, and report what was actually written. The grips follow it. */
 function setColumn(width) {
-  /** The column cannot be wider than the view area it is centred in; a chosen width is honoured only if it fits. */
-  const available = chatMain.clientWidth - 48
-  const clamped = Math.max(COLUMN_MIN, Math.min(COLUMN_MAX, available, Math.round(width)))
+  const clamped = Math.max(COLUMN_MIN, Math.min(columnMax(), Math.round(width)))
   chatMain.style.setProperty('--chat-column', `${clamped}px`)
-  columnGutter.setAttribute('aria-valuenow', String(clamped))
+  for (const grip of columnGrips) {
+    grip.setAttribute('aria-valuenow', String(clamped))
+    grip.setAttribute('aria-valuemax', String(columnMax()))
+  }
   return clamped
 }
 /** The column currently in force, in pixels. */
@@ -2792,32 +2846,78 @@ window.addEventListener('resize', () => {
   if (storedColumn() === null) setColumn(columnDefault())
 })
 
+/**
+ * One pointer-captured grip, with DSH's maths: **both edges move**, so one pixel of travel widens the column
+ * by two (`outward = side === 'right' ? dx : -dx; width = base + outward * 2`).
+ *
+ * The width applies live while dragging, and is committed to storage once on release — DSH's `onCommit` — so a
+ * gesture that is abandoned with Escape or a cancel is not remembered.
+ */
 let columnDrag = null
-columnGutter.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return
-  columnDrag = { startX: event.clientX, startWidth: columnWidthNow() }
-  columnGutter.dataset.dragging = 'true'
-  columnGutter.setPointerCapture?.(event.pointerId)
-  event.preventDefault()
-})
+for (const grip of columnGrips) {
+  grip.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return
+    columnDrag = {
+      startX: event.clientX,
+      startWidth: columnWidthNow(),
+      grip,
+      side: grip.dataset.side === 'left' ? 'left' : 'right',
+      top: grip.getBoundingClientRect().top,
+    }
+    grip.dataset.dragging = 'true'
+    try {
+      grip.setPointerCapture(event.pointerId)
+    } catch {
+      // A synthetic pointer has no capture to take; the drag still works from the window listener.
+    }
+    event.preventDefault()
+  })
+  /**
+   * The grip line follows the pointer down the handle, as DSH's does: it sets
+   * `--dsh-width-handle-pointer-y` on every move, which is what makes the 2px line appear under the hand.
+   */
+  grip.addEventListener('pointermove', (event) => {
+    grip.style.setProperty('--grip-y', `${Math.round(event.clientY - grip.getBoundingClientRect().top)}px`)
+  })
+  grip.addEventListener('pointerleave', () => grip.style.removeProperty('--grip-y'))
+  /**
+   * A wheel over a grip scrolls the transcript, as DSH's handle does — it is a strip of the reading surface,
+   * and taking the wheel there should not be a dead zone. DSH converts line/page deltas; so does this.
+   */
+  grip.addEventListener(
+    'wheel',
+    (event) => {
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? log.clientHeight : 1
+      log.scrollBy({ top: event.deltaY * scale })
+      event.preventDefault()
+    },
+    { passive: false },
+  )
+  /** The handle is keyboard operable, so the column is not pointer-only — heddle is ahead of DSH here. */
+  grip.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const step = event.shiftKey ? 64 : 16
+    rememberColumn(setColumn(columnWidthNow() + (event.key === 'ArrowRight' ? step : -step)))
+  })
+}
 window.addEventListener('pointermove', (event) => {
   if (columnDrag === null) return
-  /** Both sides grow, so one pixel of pointer travel widens the column by two. */
-  rememberColumn(setColumn(columnDrag.startWidth + (event.clientX - columnDrag.startX) * 2))
+  columnDrag.grip.style.setProperty('--grip-y', `${Math.round(event.clientY - columnDrag.top)}px`)
+  const dx = event.clientX - columnDrag.startX
+  const outward = columnDrag.side === 'left' ? -dx : dx
+  setColumn(columnDrag.startWidth + outward * 2)
 })
 const endColumnDrag = () => {
+  if (columnDrag === null) return
+  const { grip } = columnDrag
   columnDrag = null
-  delete columnGutter.dataset.dragging
+  delete grip.dataset.dragging
+  grip.style.removeProperty('--grip-y')
+  rememberColumn(columnWidthNow())
 }
 window.addEventListener('pointerup', endColumnDrag)
 window.addEventListener('pointercancel', endColumnDrag)
-/** The handle is keyboard operable, so the column is not pointer-only. */
-columnGutter.addEventListener('keydown', (event) => {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-  event.preventDefault()
-  const step = event.shiftKey ? 64 : 16
-  rememberColumn(setColumn(columnWidthNow() + (event.key === 'ArrowRight' ? step : -step)))
-})
 const queueDock = document.getElementById('queue')
 const modelTrigger = document.getElementById('model-trigger')
 const modelMenu = document.getElementById('model-menu')
