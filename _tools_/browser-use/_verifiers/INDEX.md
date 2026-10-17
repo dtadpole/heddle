@@ -1,5 +1,5 @@
 ---
-title: Browser Tool Verifiers
+title: Browser Use Verifiers
 version: 1.0.0
 description: The claims the browser tool must keep, one folder each, kept beside the tool they judge rather than in the repository's top-level verifiers.
 grounded_in:

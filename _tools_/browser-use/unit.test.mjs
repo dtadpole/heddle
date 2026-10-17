@@ -25,7 +25,7 @@ import { attributesOf, formatSnapshot } from './snapshot.mjs'
  * bug in one of them shows up as a mysterious failure much later, and because a rule written in a
  * helper deserves a claim that can fail.
  *
- *     node --test _tools_/browser-tool/unit.test.mjs
+ *     node --test _tools_/browser-use/unit.test.mjs
  */
 
 /** One masked text frame, decoded back to its payload and flags. */

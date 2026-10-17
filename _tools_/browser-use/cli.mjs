@@ -12,9 +12,9 @@ import { TOOL_HELP, TOOL_NAMES } from './tools.mjs'
  * One command per browser tool, with the tool's arguments as either one JSON object or `--name=value`
  * pairs, so a shell that is bad at quoting is not the reason a call fails:
  *
- *     node _tools_/browser-tool/cli.mjs take_snapshot
- *     node _tools_/browser-tool/cli.mjs click '{"uid": "1_3"}'
- *     node _tools_/browser-tool/cli.mjs fill --uid=1_4 --value=hello
+ *     node _tools_/browser-use/cli.mjs take_snapshot
+ *     node _tools_/browser-use/cli.mjs click '{"uid": "1_3"}'
+ *     node _tools_/browser-use/cli.mjs fill --uid=1_4 --value=hello
  *
  * `start`, `stop` and `status` manage the session host. Any tool call starts one if none is running.
  */
@@ -22,11 +22,11 @@ import { TOOL_HELP, TOOL_NAMES } from './tools.mjs'
 const USAGE = `browser — drive a real Chrome over the DevTools protocol
 
 usage:
-  node _tools_/browser-tool/cli.mjs <tool> [json | --name=value ...] [--session=NAME]
-  node _tools_/browser-tool/cli.mjs start [--headless] [--session=NAME] [--profile=DIR] [--binary=PATH] [--state=DIR]
-  node _tools_/browser-tool/cli.mjs stop [--session=NAME]
-  node _tools_/browser-tool/cli.mjs status [--session=NAME]
-  node _tools_/browser-tool/cli.mjs tools
+  node _tools_/browser-use/cli.mjs <tool> [json | --name=value ...] [--session=NAME]
+  node _tools_/browser-use/cli.mjs start [--headless] [--session=NAME] [--profile=DIR] [--binary=PATH] [--state=DIR]
+  node _tools_/browser-use/cli.mjs stop [--session=NAME]
+  node _tools_/browser-use/cli.mjs status [--session=NAME]
+  node _tools_/browser-use/cli.mjs tools
 
 commands:
   start    open the browser and keep it open for later commands (a visible window)

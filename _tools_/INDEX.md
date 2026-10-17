@@ -22,7 +22,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`verify-runner/`](verify-runner/INDEX.md) | turns a check file into the project's verdict |
 | [`check-helpers/`](check-helpers/INDEX.md) | the shared library the checks import, including the one-page browser wrapper |
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
-| [`browser-tool/`](browser-tool/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
+| [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
 rather than the harness. The test is the one the conventions give: if the package
@@ -33,5 +33,5 @@ harness belongs to the harness; the runner that scores it belongs to the project
 
 [`verify-runner/INDEX.md`](verify-runner/INDEX.md) for the exit contract every verifier keeps,
 [`check-helpers/INDEX.md`](check-helpers/INDEX.md) for the shared helpers,
-[`browser-tool/INDEX.md`](browser-tool/INDEX.md) for the browser the page checks drive, and
+[`browser-use/INDEX.md`](browser-use/INDEX.md) for the browser the page checks drive, and
 [`_verifiers_/INDEX.md`](../_verifiers_/INDEX.md) for the verifications that use them.

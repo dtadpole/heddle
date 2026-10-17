@@ -1,18 +1,22 @@
 ---
-title: Browser Tool
+title: Browser Use
 version: 1.0.0
 description: A browser this repository drives over the Chrome DevTools protocol, with the harness browser's tool surface, one command per tool and one long-lived session behind them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, asking for a browser tool under _tools_ that replicates the DSH browser MCP
+  - source: owner statement in the dsh session, 2026-10-17, choosing the name browser-use
   - source: the DSH browser MCP as configured in the web profile, read on 2026-10-17
   - source: the reading recorded in _context_/dsh-browser-mcp
 ---
 
-# `browser-tool`
+# `browser-use`
 
 Instance of [`_tools_`](../INDEX.md). Holds a **browser an agent or a check can drive**: a
 dependency-free Chrome DevTools Protocol client, the tool surface the harness's browser exposes, and a
 command line that keeps one browser alive between commands.
+
+The name is the owner's choice (2026-10-17) and is unrelated to the third-party project that happens to
+share it: this is this repository's own driver, and everything here was written against the protocol.
 
 ## Why it exists
 
@@ -51,12 +55,12 @@ repository in [`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/IND
 ## Run it
 
 ```bash
-node _tools_/browser-tool/cli.mjs start            # a visible browser, kept open for later commands
-node _tools_/browser-tool/cli.mjs new_page '{"url": "https://example.com"}'
-node _tools_/browser-tool/cli.mjs take_snapshot
-node _tools_/browser-tool/cli.mjs click '{"uid": "1_3"}'
-node _tools_/browser-tool/cli.mjs take_screenshot '{"fullPage": true}'
-node _tools_/browser-tool/cli.mjs stop
+node _tools_/browser-use/cli.mjs start            # a visible browser, kept open for later commands
+node _tools_/browser-use/cli.mjs new_page '{"url": "https://example.com"}'
+node _tools_/browser-use/cli.mjs take_snapshot
+node _tools_/browser-use/cli.mjs click '{"uid": "1_3"}'
+node _tools_/browser-use/cli.mjs take_screenshot '{"fullPage": true}'
+node _tools_/browser-use/cli.mjs stop
 ```
 
 Any tool call starts the session when none is running; `start` is only needed when the first call
@@ -107,10 +111,10 @@ The verifiers live beside the tool, in [`_verifiers_/`](_verifiers_/INDEX.md), b
 tool rather than heddle's ultimate goal:
 
 ```bash
-node --test _tools_/browser-tool/unit.test.mjs                                  # no browser
-_tools_/browser-tool/_verifiers/browser-surface/verify.sh                      # headless
-_tools_/browser-tool/_verifiers/browser-session/verify.sh                      # headless
-HEDDLE_BROWSER_HEADED=1 _tools_/browser-tool/_verifiers/browser-surface/verify.sh   # watch it
+node --test _tools_/browser-use/unit.test.mjs                                  # no browser
+_tools_/browser-use/_verifiers/browser-surface/verify.sh                      # headless
+_tools_/browser-use/_verifiers/browser-session/verify.sh                      # headless
+HEDDLE_BROWSER_HEADED=1 _tools_/browser-use/_verifiers/browser-surface/verify.sh   # watch it
 ```
 
 Each serves its own fixture page on loopback, so a run spends nothing and needs no network. They judge

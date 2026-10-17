@@ -41,7 +41,7 @@ with nobody watching. A reader planning a run has to know which kind they are ab
 it, and a reader in an unattended context has to know which ones they must skip.
 
 Today every browser-driven verifier here runs **headless**; the window is judged by the browser tool's own
-`browser-surface` verifier (`_tools_/browser-tool/_verifiers/`), whose headed run checks that a window really
+`browser-surface` verifier (`_tools_/browser-use/_verifiers/`), whose headed run checks that a window really
 was opened. That is deliberate: the repository's verifications judge heddle, and none of them claims anything
 about a window; a check that needs one belongs beside the thing whose window it is.
 
@@ -70,7 +70,7 @@ a diff against the previous measurement.
 | 6 | 6 | `0` — the hook points, retarget, refusal, replacement, a refusal that stops, a broken hook named |
 | 7 | 24 | `0` — the transcript, resume and a frame torn by an interruption; containment, the segment-wise trap and the nearest root; one session per folder and `--new`; the tree's one level, kinds, badges, laziness, plumbing and the boundary that only an instance carries a session; in a browser, that a folder opens and closes with the same control; an adopted folder reported as ad hoc and promoted into the tree when it is registered; and a root unregistered, refused while it still holds sessions, or removed with its sessions adopted by the root above it |
 | 8 | 5 | `0` — the three modes, the sibling prefix, and the temp directory only when admitted |
-| 9 | 13 | `0` — port, page, API, the live stream, a composer that fills the panel, the workspace controls, and a source file shown as source |
+| 9 | 11 | `0` — port, page, API, the live stream, a composer that fills the panel, the workspace controls, and a source file shown as source |
 | 10 | 10 | `0` — fresh token, cookie handshake, the fence, both endpoints refused, the secret's mode, a stale token's recovery page, session history over the API and in a browser |
 | 11 | 2 | `0` — the ledger's fields and rules over the API, and a browser drawing both views with a timeline |
 | 12 | 1 | `0` — a divider that is a control, a pointer drag, the limits, the arrow keys, and the width after a reload |
