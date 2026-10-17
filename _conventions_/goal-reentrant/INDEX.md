@@ -1,138 +1,80 @@
 ---
-title: Reentrant components
+title: Goal reentrancy
 version: 1.0.0
-description: Every major component is reentrant — re-evaluable, restartable, replaceable and fault-tolerant — deriving its state and progress from durable records rather than from event delivery or one process lifetime.
+description: How the goal subsystem meets the reentrancy standard — durable goal state, a pure round decision, a driver that survives restart and replacement, and the tests that would catch a regression.
 grounded_in:
   - source: human-authored
   - source: owner statement 2026-10-17 that systems always use reentrant conditions, not point events, for major state tracking and resumption
-  - source: owner statement 2026-10-17 defining this as a system design pattern where any major component can be reentrant and survive a harness restart and intermittent errors from components being removed, upgraded, added or changed
+  - source: owner statement 2026-10-17 that reentrancy is a system design pattern where any major component survives a harness restart and intermittent errors from components being removed, upgraded, added or changed
 ---
 
-# Reentrant components
+# Goal reentrancy
 
-The first Heddle convention. It is an instance of `_conventions_` (one folder per convention); see the
-[folder's entry point](../INDEX.md) for what a convention must carry.
+The first Heddle convention: the **goal subsystem**'s application of the
+[reentrancy standard](../INDEX.md#the-reentrancy-standard). The standard — re-evaluable, restartable,
+replaceable, fault-tolerant, and the ten checks — is stated once in the folder entry point; this article says
+how goals meet it, which defects made it necessary, and what would catch a regression.
 
-**The rule.** Every major component must be **reentrant**: it can be re-entered, re-evaluated, restarted,
-replaced or degraded at any moment, and it derives its state and its progress from **durable records** —
-never from the delivery of a point event, and never only from memory that one process lifetime owns.
+## The goal is the durable subject
 
-The inverse — a component whose next step depends on an event arriving exactly once, on a collaborator
-always being present and the same version, or on state that exists only in memory — is forbidden for any
-component that tracks major state or resumes work.
+A goal is not a record that is updated; it is an **event** appended to the session log. Every mutation writes
+one `goal/change` carrying the complete snapshot (or a clear tombstone), and the current state is the fold of
+that log, with a `GoalRef{id, revision}` compare-and-set on every change. `roundsStarted` is not a counter but
+a count of **admitted** goal rounds, each of which is a user message the harness wrote with
+`source = {kind:'goal', goalId, revision, round}`.
 
-## What "reentrant" means here
+That single choice is what makes the rest of the standard reachable: a restart, a replacement driver or a
+failed round all begin by folding the same durable record.
 
-All four hold, or the component is not reentrant:
+## How it meets the standard
 
-1. **Re-evaluable.** Its next action is a pure function of durable state. "What should happen now?" can be
-   asked at any time, any number of times, by any caller — and the answer is the same.
-2. **Restartable.** After the harness restarts it rebuilds from durable state and continues. No progress lives
-   only in memory, and since no event fires for work that was already underway, it learns its pending work
-   from a **startup resync**, not from an event.
-3. **Replaceable.** It can be removed, upgraded, re-added or swapped for a new instance while the system runs
-   (a Cordis plugin unloads and reloads). The durable record and its contract outlive the instance; a versioned
-   record is decoded **strictly**, so an upgraded component either understands the log or fails loudly rather
-   than silently acting on a half-understood one.
-4. **Fault-tolerant.** A transient failure — a model call that fails, a collaborator removed mid-call, a
-   component being upgraded — leaves the subject **runnable**, and the next reconciliation retries it. A
-   permanent failure is recorded as a **state** (blocked or complete, with a reason), never inferred from
-   silence.
+| Property | Mechanism in `src/goal/` | Where it would fail |
+|---|---|---|
+| re-evaluable | `decideGoalRound(view)` is pure: no clock, no event history; any caller may ask "what now?" | `test/goal-driver.test.ts` — the round-decision cases |
+| mid-action edge not lost | edges collapse into a `requested` flag on a per-session lane; a draining lane keeps the flag and re-evaluates once more | the same file — a round completes the goal while the chain runs; the awaited chain settles on the *new* state |
+| one action in flight | the drain promise is stored before the drain starts, so a nested `request` finds the lane busy | the same file — a serialized second trigger |
+| startup resync | `resumeAtStart` folds every session and requests the runnable goals; only the Web server calls it | the same file — the boot sweep requests the active goal and nothing else |
+| restartable | activation defaults from the durable phase: an `active` goal is armed again in a new process | `_verifiers_/80-web-ui/check-goal.mjs` — killed mid-push, restarted on the same store, continued without a turn and without a person |
+| replaceable | a new `GoalService`/driver over the same log takes over; no state lives only in the old instance | `test/goal-driver.test.ts` — a reopened service drives the goal the previous instance started |
+| absent collaborator | the driver row is optional; with it absent goals are idle but intact, and adding it back resumes through the boot sweep | the same file and the boot-sweep test |
+| actions yield | `setImmediate` between rounds | the same file — a macrotask scheduled during a round gets to run and pauses the goal |
+| fault-tolerant | a turn that throws leaves the goal active and armed for the next reconciliation | the same file — a failed turn stays runnable |
+| stopping is a condition | `decideGoalRound` stops on phase/activation and **blocks** at the cap rather than stopping silently | `test/goal.test.ts` — every transition and refusal |
+| records versioned and strict | `goal/change` carries version 1; field sets, revision sequencing and phase/reason agreement are refused loudly | `test/goal.test.ts` — a snapshot whose phase and reason disagree is refused |
 
-The frequently confused special case: this is a superset of "level-triggered, not edge-triggered". Using
-conditions instead of point events is *how* a component becomes re-evaluable; it is not the whole of being
-reentrant.
+## The defects that made this a convention
 
-## The four inverses
-
-| Anti-pattern | What it fails at |
+| Defect | Property it violated |
 |---|---|
-| A `ctx.on(...)` handler (or webhook, or SSE handler) that **performs** the state change, with delivery as the only trigger | Re-evaluable and restartable: a dropped, duplicated, reordered, or post-restart-absent event is lost work |
-| State that exists only in memory and cannot be folded from the durable record | Restartable and replaceable: a new instance starts blind |
-| Work that is neither idempotent nor checkpointed — a retry repeats a side effect or loses progress | Fault-tolerant: every intermittent error becomes either a duplicate or a hole |
-| Code that assumes a collaborator is present, the same version, and never changing | Replaceable: a component removed, upgraded or added mid-flight turns into a crash instead of a condition |
+| An armed goal was **idle after the harness restarted** — the event that would have pushed it had fired in the previous process | restartable, startup resync |
+| An edge that arrived **during a chain was swallowed** by the chain already running — a goal completed by a model mid-round went unacted on | re-evaluable, mid-action edge retention |
+| A fast model **starved the process**: 500 rounds left the server alive and unable to answer a request | actions yield |
+| A completion that left `blocked` **carried the block reason into the next phase**, so the fold refused the log it had just written | durable state consistency, strict decoding |
+| The Web server needed **no change** when the driver was added, and the driver's absence leaves goals idle without corrupting them | replaceable, absent collaborator |
 
-## The shape
+## What is partial, and not hidden
 
-```
-durable record ──► pure decision(state) ──► action ──► durable record
-      ▲                  │                      │
-      │                  └── act / stop / block  │
-      └──────── re-evaluate ─────────────────────┘
-   edges: any number, any order — each only says "look again"
-   boot:  a resync pass, because a restart has no edges
-   error: the decision is asked again; transient failures stay runnable
-```
+- **One process per session.** Two processes around one session are out of scope: the driver is per-process
+  and the store is single-writer by design. Activation is process-local for exactly that reason; the durable
+  phase is what a restart reads.
+- **A one-shot CLI does not sweep.** `heddle tree` and `heddle --turn` must not start model calls for sessions
+  they are not working on, so only the server calls `resumeAtStart`. A goal is therefore resumed when the
+  server starts, not by an unrelated command.
+- **A round interrupted by a crash is still an admitted round.** The message was appended before the turn ran;
+  the count reflects the log, and the next round is numbered after it. This is a decision, stated here rather
+  than discovered.
+- **A driver removed mid-flight** leaves the goal active and intact; nothing resumes until the driver is
+  present again and a boot resync (or an edge) asks it. There is no supervisor for a component's absence —
+  that is what a `monitoring-reentrant` convention would speak to.
 
-Properties a judge can check, each with its test named in the next section:
+## Recognising a regression in this subsystem
 
-1. **Durable state is the only truth.** The decision reads folded durable state, not a memory of what happened.
-2. **The decision is pure.** `decide(state)` returns act / stop / block: no clock, no event history.
-3. **Edges are redundant hints.** More than one way to learn that state may have changed; a single
-   subscription whose delivery is the only trigger is the anti-pattern.
-4. **A mid-action edge is not lost.** Edges collapse into a `requested` flag on a per-subject lane; a lane
-   already draining keeps the flag and re-evaluates once more before settling.
-5. **One action in flight per subject.** A second request joins the lane (and may add a pass) rather than
-   starting a concurrent chain; a nested request from inside an action finds the lane busy.
-6. **Startup is a resync.** At boot, scan durable state and feed the condition; only the long-lived owner does
-   it, never a one-shot command.
-7. **Actions yield.** Yield to the event loop between actions: a fast backend otherwise starves the process
-   (measured: a 500-round chain left the server alive and unable to answer), and the yield is the window in
-   which a person's override lands.
-8. **Stopping is part of the condition.** "Nothing more to do" is a state (phase, budget, absence), not the
-   absence of a subsequent event.
-9. **Records are versioned and strict.** An unknown version, a field set that does not match, or a value that
-   contradicts its own phase fails replay loudly; a newer component must not guess at an older log's meaning.
-10. **An absent collaborator is a condition.** A missing service is read as absent (Cordis `inject` keeps the
-    plugin pending; an optional read answers `undefined`), and the component degrades or waits — it does not
-    crash, and it does not silently do half the work.
-
-## The instances that made this a rule
-
-| Defect | Which property it violated |
-|---|---|
-| An armed goal was **idle after the harness restarted** — the event that would have pushed it had fired in the previous process | restartable (2) and startup resync (6) |
-| An edge that arrived **during a chain was swallowed** by the chain already running — a goal completed by a model mid-round went unacted on | re-evaluable and mid-action edge retention (1, 4) |
-| A fast model **starved the process**: 500 rounds left it alive and unable to answer a request, because a chain of microtasks never yields | the yield property (7) |
-| A completion that left `blocked` **carried the block reason into the next phase**, so the fold refused the log it had just written | durable record consistency and strict decoding (1, 9) |
-| The whole Web server needed **no change** when the goal driver was added — and the goal driver being *absent* leaves goals idle without corrupting them, while adding it back resumes them through the boot resync | replaceable (3) and absent collaborator (10) |
-
-## How it is judged
-
-| Property | Where it would fail |
-|---|---|
-| re-evaluable: the decision is pure | `test/goal-driver.test.ts` — the round decision cases, no clock and no history |
-| mid-action edge re-evaluated, not lost | the same file — a round completes the goal while the chain runs; the awaited chain settles on the *new* state |
-| one action in flight, nested request finds the lane busy | the same file — the drain promise is stored before the drain starts |
-| startup resync finds exactly the runnable subjects | the same file — the boot sweep requests the active goal and nothing else |
-| actions yield, so a person can override between them | the same file — a macrotask scheduled during a round gets to run and pauses the goal |
-| transient failure leaves the subject runnable | the same file — a turn that throws leaves the goal active and armed |
-| restartable: pushing survives a restart | `_verifiers_/80-web-ui/check-goal.mjs` — the harness is killed mid-push, restarted on the same store, and the goal continues without a turn and without a person |
-| replaceable: a new instance over the same record picks up the work | `test/goal-driver.test.ts` — a reopened `GoalService` drives the goal the previous instance started |
-| versioned records decoded strictly | `test/goal.test.ts` — a snapshot whose phase and reason disagree is refused; an unknown version fails loudly |
-
-## Recognising a violation
-
-- A `ctx.on(...)` (or webhook, or stream handler) that **performs** the state change instead of requesting a
-  reconciliation.
-- State that exists only in memory and cannot be folded from the log.
-- A timer that exists to paper over a missed event ("retry in five seconds").
-- A single trigger with no way to recover it: no sweep, no re-read, no second edge.
-- Work not serialized per subject, so two triggers interleave.
-- A collaborator read without an absence check, or an assumption that it is the same version as last time.
-- A version bump in a durable record's shape without a strict decoder that refuses what it does not understand.
-
-## Where it applies
-
-| System | Status |
-|---|---|
-| goal round driver | the worked example — all ten properties |
-| context assembly | reentrant by construction: the surface is folded and re-derived on every request |
-| session store | reentrant by construction: append-only log, fold on open, torn-tail repair, incremental cache invalidated by generation |
-| workspace membership | derived from canonical paths on every read, so a moved or re-registered folder needs no migration |
-| Web UI live state | **partial**: the page follows the server's stream *and* re-reads on selection, but has no boot resync — the named gap |
-| the Web UI daemon | the supervisor is judged by its own part; kill-and-recover is the same shape of claim |
-| any new component | the ten properties above are the review list |
+- A goal action performed **inside** an event handler rather than requested as a reconciliation.
+- Goal state kept in memory (a counter, a cache of rounds) that the log cannot reproduce.
+- A single trigger with no sweep — a goal that can only advance when a turn happens to complete.
+- A round started while another is in flight, or two chains for one session.
+- A `blocked` transition or a `complete` that leaves the block reason behind.
+- A driver that never yields, so a person cannot pause and the server cannot answer.
 
 ## Amendment
 
