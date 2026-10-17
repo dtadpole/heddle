@@ -402,3 +402,49 @@ test('every kind belongs to one of the three overview lanes', () => {
   assert.ok(spans.length > 0, 'a turn with a tool call has a span')
   assert.ok(spans[0]!.lanes.includes('tools'), 'and the span says it touched the tools lane')
 })
+
+test('a streamed answer and its completion are one record, with the done chunk between them', () => {
+  /**
+   * The regression the owner saw in the UI: the answer drawn twice. The handler used to ask whether a
+   * stream was *pending*, and a `done` chunk settles the pending stream before `assistant/completed`
+   * arrives — so the answer was written once from the deltas and once from the completion. This is the
+   * real event order of a streamed turn, which the older test omitted.
+   */
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'list it' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'the answer' } }),
+    event(4, '2026-10-17T10:00:00.300Z', { type: 'assistant/chunk', chunk: { type: 'done' } }),
+    event(5, '2026-10-17T10:00:00.400Z', { type: 'assistant/completed', text: 'the answer' }),
+    event(6, '2026-10-17T10:00:00.500Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const answers = ledger.turns[0]!.steps[0]!.records.filter((record) => record.kind === 'assistant')
+  assert.equal(answers.length, 1, 'one answer, not two')
+  assert.equal(answers[0]!.text, 'the answer')
+})
+
+test('the prompt is folded into one step, not every step of the turn', () => {
+  /**
+   * The second half of the owner's bug: the prompt and its context note appeared in both steps of a turn
+   * with two model requests. The prologue was folded into the closing step and then kept because the
+   * request boundary passed `keepPrologue`. The user's words belong to the turn's first step only.
+   */
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'what is in here' }] } }),
+    event(2, '2026-10-17T10:00:00.010Z', { type: 'context/note', origin: 'instructions', message: { role: 'user', content: [{ type: 'text', text: 'be terse' }] } }),
+    event(3, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 2 }),
+    event(4, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'list_dir', arguments: '{"path":"/tmp"}' } }),
+    event(5, '2026-10-17T10:00:00.300Z', { type: 'assistant/chunk', chunk: { type: 'done' } }),
+    event(6, '2026-10-17T10:00:00.400Z', { type: 'message', message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt' }] } }),
+    event(7, '2026-10-17T10:00:00.500Z', { type: 'model/request', messages: 4 }),
+    event(8, '2026-10-17T10:00:00.600Z', { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'two files' } }),
+    event(9, '2026-10-17T10:00:00.700Z', { type: 'assistant/chunk', chunk: { type: 'done' } }),
+    event(10, '2026-10-17T10:00:00.800Z', { type: 'assistant/completed', text: 'two files' }),
+    event(11, '2026-10-17T10:00:00.900Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const steps = ledger.turns[0]!.steps
+  const ofKind = (kind: string) => steps.flatMap((step) => step.records).filter((record) => record.kind === kind)
+  assert.equal(ofKind('user').length, 1, 'the prompt is recorded once for the turn')
+  assert.equal(ofKind('context').length, 1, 'and so is the instruction baseline it carried')
+  assert.equal(steps[1]!.records.filter((record) => record.kind === 'user' || record.kind === 'context').length, 0, 'the second step starts from the model request, not from a copy of the prompt')
+})
