@@ -285,7 +285,15 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       ...(startedAt !== undefined ? { startedAt } : {}),
       ...(duration !== undefined ? { durationMs: duration } : {}),
     })
-    if (!keepPrologue) prologue = []
+    /**
+     * The prompt is folded in **once**.
+     *
+     * `keepPrologue` means "hold the prompt for the step a request is about to open", which is the
+     * records-empty case above. Here the step has records, so the prompt has just been folded into it and
+     * must be cleared — leaving it kept duplicated the user message and its context note into every later
+     * step of the same turn, which is the bug a transcript with two model requests showed.
+     */
+    prologue = []
   }
 
   /** Close the current turn, if there is one. */
@@ -498,9 +506,19 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
        * which is what `assistant/completed` carries — produced no assistant record at all. A ledger without
        * the answers is not a ledger.
        */
-      const hadStream = pending !== null
       settleAssistant(event.at, true)
-      if (!hadStream && event.text !== undefined && event.text.length > 0) {
+      /**
+       * The settled answer is written from this event only when the step does not already hold it.
+       *
+       * The old guard asked whether a stream was *pending*, and a `done` chunk settles the pending stream
+       * before the completion arrives — so a real streamed answer was written twice: once from the deltas
+       * and once from the completion. Measured in a transcript with a `done` chunk: two identical
+       * `assistant` records in one step. The question is not "was a stream pending" but "do these words
+       * already exist here", which is true for a bare completion and for a streamed one alike.
+       */
+      const alreadyRecorded = (records: readonly LedgerRecord[]): boolean =>
+        records.some((record) => record.kind === 'assistant' && record.text === event.text)
+      if (event.text !== undefined && event.text.length > 0 && !alreadyRecorded(step?.records ?? []) && !alreadyRecorded(prologue)) {
         put({ kind: 'assistant', label: 'assistant', text: event.text, ...(event.at !== undefined ? { startedAt: event.at } : {}) })
       }
       const notes = [
