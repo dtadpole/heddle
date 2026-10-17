@@ -12,7 +12,39 @@
 -->
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
-  :root { color-scheme: light dark; --line: color-mix(in oklab, currentColor 20%, transparent); }
+  /**
+   * The palette, read from this machine's reference tab rather than chosen here.
+   *
+   * Measured on 2026-10-17 with `getComputedStyle` in the same browser: the canvas is #171717, raised surfaces
+   * #222222, the border #353535, ink #ededed with #b3b3b3 for supporting text, and one accent blue. The type is
+   * its own stack — `-apple-system` and `BlinkMacSystemFont` before the generic sans — and the figure face
+   * names "Optimistic Mono" first, falling back through the platform monospace stack. The page is dark by
+   * decision: the reference does not offer a light appearance, so following the system here would be a different
+   * product rather than a similar one.
+   */
+  :root {
+    color-scheme: dark;
+    --bg: #171717;
+    --surface: #222222;
+    --surface-2: #242424;
+    --sidebar: #1c1c1c;
+    --hover: #2c2c2c;
+    --border: #353535;
+    --border-strong: #4a4a4a;
+    --text: #ededed;
+    --text-2: #b3b3b3;
+    --text-3: #8f8f8f;
+    --accent: #2694fe;
+    --on-accent: #171717;
+    --radius: 8px;
+    --radius-pill: 999px;
+    --shadow-low: 0 1px 1px -1px #0003;
+    --shadow-menu: 0 2px 8px -2px #0003;
+    --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "Optimistic Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --code-bg: #232127;
+    --line: var(--border);
+  }
   * { box-sizing: border-box; }
   /**
    * The page paints its own surface and its own ink, in both appearances.
@@ -24,11 +56,11 @@
    */
   body {
     margin: 0;
-    font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+    font: 14px/1.5 var(--font);
     display: flex;
     height: 100vh;
-    background: Canvas;
-    color: CanvasText;
+    background: var(--bg);
+    color: var(--text);
   }
   /**
    * The sidebar's width is one custom property, read by the panel and by nothing else.
@@ -48,7 +80,7 @@
      * Measured here: Menlo and PingFang SC are installed; SF Mono, JetBrains Mono and Fira Code are not, so they are
      * named for the machines that have them and the rest of the stack carries this one.
      */
-    --code-font: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", Courier, ui-monospace, "PingFang SC", "Microsoft YaHei", monospace;
+    --code-font: "Optimistic Mono", "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", Courier, ui-monospace, "PingFang SC", "Microsoft YaHei", monospace;
     /**
      * The size of a code line, from DSH's theme as well: 12px text on a 19px line.
      *
@@ -59,8 +91,8 @@
     --code-size: 12px;
     --code-leading: 19px;
   }
-  aside { width: var(--sidebar-width); flex: none; border-right: 1px solid var(--line); overflow-y: auto; padding: .75rem; }
-  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  aside { width: var(--sidebar-width); flex: none; border-right: 1px solid var(--border); overflow-y: auto; padding: .75rem; color: var(--text-2); background: var(--sidebar); }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
   /**
    * The divider borrows the sidebar's border so the drag target is where the line already is, and widens its
    * hit area into the content with a transparent border rather than by pushing the layout around.
@@ -79,11 +111,11 @@
     background: color-mix(in oklab, currentColor 25%, transparent);
     outline: none;
   }
-  h1 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; margin: .25rem 0 .5rem; }
+  h1 { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); margin: .25rem 0 .5rem; }
   ol { list-style: none; margin: 0; padding: 0; }
-  li { padding: .4rem .5rem; border-radius: .35rem; cursor: pointer; }
-  li:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
-  li[aria-current] { background: color-mix(in oklab, currentColor 14%, transparent); }
+  li { padding: .4rem .5rem; border-radius: var(--radius); cursor: pointer; }
+  li:hover { background: var(--surface); }
+  li[aria-current] { background: var(--surface); color: var(--text); }
   .meta { opacity: .6; font-size: .78rem; }
   /**
    * The chat rows, laid out and dressed the way DSH's are.
@@ -94,16 +126,20 @@
    * full width and carries no chrome at all; its reasoning and tool rows are compact one-line disclosures that
    * open into their bodies. Those are the four shapes this block is.
    */
-  #log { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 6px; font-size: 14px; line-height: 1.6; }
+  #log { flex: 1; overflow-y: auto; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 6px; font-size: 15px; line-height: 24px; }
   #log > * { min-width: 0; }
   .turn { white-space: pre-wrap; overflow-wrap: anywhere; }
   /**
    * The person's own message: a bubble against the right edge, capped at 82% of the column — DSH's
    * `MessageItem` bubble, which is `padding: 10px 16px` at `radius-xl` on the specific-bubble surface.
    */
-  .turn.user { align-self: flex-end; max-width: min(82%, 34rem); padding: .6rem 1rem; border-radius: 1.1rem; background: color-mix(in oklab, currentColor 11%, transparent); }
+  .turn.user {
+    align-self: flex-end; max-width: min(82%, 34rem); padding: .55rem .9rem;
+    border: 1px solid var(--border); border-radius: 1rem;
+    background: var(--surface); color: var(--text);
+  }
   /** The answer: no border, no bubble, roomier leading — DSH's `AssistantMarkdown` root. */
-  .turn.assistant { margin-top: 6px; font-size: 14px; line-height: 1.75; }
+  .turn.assistant { margin-top: 6px; font-size: 15px; line-height: 24px; color: var(--text); }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
   /**
    * A drawn answer is a document, so it follows the document's whitespace rather than the row's `pre-wrap`
@@ -132,9 +168,9 @@
   details.turn { font-size: 13px; }
   details.turn > summary {
     display: flex; align-items: baseline; gap: .4rem;
-    cursor: pointer; list-style: none; opacity: .72; padding: .12rem 0; min-width: 0;
+    cursor: pointer; list-style: none; padding: .12rem 0; min-width: 0; color: var(--text-2);
   }
-  details.turn > summary:hover { opacity: 1; }
+  details.turn > summary:hover { color: var(--text); }
   details.turn > summary::-webkit-details-marker { display: none; }
   details.turn > summary::before { content: '▸'; flex: none; font-size: .7em; opacity: .8; }
   details.turn[open] > summary::before { content: '▾'; }
@@ -265,8 +301,8 @@
   .markdown h1 { font-size: 1.35rem; } .markdown h2 { font-size: 1.15rem; } .markdown h3 { font-size: 1rem; }
   .markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre { margin: .6em 0; }
   .markdown ul, .markdown ol { padding-left: 1.3rem; }
-  .markdown code { font-family: var(--code-font); font-size: .88em; background: color-mix(in oklab, currentColor 8%, transparent); padding: .08rem .25rem; border-radius: .2rem; }
-  .markdown pre { background: color-mix(in oklab, currentColor 7%, transparent); padding: .7rem .8rem; border-radius: .35rem; overflow-x: auto; }
+  .markdown code { font-family: var(--code-font); font-size: .88em; background: var(--code-bg); padding: .08rem .28rem; border-radius: 4px; }
+  .markdown pre { background: var(--code-bg); border: 1px solid var(--border); padding: .7rem .8rem; border-radius: var(--radius); overflow-x: auto; }
   .markdown pre code { background: none; padding: 0; }
   /**
    * The highlighter's own class names, coloured here rather than by shipping its theme file.
@@ -299,26 +335,14 @@
    * a while, and saturated colour is what makes code look like a warning.
    */
   :root {
-    --tok-keyword: #8250df;
-    --tok-string: #0a6b3d;
-    --tok-number: #a1440a;
-    --tok-comment: #6b7280;
-    --tok-title: #0550ae;
-    --tok-attr: #953800;
-    --tok-type: #6639ba;
-    --tok-meta: #a40e26;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --tok-keyword: #c9a6f5;
-      --tok-string: #8fd3ab;
-      --tok-number: #f0a878;
-      --tok-comment: #8b96a5;
-      --tok-title: #86b4ff;
-      --tok-attr: #e6c07b;
-      --tok-type: #d7b3f5;
-      --tok-meta: #f08a8a;
-    }
+    --tok-keyword: #c9a6f5;
+    --tok-string: #8fd3ab;
+    --tok-number: #f0a878;
+    --tok-comment: #8b96a5;
+    --tok-title: #86b4ff;
+    --tok-attr: #e6c07b;
+    --tok-type: #d7b3f5;
+    --tok-meta: #f08a8a;
   }
   .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag { color: var(--tok-keyword); }
   .hljs-string, .hljs-regexp, .hljs-addition { color: var(--tok-string); }
@@ -390,7 +414,7 @@
   #file-head {
     position: sticky;
     top: 0;
-    background: color-mix(in oklab, Canvas 92%, currentColor 8%);
+    background: var(--surface);
     border-bottom: 1px solid var(--line);
     padding: .4rem .8rem;
     font-size: .72rem;
@@ -436,7 +460,7 @@
   #tree .row[aria-current='true'] { background: color-mix(in oklab, currentColor 16%, transparent); box-shadow: inset 2px 0 0 currentColor; }
   #tree .row[aria-current='true'] .label { font-weight: 600; opacity: 1; }
   #tree .menu-wrap { position: relative; display: inline-flex; }
-  #tree .menu { position: absolute; right: 0; top: 1.35rem; z-index: 5; display: flex; flex-direction: column; min-width: 10rem; padding: .2rem; background: Canvas; border: 1px solid var(--line); border-radius: .35rem; box-shadow: 0 6px 18px color-mix(in oklab, currentColor 18%, transparent); }
+  #tree .menu { position: absolute; right: 0; top: 1.35rem; z-index: 5; display: flex; flex-direction: column; min-width: 10rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); }
   #tree .menu[hidden] { display: none; }
   #tree .menu button { text-align: left; font: inherit; font-size: .82rem; padding: .3rem .5rem; background: none; border: 0; border-radius: .25rem; color: inherit; cursor: pointer; }
   #tree .menu button:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
@@ -460,8 +484,14 @@
    * check that exists now judges the composer's width. A column keeps that claim while it makes room for the
    * row: the textarea still takes the form's own width.
    */
-  form { display: flex; flex-direction: column; gap: .4rem; padding: .75rem; border-top: 1px solid var(--line); }
-  textarea { flex: 1; resize: vertical; min-height: 3.5rem; font: inherit; padding: .5rem; }
+  form { display: flex; flex-direction: column; gap: .4rem; padding: .75rem 1rem 1rem; border-top: 1px solid var(--border); background: var(--bg); }
+  textarea {
+    flex: 1; resize: vertical; min-height: 4rem; font: inherit; padding: .7rem .9rem;
+    background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 16px; outline: none;
+  }
+  textarea::placeholder { color: var(--text-3); }
+  textarea:focus-visible { border-color: var(--border-strong); }
   button { font: inherit; padding: .5rem 1rem; }
   /**
    * The tool row under the draft, in DSH's order: the model seat on the right, the submit action at the end.
@@ -480,12 +510,13 @@
    * silently drop, leaving a person unable to see why their session stopped answering.
    */
   #model-trigger {
-    display: inline-flex; align-items: center; gap: .3rem; max-width: 22rem;
-    font-size: .78rem; padding: .2rem .4rem; background: none; color: inherit;
-    border: 1px solid transparent; border-radius: .35rem; opacity: .72; cursor: pointer;
+    display: inline-flex; align-items: center; gap: .35rem; max-width: 22rem;
+    font-size: .75rem; line-height: 16px; padding: .3rem .7rem;
+    background: none; color: var(--text-2);
+    border: 1px solid var(--border); border-radius: var(--radius-pill); cursor: pointer;
   }
   #model-trigger:hover, #model-trigger[aria-expanded='true'], #model-trigger:focus-visible {
-    opacity: 1; border-color: var(--line); background: color-mix(in oklab, currentColor 7%, transparent); outline: none;
+    color: var(--text); border-color: var(--border-strong); background: var(--surface); outline: none;
   }
   #model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #model-trigger .chevron { flex: none; }
@@ -496,8 +527,8 @@
   #model-menu {
     position: absolute; bottom: calc(100% + .3rem); right: 0; z-index: 5;
     min-width: 17rem; max-height: 18rem; overflow-y: auto; margin: 0; padding: .25rem;
-    border: 1px solid var(--line); border-radius: .5rem; background: Canvas;
-    box-shadow: 0 6px 24px color-mix(in oklab, currentColor 24%, transparent);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+    box-shadow: var(--shadow-menu);
   }
   #model-menu button {
     display: flex; align-items: baseline; gap: .45rem; width: 100%; text-align: left;
@@ -517,12 +548,12 @@
    * is asking for by name, and an approximation would be a different control wearing the same word.
    */
   #send {
-    flex: none; display: grid; place-items: center; width: 2rem; height: 2rem; padding: 0;
-    border: 1px solid var(--line); border-radius: .5rem;
-    background: color-mix(in oklab, currentColor 12%, transparent); color: inherit; cursor: pointer;
+    flex: none; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; padding: 0;
+    border: 1px solid transparent; border-radius: var(--radius-pill);
+    background: var(--text); color: var(--on-accent); cursor: pointer;
   }
-  #send:hover:not(:disabled) { background: color-mix(in oklab, currentColor 20%, transparent); }
-  #send:disabled { opacity: .45; cursor: default; }
+  #send:hover:not(:disabled) { background: #ffffff; }
+  #send:disabled { background: var(--surface-2); color: var(--text-3); opacity: 1; cursor: default; }
   /**
    * The queue dock, above the composer — DSH's `QueueDock`, whose rules these follow.
    *
@@ -533,8 +564,8 @@
    */
   #queue { flex: none; padding: .5rem .75rem 0; }
   #queue .panel {
-    border: 1px solid var(--line); border-bottom: none; border-radius: .5rem .5rem 0 0;
-    background: color-mix(in oklab, currentColor 4%, transparent);
+    border: 1px solid var(--border); border-bottom: none; border-radius: var(--radius) var(--radius) 0 0;
+    background: var(--surface);
   }
   #queue .header {
     display: flex; align-items: center; gap: .4rem; width: 100%; height: 2rem; padding: 0 .6rem;
@@ -609,7 +640,15 @@
   #brand { display: flex; align-items: center; gap: .55rem; height: 60px; padding: 0 .75rem; border-bottom: 1px solid var(--line); margin-bottom: .4rem; }
   #brand-mark { width: 24px; height: 24px; display: block; }
   #brand-name { font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; font-size: 1.06rem; font-weight: 600; letter-spacing: .01em; }
-  .untwisty { font: inherit; padding: 0 .3rem; opacity: .55; }
+  /**
+   * The `…` that opens a row's menu: **no chrome of its own**.
+   *
+   * Measured, and the owner's report: a `<button>` carries the platform's background and border unless a rule
+   * takes them away, so the control read as a raised chip beside rows that are otherwise plain text. It is a
+   * quiet affordance — the row is what a person is looking at — so it paints nothing, and only its opacity
+   * answers the pointer.
+   */
+  .untwisty { font: inherit; padding: 0 .3rem; opacity: .55; background: none; border: 0; color: inherit; line-height: 1; }
   .untwisty:hover { opacity: 1; }
 </style>
 </head>
@@ -2787,6 +2826,33 @@ function menuItemsFor(node) {
       },
     })
   }
+  if (node.kind === 'session') {
+    /**
+     * A session's row offers what can be done with that session, and the owner asked for one thing: its name.
+     * The name is the **title**, not the folder — the folder is the identity the conventions require, while the
+     * title is what a person reads — so renaming writes the title and the row shows it.
+     */
+    items.push({
+      label: 'Rename…',
+      run: async () => {
+        const title = window.prompt('Rename this session', node.session?.title ?? '')
+        if (title === null) return
+        const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ title, folder: node.path }),
+        })
+        const body = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          setNote(body.error ?? 'could not rename that session')
+          return
+        }
+        setNote('')
+        await renderTree()
+        await refreshSessions()
+      },
+    })
+  }
   if (node.kind === 'instance') {
     /**
      * `New session here` is the branch case, not a special one: it goes through the same route as the
@@ -2923,7 +2989,15 @@ function nodeRow(node) {
   }
   const label = document.createElement('span')
   label.className = 'label'
-  label.textContent = node.label
+  /**
+   * A session row shows the name a person gave it; everything else shows the folder's name.
+   *
+   * This is what makes `Rename…` mean something: the title was already carried by the node and written by the
+   * route, and the row ignored it — measured, renaming succeeded and the label did not move. The folder stays
+   * reachable as the row's tooltip, because it is still the identity.
+   */
+  label.textContent = node.kind === 'session' && node.session?.title ? node.session.title : node.label
+  if (node.kind === 'session') row.title = node.path
   row.append(label)
 
   /**
