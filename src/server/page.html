@@ -845,8 +845,12 @@
   #prompt textarea {
     display: block; width: 100%; box-sizing: border-box;
     border: 0; outline: none; background: transparent; color: var(--text);
-    /** the reference's composer measures 14px on a 21px line. */
-    font: 14px/21px var(--font);
+    /**
+     * DSH's editor, measured: 14px on a **24px** line. the reference's composer is 14/21, and the two references
+     * disagree on the leading — the input area follows DSH, because that is what this port was asked to model;
+     * the reference's 21 belongs to the reference's own composer, not here.
+     */
+    font: 14px/24px var(--font);
     padding: 4px 8px 8px 14px;
     min-height: 36px; max-height: 336px; resize: none; overflow-y: auto;
   }
