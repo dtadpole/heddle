@@ -8,8 +8,8 @@ grounded_in:
 
 # `verify-runner`
 
-Holds [`run.mjs`](run.mjs), the only thing that decides a verifier's verdict, and
-[`unit.test.mjs`](unit.test.mjs), the component tests for the rules it implements. It runs
+Holds [`run.mjs`](run.mjs), the only thing that decides a verifier's verdict; its component tests live
+in [`_tests_/verify-runner/`](../../_tests_/verify-runner/INDEX.md). It runs
 a check file under Node's test runner, reads the TAP stream, and exits with the
 project's three-valued contract:
 
@@ -40,13 +40,14 @@ the result rather than a side effect of printing.
 The rules themselves are component-tested without running a check:
 
 ```bash
-node --test _tools_/verify-runner/unit.test.mjs
+node --test _tests_/verify-runner/unit.test.mjs
 ```
 
 ## Component tests
 
 `classify`, `tapCounts` and `collectNames` carry the rules every verdict depends on, so they are
-tested directly in [`unit.test.mjs`](unit.test.mjs) — no check file, no child process, no browser. The
+tested directly in [`_tests_/verify-runner/`](../../_tests_/verify-runner/INDEX.md) — no check file, no
+child process, no browser. The
 tests are the delivery claim's floor rather than a duplicate of it: a verifier proves a capability, and
 these prove that the mapping which reads its result counts a skip as unjudged, puts a failure above a
 skip, and never turns "nothing was judged" into a pass.

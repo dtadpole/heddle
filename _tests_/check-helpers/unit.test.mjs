@@ -14,7 +14,7 @@ import {
   skipUnless,
   transcriptFile,
   sessionsUnder,
-} from './lib.mjs'
+} from '../../_tools_/check-helpers/lib.mjs'
 
 /**
  * The check helpers' own **component tests**.
@@ -25,7 +25,7 @@ import {
  * either store layout, and `readTranscript` must decode either format. A check that reads a path it
  * guessed is a check that can pass while judging nothing.
  *
- *     node --test _tools_/check-helpers/unit.test.mjs
+ *     node --test _tests_/check-helpers/unit.test.mjs
  */
 
 /** A scratch directory, removed by the caller. */
