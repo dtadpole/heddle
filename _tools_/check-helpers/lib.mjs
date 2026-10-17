@@ -255,8 +255,17 @@ export async function chatDouble(options = {}) {
 
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const finish = () => {
+        /**
+         * Usage rides the frame that carries `finish_reason`, which is where the adapters read it — a
+         * separate frame after the terminator never reaches the turn. The shape is the provider's own
+         * (`prompt_tokens`/`completion_tokens`), so a check can prove the status line's rate and context
+         * share from real reported numbers rather than from a unit test of the arithmetic alone.
+         */
         response.write(
-          `data: ${JSON.stringify({ choices: [{ delta: message, finish_reason: options.toolCall ? 'tool_calls' : 'stop' }] })}\n\n`,
+          `data: ${JSON.stringify({
+            choices: [{ delta: message, finish_reason: options.toolCall ? 'tool_calls' : 'stop' }],
+            ...(options.usage !== undefined ? { usage: options.usage } : {}),
+          })}\n\n`,
         )
         response.write('data: [DONE]\n\n')
         response.end()

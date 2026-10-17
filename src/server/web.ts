@@ -1605,7 +1605,15 @@ export function resolveTurnEndpoint(sources: {
       ...(model !== undefined ? { model } : {}),
     })
     safeWrite(
-      `event: done\ndata: ${JSON.stringify({ session: handle.id, text: result.text, finishReason: result.finishReason, rounds: result.rounds, denials: result.denials })}\n\n`,
+      `event: done\ndata: ${JSON.stringify({
+        session: handle.id,
+        text: result.text,
+        finishReason: result.finishReason,
+        rounds: result.rounds,
+        denials: result.denials,
+        /** What the provider said the turn cost; the page derives a rate and a context share from it. */
+        ...(result.usage !== undefined ? { usage: result.usage } : {}),
+      })}\n\n`,
     )
   } catch (error) {
     /**
