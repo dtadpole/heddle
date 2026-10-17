@@ -340,12 +340,25 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
           titles: sections.map((section) => section.querySelector('summary')?.textContent),
           allOpen: sections.every((section) => section.open === true),
           highlighted: document.querySelectorAll('#tr-details .tr-html span[class^="hljs-"]').length,
+          summary: (() => {
+            const summary = document.querySelector('#tr-details .tr-d-acc > summary')
+            const style = getComputedStyle(summary)
+            return { height: Math.round(summary.getBoundingClientRect().height), weight: style.fontWeight, lineHeight: style.lineHeight }
+          })(),
+          payloadFont: (() => {
+            const block = document.querySelector('#tr-details .tr-html code, #tr-details .tr-html pre')
+            return block === null ? null : getComputedStyle(block).fontFamily.split(',')[0].trim()
+          })(),
         })
       })()`),
     )
     assert.deepEqual(accordion.titles, ['Hierarchy', 'Status', 'Payload', 'Result', 'Schema', 'Timing'], 'the Summary is DSH’s six-section accordion')
     assert.ok(accordion.allOpen, 'every section is open by default, as DSH shows it')
     assert.ok(accordion.highlighted > 0, 'and the payload is highlighted JSON, not a text dump')
+    assert.equal(accordion.summary.height, 24, 'a Summary section heading is DSH’s 24px tall')
+    assert.equal(accordion.summary.weight, '500', 'at DSH’s 500 weight')
+    assert.equal(accordion.summary.lineHeight, '20px', 'on a 20px line')
+    assert.match(accordion.payloadFont ?? '', /SF Mono/, 'and the payload block uses DSH’s SF Mono face')
 
     const examined = JSON.parse(
       await browser.evaluate(`(() => {

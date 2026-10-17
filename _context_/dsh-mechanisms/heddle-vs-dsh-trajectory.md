@@ -72,6 +72,22 @@ Unknowns from this batch: DSH's **row hover** paint was not found in the stylesh
 applied on an inner element or a class outside the table), so heddle's hover stays what it was and is not
 claimed to match. The trusted-hover computed values for both sides still need the pointer pass.
 
+## Batch C — the details pane (measured once each side)
+
+| Metric | DSH | heddle | Verdict |
+|---|---|---|---|
+| panel width | 441px | 440px | agree |
+| tabs | 5, 34px tall, 13px/400 | 5, 34px tall, 13px/400 | agree |
+| section heading | **24px, 13px/500, 20px line** | 23px, 13px/600 | **fixed** → 24px/500/20px |
+| payload block face | **"SF Mono"** | `monospace` (inherited) | **fixed** → `var(--mono)` starting at SF Mono |
+| Schema section | name, description, parameters JSON | same, rendered by the tested renderer | agree in content |
+| accordion | Payload/Result/Schema/Timing headings, open | six sections (Hierarchy/Status first), open | agree in behaviour; heddle adds two sections |
+
+Driver of both disagreements was **typography**, not layout: the pane width, tab strip and section structure
+already matched, while heddle's heading was 1px short at weight 600 and the payload block never received the
+mono face (its markup is a `code` element, and the rule named `pre`). The fix names the code element, puts
+the measured "SF Mono" first in the mono stack, and gives the headings DSH's 24px/500/20px.
+
 ## Unknowns (not measured, never filled in from plausibility)
 
 - DSH's SYSTEM and COMPACTED tag colours: those rows were not in the rendered window (virtualised table).
