@@ -244,3 +244,9 @@ shows one of them alone. A section's heading is its collapse control; sections a
 5. Hierarchy links are **not** ported; heddle's table already shows the turn and step, and its rows are not
    nested, so a link would point at a row the reader is already looking at. Recorded as a deliberate
    difference rather than an oversight.
+
+**Status (2026-10-17): the gap list above is closed.** The Summary is the six-section accordion (open by
+default, `<details>` as the native collapse control), Schema appears in Summary as well as its own tab,
+the payload and the schema parameters are rendered as **highlighted JSON by the tested renderer**
+(`renderCode(..., 'json', { gutter: false })`) on the server, and an error result is tinted in the pane
+as well as on the row. Hierarchy links remain the one deliberate difference, for the reason given.
