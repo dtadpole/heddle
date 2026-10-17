@@ -48,10 +48,20 @@ async function startServer(label, options = {}) {
     content: options.content ?? 'the answer',
     reasoning: 'thinking',
     holdOpenMs: options.holdOpenMs ?? 1200,
+    ...(options.usage !== undefined ? { usage: options.usage } : {}),
   })
   const config = writeJson(join(home, 'heddle.json'), {
     default: 'held',
-    endpoints: [{ name: 'held', kind: 'openai-chat', baseUrl: double.baseUrl, model: 'held-model', stream: true }],
+    endpoints: [
+      {
+        name: 'held',
+        kind: 'openai-chat',
+        baseUrl: double.baseUrl,
+        model: 'held-model',
+        stream: true,
+        ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
+      },
+    ],
   })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'held', '--session-root', join(home, 'sessions')],
@@ -510,6 +520,47 @@ test('the composer is the text column plus 32px, and the handle widens both', as
     )
     assert.equal(reloaded, dragged.column, 'the width survives a reload')
     await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The status line prints a token rate and a context share **from numbers the provider reported**, and nothing
+ * where it reported none. DSH prints the same two terms under its composer; a numerator here comes from the
+ * `usage` frame the double now sends, and a denominator from the endpoint's declared `contextWindow`.
+ */
+test('the status line derives a token rate and a context share from reported usage', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('usage', {
+    usage: { prompt_tokens: 1000, completion_tokens: 50 },
+    contextWindow: 2000,
+    holdOpenMs: 50,
+  })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    const cells = () =>
+      browser.evaluate(`(() => {
+        const cell = (name) => (document.querySelector('[data-stat="' + name + '"]') || {}).textContent || ''
+        return JSON.stringify({ tokens: cell('tokens'), context: cell('context'), turns: cell('turns') })
+      })()`)
+    const empty = JSON.parse(await cells())
+    assert.equal(empty.tokens, '', 'before any usage is reported there is no rate')
+    assert.equal(empty.context, '', 'and no context share')
+
+    await type(browser, 'report the cost')
+    await press(browser, { key: 'Enter' })
+    assert.ok(
+      await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000),
+      'the rate appears once the provider reports usage',
+    )
+    const filled = JSON.parse(await cells())
+    assert.match(filled.tokens, /^\d+ tok\/s$/, `the rate is output tokens over the turn's duration (${filled.tokens})`)
+    assert.equal(filled.context, '50% context', 'the share is reported input tokens over the declared window')
+    assert.equal(filled.turns, '1 turn', 'and the turn count still follows the transcript')
   } finally {
     browser.close()
     await server.close()
