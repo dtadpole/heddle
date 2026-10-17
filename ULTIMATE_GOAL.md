@@ -72,7 +72,7 @@ wording. Correcting the statement is the owner's act; correcting the *state* is 
 evidence.
 
 **Every part is judged, and every check passes.** Measured on 2026-10-11 by running every verifier:
-**113 checks, 0 failures, 0 unjudged**. The fifteen that waited on part 7's tree — written ahead of the
+**114 checks, 0 failures, 0 unjudged**. The fifteen that waited on part 7's tree — written ahead of the
 mechanism because the owner asked for the checks first — now pass, and the two checks allowed to report
 unjudged (part 1's real-backend probe and the daemon check) both found their subject on this machine.
 The two counts that matter are kept apart: *unjudged* is a mechanism that does not exist, and *failed*

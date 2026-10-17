@@ -55,6 +55,20 @@
         mode: allow
 
     # Tools: registered as services, gated by both of the two above.
+    # Goal management: a persisted objective, its round cap, and two lifetimes kept apart — a durable
+    # phase and a process-local activation. It reads and appends session events, so it declares the
+    # session. `defaultMaxGoalRounds` is DSH's own default.
+    - id: goal
+      name: ./src/goal/service.ts
+      inject: [session]
+      config:
+        defaultMaxGoalRounds: 256
+
+    # The model-facing goal tools, as their own row so a profile can keep the state without the verbs.
+    - id: goal-tool
+      name: ./src/plugins/goal-tool.ts
+      inject: [goal, tools]
+
     - id: tools
       name: ./src/plugins/tools.ts
       inject: [approvals, sandbox]

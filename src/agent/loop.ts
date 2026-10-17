@@ -327,6 +327,7 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
       const args = parseArguments(call.arguments)
       const result = await ctx.tools.call(call.name, args, {
         cwd,
+        session: options.session,
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
         log: (message) => ctx.logger.info('turn: %s', message),
       })

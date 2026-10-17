@@ -98,6 +98,7 @@ commands:
   tree [<path>]              print one level of the folder tree the left column shows
   file <path>                print a text file under a workspace root, as the right panel shows it
   context                    show the assembled context for a session, without calling a model
+  goal [<session-id>]        show the goal a session is working toward
   hooks                      list the hook points this build emits
   web                        serve the Web UI on localhost
   transcript <id>            print a session's transcript
@@ -215,6 +216,16 @@ function parseArgs(argv: readonly string[]): Args {
       case '--help':
         args.help = true
         break
+      case 'goal': {
+        /**
+         * A session id is optional, exactly as for `transcript` and `context`: asking about *the* session
+         * means the one in the current folder, which is what a person in a folder is looking at.
+         */
+        args.command = 'goal'
+        const candidate = argv[index + 1]
+        if (candidate !== undefined && !candidate.startsWith('-')) args.target = next()
+        break
+      }
       case 'models':
       case 'tools':
       case 'commands':
@@ -786,6 +797,21 @@ async function runCommand(command: string, target: string | undefined, json: boo
       else {
         process.stdout.write(`heddle: ${points.length} hook point(s)\n`)
         for (const point of points) process.stdout.write(`  ${point.name.padEnd(20)} ${point.mode.padEnd(10)} ${point.what}\n`)
+      }
+      return true
+    }
+    if (command === 'goal') {
+      const goal = app.ctx.goal
+      if (goal === undefined) throw new Error('this profile does not load the goal plugin')
+      const handle = target !== undefined && target.length > 0 ? app.ctx.session.start({ resume: target }) : app.ctx.session.start({ cwd: process.cwd() })
+      const view = goal.get(handle)
+      if (json) process.stdout.write(`${JSON.stringify({ session: handle.id, goal: view ?? null }, null, 2)}\n`)
+      else if (view === undefined) process.stdout.write(`heddle: no goal is current in ${handle.id}\n`)
+      else {
+        process.stdout.write(`heddle: ${view.id}  revision ${view.revision}  ${view.phase} (${view.activation})\n`)
+        process.stdout.write(`  objective: ${view.objective}\n`)
+        process.stdout.write(`  rounds: ${view.roundsStarted}/${view.maxGoalRounds}\n`)
+        if (view.blockedReason !== undefined) process.stdout.write(`  blocked: ${view.blockedReason.code} — ${view.blockedReason.message}\n`)
       }
       return true
     }

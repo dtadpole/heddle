@@ -540,8 +540,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
       sessions: ctx.session.list(),
       generated: workspaces.generated,
-      /** `?archived=1` asks for the sessions a person put away; without it they are not drawn. */
-      archived: url.searchParams.get('archived') === '1',
+      /**
+       * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
+       * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
+       * person may have bookmarked.
+       */
+      archived:
+        url.searchParams.get('archived') === 'only'
+          ? 'only'
+          : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
+            ? 'show'
+            : 'hide',
     })
     respond(response, 200, 'application/json', `${JSON.stringify(node, null, 2)}\n`)
     return
@@ -591,6 +600,86 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       const message = error instanceof Error ? error.message : String(error)
       const status = message.includes('is not a file') ? 404 : 415
       respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+    }
+    return
+  }
+
+  /**
+   * A session's goal: the durable objective, its phase, and the round it has reached.
+   *
+   * The GET is what the goal bar reads on every session change. The POST is the **person's** side of the
+   * verbs, which is why it may do one thing the model's tool may not: resume a paused goal. A pause is a
+   * person's decision, so only a person undoes it — the tool refuses and says the user must resume.
+   *
+   * Errors carry the goal service's own stable code next to the sentence, so a client can distinguish "the
+   * goal moved while you were looking" (409) from "no goal is current" (404) without parsing prose.
+   */
+  if (url.pathname === '/api/goal' && request.method === 'GET') {
+    const goals = ctx.goal
+    if (goals === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the goal plugin' })}\n`)
+      return
+    }
+    const wanted = url.searchParams.get('session')
+    if (wanted === null || wanted.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a session is required' })}\n`)
+      return
+    }
+    const handle = ctx.session.store.open(wanted)
+    if (handle === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${wanted}` })}\n`)
+      return
+    }
+    respond(response, 200, 'application/json', `${JSON.stringify({ session: handle.id, goal: goals.get(handle) ?? null }, null, 2)}\n`)
+    return
+  }
+  if (url.pathname === '/api/goal' && request.method === 'POST') {
+    const goals = ctx.goal
+    if (goals === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the goal plugin' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    const wanted = typeof body.session === 'string' ? body.session : ''
+    const handle = wanted.length > 0 ? ctx.session.store.open(wanted) : null
+    if (handle === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${wanted}` })}\n`)
+      return
+    }
+    const action = typeof body.action === 'string' ? body.action : ''
+    const ref = { id: typeof body.goal_id === 'string' ? body.goal_id : '', revision: typeof body.revision === 'number' ? body.revision : 0 }
+    try {
+      if (action === 'create') {
+        const view = goals.create(handle, {
+          objective: typeof body.objective === 'string' ? body.objective : '',
+          ...(typeof body.max_goal_rounds === 'number' ? { maxGoalRounds: body.max_goal_rounds } : {}),
+        })
+        respond(response, 200, 'application/json', `${JSON.stringify({ goal: view }, null, 2)}\n`)
+      } else if (action === 'edit') {
+        const view = goals.edit(handle, ref, {
+          ...(typeof body.objective === 'string' ? { objective: body.objective } : {}),
+          ...(typeof body.max_goal_rounds === 'number' ? { maxGoalRounds: body.max_goal_rounds } : {}),
+        })
+        respond(response, 200, 'application/json', `${JSON.stringify({ goal: view }, null, 2)}\n`)
+      } else if (action === 'pause' || action === 'resume' || action === 'complete') {
+        const view = action === 'pause' ? goals.pause(handle, ref) : action === 'resume' ? goals.resume(handle, ref) : goals.complete(handle, ref)
+        respond(response, 200, 'application/json', `${JSON.stringify({ goal: view }, null, 2)}\n`)
+      } else if (action === 'blocked') {
+        const reason = body.blocked_reason
+        const view = goals.block(handle, ref, reason as { code: string; message: string })
+        respond(response, 200, 'application/json', `${JSON.stringify({ goal: view }, null, 2)}\n`)
+      } else if (action === 'clear') {
+        const cleared = goals.clear(handle, ref)
+        respond(response, 200, 'application/json', `${JSON.stringify({ cleared }, null, 2)}\n`)
+      } else {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `unknown goal action ${JSON.stringify(action)}` })}\n`)
+      }
+    } catch (error) {
+      const code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : ''
+      const status = code === 'GOAL_NOT_FOUND' ? 404 : code === 'GOAL_STALE_REVISION' ? 409 : 400
+      const message = error instanceof Error ? error.message : String(error)
+      respond(response, status, 'application/json', `${JSON.stringify({ error: message, code })}\n`)
     }
     return
   }

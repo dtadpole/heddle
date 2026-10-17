@@ -6,9 +6,19 @@ import type { ToolSpec } from '../llm/types.ts'
 import type { ApprovalService } from '../approvals/service.ts'
 
 /** What a tool is given when it runs. */
+import type { SessionHandle } from '../session/store.ts'
+
 export interface ToolContext {
   /** Where the effect lands, already resolved and permitted. */
   readonly cwd: string
+  /**
+   * The session this call belongs to, when the tool is session-scoped.
+   *
+   * A goal belongs to a session, so the goal tools need the handle; tools that only touch the filesystem
+   * ignore it. It is passed by the loop, which is the only layer that knows which session a call is in —
+   * taking it from the model's arguments would let a call name someone else's session.
+   */
+  readonly session?: SessionHandle
   readonly signal?: AbortSignal
   /** Where to write a line about what happened; never a secret. */
   readonly log: (message: string) => void

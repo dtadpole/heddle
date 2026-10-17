@@ -25,6 +25,8 @@ The harness needs a face. This part judges that a documented default port serves
   session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
   extension, and a file's own script tags shown rather than obeyed.
+- [`check-goal.mjs`](check-goal.mjs) — goal management: the model's tool creates a goal inside a real
+  turn, and a person drives it from the bar — including resuming what a person paused.
 - [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's two workspace controls: registering
   a folder over the API the button posts to, the refusals that keep the controls honest, the split
   between a chosen root and one adopted because a session ran in it, and a browser clicking both
