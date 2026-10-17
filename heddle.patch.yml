@@ -70,6 +70,15 @@
       name: ./src/plugins/goal-driver.ts
       inject: [goal, session, model, tools, sandbox, context]
 
+    # Subagent delegation: the model-facing `delegate` tool. A child runs as a normal turn in its own session,
+    # with its parent and depth recorded in the metadata. Limits are the runtime's, not the prompt's.
+    - id: subagent-tool
+      name: ./src/plugins/subagent-tool.ts
+      inject: [tools, session, model, sandbox, context]
+      config:
+        maxDepth: 2
+        maxActive: 1
+
     # The model-facing goal tools, as their own row so a profile can keep the state without the verbs.
     - id: goal-tool
       name: ./src/plugins/goal-tool.ts
@@ -79,4 +88,4 @@
       name: ./src/plugins/tools.ts
       inject: [approvals, sandbox]
       config:
-        allow: [write_file, read_file, list_dir, bash]
+        allow: [write_file, read_file, list_dir, bash, delegate]

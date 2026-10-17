@@ -19,7 +19,9 @@ a display or a window.
 
 ## What decides it
 
-`check.mjs` drives a scripted multi-round turn and reads the transcript, and `check-end-to-end.mjs` runs the whole thing from configuration.
+`check.mjs` drives a scripted multi-round turn and reads the transcript, `check-end-to-end.mjs` runs the whole thing
+from configuration, and `check-subagents.mjs` judges the delegation boundary: a child agent runs in its own
+session, attributed to its parent, and its final answer returns as the parent's tool result.
 
 ## Running it
 
