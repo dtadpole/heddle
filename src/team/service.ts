@@ -339,6 +339,27 @@ export class TeamService {
     return { settled, delivered }
   }
 
+  /**
+   * Recover every session that carries team state.
+   *
+   * The server calls this at boot; it is the startup edge of the reentrant team. Sessions with no team events are
+   * skipped, so a large store costs one scan of the session metadata and one fold per actual team.
+   */
+  async recoverAll(leads: readonly SessionHandle[]): Promise<{ readonly recovered: number; readonly settled: number; readonly delivered: number }> {
+    let recovered = 0
+    let settled = 0
+    let delivered = 0
+    for (const lead of leads) {
+      const events = this.deps.store.read(lead)
+      if (!events.some((event) => event.type.startsWith('team/'))) continue
+      const result = await this.recover(lead)
+      recovered += 1
+      settled += result.settled
+      delivered += result.delivered
+    }
+    return { recovered, settled, delivered }
+  }
+
   /** The status of one member, from durable phase and the live registry. */
   statusOf(member: TeamMemberSnapshot): TeamMemberStatus {
     if (member.phase === 'failed') return 'failed'

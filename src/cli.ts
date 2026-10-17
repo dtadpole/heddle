@@ -513,6 +513,21 @@ async function runWeb(args: Args): Promise<void> {
       const resumed = await app.ctx.goalDriver.resumeAtStart(handles)
       if (resumed.requested > 0) process.stdout.write(`heddle web: resuming ${resumed.requested} active goal(s)\n`)
     }
+    /**
+     * The same startup edge for teams: settle members a previous process left provisioning and offer every
+     * undelivered message to its target again. Only the server does this — a one-shot command must not start
+     * turns for teams it is not working on.
+     */
+    if (app.ctx.team !== undefined) {
+      const handles = app.ctx.session
+        .list()
+        .map((meta) => app.ctx.session.store.open(meta.id))
+        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const recovered = await app.ctx.team.recoverAll(handles)
+      if (recovered.recovered > 0) {
+        process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered)\n`)
+      }
+    }
     process.stdout.write(`heddle web: ${server.url}\n`)
     process.stdout.write(`heddle web: serving on ${server.host}:${server.port}; pass --port to change it\n`)
     if (args.json) process.stdout.write(`${JSON.stringify({ url: server.url, host: server.host, port: server.port, token: server.token })}\n`)
