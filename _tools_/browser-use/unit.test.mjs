@@ -232,15 +232,46 @@ test('a response body is decoded, truncated, or described as binary', () => {
 })
 
 /**
- * The surface a caller can name, as a **component rule**: the table of tools carries the harness
- * browser's names, so a tool the driver implements is not silently absent from the command line or the
- * session host. What each of them *does* is a delivery claim and is judged by the verifiers beside the
- * tool; this one only says the table lists them.
+ * The DSH surface this tool is measured against: the 32 tools `chrome-devtools-mcp` advertises under the
+ * harness profile's flags, as recorded in `_context_/dsh-browser-mcp/`.
  */
-test('the tool table carries the harness browser surface', () => {
-  const surface = ['list_pages', 'new_page', 'select_page', 'close_page', 'navigate_page', 'take_snapshot', 'click', 'fill', 'fill_form', 'hover', 'drag', 'press_key', 'type_text', 'upload_file', 'handle_dialog', 'take_screenshot', 'evaluate_script', 'wait_for', 'list_console_messages', 'get_console_message', 'list_network_requests', 'get_network_request', 'emulate', 'resize_page']
-  for (const name of surface) assert.ok(TOOL_NAMES.includes(name), `the tool table carries ${name}`)
-  assert.equal(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'and names each tool once')
+const DSH_ADVERTISED = [
+  'click', 'close_page', 'drag', 'emulate', 'evaluate_script', 'fill', 'fill_form', 'get_console_message',
+  'get_css_styles', 'get_network_request', 'handle_dialog', 'hover', 'lighthouse_audit',
+  'list_console_messages', 'list_network_requests', 'list_pages', 'navigate_page', 'new_page',
+  'performance_analyze_insight', 'performance_start_trace', 'performance_stop_trace', 'press_key',
+  'resize_page', 'screencast_start', 'screencast_stop', 'select_page', 'take_heapsnapshot',
+  'take_screenshot', 'take_snapshot', 'type_text', 'upload_file', 'wait_for',
+]
+
+/**
+ * The advertised tools this driver deliberately does not implement, each for a stated reason.
+ *
+ * `lighthouse_audit` is the Lighthouse engine rather than a protocol call. `performance_analyze_insight`
+ * interprets a trace with the DevTools frontend's insight model; the trace itself is captured by the
+ * start/stop tools, but the analysis is not a protocol call either.
+ */
+const DSH_EXCLUDED = ['lighthouse_audit', 'performance_analyze_insight']
+
+/** Tools this driver adds beyond the DSH surface, and why. */
+const EXTRA = ['click_at']
+
+/**
+ * The coverage claim: every advertised DSH tool is either implemented or named as excluded, and nothing
+ * is implemented that is not accounted for. This is the component rule behind "the tool covers the DSH
+ * browser surface"; what each tool does is a delivery claim and is judged by the verifiers.
+ */
+test('every advertised DSH tool is implemented or named as excluded', () => {
+  for (const name of DSH_ADVERTISED) {
+    if (DSH_EXCLUDED.includes(name)) {
+      assert.ok(!TOOL_NAMES.includes(name), `${name} is excluded and absent from the tool table`)
+      continue
+    }
+    assert.ok(TOOL_NAMES.includes(name), `${name} is covered`)
+  }
+  const unexplained = TOOL_NAMES.filter((name) => !DSH_ADVERTISED.includes(name) && !EXTRA.includes(name))
+  assert.deepEqual(unexplained, [], 'every tool beyond the DSH surface is documented as an addition')
+  assert.equal(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'and the table names each tool once')
 })
 
 /**

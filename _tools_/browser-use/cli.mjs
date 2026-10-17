@@ -158,10 +158,11 @@ async function main(argv) {
     const lines = ['the tools this browser implementation offers:']
     for (const name of TOOL_NAMES) lines.push(`  ${name.padEnd(24)} ${TOOL_HELP[name] ?? ''}`)
     lines.push('', 'arguments are one JSON object, or --name=value pairs', '')
-    lines.push('not replicated from the harness browser: lighthouse_audit, performance_start_trace,')
-    lines.push('performance_stop_trace, performance_analyze_insight, take_heapsnapshot, get_css_styles,')
-    lines.push('screencast_start, screencast_stop, and the extension/PWA/third-party tool groups — each')
-    lines.push('needs a package or a DevTools frontend this tool deliberately does not ship.')
+    lines.push('not replicated from the harness browser: lighthouse_audit (the Lighthouse engine) and')
+    lines.push('performance_analyze_insight (the DevTools frontend insight model). The trace itself is')
+    lines.push('recorded by performance_start_trace and performance_stop_trace, and the other advertised')
+    lines.push('tool groups the DSH row leaves off (vision, memory analysis, DevTools comments) are not')
+    lines.push('part of the 32 tools this tool measures itself against.')
     process.stdout.write(`${lines.join('\n')}\n`)
     return 0
   }

@@ -22,6 +22,8 @@ import {
   formatNetworkRequestDetailed,
   formatPages,
   networkToJson,
+  paginate,
+  paginationLines,
   responseBodyText,
 } from './format.mjs'
 import { snapshotToJson, takeSnapshot } from './snapshot.mjs'
@@ -53,6 +55,9 @@ const BLOCKED_BY_DIALOG = new Set([
   'take_screenshot',
   'resize_page',
   'get_css_styles',
+  'take_heapsnapshot',
+  'screencast_start',
+  'screencast_stop',
   'performance_start_trace',
   'performance_stop_trace',
 ])
@@ -84,6 +89,12 @@ export const TOOL_NAMES = [
   'get_network_request',
   'emulate',
   'resize_page',
+  'get_css_styles',
+  'take_heapsnapshot',
+  'screencast_start',
+  'screencast_stop',
+  'performance_start_trace',
+  'performance_stop_trace',
 ]
 
 /** One line about each tool, for `browser help`. */
@@ -113,6 +124,12 @@ export const TOOL_HELP = {
   get_network_request: '{"reqid": 2} one request with headers and bodies',
   emulate: '{"viewport": "1280x900x2,mobile", "colorScheme": "dark"} emulate the device',
   resize_page: '{"width": 1280, "height": 900} resize the emulated viewport',
+  get_css_styles: '{"uid": "1_3"} the matched CSS rules for an element, paginated',
+  take_heapsnapshot: '{"filePath": "/path/heap.heapsnapshot"} write a V8 heap snapshot',
+  screencast_start: '{"filePath": "/path/frames"} start recording frames of the page',
+  screencast_stop: 'stop the recording and name where its frames were saved',
+  performance_start_trace: '{"reload": true, "autoStop": true} record a Chrome trace',
+  performance_stop_trace: 'stop the trace and summarise it',
 }
 
 /** The error a blocked call reports, naming the dialog so the caller knows what to do. */
@@ -141,6 +158,41 @@ export function createTools(browser, { stateDir }) {
     const page = browser.page(args.pageId)
     if (page.dialog !== undefined && BLOCKED_BY_DIALOG.has(tool)) throw dialogBlocked(page)
     return page
+  }
+
+  /**
+   * Stop the trace on a page, write the file and summarise it.
+   *
+   * A named function rather than `this.performance_stop_trace`: a handler is invoked detached from the
+   * table (`handler(args)`), so `this` is not the object and a self-call would throw.
+   */
+  const stopTrace = async (page, args = {}) => {
+    if (page.trace === undefined) throw new Error('no performance trace is recording on this page')
+    const trace = page.trace
+    page.trace = undefined
+    try {
+      await page.send('Tracing.end')
+      await trace.completed
+    } finally {
+      trace.remove()
+    }
+    const filePath = typeof args.filePath === 'string' && args.filePath.length > 0 ? args.filePath : trace.filePath
+    writeFileSync(filePath, JSON.stringify({ traceEvents: trace.events }))
+    const byName = new Map()
+    let startedAt
+    let endedAt
+    for (const event of trace.events) {
+      byName.set(event.name, (byName.get(event.name) ?? 0) + 1)
+      if (typeof event.ts === 'number') {
+        startedAt = startedAt === undefined ? event.ts : Math.min(startedAt, event.ts)
+        endedAt = endedAt === undefined ? event.ts : Math.max(endedAt, event.ts)
+      }
+    }
+    const top = [...byName.entries()].sort((left, right) => right[1] - left[1]).slice(0, 5)
+    const durationMs = startedAt !== undefined && endedAt !== undefined ? Math.round((endedAt - startedAt) / 1000) : undefined
+    const lines = ['## Performance trace', `events: ${trace.events.length}`, ...(durationMs !== undefined ? [`duration: ${durationMs}ms`] : []), `saved: ${filePath}`]
+    for (const [name, count] of top) lines.push(`${count}× ${name}`)
+    return { path: filePath, events: trace.events.length, durationMs, top: Object.fromEntries(top), text: lines.join('\n') }
   }
 
   /** A fresh snapshot, attached to a response that asked for one. */
@@ -402,6 +454,152 @@ export function createTools(browser, { stateDir }) {
     async resize_page(args = {}) {
       const page = pageFor('resize_page', args)
       return resizePage(page, { width: args.width, height: args.height })
+    },
+
+    /**
+     * The CSS rules that apply to one element.
+     *
+     * Read from the protocol's own CSS domain rather than by walking `document.styleSheets`, because the
+     * protocol answers with what the browser **applied** — the cascade, the inherited declarations, the
+     * user-agent rules and the inline style — which a page-side walk cannot reconstruct.
+     */
+    async get_css_styles(args = {}) {
+      const page = pageFor('get_css_styles', args)
+      if (typeof args.uid !== 'string' || args.uid.length === 0) throw new Error('get_css_styles needs an element uid from a snapshot')
+      const node = page.uidToNode.get(args.uid)
+      if (node?.backendNodeId === undefined) throw new Error(`the snapshot has no DOM element with uid ${args.uid}; take a new snapshot`)
+      await page.send('CSS.enable')
+      // The CSS agent answers node queries only once a document has been requested for the session.
+      await page.send('DOM.getDocument', { depth: 0 })
+      const nodeId = await page.frontendNodeId(node.backendNodeId)
+      const matched = await page.send('CSS.getMatchedStylesForNode', { nodeId })
+      const rules = []
+      const describe = (rule, origin) => {
+        if (rule?.selectorList?.text === undefined) return
+        const declarations = (rule.style?.cssProperties ?? [])
+          .filter((property) => property.name !== undefined && property.value !== undefined)
+          .map((property) => `${property.name}: ${property.value}${property.important === true ? ' !important' : ''}`)
+        rules.push({ origin, selector: rule.selectorList.text, declarations })
+      }
+      for (const entry of matched.result?.matchedCSSRules ?? []) describe(entry.rule, entry.rule?.origin)
+      describe(matched.result?.inlineStyle, 'inline')
+      describe(matched.result?.attributesStyle, 'attribute')
+      const { items, pagination } = paginate(rules, {
+        pageSize: Number.isFinite(args.pageSize) && args.pageSize > 0 ? args.pageSize : 10,
+        pageIdx: Number.isFinite(args.pageIdx) ? args.pageIdx : 0,
+      })
+      const lines = ['## CSS styles', ...paginationLines(pagination)]
+      if (items.length === 0) lines.push('<no matched rules found>')
+      for (const item of items) {
+        lines.push(`${item.selector}  (${item.origin ?? 'author'})`)
+        for (const declaration of item.declarations) lines.push(`  ${declaration}`)
+      }
+      return { uid: args.uid, rules: items, pagination, text: lines.join('\n') }
+    },
+
+    /**
+     * Start capturing a Chrome trace.
+     *
+     * DSH's tool records with the DevTools frontend's categories and answers with an insight set; this
+     * one records the protocol's own `Tracing` events, which is what a dependency-free driver can do.
+     * The trace is real — it is the file the DevTools Performance panel opens — and `performance_stop_trace`
+     * summarises it. The insight analysis is a frontend model and is named as excluded in the index.
+     */
+    async performance_start_trace(args = {}) {
+      const page = pageFor('performance_start_trace', args)
+      if (page.trace !== undefined) throw new Error('a performance trace is already recording on this page')
+      const filePath = typeof args.filePath === 'string' && args.filePath.length > 0 ? args.filePath : join(stateDir, 'traces', `trace-${Date.now()}.json`)
+      mkdirSync(join(stateDir, 'traces'), { recursive: true })
+      const events = []
+      const remove = page.connection.on('Tracing.dataCollected', (params, message) => {
+        if (message.sessionId !== page.sessionId) return
+        if (Array.isArray(params.value)) events.push(...params.value)
+      })
+      const completed = page.connection.once('Tracing.tracingComplete', 60_000)
+      await page.send('Tracing.start', {
+        categories: 'devtools.timeline,blink.user_timing,loading,v8.execute',
+        options: 'sampling-frequency=10000',
+        transferMode: 'ReportEvents',
+      })
+      page.trace = { filePath, events, remove, completed }
+      if (args.reload === true) {
+        await page.navigate({ url: page.url, type: 'reload' }).catch(() => {})
+      }
+      if (args.autoStop === true) return stopTrace(page, args)
+      return { path: filePath, text: `The performance trace is being recorded; stop it to save ${filePath}` }
+    },
+
+    /** Stop the trace, write the file the Performance panel opens, and summarise it. */
+    async performance_stop_trace(args = {}) {
+      return stopTrace(pageFor('performance_stop_trace', args), args)
+    },
+
+    /**
+     * Record frames of the page.
+     *
+     * DSH's screencast encodes a video in the DevTools frontend; the protocol itself hands over JPEG
+     * frames, which is what this tool writes — one file per frame in the directory the caller names.
+     * The claim is that the page's frames were captured, not that a container was muxed.
+     */
+    async screencast_start(args = {}) {
+      const page = pageFor('screencast_start', args)
+      if (page.screencast !== undefined) throw new Error('a screencast is already recording on this page')
+      const dir = typeof args.filePath === 'string' && args.filePath.length > 0 ? args.filePath : join(stateDir, 'screencast', `cast-${Date.now()}`)
+      mkdirSync(dir, { recursive: true })
+      const frames = []
+      const remove = page.connection.on('Page.screencastFrame', (params, message) => {
+        if (message.sessionId !== page.sessionId) return
+        const file = join(dir, `frame-${String(frames.length).padStart(5, '0')}.jpeg`)
+        writeFileSync(file, Buffer.from(params.data, 'base64'))
+        frames.push(file)
+        void page.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {})
+      })
+      await page.send('Page.startScreencast', { format: 'jpeg', quality: 80, maxWidth: 1280, maxHeight: 900, everyNthFrame: 1 })
+      page.screencast = { dir, frames, remove }
+      return { path: dir, text: `Screencast recording started, saving frames to ${dir}` }
+    },
+
+    /** Stop the recording and report where its frames were saved. */
+    async screencast_stop(args = {}) {
+      const page = pageFor('screencast_stop', args)
+      if (page.screencast === undefined) throw new Error('no screencast is recording on this page')
+      const cast = page.screencast
+      page.screencast = undefined
+      cast.remove()
+      await page.send('Page.stopScreencast').catch(() => {})
+      return { path: cast.dir, frames: cast.frames.length, text: `The screencast recording has been stopped and saved to ${cast.dir} (${cast.frames.length} frames)` }
+    },
+
+    /**
+     * A V8 heap snapshot of the page.
+     *
+     * The snapshot arrives as a stream of text chunks rather than as one reply, so the listener is
+     * attached before the call is made and the call's answer only says the profile is complete. The
+     * file is the DevTools `.heapsnapshot` format; the analysis tools are not implemented (they parse it
+     * with the DevTools heap worker), so the claim here is only that the capture is written.
+     */
+    async take_heapsnapshot(args = {}) {
+      const page = pageFor('take_heapsnapshot', args)
+      const filePath =
+        typeof args.filePath === 'string' && args.filePath.length > 0
+          ? args.filePath
+          : join(stateDir, 'heap', `heap-${Date.now()}.heapsnapshot`)
+      mkdirSync(join(stateDir, 'heap'), { recursive: true })
+      await page.send('HeapProfiler.enable')
+      const chunks = []
+      const remove = page.connection.on('HeapProfiler.addHeapSnapshotChunk', (params, message) => {
+        if (message.sessionId !== page.sessionId) return
+        if (typeof params.chunk === 'string') chunks.push(params.chunk)
+      })
+      try {
+        await page.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false, captureNumericValue: false }, { timeoutMs: 120_000 })
+      } finally {
+        remove()
+      }
+      const body = chunks.join('')
+      if (body.length === 0) throw new Error('the browser sent no heap snapshot chunks')
+      writeFileSync(filePath, body)
+      return { path: filePath, bytes: body.length, text: `Heap snapshot saved to ${filePath}` }
     },
   }
 }

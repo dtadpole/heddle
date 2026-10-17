@@ -383,6 +383,60 @@ test('take_screenshot captures the viewport, the page and one element', async (t
   assert.match(webp.path, /\.webp$/)
 })
 
+test('get_css_styles reads the rules the browser applied, paginated', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  const snapshot = await tools.take_snapshot({ pageId })
+  const button = findUid(snapshot.tree, 'button', 'Greet')
+  const styles = await tools.get_css_styles({ pageId, uid: button, pageSize: 2 })
+  assert.match(styles.text, /## CSS styles/, 'the reading is a named section')
+  assert.ok(styles.rules.length > 0, 'an element drawn on the page has matched rules')
+  assert.ok(
+    styles.rules.every((rule) => typeof rule.selector === 'string' && Array.isArray(rule.declarations)),
+    'every rule carries its selector and declarations',
+  )
+  assert.ok(
+    styles.rules.some((rule) => rule.declarations.some((declaration) => declaration.startsWith('color'))),
+    `the applied colour is among the declarations (${JSON.stringify(styles.rules[0])})`,
+  )
+  const second = await tools.get_css_styles({ pageId, uid: button, pageSize: 1, pageIdx: 1 })
+  assert.equal(second.pagination.currentPage, 1, 'the listing is paginated rather than truncated')
+  assert.equal(second.rules.length, 1)
+})
+
+test('take_heapsnapshot writes a DevTools heap snapshot of the page', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  const path = join(work, 'page.heapsnapshot')
+  const result = await tools.take_heapsnapshot({ pageId, filePath: path })
+  assert.ok(existsSync(path), 'the snapshot is on disk')
+  assert.ok(result.bytes > 10_000, `a real snapshot is not empty (${result.bytes} bytes)`)
+  const head = readFileSync(path, 'utf8').slice(0, 80)
+  assert.match(head, /^\{"snapshot":\{"meta"/, 'and it is the DevTools .heapsnapshot format')
+})
+
+test('screencast_start records frames of the page, and stop names where they went', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  const dir = join(work, 'cast')
+  const started = await tools.screencast_start({ pageId, filePath: dir })
+  assert.equal(started.path, dir)
+  // Force a paint: a frame is captured when the compositor has something new to show.
+  await tools.evaluate_script({ pageId, function: `() => { document.body.style.background = '#fafafa'; return true }` })
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
+  const stopped = await tools.screencast_stop({ pageId })
+  assert.ok(stopped.frames > 0, `frames were captured (${stopped.frames})`)
+  assert.ok(existsSync(join(dir, 'frame-00000.jpeg')), 'the first frame is a file on disk')
+})
+
+test('performance_start_trace records a trace, and stop summarises the file DevTools opens', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  const path = join(work, 'trace.json')
+  const result = await tools.performance_start_trace({ pageId, reload: true, autoStop: true, filePath: path })
+  assert.ok(result.events > 0, `the trace holds events (${result.events})`)
+  assert.ok(existsSync(path), 'and it was written where the caller named')
+  const parsed = JSON.parse(readFileSync(path, 'utf8'))
+  assert.ok(Array.isArray(parsed.traceEvents) && parsed.traceEvents.length > 0, 'in the shape the Performance panel opens')
+  assert.match(result.text, /## Performance trace/)
+})
+
 test('evaluate_script runs a function, a script, and saves to a file', async (t) => {
   if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
   const script = await tools.evaluate_script({ pageId, script: '1 + 1' })
