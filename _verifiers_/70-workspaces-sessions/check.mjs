@@ -1060,7 +1060,7 @@ test('a folder opens and closes with the same control, including a leaf with not
     )
     const openedInstance = JSON.parse(
       await browser.evaluate(`JSON.stringify({
-        selected: [...document.querySelectorAll('#tree .row[aria-current="true"]')].map((entry) => entry.querySelector('.label').textContent),
+        selected: [...document.querySelectorAll('#tree li[aria-selected="true"] > .row')].map((entry) => entry.querySelector('.label').textContent),
         open: [...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === 'some-tool').parentElement.dataset.open,
       })`),
     )
@@ -1159,7 +1159,7 @@ test('a folder opens and closes with the same control, including a leaf with not
           body: document.getElementById('file-body').textContent.trim(),
           disclosure: row.querySelector('.untwisty') === null ? 'none' : 'present',
           menu: row.querySelector('.menu-wrap') === null ? 'none' : 'present',
-          selected: [...document.querySelectorAll('#tree .row[aria-current="true"]')].map((entry) => entry.querySelector('.label').textContent),
+          selected: [...document.querySelectorAll('#tree li[aria-selected="true"] > .row')].map((entry) => entry.querySelector('.label').textContent),
           logHidden: document.getElementById('log').hidden,
           ring,
         }
@@ -1482,7 +1482,7 @@ test('New session here, on an instance row, starts a session and writes its defi
         await wait(800)
       }
       const rows = [...reopened.parentElement.querySelectorAll(':scope > ul[role=group] > li')].map((child) => (child.dataset.kind === 'session' ? 'session' : child.dataset.kind) + ':' + child.querySelector('.label')?.textContent)
-      return JSON.stringify({ rows, branchOpen: reopened.parentElement.dataset.open === 'true', selected: document.querySelector('#tree .row[aria-current="true"]')?.querySelector('.label')?.textContent ?? null })
+      return JSON.stringify({ rows, branchOpen: reopened.parentElement.dataset.open === 'true', selected: document.querySelector('#tree li[aria-selected="true"] > .row')?.querySelector('.label')?.textContent ?? null })
     })()`)
     const outcome = JSON.parse(clicked)
     assert.equal(outcome.error, undefined, `the menu opened and the item was there\\nsaw: ${clicked}`)
@@ -1602,7 +1602,7 @@ test('the panel follows the selection: a session offers two views, a file one, a
       const rows = () => [...document.querySelectorAll('#tree .row')]
       const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
       const ring = () => [...document.querySelectorAll('#views button')].filter((b) => !b.hidden).map((b) => b.textContent)
-      const current = () => document.querySelector('#tree .row[aria-current="true"]')?.querySelector('.label')?.textContent ?? null
+      const current = () => document.querySelector('#tree li[aria-selected="true"] > .row')?.querySelector('.label')?.textContent ?? null
       const openState = (label) => rowFor(label)?.parentElement.dataset.open ?? null
 
       ;[...document.querySelectorAll('#tree .row')][0].click(); await wait(600)
@@ -1998,6 +1998,22 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         ;[...document.querySelectorAll('#tree .row')][0].click(); await wait(700)
         rowFor('_tools_').click(); await wait(700)
         rowFor('some-tool').click(); await wait(900)
+        /**
+         * The tree's ARIA shape, read from DSH's own: a row that can open carries aria-expanded, a row that can be
+         * chosen carries aria-selected and NO aria-expanded (its session rows have aria-selected only), and exactly
+         * one row is chosen at a time. No backticks here: this comment lives inside a template literal.
+         */
+        const ariaShape = () => {
+          const sessionItems = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+          const workspaceItems = [...document.querySelectorAll('#tree li[data-kind="workspace"]')]
+          return {
+            chosen: sessionItems.filter((li) => li.getAttribute('aria-selected') === 'true').length,
+            hasSelected: sessionItems.every((li) => li.hasAttribute('aria-selected')),
+            leafExpanded: sessionItems.filter((li) => li.hasAttribute('aria-expanded')).length,
+            workspaceExpanded: workspaceItems.every((li) => li.hasAttribute('aria-expanded')),
+            workspaceSelected: workspaceItems.filter((li) => li.hasAttribute('aria-selected')).length,
+          }
+        }
         const sessions = [...document.querySelectorAll('#tree li[data-kind="session"]')]
         const controls = sessions.map((li) => ({
           label: li.querySelector(':scope > .row > .label')?.textContent,
@@ -2073,7 +2089,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           treeHidden: document.getElementById('tree').hidden,
           resultsHidden: document.getElementById('search-results').hidden,
         }
-        return { controls, focused, ageSlot, selected, quietBackground, viewItems, search, cleared }
+        return { controls, focused, ageSlot, selected, quietBackground, aria: ariaShape(), viewItems, search, cleared }
       })().then((value) => JSON.stringify(value))`),
     )
 
@@ -2124,6 +2140,16 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.ok(reading.selected.background !== reading.quietBackground, 'a selected row is tinted while a quiet one is not')
     assert.equal(reading.selected.shadow, 'none', 'with no left bar or shadow marking it')
     assert.equal(reading.selected.weight, '400', 'and its name keeps the list\'s normal weight')
+
+    /**
+     * DSH's ARIA shape for a tree of sessions: a chosen row is `aria-selected`, a leaf carries no `aria-expanded`, a
+     * branch does, and only one row is chosen. Read after the click above, which chose a session row.
+     */
+    assert.equal(reading.aria.chosen, 1, `exactly one row is chosen\nsaw: ${reading.aria.chosen}`)
+    assert.equal(reading.aria.hasSelected, true, 'every session row says whether it is chosen')
+    assert.equal(reading.aria.leafExpanded, 0, 'and none of them claims to have something under it')
+    assert.equal(reading.aria.workspaceExpanded, true, 'while a branch row carries aria-expanded')
+    assert.equal(reading.aria.workspaceSelected, 0, 'and no chosen state, which is not what a branch has')
 
     /**
      * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.

@@ -93,6 +93,8 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Tabs | `Chat` / `Trajectory`, plus a turn-navigation strip in the chat | `Chat` / `Trajectory`; the turn strip lives in the Trajectory view | match in intent, **difference kept** in placement |
 | Composer | 28px card, `+`, access, model, send, then a status line of turns/steps/tok-s/context | the same, same order | match |
 | Shortcuts | `Alt+Meta+A/G/K`, `Shift+Meta+F` | the same four, bound to the selected row | match |
+| Tree ARIA | `role="tree"` named "Sessions"; branch rows `aria-expanded`; session rows `aria-selected` and **no** `aria-expanded`; rows carry `draggable="true"` | `role="tree"`; branch rows `aria-expanded`; session and file rows `aria-selected` and no `aria-expanded` — **fixed this round**; rows are `tabindex="0"` | match on the state attributes, **difference kept** on `draggable` (drag-to-move is a feature) and on the label, which says "workspace folders" because this tree holds folders too |
+| Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
 
 ## Presentation, measured
