@@ -9,12 +9,13 @@ import { runTurn } from '../agent/loop.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { projectLedger, projectRows, projectTimeline } from './ledger.ts'
+import { catalogOf } from './tool-catalog.ts'
 import { PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints } from '../endpoints.ts'
 import { canonicalPath } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinitionTitle } from '../session/definition.ts'
+import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import {
@@ -1002,7 +1003,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
-    if (folder !== undefined) updateSessionDefinitionTitle(folder, body.title)
+    if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -1164,7 +1165,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
        * step boundaries on the rows, and that projection is pure, so it is made and judged on this side
        * rather than rebuilt in the page.
        */
-      respond(response, 200, 'application/json', `${JSON.stringify({ id, ledger, rows: projectRows(ledger), timeline: projectTimeline(ledger) }, null, 2)}\n`)
+      /**
+       * The **tool catalog** travels with the ledger: DSH's tool inspector has a Schema section beside the
+       * payload and the result, and the page needs the definition the model was offered to show it.
+       */
+      respond(
+        response,
+        200,
+        'application/json',
+        `${JSON.stringify({ id, ledger, rows: projectRows(ledger), timeline: projectTimeline(ledger), tools: catalogOf(ctx.tools.describe()) }, null, 2)}\n`,
+      )
       return
     }
     /** The session's own record, which is where a switch from the panel was written. */
