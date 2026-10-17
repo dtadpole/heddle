@@ -24,21 +24,27 @@
    */
   :root {
     color-scheme: dark;
-    --bg: #171717;
-    --surface: #222222;
+    --bg: #151517;
+    --surface: #232324;
     --surface-2: #242424;
-    --sidebar: #1c1c1c;
+    --sidebar: #1c1c1e;
     /** The composer card's surface, read from DSH's own card (#2c2c2e). */
     --composer: #2c2c2e;
     --hover: #2c2c2c;
     --border: #353535;
     --border-strong: #4a4a4a;
-    --text: #ededed;
-    --text-2: #b3b3b3;
-    --text-3: #8f8f8f;
+    --text: #f9fafb;
+    --text-2: #cfd3d6;
+    --text-3: #adb2b8;
     --accent: #2694fe;
     --on-accent: #171717;
     --radius: 8px;
+    /**
+     * DSH's radii, read from its own tokens: `xs` 4, `sm` 8, `md` 12, `lg` 16, `xl` 20, `panel` 28. Naming them the
+     * way DSH does is what makes a list row and a panel round by the same rule rather than by two guesses.
+     */
+    --radius-md: 12px;
+    --radius-panel: 28px;
     --radius-pill: 999px;
     --shadow-low: 0 1px 1px -1px #0003;
     --shadow-menu: 0 2px 8px -2px #0003;
@@ -59,8 +65,10 @@
    */
   body {
     margin: 0;
+    padding: 12px;
     font: 14px/1.5 var(--font);
     display: flex;
+    gap: 12px;
     height: 100vh;
     background: var(--bg);
     color: var(--text);
@@ -106,7 +114,7 @@
   #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
   #session-search { width: 100%; margin: 0 0 .5rem; padding: .3rem .45rem; font: inherit; font-size: .8rem; color: inherit; background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: .3rem; }
   #session-search::placeholder { opacity: .6; }
-  aside { width: var(--sidebar-width); flex: none; border-right: 1px solid var(--border); overflow-y: auto; padding: .75rem; color: var(--text-2); background: var(--sidebar); }
+  aside { width: var(--sidebar-width); flex: none; overflow-y: auto; padding: .75rem; color: var(--text-2); background: var(--sidebar); border-radius: var(--radius-panel); }
   /**
    * The conversation column, shared by the transcript and the composer.
    *
@@ -116,7 +124,7 @@
    * layout sane before the script runs.
    */
   /** The conversation column, DSH's measured `max-width: 680px`. */
-  main { --chat-column: 680px; position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+  main { --chat-column: 680px; position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); border-radius: var(--radius-panel); overflow: hidden; }
   /**
    * The divider borrows the sidebar's border so the drag target is where the line already is, and widens its
    * hit area into the content with a transparent border rather than by pushing the layout around.
@@ -157,6 +165,14 @@
    * one place instead of inferred from a dozen rules.
    */
   #log {
+    /**
+     * DSH's reading size: **14px on a 24px line**, which is what its `--dsh-content-font-size` resolves to and what
+     * its assistant paragraphs measure — re-measured on two of its live session pages while this was being written
+     * (a paragraph came back 14px/24px on both). 13px/20px is DSH's *reasoning* body, not the answer's. The
+     * variables stay, because the markdown block and the composer's own text read from them.
+     */
+    --chat-size: 14px;
+    --chat-leading: 24px;
     --chat-text: #f9fafb;
     --chat-secondary: #cfd3d6;
     --chat-muted: #adb2b8;
@@ -165,7 +181,7 @@
     --chat-code: #1e1e21;
     flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
     padding: 16px max(24px, calc((100% - var(--chat-column)) / 2));
-    font-size: 14px; line-height: 24px;
+    font-size: var(--chat-size); line-height: var(--chat-leading);
   }
   #log > * { min-width: 0; }
   .turn { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -185,8 +201,13 @@
   #goal-actions { display: flex; gap: .25rem; }
   #goal-actions button { font: inherit; font-size: 12px; padding: .1rem .45rem; }
   /**
-   * The person's own message: a bubble against the right edge, capped at 82% of the column — DSH's
-   * `MessageItem` bubble, which is `padding: 10px 16px` at `radius-xl` on the specific-bubble surface.
+   * The person's own message: **a right-aligned bubble**, DSH's `Sixlwa_bubble`.
+   *
+   * Meaured on two of DSH's live session pages (this is the one its DOM is unambiguous about): the bubble is
+   * `border-radius: 20px`, `padding: 10px 16px`, on `#2c2c2e` (`--dsw-specific-bubble`), and its `userStack`
+   * parent is `align-items: flex-end` — so it sits against the right edge of the 680px column, content-width up
+   * to the column, never a full-width block. An earlier reading in this file claimed a left-aligned block with a
+   * small radius; that was wrong, and the measurement is written here so it is not "fixed" back.
    */
   .turn.user {
     align-self: flex-end; max-width: min(100%, 40rem); padding: 10px 16px;
@@ -503,6 +524,13 @@
   #timeline button[data-running='true'] { background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, color-mix(in oklab, currentColor 25%, transparent) 4px, color-mix(in oklab, currentColor 25%, transparent) 8px); }
   #timeline button[aria-current='true'] { outline: 2px solid currentColor; outline-offset: -2px; }
   #timeline-legend { display: flex; gap: .75rem; font-size: .72rem; opacity: .6; margin: -.4rem 0 .7rem; }
+  /**
+   * The session header: DSH's shape — the name at the reading column's left edge, above the tabs, with the branch
+   * it belongs to beside it in the muted small type.
+   */
+  #session-head { display: flex; align-items: baseline; gap: .6rem; padding: 14px 16px 0; min-width: 0; }
+  #session-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #session-branch { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #ledger .when, #ledger .usage { opacity: .55; font-size: .76rem; }
   #ledger .usage.provider { color: #2fa36b; opacity: .9; }
   #ledger pre { white-space: pre-wrap; word-break: break-word; background: color-mix(in oklab, currentColor 6%, transparent); padding: .5rem .6rem; border-radius: .3rem; font-size: .8rem; margin: .3rem 0 0; }
@@ -571,7 +599,9 @@
   #tree, #tree ul, #tree ol { list-style: none; margin: 0; padding: 0; }
   #tree li { display: block; padding: 0; }
   #tree ul[role='group'] { padding-left: .85rem; border-left: 1px solid var(--line); }
-  #tree .row { display: flex; align-items: center; gap: .35rem; padding: .16rem .3rem; border-radius: .3rem; cursor: pointer; }
+  #tree .row { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border-radius: var(--radius-md); cursor: pointer; }
+  /** DSH's age sits in the muted small type, and its rows are quieter than their names. */
+  #tree .age { font-size: 11px; color: var(--text-3); }
   #tree .row:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
   /**
    * The selected row, and it has to be visible *while* the pointer is elsewhere: a tint alone is what
@@ -745,7 +775,8 @@
    * for more than one item, and the list is collapsed by default, which is the behaviour that keeps a long
    * queue from pushing the conversation off the screen.
    */
-  #queue { flex: none; padding: .5rem 4px 0; }
+  /** The dock is flush against the card below it: what is waiting belongs to the thing it waits for. */
+  #queue { flex: none; padding: 0 4px; margin-bottom: -1px; }
   #queue > * { max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin-inline: auto; }
   #queue .panel {
     border: 1px solid var(--border); border-bottom: none; border-radius: var(--radius) var(--radius) 0 0;
@@ -841,11 +872,205 @@
    * DSH's own behaviour, and the reason the row reads as a name rather than as a strip of buttons. A touch device
    * has no hover, so there they are simply shown.
    */
-  #tree .session-actions { display: inline-flex; align-items: center; gap: .1rem; opacity: 0; transition: opacity .12s ease; }
-  #tree li:hover > .row .session-actions, #tree li:focus-within > .row .session-actions { opacity: 1; }
-  @media (hover: none) { #tree .session-actions { opacity: 1; } }
+  #tree .session-actions, #tree .menu-wrap { opacity: 0; transition: opacity .12s ease; }
+  #tree .session-actions { display: inline-flex; align-items: center; gap: .1rem; }
+  #tree li:hover > .row .session-actions, #tree li:hover > .row .menu-wrap,
+  #tree li:focus-within > .row .session-actions, #tree li:focus-within > .row .menu-wrap { opacity: 1; }
+  /** A menu that has been opened must stay visible after the pointer leaves the row. */
+  #tree li > .row .menu-wrap:has(.menu:not([hidden])) { opacity: 1; }
+  @media (hover: none) { #tree .session-actions, #tree .menu-wrap { opacity: 1; } }
   .untwisty { font: inherit; padding: 0 .3rem; opacity: .55; background: none; border: 0; color: inherit; line-height: 1; }
   .untwisty:hover { opacity: 1; }
+
+  /**
+   * The Trajectory area, following DSH's table measured in a browser (see
+   * `_context_/dsh-mechanisms/dsh-trajectory-ui.md`): a dense single-line table with a 122px event
+   * column and 30px rows at a 12px font, a turn rail and turn labels in the gutter, kind tags coloured
+   * per kind, one row per tool call with its arguments and result on that row, and a right details pane
+   * with tabs. The toolbar carries the duration mode, the two collapse switches and the search box.
+   */
+  #tr-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 34px;
+    padding: 0 .4rem;
+    border-bottom: .5px solid var(--line);
+    background: var(--surface);
+    flex: none;
+    font: 400 12px var(--font);
+  }
+  #tr-toolbar button {
+    height: 20px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--text-3);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #tr-toolbar button:hover, #tr-toolbar button[aria-pressed='true'] { color: var(--text); background: var(--hover); }
+  #tr-status { margin-left: 8px; color: var(--text-3); font: 11px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #tr-search {
+    margin-left: auto;
+    flex: 0 164px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 6px;
+    border: .5px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--surface-2);
+    color: var(--text-3);
+  }
+  #tr-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: 400 12px var(--font); }
+  #tr-search input::placeholder { color: var(--text-3); }
+
+  /* The lane timeline: Input / Model / Tools, as DSH's overview strip. */
+  #timeline {
+    position: relative;
+    flex: none;
+    height: auto;
+    margin: 0;
+    border-radius: 0;
+    border-bottom: .5px solid var(--line);
+    background: var(--surface);
+    overflow: hidden;
+    padding: 2px 0 4px;
+    cursor: crosshair;
+  }
+  #timeline:empty { display: none; }
+  .tr-lanes { position: relative; }
+  .tr-lane { position: relative; height: 16px; }
+  .tr-lane-label {
+    position: absolute;
+    left: 6px;
+    top: 1px;
+    z-index: 2;
+    padding: 1px 4px;
+    border-radius: 2px;
+    color: var(--text-3);
+    background: var(--surface);
+    font: 8px/10px var(--mono);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    pointer-events: none;
+  }
+  .tr-lane-track { position: absolute; left: 0; right: 0; top: 0; bottom: 0; }
+  #timeline-legend { padding: 1px 6px 0; color: var(--text-3); font: 10px var(--mono); }
+  .tr-tick { position: absolute; top: 5px; height: 6px; min-width: 2px; border-radius: 1px; border: 0; padding: 0; cursor: pointer; }
+  .tr-tick[data-lane='input'] { background: color-mix(in oklab, #4b8bf5 55%, transparent); }
+  .tr-tick[data-lane='model'] { background: color-mix(in oklab, #8b5cf6 55%, transparent); }
+  .tr-tick[data-lane='tools'] { background: color-mix(in oklab, #b7791f 65%, transparent); }
+  .tr-tick[data-running='true'] { opacity: .55; }
+  .tr-tick:hover, .tr-tick[aria-current='true'] { outline: 1px solid var(--text-3); }
+  .tr-focus {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 1;
+    display: none;
+    background: color-mix(in oklab, #4b8bf5 14%, transparent);
+    border-left: 1px solid color-mix(in oklab, #4b8bf5 55%, transparent);
+    border-right: 1px solid color-mix(in oklab, #4b8bf5 55%, transparent);
+    pointer-events: none;
+  }
+
+  /* The table, the details pane, and the split between them. */
+  #ledger { display: flex; flex: 1; min-height: 0; padding: 0; overflow: hidden; font-size: 12px; }
+  .tr-split { display: flex; flex: 1; min-width: 0; min-height: 0; }
+  .tr-pane { flex: 1; min-width: 0; overflow: auto; container-type: inline-size; }
+  #tr-table { width: 100%; border-collapse: collapse; table-layout: fixed; color: var(--text); font: 400 12px/16px var(--font); }
+  #tr-table th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    height: 30px;
+    padding: 0 8px;
+    border-bottom: .5px solid var(--line);
+    color: var(--text-3);
+    background: var(--sidebar);
+    font: 500 11px var(--font);
+    text-align: left;
+  }
+  #tr-table th.tr-th-event { width: 122px; }
+  #tr-table td { height: 30px; padding: 0 8px; border-bottom: .5px solid var(--line); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #tr-table tbody tr { cursor: default; outline: none; transition: background-color .12s ease, opacity .12s ease; }
+  #tr-table tbody tr:hover { background: var(--hover); }
+  #tr-table tbody tr[data-selected='true'] { background: color-mix(in oklab, var(--text) 10%, transparent); }
+  #tr-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  #tr-table tbody tr[data-turn-start='true'] > td { border-top: 2px solid var(--border-strong); }
+  #tr-table tbody tr[data-focus='outside'] { opacity: .24; }
+  .tr-event { position: relative; }
+  .tr-event > .tr-rail { position: absolute; left: 12px; top: -1px; bottom: -1px; width: 2px; background: color-mix(in oklab, #4b8bf5 22%, transparent); }
+  .tr-event > .tr-kind { margin-left: 30px; }
+  .tr-turn-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 2;
+    padding: 1px 5px;
+    border-radius: 0 0 2px;
+    color: var(--text-3);
+    background: var(--surface);
+    font: 8px/10px var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .tr-kind {
+    display: inline-flex;
+    align-items: center;
+    height: 19px;
+    padding: 0 5px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: .035em;
+    line-height: 16px;
+  }
+  .tr-kind[data-kind='user'] { color: #6ea8f7; background: color-mix(in oklab, #4b8bf5 16%, transparent); }
+  .tr-kind[data-kind='assistant'] { color: #b29bfa; background: color-mix(in oklab, #8b5cf6 16%, transparent); }
+  .tr-kind[data-kind='reasoning'] { color: #b29bfa; background: color-mix(in oklab, #8b5cf6 10%, transparent); }
+  .tr-kind[data-kind='tool'] { color: #d9a441; background: color-mix(in oklab, #b7791f 18%, transparent); }
+  .tr-kind[data-kind='context'] { color: #6ee7a0; background: color-mix(in oklab, #2fa36b 16%, transparent); }
+  .tr-kind[data-kind='system'], .tr-kind[data-kind='compaction'] { color: var(--text-2); background: var(--surface-2); }
+  #tr-table tbody tr[data-error='true'] .tr-kind { color: #d14343; }
+  .tr-when { margin-left: 6px; color: var(--text-3); font: 10px var(--mono); }
+  .tr-content { color: var(--text); }
+  .tr-text { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .tr-tool { display: grid; grid-template-columns: clamp(180px, 36cqw - 56px, 480px) minmax(0, 1fr); align-items: center; gap: 8px; font: 400 12px/16px var(--mono); }
+  .tr-call { display: flex; min-width: 0; overflow: hidden; }
+  .tr-name { flex: none; margin-right: 7px; color: var(--text); }
+  .tr-args { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-2); }
+  .tr-inline-result { display: flex; align-items: center; min-width: 0; }
+  .tr-arrow { flex: none; margin-right: 8px; color: var(--text-3); }
+  .tr-result { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-2); }
+  .tr-no-output { color: var(--text-3); }
+  #tr-table tbody tr.tr-compact .tr-args, #tr-table tbody tr.tr-compact .tr-result, #tr-table tbody tr.tr-compact .tr-arrow { display: none; }
+  #tr-details { display: flex; flex-direction: column; flex: none; width: clamp(320px, 38%, 440px); min-width: 0; border-left: .5px solid var(--line); background: var(--surface); overflow: hidden; }
+  #tr-details[hidden] { display: none; }
+  .tr-d-head { display: flex; align-items: center; gap: 8px; flex: none; height: 42px; padding: 0 8px 0 12px; border-bottom: .5px solid var(--line); }
+  .tr-d-where { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-2); font: 500 12px var(--mono); }
+  .tr-d-close { margin-left: auto; flex: none; width: 28px; height: 28px; border: 0; border-radius: 4px; background: none; color: var(--text-2); font-size: 18px; line-height: 18px; cursor: pointer; }
+  .tr-d-close:hover { color: var(--text); background: var(--hover); }
+  .tr-d-tabs { display: flex; flex: none; gap: 1px; height: 34px; padding: 0 8px; border-bottom: .5px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+  .tr-d-tabs::-webkit-scrollbar { display: none; }
+  .tr-d-tab { flex: none; padding: 0 9px; border: 0; background: none; color: var(--text-3); font: 400 13px var(--font); cursor: pointer; }
+  .tr-d-tab:hover { color: var(--text); background: var(--hover); }
+  .tr-d-tab[aria-selected='true'] { color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+  .tr-d-body { flex: 1; min-height: 0; padding: 10px 14px 14px; overflow: auto; }
+  .tr-d-rows { display: grid; grid-template-columns: 94px minmax(0, 1fr); align-items: baseline; gap: 2px 8px; margin: 0 0 10px; font-size: 13px; }
+  .tr-d-rows dt { color: var(--text-3); }
+  .tr-d-rows dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+  .tr-d-section { margin: 12px 0 4px; color: var(--text-2); font-size: 13px; font-weight: 600; }
+  .tr-d-body pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 4px; background: var(--code-bg); color: var(--text); font: 12px/19px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tr-d-body details { margin: 2px 0; }
+  .tr-d-body details > summary { color: var(--text-2); cursor: pointer; font-size: 13px; }
+  .tr-d-empty { color: var(--text-3); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -888,6 +1113,14 @@
 -->
 <div id="gutter-left" role="separator" aria-orientation="vertical" aria-label="resize the sidebar" aria-valuemin="12" aria-valuemax="48" aria-valuenow="22" tabindex="0"></div>
 <main>
+  <!--
+    The session's own header, above its tabs — DSH prints the conversation's name there, and this view showed it
+    only in the sidebar, so the reader had to look away from the conversation to know which one it was.
+  -->
+  <header id="session-head">
+    <h2 id="session-title">No session</h2>
+    <span id="session-branch" class="meta"></span>
+  </header>
   <nav id="views" aria-label="view">
     <button type="button" data-view="chat" aria-current="true">Chat</button>
     <button type="button" data-view="trajectory">Trajectory</button>
@@ -912,7 +1145,17 @@
     cleared and then filled into an element that no longer existed — the ledger rendered and the timeline
     silently did not. A band that scrolls the ledger cannot live inside the thing it scrolls.
   -->
-  <div id="timeline" data-view="trajectory" aria-label="timeline" role="navigation" hidden></div>
+  <div id="tr-toolbar" data-view="trajectory" hidden>
+    <button type="button" id="tr-duration" aria-pressed="false" title="Use actual duration">Duration</button>
+    <button type="button" id="tr-turns" aria-pressed="false" title="Collapse turns">Turns</button>
+    <button type="button" id="tr-calls" aria-pressed="false" title="Collapse calls">Calls</button>
+    <span id="tr-status"></span>
+    <label id="tr-search">
+      <span aria-hidden="true">⌕</span>
+      <input id="tr-search-input" type="search" placeholder="Search" aria-label="Search trajectory" />
+    </label>
+  </div>
+  <div id="timeline" data-view="trajectory" aria-label="trajectory timeline" role="navigation" hidden></div>
   <div id="ledger" data-view="trajectory" hidden></div>
   <div id="file" data-view="file" hidden>
     <header id="file-head"></header>
@@ -974,7 +1217,7 @@
       </div>
     </div>
   </form>
-  <div id="composer-status" aria-live="polite"><span data-stat="turns"></span><span data-stat="steps"></span></div>
+  <div id="composer-status" aria-live="polite"><span data-stat="turns"></span><span data-stat="steps"></span><span data-stat="tokens"></span><span data-stat="context"></span></div>
   <div id="attach-menu" role="menu" aria-label="Insert a file path" hidden></div>
 </div>
 </main>
@@ -1018,7 +1261,11 @@ ledger.addEventListener('scroll', () => {
 function followLedgerTail() {
   if (!followTail || view !== 'trajectory') return
   const place = () => {
-    if (followTail && view === 'trajectory') ledger.scrollTop = ledger.scrollHeight
+    if (followTail && view === 'trajectory') {
+      const pane = ledger.querySelector('.tr-pane')
+      const scroller = pane ?? ledger
+      scroller.scrollTop = scroller.scrollHeight
+    }
   }
   place()
   requestAnimationFrame(place)
@@ -1034,6 +1281,8 @@ function followLedgerTail() {
 const list = document.getElementById('adhoc')
 const adhocNote = document.getElementById('adhoc-note')
 let current = null
+/** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
+let goalView = null
 
 function add(kind, text, merge = true, label, tool) {
   if (text === '' || text === undefined) return
@@ -1396,6 +1645,8 @@ async function showView(next) {
   ledger.hidden = view !== 'trajectory'
   timeline.hidden = view !== 'trajectory'
   filePane.hidden = view !== 'file'
+  const toolbar = document.getElementById('tr-toolbar')
+  if (toolbar !== null) toolbar.hidden = view !== 'trajectory'
   if (view === 'trajectory' && current !== null) {
     followTail = true
     await showLedger(current)
@@ -1417,7 +1668,7 @@ async function showLedger(id) {
     if (!response.ok) return
     const body = await response.json()
     if (ticket !== ledgerFetches) return
-      renderLedger(body.ledger ?? { turns: [], loose: [], tokens: {}, records: 0, inFlight: 0 }, body.timeline ?? { spans: [], durationMs: 0 })
+      renderLedger(body, body.timeline ?? { spans: [], durationMs: 0 })
   } catch (error) {
     const note = document.createElement('div')
     note.className = 'turn denied'
@@ -1527,106 +1778,501 @@ function recordNode(record) {
  * picking it scrolls the ledger to that turn. A span whose turn is still running is striped rather than
  * given a width it cannot justify — the same rule the rows follow.
  */
-function renderTimeline(timeline_) {
-  timeline.replaceChildren()
-  const spans = timeline_?.spans ?? []
-  if (spans.length === 0) return
-  for (const span of spans) {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.style.left = (span.start * 100).toFixed(3) + '%'
-    button.style.width = Math.max((span.end - span.start) * 100, 0.4).toFixed(3) + '%'
-    button.dataset.turn = String(span.turn)
-    button.dataset.leading = span.kinds[0] ?? 'system'
-    if (span.running) button.dataset.running = 'true'
-    button.title = 'turn ' + span.turn + ' · ' + span.records + ' record(s)' + (span.running ? ' · running' : '')
-    button.setAttribute('aria-label', button.title)
-    button.addEventListener('click', () => {
-      const anchor = turnAnchors.get(span.turn)
-      if (anchor === undefined) return
-      for (const other of timeline.querySelectorAll('button')) other.removeAttribute('aria-current')
-      button.setAttribute('aria-current', 'true')
-      anchor.scrollIntoView({ block: 'start', behavior: 'smooth' })
-    })
-    timeline.append(button)
+/** The Trajectory area's state: the rows, the selection, and the toolbar's three modes. */
+const trajectory = {
+  rows: [],
+  turns: new Map(),
+  counts: new Map(),
+  timeline: { spans: [], durationMs: 0 },
+  data: {},
+  selected: -1,
+  durationActual: false,
+  collapsedTurns: false,
+  collapsedCalls: false,
+  expanded: new Set(),
+  search: '',
+  focus: null,
+  domainStart: undefined,
+  domainEnd: undefined,
+}
+
+/** DSH's kind vocabulary, which the table's tags speak. */
+const KIND_LABEL = { user: 'USER', assistant: 'ASSISTANT', reasoning: 'THINK', tool: 'TOOL', context: 'CONTEXT', system: 'SYSTEM', compaction: 'COMPACTED' }
+
+/** A record's one-line body: its first line, or what the row is when it has none. */
+function previewOf(record) {
+  const text = String(record.text ?? '').split('\n')[0] ?? ''
+  if (text !== '') return text
+  if (record.kind === 'assistant') return '(tool call only)'
+  if (record.kind === 'tool') return record.name ?? record.label ?? 'tool'
+  return record.label ?? record.kind
+}
+
+/** The ledger flattened into table rows, with turn and step boundaries on the rows themselves. */
+function rowsOf(data) {
+  if (Array.isArray(data.rows)) return data.rows
+  /** A server that does not send the projection still gets a table: flatten it here, the same way. */
+  const rows = []
+  for (const turn of data.turns ?? []) {
+    for (const step of turn.steps ?? []) {
+      ;(step.records ?? []).forEach((record, index) => {
+        rows.push({
+          turn: turn.index,
+          step: step.index,
+          kind: record.kind,
+          record,
+          turnStart: rows.length === 0 || rows[rows.length - 1].turn !== turn.index,
+          stepStart: index === 0,
+          loose: false,
+        })
+      })
+    }
   }
-  const legend = document.createElement('div')
-  legend.id = 'timeline-legend'
-  const total = timeline_?.durationMs ?? 0
-  legend.textContent = [human(total) + ' recorded', spans.length + ' turn(s)'].filter(Boolean).join(' · ')
-  timeline.after(legend)
+  for (const record of data.loose ?? []) rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true })
+  return rows
 }
 
 function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   /**
-   * The pane is cleared here, not only in the caller.
-   *
-   * Measured in a browser: switching view and finishing a live turn at the same moment produced two ledgers
-   * stacked in one pane. Both were real renders — the two calls raced — and clearing at the point of drawing
-   * is what makes a render idempotent regardless of who called it.
+   * The pane is cleared here, not only in the caller: switching view and finishing a live turn at the
+   * same moment used to stack two ledgers in one pane, and clearing at the point of drawing makes a
+   * render idempotent whoever called it.
    */
-  ledger.replaceChildren()
   turnAnchors.clear()
-  for (const stale of document.querySelectorAll('#timeline-legend')) stale.remove()
-  renderTimeline(timeline_)
-  const summary = document.createElement('div')
-  summary.className = 'summary'
-  const bits = [data.records + ' record(s)']
-  if (data.turns.length > 0) bits.push(data.turns.length + ' turn(s)')
-  if (data.inFlight > 0) bits.push(data.inFlight + ' running')
-  const tokens = data.tokens ?? {}
-  if (tokens.input !== undefined) bits.push('in ' + tokens.input + ' tokens (reported)')
-  if (tokens.output !== undefined) bits.push('out ' + tokens.output + ' tokens (reported)')
-  if (tokens.estimated !== undefined) bits.push(tokens.estimated + ' tokens estimated')
-  summary.textContent = bits.join(' · ')
-  ledger.append(summary)
+  trajectory.rows = rowsOf(data.ledger ?? data)
+  trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
+  trajectory.timeline = timeline_
+  trajectory.data = data
+  trajectory.selected = -1
+  trajectory.expanded.clear()
+  trajectory.focus = null
+  const times = trajectory.rows
+    .map((row) => row.record?.startedAt)
+    .filter((at) => typeof at === 'string')
+    .map((at) => Date.parse(at))
+    .filter((at) => !Number.isNaN(at))
+  trajectory.domainStart = times.length > 0 ? Math.min(...times) : undefined
+  trajectory.domainEnd = times.length > 0 ? Math.max(...times) : undefined
 
-  for (const turn of data.turns) {
-    const box = document.createElement('section')
-    box.className = 'turn'
-    const header = document.createElement('header')
-    const when = clock(turn.startedAt)
-    header.textContent = ['turn ' + turn.index, when, human(turn.durationMs)].filter(Boolean).join(' · ')
-    box.append(header)
-    for (const step of turn.steps) {
-      const stepBox = document.createElement('div')
-      stepBox.className = 'step'
-      const stepHeader = document.createElement('div')
-      stepHeader.className = 'step > header'
-      const bits2 = ['step ' + step.index, step.model, clock(step.startedAt), human(step.durationMs)].filter(Boolean)
-      stepHeader.textContent = bits2.join(' · ')
-      stepBox.append(stepHeader)
-      for (const record of step.records) stepBox.append(recordNode(record))
-      box.append(stepBox)
-    }
-    turnAnchors.set(turn.index, box)
-    ledger.append(box)
-  }
+  /** DSH's shape: a scroll pane holding one table, and a details pane on the right. */
+  const split = document.createElement('div')
+  split.className = 'tr-split'
+  const pane = document.createElement('div')
+  pane.className = 'tr-pane'
+  const table = document.createElement('table')
+  table.id = 'tr-table'
+  const head = document.createElement('thead')
+  const headRow = document.createElement('tr')
+  const eventHead = document.createElement('th')
+  eventHead.className = 'tr-th-event'
+  eventHead.textContent = 'Event'
+  const contentHead = document.createElement('th')
+  contentHead.textContent = 'Content'
+  headRow.append(eventHead, contentHead)
+  head.append(headRow)
+  table.append(head, document.createElement('tbody'))
+  pane.append(table)
+  const details = document.createElement('aside')
+  details.id = 'tr-details'
+  details.hidden = true
+  split.append(pane, details)
+  ledger.replaceChildren(split)
 
-  /**
-   * Records that belong to no turn are shown rather than hidden. A ledger that quietly drops what it does not
-   * recognise cannot be trusted to be complete.
-   */
-  if (data.loose !== undefined && data.loose.length > 0) {
-    const box = document.createElement('section')
-    box.className = 'turn loose'
-    const header = document.createElement('header')
-    header.textContent = 'before any turn'
-    box.append(header)
-    for (const record of data.loose) box.append(recordNode(record))
-    ledger.append(box)
+  const status = document.getElementById('tr-status')
+  if (status !== null) {
+    const ledgerData = data.ledger ?? {}
+    const bits = [ledgerData.records ?? trajectory.rows.length, 'records']
+    if ((ledgerData.turns?.length ?? 0) > 0) bits.push(ledgerData.turns.length + ' turns')
+    const tokens = ledgerData.tokens ?? {}
+    if (tokens.input !== undefined) bits.push('in ' + tokens.input)
+    if (tokens.output !== undefined) bits.push('out ' + tokens.output)
+    if (tokens.estimated !== undefined) bits.push(tokens.estimated + ' estimated')
+    status.textContent = bits.join(' · ')
   }
+  renderTimeline(timeline_, data)
+  renderRows()
 }
 
-/**
- * The goal bar's state, refreshed whenever the selected session changes or a verb is applied.
- *
- * The bar renders **the service's own fields** — phase, activation, rounds, blocked reason — and computes
- * nothing about the lifecycle itself. Which buttons appear is the one decision made here, and it follows
- * the transition table: pause an active goal, resume a stopped one, complete anything unfinished, edit or
- * clear whenever a goal is current.
- */
-let goalView = null
+/** Re-draw the table body from the rows and the current modes. */
+function renderRows() {
+  const body = document.querySelector('#tr-table tbody')
+  if (body === null) return
+  turnAnchors.clear()
+  trajectory.counts = new Map()
+  for (const row of trajectory.rows) trajectory.counts.set(row.turn, (trajectory.counts.get(row.turn) ?? 0) + 1)
+  const query = trajectory.search.trim().toLowerCase()
+  const shown = []
+  for (let index = 0; index < trajectory.rows.length; index += 1) {
+    const row = trajectory.rows[index]
+    const record = row.record ?? {}
+    if (query !== '') {
+      const haystack = [row.kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase()
+      if (!haystack.includes(query)) continue
+    }
+    if (trajectory.collapsedTurns && !row.turnStart && !trajectory.expanded.has(row.turn)) continue
+    shown.push([row, index])
+  }
+  body.replaceChildren(...shown.map(([row, index]) => rowNode(row, index)))
+}
+
+function rowNode(row, index) {
+  const record = row.record ?? {}
+  const tr = document.createElement('tr')
+  tr.dataset.kind = row.kind
+  tr.dataset.index = String(index)
+  tr.dataset.turn = String(row.turn)
+  if (row.step !== undefined) tr.dataset.step = String(row.step)
+  if (row.turnStart) tr.dataset.turnStart = 'true'
+  if (row.stepStart) tr.dataset.stepStart = 'true'
+  if (record.inFlight === true) tr.dataset.inflight = 'true'
+  if (record.state === 'error') tr.dataset.error = 'true'
+  if (trajectory.collapsedCalls && row.kind === 'tool') tr.classList.add('tr-compact')
+  if (trajectory.selected === index) tr.dataset.selected = 'true'
+  if (trajectory.focus !== null && record.startedAt !== undefined) {
+    const at = Date.parse(record.startedAt)
+    if (!Number.isNaN(at) && (at < trajectory.focus.from || at > trajectory.focus.to)) tr.dataset.focus = 'outside'
+  }
+  const event = document.createElement('td')
+  event.className = 'tr-event'
+  if (row.turnStart) {
+    const rail = document.createElement('span')
+    rail.className = 'tr-rail'
+    const label = document.createElement('span')
+    label.className = 'tr-turn-label'
+    label.textContent = row.loose ? 'between turns' : 'Turn ' + row.turn
+    event.append(rail, label)
+  }
+  const tag = document.createElement('span')
+  tag.className = 'tr-kind'
+  tag.dataset.kind = row.kind
+  tag.textContent = KIND_LABEL[row.kind] ?? String(row.kind).toUpperCase()
+  const when = document.createElement('span')
+  when.className = 'tr-when'
+  when.textContent = clock(record.startedAt) ?? ''
+  event.append(tag, when)
+  const content = document.createElement('td')
+  content.className = 'tr-content'
+  const collapsed = trajectory.collapsedTurns && row.turnStart && !trajectory.expanded.has(row.turn)
+  if (collapsed) {
+    const summary = document.createElement('span')
+    summary.className = 'tr-text'
+    summary.textContent = '▸ ' + (trajectory.counts.get(row.turn) ?? 0) + ' records — click to expand'
+    content.append(summary)
+  } else if (row.kind === 'tool') {
+    content.append(toolRowNode(record))
+  } else {
+    const text = document.createElement('span')
+    text.className = 'tr-text'
+    text.textContent = previewOf(record) + (record.inFlight === true ? ' · running' : '')
+    content.append(text)
+  }
+  tr.append(event, content)
+  tr.tabIndex = 0
+  tr.setAttribute('role', 'row')
+  if (row.turnStart) turnAnchors.set(row.turn, tr)
+  tr.addEventListener('click', () => {
+    if (collapsed) {
+      trajectory.expanded.add(row.turn)
+      renderRows()
+      return
+    }
+    selectRow(index)
+  })
+  tr.addEventListener('keydown', (keyEvent) => {
+    if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+      keyEvent.preventDefault()
+      tr.click()
+    }
+  })
+  return tr
+}
+
+/** One row for one tool call: the request on the left, the result on the right, one element. */
+function toolRowNode(record) {
+  const wrap = document.createElement('div')
+  wrap.className = 'tr-tool'
+  const call = document.createElement('span')
+  call.className = 'tr-call'
+  const name = document.createElement('span')
+  name.className = 'tr-name'
+  name.textContent = record.name ?? String(record.label ?? 'tool').replace(/^→ /, '')
+  const args = document.createElement('span')
+  args.className = 'tr-args'
+  args.textContent = String(record.text ?? '').replace(/\s+/g, ' ')
+  call.append(name, args)
+  const arrow = document.createElement('span')
+  arrow.className = 'tr-arrow'
+  arrow.textContent = '→'
+  const result = document.createElement('span')
+  result.className = 'tr-result'
+  const out = String(record.result ?? '')
+  result.textContent = out === '' ? 'no output' : out.split('\n')[0] ?? ''
+  if (out === '') result.classList.add('tr-no-output')
+  /** The arrow rides in the result cell: as a third grid item it wrapped the row onto a second line. */
+  const answer = document.createElement('span')
+  answer.className = 'tr-inline-result'
+  answer.append(arrow, result)
+  wrap.append(call, answer)
+  return wrap
+}
+
+/** Select a row and show it in the details pane. */
+function selectRow(index) {
+  const row = trajectory.rows[index]
+  if (row === undefined) return
+  trajectory.selected = index
+  for (const tr of ledger.querySelectorAll('#tr-table tbody tr')) tr.removeAttribute('data-selected')
+  const node = ledger.querySelector('#tr-table tbody tr[data-index="' + index + '"]')
+  if (node !== null) node.setAttribute('data-selected', 'true')
+  renderDetails(row)
+}
+
+function trRows(pairs) {
+  const list = document.createElement('dl')
+  list.className = 'tr-d-rows'
+  for (const [key, value] of pairs) {
+    if (value === undefined || value === null || value === '') continue
+    const term = document.createElement('dt')
+    term.textContent = key
+    const definition = document.createElement('dd')
+    definition.textContent = String(value)
+    list.append(term, definition)
+  }
+  return list
+}
+
+function trPre(text) {
+  const pre = document.createElement('pre')
+  pre.textContent = text
+  return pre
+}
+
+function trSection(title) {
+  const heading = document.createElement('div')
+  heading.className = 'tr-d-section'
+  heading.textContent = title
+  return heading
+}
+
+function trEmpty(text) {
+  const empty = document.createElement('p')
+  empty.className = 'tr-d-empty'
+  empty.textContent = text
+  return empty
+}
+
+/** The right pane: Summary, Payload, Result and Timing, as DSH's tabs. */
+function renderDetails(row) {
+  const details = document.getElementById('tr-details')
+  if (details === null) return
+  const record = row.record ?? {}
+  const turn = trajectory.turns.get(row.turn)
+  const step = (turn?.steps ?? []).find((entry) => entry.index === row.step)
+  details.hidden = false
+  details.replaceChildren()
+  const head = document.createElement('div')
+  head.className = 'tr-d-head'
+  const tag = document.createElement('span')
+  tag.className = 'tr-kind'
+  tag.dataset.kind = row.kind
+  tag.textContent = KIND_LABEL[row.kind] ?? String(row.kind).toUpperCase()
+  const where = document.createElement('span')
+  where.className = 'tr-d-where'
+  where.textContent = [row.loose ? 'before any turn' : 'Turn ' + row.turn, row.step !== undefined ? 'Step ' + row.step : null].filter(Boolean).join(' · ')
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.className = 'tr-d-close'
+  close.textContent = '×'
+  close.setAttribute('aria-label', 'close details')
+  close.addEventListener('click', () => {
+    details.hidden = true
+    trajectory.selected = -1
+    for (const tr of ledger.querySelectorAll('#tr-table tbody tr')) tr.removeAttribute('data-selected')
+  })
+  head.append(tag, where, close)
+  const tabs = document.createElement('div')
+  tabs.className = 'tr-d-tabs'
+  const bodyBox = document.createElement('div')
+  bodyBox.className = 'tr-d-body'
+  const sections = [
+    ['Summary', () => summarySection(row, record, step)],
+    ['Payload', () => (String(record.text ?? '') === '' ? trEmpty('nothing was recorded as a payload') : trPre(String(record.text)))],
+    ['Result', () => (String(record.result ?? '') === '' ? trEmpty('no result recorded') : trPre(String(record.result)))],
+    ['Timing', () => timingSection(record, turn, step)],
+  ]
+  const show = (index) => {
+    tabs.querySelectorAll('.tr-d-tab').forEach((tab, at) => tab.setAttribute('aria-selected', at === index ? 'true' : 'false'))
+    bodyBox.replaceChildren(sections[index][1]())
+  }
+  sections.forEach(([label], index) => {
+    const tab = document.createElement('button')
+    tab.type = 'button'
+    tab.className = 'tr-d-tab'
+    tab.textContent = label
+    tab.setAttribute('role', 'tab')
+    tab.addEventListener('click', () => show(index))
+    tabs.append(tab)
+  })
+  details.append(head, tabs, bodyBox)
+  show(0)
+}
+
+function summarySection(row, record, step) {
+  const box = document.createElement('div')
+  box.append(
+    trRows([
+      ['Kind', KIND_LABEL[row.kind] ?? row.kind],
+      ['Status', record.inFlight === true ? 'Running' : record.state === 'error' ? 'Failed' : 'Completed'],
+      ['Model', step?.model],
+      ['Started', clock(record.startedAt)],
+      ['Duration', human(record.durationMs)],
+      ['TTFT', human(record.ttftMs)],
+      ['Turn', row.loose ? 'none' : row.turn],
+      ['Step', row.step],
+    ]),
+  )
+  if (row.kind === 'tool') {
+    box.append(trSection('Payload'), trPre(String(record.text ?? '')))
+    box.append(trSection('Result'), trPre(String(record.result ?? '(no result recorded)')))
+  } else if (record.text !== undefined && String(record.text) !== '') {
+    box.append(trSection('Content'), trPre(String(record.text)))
+  }
+  if (record.note !== undefined) box.append(trEmpty(String(record.note)))
+  return box
+}
+
+function timingSection(record, turn, step) {
+  return trRows([
+    ['Started', clock(record.startedAt)],
+    ['Duration', human(record.durationMs)],
+    ['TTFT', human(record.ttftMs)],
+    ['Turn duration', human(turn?.durationMs)],
+    ['Step duration', human(step?.durationMs)],
+    ['Input tokens', record.usage?.inputTokens],
+    ['Output tokens', record.usage?.outputTokens],
+    ['Token source', record.usageSource],
+  ])
+}
+
+/** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
+function renderTimeline(timeline_, data = {}) {
+  timeline.replaceChildren()
+  const spans = timeline_?.spans ?? []
+  if (spans.length === 0) return
+  const total = timeline_?.durationMs ?? 0
+  const laneKinds = { input: ['user', 'context', 'system'], model: ['assistant', 'reasoning', 'compaction'], tools: ['tool'] }
+  const wrapper = document.createElement('div')
+  wrapper.className = 'tr-lanes'
+  const focusBox = document.createElement('div')
+  focusBox.className = 'tr-focus'
+  wrapper.append(focusBox)
+  const equal = 1 / spans.length
+  for (const lane of Object.keys(laneKinds)) {
+    const laneBox = document.createElement('div')
+    laneBox.className = 'tr-lane'
+    laneBox.dataset.lane = lane
+    const label = document.createElement('span')
+    label.className = 'tr-lane-label'
+    label.textContent = lane
+    const track = document.createElement('div')
+    track.className = 'tr-lane-track'
+    spans.forEach((span, index) => {
+      const kinds = span.kinds ?? []
+      if (!kinds.some((kind) => laneKinds[lane].includes(kind))) return
+      const tick = document.createElement('button')
+      tick.type = 'button'
+      tick.className = 'tr-tick'
+      tick.dataset.lane = lane
+      const left = trajectory.durationActual ? span.start : index * equal
+      const width = trajectory.durationActual ? Math.max(span.end - span.start, 0.004) : equal * 0.9
+      tick.style.left = (left * 100).toFixed(3) + '%'
+      tick.style.width = (width * 100).toFixed(3) + '%'
+      if (span.running) tick.dataset.running = 'true'
+      tick.title = 'turn ' + span.turn + ' · ' + (kinds.join(', ') || 'records')
+      tick.setAttribute('aria-label', tick.title)
+      tick.addEventListener('click', (clickEvent) => {
+        clickEvent.stopPropagation()
+        const anchor = turnAnchors.get(span.turn)
+        if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      })
+      track.append(tick)
+    })
+    laneBox.append(label, track)
+    wrapper.append(laneBox)
+  }
+  timeline.append(wrapper)
+  /** Drag across the strip to focus a time window; rows outside it dim, as DSH does. */
+  let dragging = false
+  let startX = 0
+  const fractionAt = (clientX) => {
+    const bounds = timeline.getBoundingClientRect()
+    return Math.min(Math.max((clientX - bounds.left) / Math.max(bounds.width, 1), 0), 1)
+  }
+  const setWindow = (from, to) => {
+    if (to - from < 0.01) {
+      focusBox.style.display = 'none'
+      trajectory.focus = null
+    } else {
+      focusBox.style.display = 'block'
+      focusBox.style.left = (from * 100).toFixed(2) + '%'
+      focusBox.style.width = ((to - from) * 100).toFixed(2) + '%'
+      const start = trajectory.domainStart
+      const end = trajectory.domainEnd
+      trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
+    }
+    renderRows()
+  }
+  timeline.onpointerdown = (pointerEvent) => {
+    if (pointerEvent.target.closest('.tr-tick') !== null) return
+    dragging = true
+    startX = fractionAt(pointerEvent.clientX)
+    focusBox.style.display = 'block'
+    focusBox.style.left = (startX * 100).toFixed(2) + '%'
+    focusBox.style.width = '0%'
+    timeline.setPointerCapture?.(pointerEvent.pointerId)
+  }
+  timeline.onpointermove = (pointerEvent) => {
+    if (!dragging) return
+    const x = fractionAt(pointerEvent.clientX)
+    setWindow(Math.min(startX, x), Math.max(startX, x))
+  }
+  timeline.onpointerup = (pointerEvent) => {
+    if (!dragging) return
+    dragging = false
+    const x = fractionAt(pointerEvent.clientX)
+    setWindow(Math.min(startX, x), Math.max(startX, x))
+  }
+  const legend = document.createElement('div')
+  legend.id = 'timeline-legend'
+  legend.textContent = [human(total) + ' recorded', spans.length + ' turn(s)'].filter(Boolean).join(' · ')
+  timeline.append(legend)
+}
+
+/** DSH's toolbar: the duration mode, the two collapse switches, and search. */
+function wireTrajectoryToolbar() {
+  for (const [id, key] of [
+    ['tr-duration', 'durationActual'],
+    ['tr-turns', 'collapsedTurns'],
+    ['tr-calls', 'collapsedCalls'],
+  ]) {
+    const button = document.getElementById(id)
+    if (button === null) continue
+    button.addEventListener('click', () => {
+      trajectory[key] = !trajectory[key]
+      button.setAttribute('aria-pressed', trajectory[key] ? 'true' : 'false')
+      if (key === 'durationActual') renderTimeline(trajectory.timeline, trajectory.data)
+      else renderRows()
+    })
+  }
+  const search = document.getElementById('tr-search-input')
+  if (search !== null) {
+    search.addEventListener('input', () => {
+      trajectory.search = search.value
+      renderRows()
+    })
+  }
+}
+wireTrajectoryToolbar()
 
 async function refreshGoal() {
   const bar = document.getElementById('goal-bar')
@@ -1689,6 +2335,8 @@ async function refreshGoal() {
 }
 
 async function showSession(id) {
+  lastTurnUsage = null
+  lastTurnSeconds = 0
   current = id
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
@@ -1712,6 +2360,11 @@ async function showSession(id) {
      * session: the choice travels with the request and the server records it on the session it made.
      */
     applySessionModel(body.endpoint ?? null, body.model ?? null)
+    /** The header follows the conversation, the way DSH's does. */
+    const titleCell = document.getElementById('session-title')
+    const branchCell = document.getElementById('session-branch')
+    if (titleCell !== null) titleCell.textContent = typeof body.title === 'string' && body.title.length > 0 ? body.title : id
+    if (branchCell !== null) branchCell.textContent = typeof body.cwd === 'string' ? body.cwd : ''
     /**
      * Each turn renders inside its own guard.
      *
@@ -2020,9 +2673,15 @@ const COLUMN_MIN = 560
 const COLUMN_MAX = 1200
 const COLUMN_STORAGE = 'heddle.chatColumn'
 
-/** The width the column has when nobody has chosen one: the view area, less its margins. */
+/**
+ * The width the column has when nobody has chosen one: **DSH's 680px**, which is its measured text column.
+ *
+ * The default used to be "the view area, less its margins", which on a wide window made the transcript 830px
+ * and broke the line length the typography was chosen for. A person can still widen it with the grip — the
+ * default is just the reference width, not the maximum.
+ */
 function columnDefault() {
-  return chatMain.clientWidth - 48
+  return Math.min(680, chatMain.clientWidth - 48)
 }
 /** Write the column, clamped, and report what was actually written. */
 function setColumn(width) {
@@ -2156,7 +2815,7 @@ let queueSeq = 0
 let queueExpanded = false
 let editing = null
 
-function previewOf(text) {
+function queuePreview(text) {
   const flat = text.replace(/\s+/g, ' ').trim()
   const chars = Array.from(flat)
   return chars.length > QUEUE_PREVIEW_CHARS ? `${chars.slice(0, QUEUE_PREVIEW_CHARS).join('')}…` : flat
@@ -2336,7 +2995,7 @@ function queueRow(item) {
   }
   const preview = document.createElement('span')
   preview.className = 'preview'
-  preview.textContent = previewOf(item.text)
+  preview.textContent = queuePreview(item.text)
   preview.title = item.text
   row.append(preview)
   if (item.status === 'sending' || item.status === 'failed') {
@@ -2499,6 +3158,7 @@ async function sendTurn(body) {
 }
 
 async function runTurn(text, key) {
+  const startedAt = performance.now()
   const target = key === QUEUE_KEY_NONE ? null : key
   const response = await sendTurn({
     /**
@@ -2554,8 +3214,18 @@ async function runTurn(text, key) {
         if (target === null) {
           current = payload.session
           adoptSession(payload.session)
+          /** A Stop pressed before the session existed lands now. */
+          if (stopRequested) {
+            stopRequested = false
+            void stopTurn()
+          }
         }
       } else if (name === 'done') {
+        /** What the provider said the turn cost, and how long it took, if it said anything. */
+        stopRequested = false
+        lastTurnUsage = payload.usage ?? null
+        lastTurnSeconds = (performance.now() - startedAt) / 1000
+        updateStatusBar()
         for (const denial of payload.denials ?? []) add('denied', `${denial.tool}: ${denial.message}`)
         /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
         settleChat()
@@ -2576,6 +3246,7 @@ async function runTurn(text, key) {
          * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
          * sentence in the transcript for something the reader asked for.
          */
+        stopRequested = false
         settleChat()
         void renderSettledAnswers()
         if (typeof payload.session === 'string') runningSessions.delete(payload.session)
@@ -2668,6 +3339,16 @@ function renderComposerState() {
  * and nothing about tokens yet, so the line prints the two it has and the model that answers. A number this
  * page cannot measure is not printed rather than invented.
  */
+/**
+ * The last completed turn's reported usage and duration, when the provider reported both.
+ *
+ * DSH prints a token rate and a context share under its composer. Both need numbers a provider sends, so they
+ * are kept here rather than invented: no usage means no rate, and no declared `contextWindow` means no
+ * percentage — a made-up denominator would be worse than an empty cell.
+ */
+let lastTurnUsage = null
+let lastTurnSeconds = 0
+
 function updateStatusBar() {
   if (statusBar === null) return
   let turns = 0
@@ -2680,11 +3361,39 @@ function updateStatusBar() {
   const stepsCell = statusBar.querySelector('[data-stat="steps"]')
   if (turnsCell !== null) turnsCell.textContent = `${turns} turn${turns === 1 ? '' : 's'}`
   if (stepsCell !== null) stepsCell.textContent = `${steps} step${steps === 1 ? '' : 's'}`
+  const tokensCell = statusBar.querySelector('[data-stat="tokens"]')
+  if (tokensCell !== null) {
+    const out = lastTurnUsage?.outputTokens
+    tokensCell.textContent = typeof out === 'number' && lastTurnSeconds > 0 ? `${Math.round(out / lastTurnSeconds)} tok/s` : ''
+  }
+  const contextCell = statusBar.querySelector('[data-stat="context"]')
+  if (contextCell !== null) {
+    const used = lastTurnUsage?.inputTokens
+    const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
+    const window = endpoint?.contextWindow
+    contextCell.textContent =
+      typeof used === 'number' && typeof window === 'number' && window > 0
+        ? `${Math.round((used / window) * 100)}% context`
+        : ''
+  }
 }
+
+/**
+ * A stop asked for before the turn has named its session.
+ *
+ * Measured: the button appears as soon as the message is being delivered, and a turn that created the session
+ * has no id for those first milliseconds — so a click could reach a button that knew nothing to stop. It is
+ * remembered and delivered the moment the session event names it, which is the behaviour a person expects from
+ * a Stop that looked pressable.
+ */
+let stopRequested = false
 
 /** Ask the server to end the turn that is running. A no-op when it already ended is not a failure. */
 async function stopTurn() {
-  if (composerKey === QUEUE_KEY_NONE) return
+  if (composerKey === QUEUE_KEY_NONE) {
+    stopRequested = true
+    return
+  }
   try {
     await fetch(`/api/sessions/${encodeURIComponent(composerKey)}/stop`, { method: 'POST' })
   } catch {

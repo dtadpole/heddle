@@ -76,6 +76,31 @@ A `View options` menu with three groups, each a radio-ish list:
 - A footer of live facts: `25 turns 643 steps · 209 tok/s`, `226M tok · Cache hit 99%`,
   `33% of context used`.
 
+## Presentation, measured
+
+The feature half was matched first; this half was matched by **measuring both UIs in a browser** and by comparing
+screenshots of the same view, rather than by eye. Every number below was read from `getComputedStyle` on
+2026-10-17, on DSH's session view at 127.0.0.1:8080 and on Heddle's at 8082.
+
+| Thing | DSH | Heddle before | Heddle now |
+|---|---|---|---|
+| Page surface | one dark ground `#151517`, both columns are **inset 12px and rounded 28px** | flat columns, flush edges | inset 12px, both panels `border-radius: 28px` |
+| List row | **34px** tall, `border-radius: 12px`, `padding: 0 8px`, `gap: 6px`, 14px text | 26px tall, radius 4.8px, padding 2.6/4.8 | 34px, radius 12px, `0 8px`, gap 6px |
+| Row age | 11px, muted `#adb2b8`, right-aligned | 11-12px mixed | 11px `--text-3` |
+| Row controls | nothing until hover; then `…`, archive, pin | `…` always visible | all three hidden until hover **or keyboard focus** (`:focus-within`), always shown where hover is impossible |
+| Reading text | **13px on 20px**, secondary `#cfd3d6` | 15px on 24px | 13px on 20px, gap 8px |
+| Code | 12px on 19px, mono stack starting `SF Mono` | 13.2px | 12px family token, 19px leading |
+| User turn | **full width, left-aligned**, quiet surface, radius 12px | right-aligned bubble, radius 20px | stretched, left-aligned, radius 12px, surface `#2c2c2e` |
+| Panel header | session name + chips above the tabs | *absent* — the name was only in the sidebar | `#session-head` with the name (15px/600) and its folder in muted 11px |
+| Composer card | 28px radius, `#2c2c2e` | already matched | unchanged |
+| Status line | 11-12px muted: turns, steps, tok/s, cache, context % | turns/steps/tok-s/context, 12px | unchanged (the features were already there) |
+| Frame radius scale | xs 4 · sm 8 · md 12 · lg 16 · xl 20 · panel 28 | one `--radius: 8px` | `--radius-md: 12px`, `--radius-panel: 28px`, the rest as before |
+
+What is deliberately **not** copied: the fixed dark palette (Heddle keeps its light/dark tokens and adopts DSH's
+values as the dark half), DSH's right-hand tool sidebar and its subagent/background-job chips (Heddle has no such
+mechanisms), and its turn toolbar with the colour-coded timeline band (Heddle's Trajectory view is the equivalent
+projection and already exists).
+
 ## What Heddle does today
 
 | Area | Heddle | DSH | Gap |

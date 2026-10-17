@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { runTurn } from '../agent/loop.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
-import { projectLedger, projectTimeline } from './ledger.ts'
+import { projectLedger, projectRows, projectTimeline } from './ledger.ts'
 import { PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
@@ -1159,7 +1159,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
        * disagree with the rows beneath it about when anything happened.
        */
       const ledger = projectLedger(events)
-      respond(response, 200, 'application/json', `${JSON.stringify({ id, ledger, timeline: projectTimeline(ledger) }, null, 2)}\n`)
+      /**
+       * The rows travel with the ledger: DSH's Trajectory table is one row per event with the turn and
+       * step boundaries on the rows, and that projection is pure, so it is made and judged on this side
+       * rather than rebuilt in the page.
+       */
+      respond(response, 200, 'application/json', `${JSON.stringify({ id, ledger, rows: projectRows(ledger), timeline: projectTimeline(ledger) }, null, 2)}\n`)
       return
     }
     /** The session's own record, which is where a switch from the panel was written. */
@@ -1179,6 +1184,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            */
           endpoint: meta?.endpoint ?? null,
           model: meta?.model ?? null,
+          /**
+           * The name the session is read under, and the folder it belongs to — the two things DSH prints above a
+           * conversation's tabs. The page had them only in the sidebar, so a reader had to look away to know which
+           * session was open.
+           */
+          title: meta?.title ?? null,
+          cwd: meta?.cwd ?? null,
           /**
            * An answer travels as the document it is, not only as its source.
            *
