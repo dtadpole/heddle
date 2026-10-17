@@ -18,6 +18,13 @@ Goal management, modelled on DSH's five `dsh-goal*` packages — the reading wit
 | [`tool.ts`](tool.ts) | The **model's verbs**: `create_goal`, `get_goal`, `update_goal`. Two policies live in the descriptions where a model reads them — a long request may be inferred to be a goal, and a paused goal is resumed by the *person*, not the model |
 | [`driver.ts`](driver.ts) | The **round driver**: a level-triggered reconciler. A round is a user message the harness writes, carrying `source={kind:'goal', goalId, revision, round}`, which is what `foldGoal` counts as an admitted round; the driver re-evaluates a pure condition on every edge, yields between rounds, and blocks with `round-limit` at the cap |
 
+## The rule it follows
+
+The driver is a worked example of
+[reentrant conditions](../../_conventions_/heddle-conventions/reentrant-conditions.md): edges are hints, the
+decision is a pure function of the folded goal, a mid-chain edge is re-evaluated rather than dropped, and a
+restart is handled by a boot sweep because no edge fires for a session that was already active.
+
 ## The rule that diverges from DSH
 
 DSH keeps `activation` process-local and **disarms** a goal when a session is reopened, so a restarted

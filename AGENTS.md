@@ -69,6 +69,11 @@ and these are the articles that bind here.
   — headed is for exploration and human-assisted debugging, headless for automation, and every artifact
   that needs a browser states in its `INDEX.md` whether it runs headless, headed or needs none.
 
+Heddle's **own** conventions live in [`_conventions_/`](_conventions_/INDEX.md) — rules that are specific to
+this repository rather than borrowed from `reflection`, each with the instance that made it necessary and the
+test that judges it. The first is
+[reentrant conditions](_conventions_/heddle-conventions/reentrant-conditions.md).
+
 ## The rules that are local to this repository
 
 - **A renderer is a library, not a rewrite.** Markdown and code rendering use maintained, low-dependency
