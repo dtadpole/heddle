@@ -21,7 +21,7 @@ Goal management, modelled on DSH's five `dsh-goal*` packages — the reading wit
 ## The rule it follows
 
 The driver is a worked example of
-[reentrant components](../../_conventions_/reentrant-components/INDEX.md): edges are hints, the
+[goal reentrancy](../../_conventions_/goal-reentrant/INDEX.md): edges are hints, the
 decision is a pure function of the folded goal, a mid-chain edge is re-evaluated rather than dropped, and a
 restart is handled by a boot sweep because no edge fires for a session that was already active.
 
