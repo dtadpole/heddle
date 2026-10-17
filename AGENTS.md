@@ -34,7 +34,6 @@ loads `AGENTS.md` and nothing else.
 | [`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md) | what completes this project, part by part |
 | [`_verifiers_/`](_verifiers_/INDEX.md) | the verifications that decide those parts, and the owner-requested views beside them |
 | [`_tools_/`](_tools_/INDEX.md) | the runner, the shared check helpers, and the Web UI daemon |
-| [`_tests_/`](_tests_/INDEX.md) | the tools' component test suites, one per subject |
 | [`_skills_/`](_skills_/INDEX.md) | the procedures a repeated job follows, one per procedure |
 | [`src/`](src/INDEX.md) | the harness itself |
 | [`test/`](test/INDEX.md) | the framework's own unit suite |
@@ -101,7 +100,7 @@ that made it necessary and the test that judges it. The first is
 npm run check                      # types, source and tests
 npm test                           # the framework's unit suite
 npm run build                      # emit dist/, which the verifiers judge
-node --test _tests_/*/unit.test.mjs   # the tools' component suites, with no browser and no build
+node --test _tools_/*/_tests_/*/unit.test.mjs   # each tool's component suites, no browser and no build
 for d in _verifiers_/*/; do sh "$d/verify.sh"; done
 ```
 
