@@ -14,9 +14,9 @@ A UI on localhost is still a door. This part judges that a token is generated an
 
 ## Where it runs
 
-**Headless browser.** The checks that need a page open a real Chrome with no window, through
-[`_tools_/browser-use/`](../../_tools_/browser-use/INDEX.md); the rest drive the CLI and local HTTP
-doubles. Nothing here needs a display, so it runs unattended.
+**No browser.** The checks drive the CLI and the server over local HTTP, and read the served page as
+text where the page's own source is the subject. Nothing here needs a display or a window; the page's
+rendering is judged by the Web UI parts that own it.
 
 ## What decides it
 
