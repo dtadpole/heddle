@@ -324,6 +324,11 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
           userBg: userStyle ? userStyle.backgroundColor : null,
           userPadding: userStyle ? userStyle.padding : null,
           userAlign: userStyle ? userStyle.alignSelf : null,
+          /** Alignment is not enough: a **stretched** block has the same right edge. Measure the box itself. */
+          userWidth: user ? Math.round(user.getBoundingClientRect().width) : null,
+          userRight: user ? Math.round(user.getBoundingClientRect().right) : null,
+          logContentRight: (() => { const log = document.getElementById('log'); const cs = getComputedStyle(log); return Math.round(log.getBoundingClientRect().right - Number.parseFloat(cs.paddingRight)) })(),
+          logContentWidth: (() => { const log = document.getElementById('log'); const cs = getComputedStyle(log); return Math.round(log.clientWidth - Number.parseFloat(cs.paddingLeft) - Number.parseFloat(cs.paddingRight)) })(),
           reasoningClosed: reasoning.open === false,
           reasoningHeight: Math.round(reasoningLine.getBoundingClientRect().height),
           reasoningTitle: reasoningLine.querySelector('.title').textContent,
@@ -364,6 +369,20 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     assert.equal(measured.userBg, 'rgb(44, 44, 46)', 'on DSH\'s specific-bubble surface')
     assert.equal(measured.userPadding, '10px 16px', 'with its 10px/16px padding')
     assert.equal(measured.userAlign, 'flex-end', 'sitting against the right edge')
+    /**
+     * The owner's report was exactly this: a full-width block can look "right aligned" because its right edge is on
+     * the column's edge, while its text is left-aligned across the whole column. So the claim has two halves — the
+     * bubble's **own width** must be smaller than the column for a short prompt, and its right edge must sit on the
+     * column's right edge.
+     */
+    assert.ok(
+      measured.userWidth <= measured.logContentWidth - 20,
+      `the bubble hugs its text rather than filling the column (${measured.userWidth} of ${measured.logContentWidth})`,
+    )
+    assert.ok(
+      Math.abs(measured.userRight - measured.logContentRight) <= 1,
+      `and it ends on the column's right edge (${measured.userRight} vs ${measured.logContentRight})`,
+    )
 
     // The reasoning row: 24px tall, folded, titled, with two glyphs ready to swap.
     assert.equal(measured.reasoningClosed, true, 'reasoning is folded by default')
@@ -455,6 +474,46 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     assert.ok(toolOpened.result && toolOpened.result.includes('a.txt'), 'and so is what the tool answered')
     assert.equal(toolOpened.radius, '8px', 'a tool\'s halves sit on a rounded code surface')
     assert.equal(toolOpened.preFont, '12.5px', 'in the code size the answers use')
+
+    /**
+     * The same claim at a second width, because an alignment can be a width accident: a stretched block passes an
+     * edge test at one width too. The reference is measured the same way — the bubble's shape must not depend on
+     * the window — so this re-checks hug + flush edge at 1000px and 1600px.
+     */
+    const alignmentAt = async (width) => {
+      await browser.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false })
+      await browser.waitFor(`window.innerWidth === ${width}`, 5_000)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      return JSON.parse(
+        await browser.evaluate(`JSON.stringify((() => {
+          const log = document.getElementById('log')
+          const user = document.querySelector('#log .turn.user')
+          const cs = getComputedStyle(log)
+          const box = log.getBoundingClientRect()
+          const ub = user.getBoundingClientRect()
+          return {
+            window: window.innerWidth,
+            width: Math.round(ub.width),
+            right: Math.round(ub.right),
+            contentRight: Math.round(box.right - Number.parseFloat(cs.paddingRight)),
+            contentWidth: Math.round(log.clientWidth - Number.parseFloat(cs.paddingLeft) - Number.parseFloat(cs.paddingRight)),
+          }
+        })())`),
+      )
+    }
+    for (const width of [1000, 1600]) {
+      const state = await alignmentAt(width)
+      assert.equal(state.window, width, `the viewport is ${width}px`)
+      assert.ok(
+        state.width <= state.contentWidth - 20,
+        `at ${width}px the bubble still hugs its text (${state.width} of ${state.contentWidth})`,
+      )
+      assert.ok(
+        Math.abs(state.right - state.contentRight) <= 1,
+        `at ${width}px it still ends on the column's right edge (${state.right} vs ${state.contentRight})`,
+      )
+    }
+    await browser.send('Emulation.clearDeviceMetricsOverride')
   } finally {
     browser.close()
     await server.close()
