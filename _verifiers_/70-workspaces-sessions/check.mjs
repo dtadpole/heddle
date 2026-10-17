@@ -2001,6 +2001,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         const sessions = [...document.querySelectorAll('#tree li[data-kind="session"]')]
         const controls = sessions.map((li) => ({
           label: li.querySelector(':scope > .row > .label')?.textContent,
+          slots: [...li.querySelectorAll(':scope > .row .row-tools > *')].map((child) => child.className),
           buttons: [...li.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
           /**
            * Not hovered yet: DSH keeps the row quiet until the pointer arrives. The rule lives on the **slot** that
@@ -2090,7 +2091,13 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     const withoutControls = reading.controls.filter((row) => row.buttons.length === 0)
     assert.equal(withControls.length, 2, `the two sessions carry controls\nsaw: ${JSON.stringify(reading.controls)}`)
     for (const row of withControls) {
-      assert.deepEqual(row.buttons, ['Pin session', 'Archive session'], `a session row offers its two quick controls\nsaw: ${JSON.stringify(row.buttons)}`)
+      /**
+       * DSH's arrangement, measured from its own row: the `…` first, then `Archive session`, then `Pin session`.
+       * The order is the claim — the same three gestures in a different sequence is a translation a reader has to
+       * perform — so both halves of it are asserted, the slot order and the order inside the slot.
+       */
+      assert.deepEqual(row.slots, ['menu-wrap', 'session-actions'], `the menu leads the quick controls\nsaw: ${JSON.stringify(row.slots)}`)
+      assert.deepEqual(row.buttons, ['Archive session', 'Pin session'], `then archive, then pin\nsaw: ${JSON.stringify(row.buttons)}`)
       assert.equal(row.quiet, '0', 'and they are invisible while the row is quiet')
     }
     for (const row of withoutControls) {

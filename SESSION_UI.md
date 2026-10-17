@@ -76,6 +76,25 @@ A `View options` menu with three groups, each a radio-ish list:
 - A footer of live facts: `25 turns 643 steps · 209 tok/s`, `226M tok · Cache hit 99%`,
   `33% of context used`.
 
+## The audit, surface by surface
+
+Both UIs opened side by side on 2026-10-17; every row is a thing a person can point at, and each verdict is either a
+measurement that matched, a fix, or a stated decision not to copy.
+
+| Surface | DSH, observed | Heddle, after the audit | Verdict |
+|---|---|---|---|
+| Row's leading content | status word `Running` / `Completed` at x=28, then a tag (`[ui]`, `[feat]`, `[tool]`) and the title | the row's icon, then the title (type rows carry their badge) | **difference kept**: the tag is this UI's type badge; a running/completed word would need heddle's own stream state threaded into a tree row, which is a feature rather than a fix |
+| Row's hover controls, order | `…` at x=192, `Archive session` at x=218, `Pin session` at x=244 | the same three in the same order, measured at x=206/229/254 | **fixed this round** — it was `Pin`, `Archive`, `…` |
+| Row's age | right edge, 8px inside, muted 11px | same | match |
+| Menu items, names | `Pin session`, `Rename`, `Fork session`, `Archive session` (reversed when set), with chords printed beside | the same four names; the chords work but are not printed | match on names, **difference kept** on printing the chords |
+| Search | a field that replaces the tree with a flat result list, each row `title · workspace · age` | same, with Clear and Escape | match |
+| View options | `Hide archived`, `All conversations (show archived)`, `Archived only` | the same three strings, current state by `aria-checked` | match |
+| Panel header | session name at the column's left, chips for subagents/jobs, then tabs | session name, the folder it belongs to, then tabs | match in shape; the chips have no heddle mechanism behind them |
+| Tabs | `Chat` / `Trajectory`, plus a turn-navigation strip in the chat | `Chat` / `Trajectory`; the turn strip lives in the Trajectory view | match in intent, **difference kept** in placement |
+| Composer | 28px card, `+`, access, model, send, then a status line of turns/steps/tok-s/context | the same, same order | match |
+| Shortcuts | `Alt+Meta+A/G/K`, `Shift+Meta+F` | the same four, bound to the selected row | match |
+| Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
+
 ## Presentation, measured
 
 The feature half was matched first; this half was matched by **measuring both UIs in a browser** and by comparing
