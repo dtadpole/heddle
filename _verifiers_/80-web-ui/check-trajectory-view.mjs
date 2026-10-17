@@ -203,6 +203,29 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.match(examined.result, /a\.txt/, 'the Result tab shows what the tool answered in full')
 
     // The toolbar's two collapse switches and the search box, as DSH's.
+    /**
+     * The panes are square; the rounded surface belongs to the composer card, which declares it itself.
+     * This is the owner's rule of 2026-10-17: a default must not carry a shape that only one element wants.
+     */
+    const corners = JSON.parse(
+      await browser.evaluate(`(() => {
+        const radius = (selector) => {
+          const element = document.querySelector(selector)
+          return element === null ? null : getComputedStyle(element).borderRadius
+        }
+        return JSON.stringify({
+          sidebar: radius('aside'),
+          main: radius('main'),
+          details: radius('#tr-details'),
+          composer: radius('#composer-card'),
+        })
+      })()`),
+    )
+    assert.equal(corners.sidebar, '0px', 'the left navigation pane is square')
+    assert.equal(corners.main, '0px', 'and so is the main pane')
+    assert.equal(corners.details, '0px', 'and the trajectory details pane')
+    assert.equal(corners.composer, '28px', 'while the composer card keeps its own rounded style')
+
     // DSH's details pane is resizable: drag its 8px handle and it keeps the width asked for.
     const resized = JSON.parse(
       await browser.evaluate(`(() => {
@@ -277,7 +300,19 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(searched.rows, 2, 'search narrows the table to the matching rows')
     assert.deepEqual(searched.kinds, ['tool', 'tool'])
 
-    await browser.evaluate(`(() => { const s = document.getElementById('tr-search-input'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    // Leave the page in its default shape for the evidence screenshot: no compact calls, no focus window.
+    await browser.evaluate(`(() => {
+      const search = document.getElementById('tr-search-input')
+      search.value = ''
+      search.dispatchEvent(new Event('input', { bubbles: true }))
+      const calls = document.getElementById('tr-calls')
+      if (calls.getAttribute('aria-pressed') === 'true') calls.click()
+      const strip = document.getElementById('timeline')
+      const rect = strip.getBoundingClientRect()
+      strip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: rect.left + 1, pointerId: 3 }))
+      strip.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: rect.left + 1, pointerId: 3 }))
+    })()`)
+    assert.ok(await browser.waitFor("document.querySelector('#tr-table tbody tr[data-kind=tool] .tr-result') !== null", 10_000), 'the tool row shows its result again')
     const evidence = join(repoRoot, '_context_', 'dsh-mechanisms', 'heddle-trajectory.png')
     await browser.screenshot(evidence)
     assert.ok(true, `a screenshot of the result is at ${evidence}`)
