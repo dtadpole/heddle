@@ -160,6 +160,27 @@ function specsOf(tools: Context['tools']): readonly ToolSpec[] {
  * to one, which is DSH's default and enough for the one thing a retry can fix.
  */
 export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<TurnResult> {
+  /**
+   * The live-turn registry is optional: a minimal profile can run turns without interruption. When it is
+   * present, the turn's own signal is **combined** with the caller's, so a person's stop and a Lead's
+   * `interrupt_agent` both take effect, and the entry is removed whichever way the turn ends.
+   */
+  const live = ctx.turns?.begin(options.session.id)
+  const signal =
+    live === undefined
+      ? options.signal
+      : options.signal === undefined
+        ? live.signal
+        : AbortSignal.any([options.signal, live.signal])
+  try {
+    return await runTurnBody(ctx, options, signal)
+  } finally {
+    live?.settle()
+  }
+}
+
+/** One turn's body; the exported `runTurn` adds the live-turn registration around it. */
+async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortSignal | undefined): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
@@ -273,7 +294,7 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
       })
 
       try {
-        for await (const chunk of ctx.model.stream(request, options.signal)) {
+        for await (const chunk of ctx.model.stream(request, signal)) {
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
@@ -363,7 +384,7 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
       const result = await ctx.tools.call(call.name, args, {
         cwd,
         session: options.session,
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(signal !== undefined ? { signal } : {}),
         log: (message) => ctx.logger.info('turn: %s', message),
       })
       toolCallRecords.push({ name: call.name, arguments: call.arguments, result })

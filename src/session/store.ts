@@ -106,6 +106,14 @@ export interface SessionMeta {
   readonly parentSession?: SessionId
   readonly origin?: 'subagent'
   readonly delegationDepth?: number
+  /**
+   * The team this session belongs to, when it is a teammate's.
+   *
+   * A teammate runs in its own log, so "which team am I in" has to be answerable from the teammate's own
+   * record: the Lead's session id. The team's journal is in the Lead's log; this field is how a tool called
+   * inside a teammate's turn finds it.
+   */
+  readonly teamId?: SessionId
 }
 
 /** The default root, overridable so a check can use a scratch directory. */
@@ -384,9 +392,13 @@ export class SessionStore {
       readonly parentSession?: SessionId
       readonly origin?: 'subagent'
       readonly delegationDepth?: number
+      readonly teamId?: SessionId
+      /** An id chosen by the caller, so a journal entry can name a session before it is created. */
+      readonly id?: SessionId
     } = {},
   ): SessionHandle {
-    const id = `session-${randomUUID()}`
+    const id = options.id ?? `session-${randomUUID()}`
+    if (id.trim().length === 0) throw new Error('a session id must not be empty')
     const cwd = options.cwd ?? process.cwd()
     const dir = join(this.root, workspaceKey(cwd))
     mkdirSync(dir, { recursive: true })
@@ -404,6 +416,7 @@ export class SessionStore {
           ...(options.parentSession !== undefined ? { parentSession: options.parentSession } : {}),
           ...(options.origin !== undefined ? { origin: options.origin } : {}),
           ...(options.delegationDepth !== undefined ? { delegationDepth: options.delegationDepth } : {}),
+          ...(options.teamId !== undefined ? { teamId: options.teamId } : {}),
           turns: 0,
         },
         null,
@@ -473,7 +486,17 @@ export class SessionStore {
    * sequence numbers, and a fork that replayed them wrongly would be worse than no fork at all. The system
    * message is **not** copied: the new session assembles its own, and two of them would be one too many.
    */
-  fork(source: SessionId): SessionHandle | null {
+  fork(
+    source: SessionId,
+    attribution: {
+      readonly parentSession?: SessionId
+      readonly origin?: 'subagent'
+      readonly delegationDepth?: number
+      readonly teamId?: SessionId
+      readonly title?: string
+      readonly id?: SessionId
+    } = {},
+  ): SessionHandle | null {
     const from = this.open(source)
     if (from === null) return null
     const meta = this.list().find((one) => one.id === source)
@@ -481,6 +504,12 @@ export class SessionStore {
       ...(meta?.cwd !== undefined ? { cwd: meta.cwd } : {}),
       ...(meta?.endpoint !== undefined ? { endpoint: meta.endpoint } : {}),
       ...(meta?.model !== undefined ? { model: meta.model } : {}),
+      ...(attribution.title !== undefined ? { title: attribution.title } : {}),
+      ...(attribution.parentSession !== undefined ? { parentSession: attribution.parentSession } : {}),
+      ...(attribution.origin !== undefined ? { origin: attribution.origin } : {}),
+      ...(attribution.delegationDepth !== undefined ? { delegationDepth: attribution.delegationDepth } : {}),
+      ...(attribution.teamId !== undefined ? { teamId: attribution.teamId } : {}),
+      ...(attribution.id !== undefined ? { id: attribution.id } : {}),
     })
     for (const message of this.deriveMessages(from)) {
       if (message.role === 'system') continue
