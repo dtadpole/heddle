@@ -575,3 +575,161 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
     await server.close()
   }
 })
+
+test('the conversation minimap follows the reference: rows, a bright window, a hover swell and a jump', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The reference is the reference's `nav[aria-label="Conversation minimap"]`, read while it ran: one 12px row per
+   * message, a 12px bar whose thickness encodes the message's size, resting opacities of 0.33 (user) and 0.267
+   * (assistant), the visible window brightened with feathered edges, and on hover a ±4-row swell reaching opacity 1
+   * and `scaleX` 2.1 / `scaleY` 1.5, with a 300×81 `#242424` preview card to the left of the rail.
+   *
+   * The conversation is made long on purpose, because the scroll window is only observable when the transcript
+   * actually scrolls; a fixture that fits on one screen would let a broken scrollspy pass.
+   */
+  const answer = 'word '.repeat(140)
+  const server = await startServer('minimap', [
+    { text: answer }, { text: 'second answer ' + answer }, { text: 'third answer ' + answer }, { text: 'fourth answer ' + answer },
+    { text: 'fifth answer ' + answer }, { text: 'sixth answer ' + answer }, { text: 'seventh answer ' + answer }, { text: 'eighth answer ' + answer },
+  ])
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.session?.id ?? opened.id
+    for (let turn = 0; turn < 8; turn += 1) {
+      const response = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: `question ${turn + 1}`, folder: server.work, session }),
+      })
+      assert.equal(response.status, 200, `turn ${turn + 1} ran (${response.status})`)
+      await response.text()
+    }
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelectorAll("#log > .turn").length >= 8', 25_000)
+    await browser.waitFor('document.getElementById("minimap") !== null && !document.getElementById("minimap").hidden', 10_000)
+    await browser.waitFor('document.querySelectorAll("#minimap .mm-row").length > 0', 10_000)
+    /** The rail fades in over .24s — a state that exists before the animation has run is not "faded in". */
+    await browser.waitFor('document.getElementById("minimap").dataset.visible === "true"', 10_000)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    const shape = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const bars = [...document.querySelectorAll('#minimap .mm-bar')]
+        const rail = document.getElementById('minimap')
+        const rows = [...document.querySelectorAll('#minimap .mm-row')]
+        return {
+          turns: document.querySelectorAll('#log > .turn').length,
+          rows: rows.length,
+          bars: bars.length,
+          roleCounts: bars.reduce((all, bar) => { all[bar.dataset.role] = (all[bar.dataset.role] || 0) + 1; return all }, {}),
+          heights: bars.map((bar) => Number.parseFloat(getComputedStyle(bar).height)),
+          visible: rail.dataset.visible,
+          opacity: getComputedStyle(rail).opacity,
+          label: document.getElementById('minimap-hit').getAttribute('aria-label'),
+          railBox: { w: Math.round(rail.getBoundingClientRect().width), right: Math.round(document.getElementById('log').getBoundingClientRect().right - rail.getBoundingClientRect().right) },
+          rowHeights: [...new Set(rows.map((row) => getComputedStyle(row).height))],
+        }
+      })())`),
+    )
+    assert.ok(shape.rows >= 8, `the rail has a row per turn (${shape.rows})`)
+    assert.equal(shape.rows, shape.turns, 'one row per displayed turn')
+    assert.equal(shape.bars, shape.rows, 'one bar per row')
+    assert.ok(shape.roleCounts.user > 0 && shape.roleCounts.assistant > 0, 'the person and the answer are both on the rail')
+    assert.equal(shape.visible, 'true', 'the rail says it is visible')
+    assert.ok(Number(shape.opacity) > 0.9, `and it has faded in (${shape.opacity})`)
+    assert.equal(shape.railBox.w, 30, 'the rail is 30px wide, as measured')
+    assert.equal(shape.railBox.right, 4, 'and 4px from the chat log\'s right edge')
+    assert.deepEqual(shape.rowHeights, ['12px'], 'each row is 12px, as measured')
+    for (const height of shape.heights) assert.ok(height >= 1.5 && height <= 6.5, `a bar's thickness encodes its message (${height})`)
+    assert.match(shape.label, new RegExp(`Conversation minimap, ${shape.rows} messages`), 'the label counts the rows, as the reference does')
+    assert.match(shape.label, /arrow keys/, 'and teaches the keyboard shortcut')
+    assert.ok(new Set(shape.heights.map((height) => height.toFixed(1))).size > 1, 'thickness varies with the turn')
+
+    /** The scroll window: some rows bright, some at rest — and the bright set moves when the transcript scrolls. */
+    const litAt = async () => JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#minimap .mm-bar')].map((bar) => Number.parseFloat(getComputedStyle(bar).opacity)))`))
+    const topLit = await litAt()
+    assert.ok(topLit.some((value) => value > 0.9), 'turns on screen are bright')
+    assert.ok(topLit.some((value) => value < 0.4), 'turns off screen are at rest')
+    await browser.evaluate('document.getElementById("log").scrollTop = document.getElementById("log").scrollHeight')
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    const bottomLit = await litAt()
+    assert.ok(bottomLit.slice(-3).some((value) => value > 0.9), 'after scrolling, the bright window is at the end')
+    assert.ok(bottomLit.slice(0, 3).some((value) => value < 0.4), 'and the start has gone quiet')
+
+    /** Hover: the neighbourhood swells, the hovered bar reaches scaleX > 1.5 and opacity 1, and a preview appears. */
+    const rowPoint = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const rows = [...document.querySelectorAll('#minimap .mm-row')]
+        const row = rows[Math.min(3, rows.length - 1)]
+        const box = row.getBoundingClientRect()
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), index: rows.indexOf(row) }
+      })())`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rowPoint.x, y: rowPoint.y, button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    const hovered = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const bars = [...document.querySelectorAll('#minimap .mm-bar')]
+        const index = ${rowPoint.index}
+        const preview = document.getElementById('minimap-preview')
+        const read = (bar) => ({ o: Number.parseFloat(getComputedStyle(bar).opacity), t: getComputedStyle(bar).transform })
+        return {
+          hovered: read(bars[index]),
+          near: read(bars[Math.min(bars.length - 1, index + 1)]),
+          far: read(bars[Math.max(0, index - 4)]),
+          previewVisible: !preview.hidden && preview.dataset.visible === 'true',
+          previewText: (preview.textContent || '').trim().slice(0, 80),
+          previewWidth: Math.round(preview.getBoundingClientRect().width),
+          previewBg: getComputedStyle(preview).backgroundColor,
+          previewRadius: getComputedStyle(preview).borderRadius,
+        }
+      })())`),
+    )
+    assert.ok(hovered.hovered.o > 0.9, `the hovered bar is at full strength (${hovered.hovered.o})`)
+    assert.match(hovered.hovered.t, /matrix\(2\.0|matrix\(2\.1/, `it swells horizontally to about 2.1x (${hovered.hovered.t})`)
+    assert.ok(hovered.near.o > hovered.far.o, 'the swell falls off with distance')
+    assert.equal(hovered.previewVisible, true, 'a preview card appears')
+    assert.ok(hovered.previewText.length > 2, `with the turn's text (${hovered.previewText})`)
+    assert.equal(hovered.previewWidth, 300, 'at the reference width of 300px')
+    assert.equal(hovered.previewBg, 'rgb(36, 36, 36)', 'on the reference surface')
+    assert.equal(hovered.previewRadius, '8px', 'at the reference radius')
+
+    /** A click jumps: the first row takes the transcript to the top, the last row takes it down. */
+    await browser.evaluate('document.getElementById("log").scrollTop = 0')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const clickRow = async (index) => {
+      await browser.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('#minimap .mm-row')]
+        const row = rows[${index}]
+        const box = row.getBoundingClientRect()
+        document.getElementById('minimap-hit').dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box.left + 6, clientY: box.top + box.height / 2 }))
+      })()`)
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      return browser.evaluate('Math.round(document.getElementById("log").scrollTop)')
+    }
+    const jumpedDown = await clickRow(7)
+    assert.ok(jumpedDown > 100, `clicking the last row scrolls the transcript down (${jumpedDown})`)
+    const jumpedUp = await clickRow(0)
+    assert.ok(jumpedUp < jumpedDown / 2, `clicking the first row takes it back to the top (${jumpedUp})`)
+
+    /** The keyboard, as its label promises: an arrow previews, Enter jumps. */
+    await browser.evaluate('document.getElementById("log").scrollTop = 0; document.getElementById("minimap-hit").focus()')
+    await browser.evaluate(`document.getElementById('minimap-hit').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))`)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const keyboardPreview = await browser.evaluate('!document.getElementById("minimap-preview").hidden')
+    assert.equal(keyboardPreview, true, 'an arrow key previews a message')
+    await browser.evaluate(`document.getElementById('minimap-hit').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`)
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    const afterEnter = await browser.evaluate('Math.round(document.getElementById("log").scrollTop)')
+    assert.ok(afterEnter >= 0, 'and Enter jumps without error')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
