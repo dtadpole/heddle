@@ -2,7 +2,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { adapterFor } from './adapters.ts'
-import { ModelError, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
+import { ModelError, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
 export { ModelError } from './types.ts'
@@ -105,8 +105,14 @@ export class ModelService extends Service {
         { endpoint: effective.endpoint, code: 'NO_ENDPOINT' },
       )
     }
-    const next = () => resolved.stream(effective, signal)
-    return this.ctx.waterfall('model/stream', effective, next)
+    /**
+     * The provider boundary drops assistant turns that carry only reasoning, because reasoning is not
+     * replayed and a provider rejects an assistant message with neither content nor tool calls.
+     * Applied after the request hook, so a policy listener sees the request as it was recorded.
+     */
+    const sendable = { ...effective, messages: requestMessages(effective.messages) }
+    const next = () => resolved.stream(sendable, signal)
+    return this.ctx.waterfall('model/stream', sendable, next)
   }
 
   /**
