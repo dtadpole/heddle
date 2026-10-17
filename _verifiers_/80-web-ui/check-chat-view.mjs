@@ -718,6 +718,32 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
     assert.ok(bottomLit.slice(-3).some((value) => value > 0.9), 'after scrolling, the bright window is at the end')
     assert.ok(bottomLit.slice(0, 3).some((value) => value < 0.4), 'and the start has gone quiet')
 
+    /**
+     * Synced scroll, the owner's new request: scrolling the **main chat** must move the rail's bright window too,
+     * the same way agentcloud's does (measured there by setting its scroller to 0 / 35% / 70% / 100% and reading the
+     * opacity window move each time). Programmatic `scrollTop` is not enough to judge it — the report was about the
+     * wheel — so this uses a **trusted wheel event** through the browser's input pipeline at a point over the
+     * transcript, then checks both that the chat scrolled and that the window moved.
+     */
+    await browser.evaluate('document.getElementById("log").scrollTop = 0')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const litStart = await litAt()
+    const logBox = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => { const box = document.getElementById('log').getBoundingClientRect(); return { x: Math.round(box.left + box.width / 3), y: Math.round(box.top + box.height / 2) } })())`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: logBox.x, y: logBox.y, deltaX: 0, deltaY: 900 })
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const wheelState = JSON.parse(
+      await browser.evaluate(`JSON.stringify({ scrollTop: Math.round(document.getElementById('log').scrollTop), lit: [...document.querySelectorAll('#minimap .mm-bar')].map((bar) => Number.parseFloat(getComputedStyle(bar).opacity)) })`),
+    )
+    assert.ok(wheelState.scrollTop > 0, `the wheel scrolled the transcript (${wheelState.scrollTop})`)
+    assert.ok(
+      wheelState.lit.some((value, index) => value > 0.9 && litStart[index] <= 0.35),
+      `and the rail's bright window moved with it (before ${litStart.map((v) => v.toFixed(2)).join(',')} / after ${wheelState.lit.map((v) => v.toFixed(2)).join(',')})`,
+    )
+    await browser.evaluate('document.getElementById("log").scrollTop = 0')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
     /** Hover: the neighbourhood swells, the hovered bar reaches scaleX > 1.5 and opacity 1, and a preview appears. */
     const rowPoint = JSON.parse(
       await browser.evaluate(`JSON.stringify((() => {
