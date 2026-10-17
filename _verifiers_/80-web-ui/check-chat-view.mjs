@@ -20,12 +20,12 @@ import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, 
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, steps) {
   const home = isolatedHome(`chat-${label}`)
   const work = fixtureDir(`chat-${label}-work`)
   const { config } = scriptedConfig({
     home,
-    steps: [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
+    steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
   })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
@@ -232,5 +232,206 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
     child.kill()
     removeDir(home)
     removeDir(work)
+  }
+})
+
+test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its affordance on hover', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The claim is **parity with the reference**, so the numbers in it were read out of DSH's own running GUI
+   * through the browser rather than chosen: the 680px column, 14px text on a 24px line, the 20px-radius
+   * bubble on `#2c2c2e` with 10px/16px padding, a reasoning row exactly 24px tall whose **kind icon gives way
+   * to a chevron on hover** (`O_Ebla_activityIcon` → `O_Ebla_chevron` by opacity), and a summary that goes
+   * **sticky** over its own body once open.
+   *
+   * Judged by computed style rather than by screenshots: a screenshot shows that today looks right, while the
+   * computed value is the thing a later stylesheet can break without anyone noticing.
+   */
+  const server = await startServer('style', (work) => [
+    /**
+     * One step, because a round that produces only reasoning **ends the turn**: the loop sees no tool call
+     * and no text to continue with. Measured here first, as two turns instead of four.
+     */
+    { reasoning: 'I should look at the folder before answering.', toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'it listed the folder' },
+  ])
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'a.txt'), 'one\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector("#log .turn.reasoning") !== null && document.querySelector("#log .turn.tool") !== null', 20_000)
+
+    const diag = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        turns: document.querySelectorAll('#log .turn').length,
+        user: !!document.querySelector('#log .turn.user'),
+        assistant: !!document.querySelector('#log .turn.assistant'),
+        reasoning: !!document.querySelector('#log .turn.reasoning'),
+        tool: !!document.querySelector('#log .turn.tool'),
+        kinds: [...document.querySelectorAll('#log .turn')].map((n) => n.dataset.kind),
+        note: (document.getElementById('tree-note') || {}).textContent || null,
+      })`),
+    )
+    assert.ok(diag.reasoning && diag.tool && diag.user, `the fixture drew its turns\nDIAG ${JSON.stringify(diag)}`)
+    const measured = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const log = document.getElementById('log')
+        const logStyle = getComputedStyle(log)
+        const assistant = document.querySelector('#log .turn.assistant')
+        const user = document.querySelector('#log .turn.user')
+        const userStyle = user ? getComputedStyle(user) : null
+        const assistantStyle = assistant ? getComputedStyle(assistant) : null
+        const mainStyle = getComputedStyle(document.querySelector('main'))
+        const reasoning = document.querySelector('#log .turn.reasoning')
+        const tool = document.querySelector('#log .turn.tool')
+        const reasoningLine = reasoning.querySelector('summary')
+        const toolLine = tool.querySelector('summary')
+        const chevron = reasoningLine.querySelector('.chevron')
+        const kind = reasoningLine.querySelector('.kind')
+        return {
+          column: mainStyle.getPropertyValue('--chat-column').trim(),
+          logFont: logStyle.fontSize, logLine: logStyle.lineHeight, logGap: logStyle.rowGap,
+          assistantFont: assistantStyle ? assistantStyle.fontSize : null,
+          assistantLine: assistantStyle ? assistantStyle.lineHeight : null,
+          userFont: userStyle ? userStyle.fontSize : null,
+          userLine: userStyle ? userStyle.lineHeight : null,
+          userRadius: userStyle ? userStyle.borderRadius : null,
+          userBg: userStyle ? userStyle.backgroundColor : null,
+          userPadding: userStyle ? userStyle.padding : null,
+          userAlign: userStyle ? userStyle.alignSelf : null,
+          reasoningClosed: reasoning.open === false,
+          reasoningHeight: Math.round(reasoningLine.getBoundingClientRect().height),
+          reasoningTitle: reasoningLine.querySelector('.title').textContent,
+          reasoningGlyphs: reasoningLine.querySelectorAll('svg').length,
+          chevronAtRest: getComputedStyle(chevron).opacity,
+          kindAtRest: getComputedStyle(kind).opacity,
+          toolClosed: tool.open === false,
+          toolSummary: toolLine.textContent,
+          toolGlyphs: toolLine.querySelectorAll('svg').length,
+        }
+      })())`),
+    )
+
+    // Typography and the column, against DSH's measured values.
+    assert.equal(measured.column, '680px', 'the conversation column is DSH\'s 680px')
+    assert.equal(measured.logFont, '14px', `the chat is 14px, as DSH\\'s content font is — MEASURED ${JSON.stringify(measured)}`)
+    assert.equal(measured.logLine, '24px', 'on a 24px line')
+    assert.equal(measured.logGap, '6px', 'with DSH\'s 6px flow gap')
+    assert.equal(measured.assistantFont, '14px', 'the answer is 14px')
+    assert.equal(measured.assistantLine, '24px', 'on 24px')
+    assert.equal(measured.userFont, '14px', 'the person\'s message is 14px')
+    assert.equal(measured.userLine, '22px', 'on DSH\'s 22px bubble line')
+    assert.equal(measured.userRadius, '20px', 'its bubble radius is DSH\'s 20px')
+    assert.equal(measured.userBg, 'rgb(44, 44, 46)', 'on DSH\'s specific-bubble surface')
+    assert.equal(measured.userPadding, '10px 16px', 'with its 10px/16px padding')
+    assert.equal(measured.userAlign, 'flex-end', 'sitting against the right edge')
+
+    // The reasoning row: 24px tall, folded, titled, with two glyphs ready to swap.
+    assert.equal(measured.reasoningClosed, true, 'reasoning is folded by default')
+    assert.equal(measured.reasoningTitle, 'Think', 'its title is DSH\'s "Think"')
+    assert.equal(measured.reasoningGlyphs, 2, 'it carries a kind icon and a chevron')
+    assert.ok(
+      measured.reasoningHeight >= 23 && measured.reasoningHeight <= 25,
+      `the folded row is DSH\'s 24px (measured ${measured.reasoningHeight}px)`,
+    )
+    assert.equal(measured.chevronAtRest, '0', 'the chevron is hidden at rest')
+    assert.equal(measured.kindAtRest, '1', 'and the kind icon is what shows')
+
+    // The tool row: folded, DSH\'s phrase first, the tool's name as the hint.
+    assert.equal(measured.toolClosed, true, 'a tool row is folded by default')
+    assert.match(measured.toolSummary, /list_dir/, 'its title is the tool\'s own name, as DSH\'s "Bash" is')
+    assert.match(measured.toolSummary, /shot-style-work|work/, 'and its hint is what the call acted on, as DSH\'s "Read · ~/.dsh/AGENTS.md"')
+    assert.equal(measured.toolGlyphs, 2, 'it too carries a kind icon and a chevron')
+
+    /**
+     * The affordance swap, judged with a real mouse move rather than by reading the stylesheet: DSH shows the
+     * chevron only while a person is on the row.
+     */
+    const point = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const el = document.querySelector('#log .turn.reasoning summary')
+        const rect = el.getBoundingClientRect()
+        return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }
+      })())`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const hovered = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        chevron: getComputedStyle(document.querySelector('#log .turn.reasoning summary .chevron')).opacity,
+        kind: getComputedStyle(document.querySelector('#log .turn.reasoning summary .kind')).opacity,
+      })`),
+    )
+    assert.equal(hovered.chevron, '1', 'hovering the row reveals the chevron')
+    assert.equal(hovered.kind, '0', 'and puts the kind icon away')
+
+    // Clicking the row opens it: the body arrives, the chevron stays and the summary becomes sticky.
+    await browser.evaluate('document.querySelector("#log .turn.reasoning summary").click()')
+    await browser.waitFor('document.querySelector("#log .turn.reasoning").open === true', 5_000)
+    const openedState = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const reasoning = document.querySelector('#log .turn.reasoning')
+        const line = reasoning.querySelector('summary')
+        const body = reasoning.querySelector('[data-body]')
+        return {
+          open: reasoning.open,
+          chevron: getComputedStyle(line.querySelector('.chevron')).opacity,
+          bodyHeight: Math.round(body.getBoundingClientRect().height),
+          sticky: getComputedStyle(line).position,
+          bodyFont: getComputedStyle(body).fontSize,
+          bodyLine: getComputedStyle(body).lineHeight,
+        }
+      })())`),
+    )
+    assert.equal(openedState.open, true, 'a click opens the folded row')
+    assert.equal(openedState.chevron, '1', 'the chevron stays visible while open')
+    assert.ok(openedState.bodyHeight > 0, 'the reasoning body is on screen')
+    assert.equal(openedState.sticky, 'sticky', 'and the summary is sticky above its own body, as DSH\'s is')
+    assert.equal(openedState.bodyFont, '13px', 'the reasoning body is 13px')
+    assert.equal(openedState.bodyLine, '20px', 'on DSH\'s 20px reasoning line')
+
+    await browser.evaluate('document.querySelector("#log .turn.reasoning summary").click()')
+    await browser.waitFor('document.querySelector("#log .turn.reasoning").open === false', 5_000)
+
+    // The tool row opens onto its two halves, in the answer's code surface.
+    await browser.evaluate('document.querySelector("#log .turn.tool summary").click()')
+    await browser.waitFor('document.querySelector("#log .turn.tool").open === true', 5_000)
+    const toolOpened = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const tool = document.querySelector('#log .turn.tool')
+        const args = tool.querySelector('[data-args]')
+        const result = tool.querySelector('[data-result]')
+        const argsStyle = args ? getComputedStyle(args) : null
+        return {
+          args: args ? args.textContent : null,
+          result: result ? result.textContent : null,
+          argsVisible: args ? Math.round(args.getBoundingClientRect().height) > 0 : false,
+          radius: argsStyle ? argsStyle.borderRadius : null,
+          preBg: argsStyle ? argsStyle.backgroundColor : null,
+          preFont: argsStyle ? argsStyle.fontSize : null,
+        }
+      })())`),
+    )
+    assert.ok(toolOpened.argsVisible && toolOpened.args, 'the call\'s arguments are inside the opened row')
+    assert.ok(toolOpened.result && toolOpened.result.includes('a.txt'), 'and so is what the tool answered')
+    assert.equal(toolOpened.radius, '8px', 'a tool\'s halves sit on a rounded code surface')
+    assert.equal(toolOpened.preFont, '12.5px', 'in the code size the answers use')
+  } finally {
+    browser.close()
+    await server.close()
   }
 })
