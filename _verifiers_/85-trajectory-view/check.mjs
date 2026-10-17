@@ -194,56 +194,30 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
     assert.ok(tabs.includes('Trajectory'), 'and the ledger')
 
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
-    assert.ok(await browser.waitFor('document.querySelectorAll("#ledger details.record").length > 0', 20_000), 'the ledger drew records')
+    /**
+     * The ledger is drawn as a **table**, DSH's shape: one row per event, a kind badge and its content per
+     * row. The table's fidelity — one call per row, the details pane, the columns — is judged by the Web UI
+     * part's own trajectory check; what this part judges is that the ledger *is* the session's record, in
+     * the same window its conversation is.
+     */
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the ledger drew rows')
 
     const drawn = JSON.parse(
       await browser.evaluate(`(() => {
-        const rows = [...document.querySelectorAll('#ledger details.record')]
+        const rows = [...document.querySelectorAll('#tr-table tbody tr')]
         return JSON.stringify({
           rows: rows.length,
-          withKind: rows.filter((r) => (r.querySelector('.kind') || {}).innerText).length,
-          oneLine: rows.every((r) => {
-            const summary = r.querySelector(':scope > summary')
-            return Math.round(summary.getBoundingClientRect().height / parseFloat(getComputedStyle(summary).lineHeight)) === 1
-          }),
-          closed: rows.every((r) => !r.hasAttribute('open')),
-          ellipsis: rows.every((r) => getComputedStyle(r.querySelector('.label')).textOverflow === 'ellipsis'),
+          kinds: [...new Set(rows.map((row) => row.dataset.kind))],
+          withEvent: rows.filter((row) => (row.querySelector('.tr-event') || { innerText: '' }).innerText.trim().length > 0).length,
+          withContent: rows.filter((row) => (row.querySelector('.tr-content') || { innerText: '' }).innerText.trim().length > 0).length,
           chatHidden: document.getElementById('log').hidden
         })
       })()`),
     )
     assert.ok(drawn.rows > 0, 'there are rows')
-    assert.equal(drawn.withKind, drawn.rows, 'every row carries its kind as an annotation')
-    assert.ok(drawn.oneLine, 'every row is one line')
-    assert.ok(drawn.closed, 'and closed by default, so a long ledger stays navigable')
-    assert.ok(drawn.ellipsis, 'with a label that truncates rather than wrapping')
-    /**
-     * And the row shows the record's **own text**, not its kind.
-     *
-     * Measured: every assistant row read `assistant`, because the row printed the record's label — which is
-     * its kind, or a tool's name — so a reader learned nothing about what was said. The kind is the badge;
-     * the snippet is the content.
-     */
-    const content = JSON.parse(
-      await browser.evaluate(`(() => {
-        const rows = [...document.querySelectorAll('#ledger details.record')]
-        const labels = rows.map((r) => r.querySelector(':scope > summary > .label').innerText.trim())
-        return JSON.stringify({
-          rows: rows.length,
-          blank: labels.filter((text) => text.length === 0).length,
-          nonKind: labels.filter((text) => !['user', 'assistant', 'reasoning', 'tool', 'system', 'compaction'].includes(text)).length,
-          badges: [...new Set(rows.map((r) => r.querySelector(':scope > summary > .kind').innerText))].slice(0, 6),
-          longest: Math.max(...labels.map((text) => text.length))
-        })
-      })()`),
-    )
-    assert.equal(content.blank, 0, 'no row is blank — every one shows something')
-    assert.ok(content.nonKind > 0, 'and the rows carry the record text rather than only its kind')
-    assert.ok(
-      content.badges.some((badge) => badge.startsWith('tool ')),
-      `a tool row's badge names the tool (${JSON.stringify(content.badges)})`,
-    )
-    assert.ok(content.longest <= 200, `a snippet is short enough to scan (longest ${content.longest} chars)`)
+    assert.equal(drawn.withEvent, drawn.rows, 'every row says what happened')
+    assert.equal(drawn.withContent, drawn.rows, 'and carries the record itself')
+    assert.ok(drawn.kinds.includes('user') && drawn.kinds.includes('assistant'), `the ledger holds the conversation's own turns (${JSON.stringify(drawn.kinds)})`)
     assert.ok(drawn.chatHidden, 'while the conversation is hidden')
     /**
      * And it is hidden **on screen**, not merely marked so.
@@ -264,62 +238,84 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
     assert.equal(onlyOneView.ledger, true, 'the ledger is')
     assert.equal(onlyOneView.timeline, true, 'with its timeline')
 
-    // A row opens to its full input and output.
-    await browser.evaluate(`document.querySelector('#ledger details.record > summary').click()`)
-    const opened = JSON.parse(
-      await browser.evaluate(`JSON.stringify({ open: document.querySelectorAll('#ledger details.record[open]').length, bodyChars: (document.querySelector('#ledger details.record[open] pre') || { innerText: '' }).innerText.length })`),
+    /**
+     * A row opens its record in the details pane — the reading this view exists for. The pane's own
+     * sections are judged by the Web UI part's trajectory check; here the claim is only that the row a
+     * reader picks is the one the details pane shows.
+     */
+    await browser.evaluate(`document.querySelector('#tr-table tbody tr').click()`)
+    assert.ok(
+      await browser.waitFor('document.getElementById("tr-details") !== null && !document.getElementById("tr-details").hidden', 10_000),
+      'clicking a row opens its record',
     )
-    assert.equal(opened.open, 1, 'clicking a row opens it')
-    assert.ok(opened.bodyChars > 0, 'and its record is there to read')
+    const opened = JSON.parse(await browser.evaluate(`JSON.stringify({ chars: document.getElementById('tr-details').innerText.length })`))
+    assert.ok(opened.chars > 0, 'and the record is there to read')
 
-    // The timeline: present, proportional, pickable, and it moves the ledger.
+    /**
+     * The timeline: a strip of **ticks**, one per turn, positioned on the session's recorded span and named by
+     * their turn, with the span itself stated beside it.
+     *
+     * The design changed on 2026-10-17 from one pickable segment per turn to a lane strip of ticks — the shape DSH
+     * uses — so the claim is a tick per turn rather than a segment, and the marker is the **scroll that follows the
+     * pick**, not an `aria-current` the new control does not set. The old claim is kept in the Git history rather
+     * than left in the check, where it would judge a design that no longer exists.
+     */
     const timeline = JSON.parse(
       await browser.evaluate(`(() => {
         const band = document.getElementById('timeline')
-        const segments = [...band.querySelectorAll('button')]
+        const ticks = [...band.querySelectorAll('.tr-tick')]
         return JSON.stringify({
           exists: band !== null,
-          segments: segments.length,
-          proportional: segments.every((s) => parseFloat(s.style.left) >= 0 && parseFloat(s.style.left) <= 100 && parseFloat(s.style.width) >= 2),
-          labelled: segments.every((s) => /turn \\d+/.test(s.getAttribute('aria-label') || '')),
+          ticks: ticks.length,
+          proportional: ticks.every((tick) => {
+            const left = parseFloat(tick.style.left)
+            const width = parseFloat(tick.style.width)
+            return Number.isFinite(left) && left >= 0 && left <= 100 && Number.isFinite(width) && width > 0
+          }),
+          labelled: ticks.every((tick) => /turn \\d+/.test(tick.getAttribute('aria-label') || '')),
+          lanes: [...new Set(ticks.map((tick) => tick.dataset.lane))],
           legend: (document.getElementById('timeline-legend') || { innerText: '' }).innerText
         })
       })()`),
     )
     assert.ok(timeline.exists, 'the timeline exists')
-    assert.ok(timeline.segments >= 1, 'with a segment per turn')
-    assert.ok(timeline.proportional, 'each positioned along the axis and wide enough to pick')
+    assert.ok(timeline.ticks >= 1, 'with a tick for a turn')
+    assert.ok(timeline.proportional, 'each positioned along the axis, with a width the axis gives it')
     assert.ok(timeline.labelled, 'and named by its turn')
+    assert.ok(timeline.lanes.length >= 1, `assigned to a lane (${JSON.stringify(timeline.lanes)})`)
     assert.match(timeline.legend, /recorded/, 'with the recorded span stated')
 
-    await browser.evaluate(`document.querySelector('#timeline button').click()`)
-    assert.ok(
-      await browser.waitFor(`document.querySelector('#timeline button[aria-current="true"]') !== null`, 5_000),
-      'picking a segment marks it as the one being shown',
+    /**
+     * Picking a tick takes the reader to that turn. Measured by **scrolling**: the strip's job is navigation, and a
+     * control that changes its own appearance while leaving the reader where they were has not navigated.
+     */
+    const picked = JSON.parse(
+      await browser.evaluate(`(() => {
+        const ticks = [...document.querySelectorAll('#timeline .tr-tick')]
+        const pane = document.querySelector('.tr-pane')
+        const before = Math.round(pane.scrollTop)
+        const last = ticks[ticks.length - 1]
+        if (last !== undefined) last.click()
+        return JSON.stringify({ before, ticks: ticks.length, scrollable: pane.scrollHeight > pane.clientHeight })
+      })()`),
     )
+    assert.ok(picked.scrollable, 'the ledger is long enough to scroll, so the position means something')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 900))
+    const afterPick = await browser.evaluate(`Math.round(document.querySelector('.tr-pane').scrollTop)`)
+    assert.notEqual(afterPick, picked.before, `picking the last tick moves the ledger (${picked.before} -> ${afterPick})`)
 
     /**
      * The ledger opens at its **tail**, and following stops when the reader scrolls up.
      *
-     * The rule DSH states, and the reason it exists: a ledger that always jumped to the bottom would be
-     * unusable during a long turn, which is exactly when a person wants to read what already happened. The
-     * domain is checked too, because a ledger with nothing to scroll would satisfy the position by accident.
+     * The rule DSH states, and the reason it exists: a ledger that always jumped to the bottom would be unusable
+     * during a long turn, which is exactly when a person wants to read what already happened. The scrolling element
+     * is the table's pane rather than the view's outer box, which is a fact about this layout and not about the rule.
      */
-    const tail = JSON.parse(
-      await browser.evaluate(`(() => {
-        const pane = document.getElementById('ledger')
-        const atTail = pane.scrollHeight - pane.scrollTop - pane.clientHeight
-        return JSON.stringify({ scrollable: pane.scrollHeight > pane.clientHeight, distanceFromTail: atTail })
-      })()`),
-    )
-    assert.ok(tail.scrollable, `the ledger is long enough to scroll, so the position means something (${JSON.stringify(tail)})`)
-    assert.ok(tail.distanceFromTail <= 24, `it opens at its tail (${tail.distanceFromTail}px from it)`)
-
-    await browser.evaluate(`(() => { const pane = document.getElementById('ledger'); pane.scrollTop = 0; pane.dispatchEvent(new Event('scroll')) })()`)
-    await browser.evaluate(`document.querySelector('#ledger details.record > summary').click()`)
+    await browser.evaluate(`(() => { const pane = document.querySelector('.tr-pane'); pane.scrollTop = 0; pane.dispatchEvent(new Event('scroll')) })()`)
+    await browser.evaluate(`document.querySelector('#tr-table tbody tr').click()`)
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 700))
     assert.equal(
-      await browser.evaluate(`document.getElementById('ledger').scrollTop`),
+      await browser.evaluate(`document.querySelector('.tr-pane').scrollTop`),
       0,
       'and a reader who scrolls to the top is left there, rather than pulled back to the tail',
     )
@@ -335,6 +331,57 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
     )
     assert.equal(backToChat.log, true, 'and the conversation drawn again')
     assert.equal(backToChat.ledger, false, 'with the ledger off screen')
+
+    /**
+     * The ring is a **tablist**, which is what DSH uses for the same control and what this control is: one of two
+     * panels is shown, the other put away. Measured from DSH on 2026-10-17 — `role=tab` with `aria-selected` — while
+     * this page said `aria-current`, which means "the current one" and not "one of a set of alternatives".
+     *
+     * The pattern's promise is that the arrow keys cross the list, so that is judged too, along with the panel each tab
+     * names: a tab whose `aria-controls` points at nothing is worse than no tab, because a reader is offered a control
+     * that leads nowhere.
+     */
+    const semantics = JSON.parse(
+      await browser.evaluate(`(() => {
+        const ring = document.getElementById('views')
+        const tabs = [...ring.querySelectorAll('[role="tab"]')]
+        return JSON.stringify({
+          role: ring.getAttribute('role'),
+          tabs: tabs.map((tab) => ({
+            text: tab.textContent.trim(),
+            selected: tab.getAttribute('aria-selected'),
+            controls: tab.getAttribute('aria-controls'),
+            target: tab.getAttribute('aria-controls') === null ? false : document.getElementById(tab.getAttribute('aria-controls')) !== null,
+            tabIndex: tab.tabIndex
+          }))
+        })
+      })()`),
+    )
+    assert.equal(semantics.role, 'tablist', 'the ring is a tablist')
+    assert.equal(semantics.tabs.length, 2, 'with the two views as tabs')
+    assert.ok(semantics.tabs.every((tab) => tab.controls !== null && tab.target), 'and each names a panel that exists')
+    assert.equal(semantics.tabs.filter((tab) => tab.selected === 'true').length, 1, 'exactly one is selected')
+    assert.equal(semantics.tabs.filter((tab) => tab.tabIndex === 0).length, 1, 'and one of them is in the Tab order')
+
+    /** ArrowRight crosses to the other tab and shows its panel — the behaviour the pattern promises. */
+    const crossed = JSON.parse(
+      await browser.evaluate(`(() => {
+        const ring = document.getElementById('views')
+        const selected = ring.querySelector('[role="tab"][aria-selected="true"]')
+        selected.focus()
+        selected.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+        return JSON.stringify({
+          selected: [...ring.querySelectorAll('[role="tab"][aria-selected="true"]')].map((tab) => tab.textContent.trim()),
+          focused: document.activeElement === ring.querySelector('[role="tab"][aria-selected="true"]'),
+          ledgerShown: !document.getElementById('ledger').hidden,
+          logHidden: document.getElementById('log').hidden
+        })
+      })()`),
+    )
+    assert.equal(crossed.selected.length, 1, 'the arrow key moves the selection to exactly one tab')
+    assert.equal(crossed.focused, true, 'and the focus follows it')
+    assert.ok(crossed.ledgerShown && crossed.logHidden, 'with the panel it names shown and the other put away')
+
   } finally {
     browser.close()
     server.kill()

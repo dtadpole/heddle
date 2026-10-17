@@ -188,6 +188,98 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
       String(Math.round(remembered)),
       'and the control reports the width it is showing',
     )
+
+    /**
+     * The panel **collapses to a rail** — DSH's gesture, measured from it on 2026-10-17: 280 pixels expanded, 56
+     * collapsed, the control at the top of the panel, the chord `Alt+Meta+B`, and the rail keeping its icon controls.
+     *
+     * The width is asserted rather than the class because the class is this project's name for it; 56 is the number a
+     * reader sees, and a rail that drifted to 80 would still "collapse".
+     */
+    const expandedWidth = await browser.evaluate(`Math.round(document.querySelector('aside').getBoundingClientRect().width)`)
+    const collapsed = JSON.parse(
+      await browser.evaluate(`(() => {
+        document.getElementById('sidebar-toggle').click()
+        const aside = document.querySelector('aside')
+        const main = document.querySelector('main')
+        const toggle = document.getElementById('sidebar-toggle')
+        return JSON.stringify({
+          width: Math.round(aside.getBoundingClientRect().width),
+          mainWidth: Math.round(main.getBoundingClientRect().width),
+          label: toggle.getAttribute('aria-label'),
+          expanded: toggle.getAttribute('aria-expanded'),
+          treeVisible: getComputedStyle(document.getElementById('tree')).display !== 'none',
+          gutterVisible: getComputedStyle(document.getElementById('gutter-left')).display !== 'none',
+          searchVisible: getComputedStyle(document.getElementById('sidebar-search')).display !== 'none',
+          stored: localStorage.getItem('heddle.layout.collapsed.v1')
+        })
+      })()`),
+    )
+    assert.equal(collapsed.width, 56, `the rail is 56 pixels wide (from ${expandedWidth})`)
+    assert.ok(collapsed.mainWidth > expandedWidth, `and the column takes the space back (${collapsed.mainWidth})`)
+    assert.equal(collapsed.label, 'Open sidebar', 'the control names the action, not the state')
+    assert.equal(collapsed.expanded, 'false', 'and reports itself collapsed')
+    assert.equal(collapsed.treeVisible, false, 'the tree is put away')
+    assert.equal(collapsed.gutterVisible, false, 'and the divider with it, because a rail has no width to drag')
+    assert.equal(collapsed.searchVisible, true, 'while the rail keeps a search control')
+    assert.equal(collapsed.stored, 'true', 'and the choice is remembered')
+
+    /**
+     * The rail's top control is the **app's own icon**, which is what DSH's is: measured at 36×36, at (10, 18), named
+     * `Open sidebar`, holding the brand mark rather than a generic panel glyph. The two are read per element — the icon
+     * loaded and displayed, the panel glyph put away — because "the icon is there" is exactly the kind of claim that a
+     * hidden element satisfies.
+     */
+    const icon = JSON.parse(
+      await browser.evaluate(`(() => {
+        const toggle = document.getElementById('sidebar-toggle')
+        const mark = document.getElementById('sidebar-toggle-mark')
+        const glyph = document.getElementById('sidebar-toggle-glyph')
+        const box = mark.getBoundingClientRect()
+        return JSON.stringify({
+          label: toggle.getAttribute('aria-label'),
+          markShown: getComputedStyle(mark).display !== 'none',
+          markLoaded: mark.complete && mark.naturalWidth > 0,
+          markBox: Math.round(box.width) + 'x' + Math.round(box.height),
+          markSrc: mark.getAttribute('src'),
+          glyphShown: getComputedStyle(glyph).display !== 'none',
+          toggleBox: (() => { const r = toggle.getBoundingClientRect(); return Math.round(r.width) + 'x' + Math.round(r.height) })()
+        })
+      })()`),
+    )
+    assert.equal(icon.label, 'Open sidebar', 'the icon control is named for the action')
+    assert.equal(icon.markShown, true, 'the app icon is displayed while the panel is a rail')
+    assert.equal(icon.markLoaded, true, `and its picture loaded (${icon.markSrc})`)
+    assert.equal(icon.markBox, '24x24', 'at 24 pixels, inside the 36-pixel control')
+    assert.equal(icon.toggleBox, '36x36', 'which is the rail control DSH uses')
+    assert.equal(icon.glyphShown, false, 'with the panel glyph put away')
+
+    /** Remembered across a reload — better than DSH, which brings the wide panel back, and consistent with the width. */
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("sidebar-toggle") !== null', 20_000), 'the page came back')
+    assert.equal(
+      await browser.evaluate(`Math.round(document.querySelector('aside').getBoundingClientRect().width)`),
+      56,
+      'the rail is still collapsed after a reload',
+    )
+
+    /** The chord, which is DSH's own: `Alt+Meta+B`. */
+    const chord = JSON.parse(
+      await browser.evaluate(`(() => {
+        document.getElementById('sidebar-toggle').focus()
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', altKey: true, metaKey: true, bubbles: true }))
+        const aside = document.querySelector('aside')
+        const toggle = document.getElementById('sidebar-toggle')
+        return JSON.stringify({
+          width: Math.round(aside.getBoundingClientRect().width),
+          label: toggle.getAttribute('aria-label'),
+          stored: localStorage.getItem('heddle.layout.collapsed.v1')
+        })
+      })()`),
+    )
+    assert.ok(chord.width > 100, `the chord opens the panel again (${chord.width})`)
+    assert.equal(chord.label, 'Collapse sidebar', 'with the control naming the new action')
+    assert.equal(chord.stored, 'false', 'and the state written back')
   } finally {
     browser.close()
     server.kill()
