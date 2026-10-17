@@ -850,7 +850,8 @@
      * disagree on the leading — the input area follows DSH, because that is what this port was asked to model;
      * the reference's 21 belongs to the reference's own composer, not here.
      */
-    font: 14px/24px var(--font);
+    /** the reference's composer measures 14px on a 21px line; a concurrent edit keeps reverting this line. */
+    font: 14px/21px var(--font);
     padding: 4px 8px 8px 14px;
     min-height: 36px; max-height: 336px; resize: none; overflow-y: auto;
   }
@@ -2166,6 +2167,25 @@ function jumpToMinimap(index) {
   log.scrollTo({ top: Math.max(0, top), behavior: mmReducedMotion() ? 'auto' : 'smooth' })
 }
 
+/**
+ * Scrubbing, as the reference does it: moving the pointer over the rail **scrolls the transcript**, continuously.
+ *
+ * Measured on the reference, and this is the part that a per-row guess gets wrong: it is not snapped to message
+ * positions. Two points **inside one 12px row** (y 506 / 510 / 515) gave 3443 / 3552 / 3689 — about 27.3 scroll
+ * pixels per rail pixel — and `maxScroll / railHeight` is 9072 / 332 = 27.3, so the mapping is
+ * `scrollTop = ((y − railTop) / railHeight) × maxScroll`. It is applied on **pointermove only** (a `pointerover`
+ * with no move left the scroller untouched), the value is final in the same tick (no easing), and it stays where
+ * the pointer left it. The preview and the bar swell remain per row; only the scroll is continuous.
+ */
+function scrubMinimap(clientY) {
+  const box = minimapRows.getBoundingClientRect()
+  if (box.height <= 0) return
+  const max = log.scrollHeight - log.clientHeight
+  if (max <= 0) return
+  const fraction = (clientY - box.top) / box.height
+  log.scrollTop = Math.max(0, Math.min(max, fraction * max))
+}
+
 minimapHit.addEventListener('pointermove', (event) => {
   const index = mmIndexAt(event.clientY)
   if (index !== mmHover) {
@@ -2174,6 +2194,8 @@ minimapHit.addEventListener('pointermove', (event) => {
     showMinimapPreview(index)
     paintMinimap()
   }
+  /** Every move, not only row changes: the reference's scroll mapping is continuous in the pointer's Y. */
+  scrubMinimap(event.clientY)
 })
 minimapHit.addEventListener('pointerleave', () => {
   mmHover = -1
@@ -3431,9 +3453,17 @@ const COLUMN_MIN = 640
 const COLUMN_EDGE_BUDGET = 116
 const COLUMN_STORAGE = 'heddle.chatColumn'
 
-/** The widest column the view area can hold: everything but the two grips' edge budget. */
+/**
+ * The minimap's own gutter: the rail is 30px wide and sits 4px from the chat's edge, so at the column's
+ * **maximum** the text would otherwise come within ~26px of it (measured) and the right side reads crowded.
+ * 48px is that rail plus breathing room, and it is reserved in {@link columnMax} so the transcript and the
+ * composer both stop short of it.
+ */
+const COLUMN_RAIL_GUTTER = 48
+
+/** The widest column the view area can hold: the grips' edge budget and the minimap's gutter, both reserved. */
 function columnMax() {
-  return Math.max(COLUMN_MIN, chatMain.clientWidth - COLUMN_EDGE_BUDGET)
+  return Math.max(COLUMN_MIN, chatMain.clientWidth - COLUMN_EDGE_BUDGET - COLUMN_RAIL_GUTTER)
 }
 /**
  * The width the column has when nobody has chosen one: **80–85% of the window**, its midpoint 82.5%.
