@@ -4,14 +4,36 @@
  * words in those comments, never backticks.
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
 import { fixtureDir, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/check-helpers/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
-import { isUnder } from '../../src/paths.ts'
+
+/**
+ * Whether `child` sits outside `parent`, **spelled independently of the implementation** (`src/paths.ts`
+ * has its own `isUnder`).
+ *
+ * The verifier used to ask that function whether the implementation had kept a transcript out of the
+ * repository — a check that agrees with the rule it is judging cannot catch the rule being wrong, and
+ * this rule has a trap (`/a/b-sibling` shares every character of `/a/b`). The implementation's rule is
+ * pinned by component tests in `test/paths.test.ts`; the verifier spells its comparison itself.
+ */
+function isOutside(parent, child) {
+  const canonical = (value) => {
+    const absolute = resolve(value)
+    try {
+      return realpathSync(absolute)
+    } catch {
+      return absolute
+    }
+  }
+  const from = canonical(parent)
+  const to = canonical(child)
+  return to !== from && !to.startsWith(from.endsWith(sep) ? from : from + sep)
+}
 
 /**
  * Verifier 7 — workspaces and sessions.
@@ -775,7 +797,7 @@ test('a session can be created at the top-level workspace, and its definition is
     const body = parseJson(created.stdout)
     assert.match(String(body.name), /^session-\d{8}-\d{4}$/, `the instance is named for the clock\nsaw: ${body.name}`)
     assert.ok(existsSync(body.definition), `the definition is on disk at ${body.definition}`)
-    assert.ok(!isUnder(h.work, body.log), `and the log is not in the repository\nsaw: ${body.log}`)
+    assert.ok(isOutside(h.work, body.log), `and the log is not in the repository\nsaw: ${body.log}`)
 
     const definition = JSON.parse(readFileSync(body.definition, 'utf8'))
     assert.equal(definition.id, body.session, 'the definition names the session it belongs to')
@@ -1515,7 +1537,7 @@ test('New session here, on an instance row, starts a session and writes its defi
     const sessionNode = (drawn.tree.children ?? []).find((node) => node.kind === 'session')
     assert.equal(sessionNode?.session?.id, fields.id, 'the row names the session its definition names')
 
-    assert.ok(!isUnder(h.work, String(fields.log)), `while the transcript stays outside the repository\\nsaw: ${fields.log}`)
+    assert.ok(isOutside(h.work, String(fields.log)), `while the transcript stays outside the repository\\nsaw: ${fields.log}`)
   } finally {
     browser?.close()
     live?.kill()
