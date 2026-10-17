@@ -704,9 +704,24 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
    * actually scrolls; a fixture that fits on one screen would let a broken scrollspy pass.
    */
   const answer = 'word '.repeat(140)
-  const server = await startServer('minimap', [
-    { text: answer }, { text: 'second answer ' + answer }, { text: 'third answer ' + answer }, { text: 'fourth answer ' + answer },
-    { text: 'fifth answer ' + answer }, { text: 'sixth answer ' + answer }, { text: 'seventh answer ' + answer }, { text: 'eighth answer ' + answer },
+  /**
+   * Four exchanges use a reasoning step and a tool call, four do not. The rail's unit is the **section** (the
+   * person's message and the answer), so this fixture has 24 `.turn` elements but must produce 16 rows: a rail built
+   * per turn would show 24, which is the tool-grained structure the owner reported.
+   */
+  const server = await startServer('minimap', (work) => [
+    { reasoning: 'I should look before answering.', toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'first answer ' + answer },
+    { reasoning: 'I should look before answering.', toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'second answer ' + answer },
+    { reasoning: 'I should look before answering.', toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'third answer ' + answer },
+    { reasoning: 'I should look before answering.', toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'fourth answer ' + answer },
+    { text: 'fifth answer ' + answer },
+    { text: 'sixth answer ' + answer },
+    { text: 'seventh answer ' + answer },
+    { text: 'eighth answer ' + answer },
   ])
   const browser = await openBrowser({ width: 1400, height: 900 })
   try {
@@ -726,7 +741,7 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
     }
 
     await browser.goto(server.url)
-    await browser.waitFor('document.querySelectorAll("#log > .turn").length >= 8', 25_000)
+    await browser.waitFor('document.querySelectorAll("#log > .turn").length >= 24', 25_000)
     await browser.waitFor('document.getElementById("minimap") !== null && !document.getElementById("minimap").hidden', 10_000)
     await browser.waitFor('document.querySelectorAll("#minimap .mm-row").length > 0', 10_000)
     /** The rail fades in over .24s — a state that exists before the animation has run is not "faded in". */
@@ -752,8 +767,20 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
         }
       })())`),
     )
-    assert.ok(shape.rows >= 8, `the rail has a row per turn (${shape.rows})`)
-    assert.equal(shape.rows, shape.turns, 'one row per displayed turn')
+    /**
+     * Section level, as the reference is: 8 exchanges make 16 rows (8 user + 8 answer) even though the transcript
+     * holds 24 turns because four exchanges also have a reasoning row and a tool row. A per-turn rail would report
+     * 24 rows and two tool/role keys.
+     */
+    assert.ok(shape.turns >= 24, `the transcript has more turns than sections once the tool steps are in (${shape.turns})`)
+    assert.equal(shape.rows, 16, `but the rail has one row per section (${shape.rows})`)
+    assert.deepEqual(shape.roleCounts, { user: 8, assistant: 8 }, `and only the person's and the answer's roles (${JSON.stringify(shape.roleCounts)})`)
+    /**
+     * The unit is the **section**, not the turn: the old assertion pinned "one row per displayed turn", which is
+     * exactly the tool-grained structure the owner reported. The reference's unit is the user message and the
+     * answer (measured 5 user + 5 assistant rows over a 27-row conversation with no tool or reasoning rows).
+     */
+    assert.ok(shape.rows < shape.turns, `the rail is coarser than the turn list (${shape.rows} rows for ${shape.turns} turns)`)
     assert.equal(shape.bars, shape.rows, 'one bar per row')
     assert.ok(shape.roleCounts.user > 0 && shape.roleCounts.assistant > 0, 'the person and the answer are both on the rail')
     assert.equal(shape.visible, 'true', 'the rail says it is visible')
@@ -840,6 +867,22 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
       })())`),
     )
     await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rowPoint.x, y: rowPoint.y, button: 'none' })
+    /**
+     * The expansion is **instant** in the reference — its bars compute `transition: all 0s` — so reading the swell
+     * immediately after the pointer arrives must already show the final ramp. An eased swell (heddle was .18s) reads
+     * ~1.0-1.3 here, which is the sluggishness the owner reported.
+     */
+    const instant = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const bars = [...document.querySelectorAll('#minimap .mm-bar')]
+        const bar = bars[${rowPoint.index}]
+        const cs = getComputedStyle(bar)
+        const m = /matrix\\(([-\\d.]+)/.exec(cs.transform)
+        return { scale: m ? Number(Number(m[1]).toFixed(2)) : 1, transitionProperty: cs.transitionProperty, transitionDuration: cs.transitionDuration }
+      })())`),
+    )
+    assert.ok(instant.scale >= 1.95, `the swell is already at its ramp in the frame the pointer arrives (${instant.scale})`)
+    assert.ok(!instant.transitionProperty.includes('transform'), `and the bar carries no transform transition (${instant.transitionProperty})`)
     await new Promise((resolve) => setTimeout(resolve, 320))
     const hovered = JSON.parse(
       await browser.evaluate(`JSON.stringify((() => {
