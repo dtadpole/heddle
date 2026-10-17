@@ -275,6 +275,45 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(state.toolRowHeight, '30px', 'including the tool row — one line, as DSH draws it')
     assert.equal(state.tableFont, '12px', 'at DSH’s 12px table font')
 
+    // Kind tags, per element: DSH's measured 4px radius and palette, not an approximation.
+    const tags = JSON.parse(
+      await browser.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('#tr-table tbody tr')]
+        const out = {}
+        for (const row of rows) {
+          const tag = row.querySelector('.tr-kind')
+          if (tag === null || out[tag.dataset.kind] !== undefined) continue
+          const style = getComputedStyle(tag)
+          out[tag.dataset.kind] = {
+            radius: style.borderRadius,
+            color: style.color,
+            background: style.backgroundColor,
+            height: Math.round(tag.getBoundingClientRect().height),
+            font: style.fontSize + '/' + style.fontWeight,
+            spacing: style.letterSpacing,
+            padding: style.padding,
+          }
+        }
+        return JSON.stringify(out)
+      })()`),
+    )
+    for (const [kind, expected] of Object.entries({
+      user: { radius: '4px', color: 'rgb(122, 170, 255)', background: 'rgb(52, 65, 91)' },
+      assistant: { radius: '4px', color: 'rgb(148, 116, 188)', background: 'rgb(53, 47, 58)' },
+      tool: { radius: '4px', color: 'rgb(221, 134, 41)', background: 'rgb(39, 36, 31)' },
+      context: { radius: '4px', color: 'rgb(89, 201, 132)', background: 'rgb(35, 60, 44)' },
+    })) {
+      const measured = tags[kind]
+      assert.ok(measured !== undefined, `the ${kind} tag is drawn`)
+      assert.equal(measured.radius, expected.radius, `the ${kind} tag radius is DSH’s 4px`)
+      assert.equal(measured.color, expected.color, `the ${kind} tag colour is DSH’s measured value`)
+      assert.equal(measured.background, expected.background, `the ${kind} tag background is DSH’s measured value`)
+      assert.equal(measured.height, 19, `the ${kind} tag is 19px tall`)
+      assert.equal(measured.font, '10px/650', `the ${kind} tag type is DSH’s 10px/650`)
+      assert.equal(measured.spacing, '0.35px', `the ${kind} tag letter-spacing matches`)
+      assert.equal(measured.padding, '0px 5px', `the ${kind} tag padding matches`)
+    }
+
     // A small buffer separates the content from the input card, in every view (the composer is shared).
     const buffer = JSON.parse(
       await browser.evaluate(`(() => {
