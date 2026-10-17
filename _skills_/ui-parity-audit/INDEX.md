@@ -108,6 +108,8 @@ grounded_in:
 | 13/20 taken as the reading size | it was a paragraph in DSH's tool inspector, not the reading column | measure the element you mean |
 | `--dsw-radius-panel` applied to the panes | DSH's panes measure 0; the token is only for the composer | measure, do not infer from tokens |
 | A backtick inside a page-script template literal, five times | a syntax error and a debugging round each time | the check file's header states it; none of those comments use backticks |
+| The view ring was a bordered, tinted, rounded box | DSH's tabs are plain text with colour-only selection — the box made one control read as a segmented control | a control's **shape** is part of parity, not just its colour; measured `background`/`border`/`radius`/`padding` as properties |
+| A whole-file pass replaced an already-aligned user turn and a fixed header | the fixes silently reverted, and only a screenshot caught it | an alignment fix ships with an assertion; a shared file can be replaced wholesale by concurrent work, and the check is what survives it |
 
 ## The report
 

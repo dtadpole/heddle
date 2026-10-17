@@ -346,9 +346,15 @@
    * to the column, never a full-width block. An earlier reading in this file claimed a left-aligned block with a
    * small radius; that was wrong, and the measurement is written here so it is not "fixed" back.
    */
+  /**
+   * DSH's user turn, measured on its own chat on 2026-10-17: **the full width of the reading column, left-aligned**, on a
+   * quiet surface with a 12px radius. A right-hand bubble is the shape a chat app uses; a session reader is reading a
+   * transcript, so the column stays one column and the surface marks whose turn it is. This rule was aligned once and a
+   * later whole-file pass replaced it back into a bubble, which is why the checks now assert the alignment.
+   */
   .turn.user {
-    align-self: flex-end; max-width: min(100%, 40rem); padding: 10px 16px;
-    border: 0; border-radius: 20px;
+    align-self: stretch; max-width: 100%; padding: 10px 14px;
+    border: 0; border-radius: 12px;
     background: var(--chat-bubble); color: var(--chat-text);
     font-size: 14px; line-height: 22px; white-space: pre-wrap;
   }
@@ -463,9 +469,19 @@
   }
   details.turn.tool [data-result] { color: var(--chat-secondary); }
   details.turn.tool[data-state='running'] > summary { opacity: .6; }
-  nav#views { display: flex; gap: .25rem; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
-  nav#views button { font: inherit; font-size: .82rem; padding: .3rem .7rem; background: none; border: 1px solid transparent; border-bottom: none; border-radius: .35rem .35rem 0 0; color: inherit; opacity: .6; cursor: pointer; }
-  nav#views button[aria-selected='true'] { opacity: 1; border-color: var(--line); background: color-mix(in oklab, currentColor 7%, transparent); }
+  /**
+   * DSH's view ring, measured on its own tablist on 2026-10-17: the tablist is transparent with 8px of left padding; each
+   * tab is **plain text** — no background, no border, no radius — 13px at weight 500, with 9px of padding below, and the
+   * selected tab is told apart by **colour alone** (`rgb(122,170,255)`) against the muted `rgb(173,178,184)` of the other.
+   * This UI drew a bordered, tinted, rounded box, which is the shape of a segmented control rather than DSH's ring.
+   */
+  nav#views { display: flex; gap: 1.5rem; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
+  nav#views button {
+    font: inherit; font-size: 13px; font-weight: 500; padding: 0 0 9px;
+    background: none; border: 0; border-radius: 0; color: var(--text-3); cursor: pointer;
+  }
+  nav#views button:hover { color: var(--text-2); }
+  nav#views button[aria-selected='true'] { color: #7aaaff; }
   /**
    * `hidden` has to win over this file's own display rules.
    *
@@ -2174,10 +2190,18 @@ function paintMinimap() {
     entry.bar.style.height = `${(entry.barThickness * scale).toFixed(2)}px`
     const light = Math.max(0, Math.min(1, entry.light ?? 0))
     let opacity = entry.rest + (1 - entry.rest) * light
+    /**
+     * No hover means **no fat bars at all**. The sentinel used to be `MM_HOVER_SPAN + 1`, which made the "no hover"
+     * case indistinguishable from a hover at row 5 — so a fresh page painted a permanent fat band around the middle
+     * of the rail that never moved with the scroll. The owner saw exactly that. The reference only scales the row
+     * under the pointer (measured: reload its page, scroll 0/25/50/75/100% with no pointer on the rail and every
+     * bar's `scaleX` stays 1), so this is the parity fix, not a style choice.
+     */
     let swell = 0
-    const hovered = mmHover >= 0 ? mmHover : MM_HOVER_SPAN + 1
-    const distance = Math.abs(index - hovered)
-    if (distance <= MM_HOVER_SPAN) swell = MM_HOVER_FLOOR + (1 - MM_HOVER_FLOOR) * (1 - distance / (MM_HOVER_SPAN + 0.5))
+    if (mmHover >= 0) {
+      const distance = Math.abs(index - mmHover)
+      if (distance <= MM_HOVER_SPAN) swell = MM_HOVER_FLOOR + (1 - MM_HOVER_FLOOR) * (1 - distance / (MM_HOVER_SPAN + 0.5))
+    }
     opacity = Math.max(opacity, swell)
     entry.bar.style.opacity = opacity.toFixed(3)
     entry.bar.style.transform = swell > 0 ? `scaleX(${(1 + 1.1 * swell).toFixed(3)}) scaleY(${(1 + 0.5 * swell).toFixed(3)})` : ''

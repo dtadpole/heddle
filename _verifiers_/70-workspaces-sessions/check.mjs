@@ -2113,6 +2113,17 @@ test("a session row's controls appear on hover, and a search replaces the tree w
             }),
             tabs: [...document.querySelectorAll('#views button')].map((button) => getComputedStyle(button).cursor),
           },
+          /** The view ring's own shape, and the user turn's alignment: both are visual parity claims. */
+          ring: [...document.querySelectorAll('#views button')].map((button) => {
+            const style = getComputedStyle(button)
+            return { background: style.backgroundColor, radius: style.borderRadius, size: style.fontSize, weight: style.fontWeight, colour: style.color }
+          }),
+          userTurn: (() => {
+            const turn = document.querySelector('#log .turn.user')
+            if (turn === null) return { alignSelf: null, radius: null }
+            const style = getComputedStyle(turn)
+            return { alignSelf: style.alignSelf, radius: style.borderRadius }
+          })(),
         }
 
         const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) > *')].map((b) => ({
@@ -2219,6 +2230,19 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.deepEqual(reading.chrome.cursors.rowControls, ['pointer', 'pointer'], `so are the controls inside it\nsaw: ${JSON.stringify(reading.chrome.cursors.rowControls)}`)
     assert.deepEqual(reading.chrome.cursors.headerMenus, ['pointer', 'pointer'], `and both header menus\nsaw: ${JSON.stringify(reading.chrome.cursors.headerMenus)}`)
     assert.deepEqual(reading.chrome.cursors.tabs, ['pointer', 'pointer'], 'and the tabs')
+
+    /**
+     * **The view ring's shape**, measured from DSH's tablist: plain text, no background or border or radius, 13px at
+     * weight 500, the selected tab told apart by colour alone. A tinted rounded box is a segmented control, not this ring.
+     */
+    assert.deepEqual(reading.chrome.ring, [
+      { background: 'rgba(0, 0, 0, 0)', radius: '0px', size: '13px', weight: '500', colour: 'rgb(122, 170, 255)' },
+      { background: 'rgba(0, 0, 0, 0)', radius: '0px', size: '13px', weight: '500', colour: 'rgb(173, 178, 184)' },
+    ], `the ring draws DSH's plain tabs\nsaw: ${JSON.stringify(reading.chrome.ring)}`)
+
+    /** **The user's turn** is the reading column's full width, left-aligned, on a 12px surface. */
+    assert.equal(reading.chrome.userTurn.alignSelf, 'stretch', `a user turn fills the column\nsaw: ${JSON.stringify(reading.chrome.userTurn)}`)
+    assert.equal(reading.chrome.userTurn.radius, '12px', 'with a 12px surface radius')
 
     /**
      * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.
