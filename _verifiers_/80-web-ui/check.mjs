@@ -372,9 +372,16 @@ test('the composer fills the panel and does not run off the screen', async (cont
             const form = document.getElementById('prompt')
             const field = document.querySelector('textarea')
             const panel = document.querySelector('main')
+            const card = document.getElementById('composer-card')
+            const column = Number.parseFloat(getComputedStyle(panel).getPropertyValue('--chat-column'))
+            const cardBox = card.getBoundingClientRect()
             return JSON.stringify({
               formDisplay: getComputedStyle(form).display,
               formWidth: Math.round(form.getBoundingClientRect().width),
+              cardWidth: Math.round(cardBox.width),
+              cardLeft: Math.round(cardBox.left - panel.getBoundingClientRect().left),
+              cardRight: Math.round(panel.getBoundingClientRect().right - cardBox.right),
+              column: Math.round(column),
               fieldWidth: Math.round(field.getBoundingClientRect().width),
               panelWidth: Math.round(panel.getBoundingClientRect().width),
               fieldRight: Math.round(field.getBoundingClientRect().right),
@@ -383,10 +390,18 @@ test('the composer fills the panel and does not run off the screen', async (cont
           })()`),
         )
         assert.equal(box.formDisplay, 'flex', 'the composer is a flex row')
+        /**
+         * DSH's composer is the **reading column plus 32px** - 16px on each side - centred in the panel, and the
+         * editor fills that card. Measured on DSH's session view: a 680px column with a 712px card. The claim is
+         * still arithmetic, because the failure it guards against is a textarea that collapses to 181px; it just
+         * measures against the card rather than the panel, since the panel is deliberately wider.
+         */
         assert.ok(
-          box.fieldWidth >= box.formWidth - 160,
-          `the input fills the panel rather than a fraction of it (${box.fieldWidth}px of ${box.formWidth}px)`,
+          Math.abs(box.cardWidth - (box.column + 32)) <= 1,
+          `the card is DSH column plus 32px (${box.cardWidth}px for a ${box.column}px column)`,
         )
+        assert.ok(box.fieldWidth >= box.cardWidth - 160, `the input fills its card rather than a fraction (${box.fieldWidth}px of ${box.cardWidth}px)`)
+        assert.ok(Math.abs(box.cardLeft - box.cardRight) <= 1, `and the card is centred in the panel (${box.cardLeft}px left, ${box.cardRight}px right)`)
         assert.ok(box.fieldRight <= box.viewport, `and nothing runs off the screen (right edge ${box.fieldRight} of ${box.viewport})`)
   } finally {
     browser.close()
