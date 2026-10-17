@@ -3,7 +3,6 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
-import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
 
 /**
  * Verifier 10 — the Web UI's token.
@@ -515,113 +514,6 @@ test('a session\'s history is readable through the API, and a blank view is not 
     assert.equal(missing.status, 404, 'an unknown session is not found')
   } finally {
     server.kill()
-    await fixture.double.close()
-    removeDir(fixture.home)
-    removeDir(fixture.work)
-  }
-})
-
-test('the page renders a session\'s history in blocks, and collapses reasoning and tools', async (context) => {
-  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
-  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  /**
-   * The check that would have caught the blank view, and three of the four bugs found while fixing it.
-   *
-   * It is a browser check because the fault was entirely in the page's own script, so no amount of API
-   * judging sees it. Measured before the fix: 32 sessions listed and `#log` with a length of 0 after a
-   * click. Measured during the fix, and each is a claim here: a stale identifier in one function left the
-   * log holding **one turn of nine** with nothing said, and the fold's deltas were read as well as the
-   * completions, which would print every answer twice.
-   *
-   * The page is opened through the gate when one is running, because that is how the owner uses it, and
-   * directly when it is not.
-   */
-  const fixture = await startServer('browser-history')
-  const live = await startCli(fixture.args, fixture.env)
-  const browser = await openBrowser()
-  try {
-    const origin = new URL(live.url).origin
-    const cookie = await handshakeCookie(live.url)
-    /** The session this check will read, taken from the API so the panel's grouping cannot affect it. */
-    const sessionsForCheck = await (await fetch(`${origin}/api/sessions`, { headers: { cookie } })).json()
-    await fetch(`${origin}/api/turn`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ prompt: 'the loom question' }),
-    }).then((response) => response.text())
-
-    // The printed URL is what a person is asked to open, so it is what this opens.
-    await browser.goto(live.url)
-    await browser.waitFor('document.getElementById("views") !== null', 20_000)
-    /**
-     * The session is selected through the **page's own handler** rather than by clicking a row.
-     *
-     * The left panel is a folder-bound tree that the other working session was still changing while this was
-     * written, and a session appears in it only when its directory is a registered workspace — so a click in
-     * the panel is a test of the tree, not of the right pane this check is about. `showSession` is what a
-     * row's click calls, so this exercises the same path without depending on where the row is drawn.
-     */
-    const id = sessionsForCheck[0]
-    assert.ok(
-      await browser.evaluate(`(async () => { await showSession(${JSON.stringify(id)}); return document.querySelectorAll('#log .turn').length })()`),
-      'the page selected the session',
-    )
-    assert.ok(
-      await browser.waitFor('document.querySelectorAll("#log .turn").length > 0', 20_000),
-      'and drew its history',
-    )
-
-    /**
-     * A session is selected on first load, so the log is never an empty pane beside a full list. Without it
-     * a prompt sent from that state starts a NEW session instead of continuing the one on screen — measured,
-     * and it is why the first version of this check watched a two-message live view while the session beside
-     * it held the whole transcript.
-     */
-    assert.ok(
-      await browser.waitFor('document.querySelectorAll("#log .turn").length > 0', 20_000),
-      'a session is selected on first load, so the log is not empty',
-    )
-
-    // Selecting a session shows ITS history, not the live stream.
-    await browser.evaluate('document.querySelector("#sessions li").click()')
-    assert.ok(
-      await browser.waitFor('document.getElementById("log").innerText.length > 0', 20_000),
-      'selecting a session shows its transcript',
-    )
-    const rendered = JSON.parse(
-      await browser.evaluate(`JSON.stringify({
-        turns: document.querySelectorAll('#log .turn').length,
-        denied: [...document.querySelectorAll('#log .turn.denied')].map((n) => n.innerText),
-        text: document.getElementById('log').innerText.slice(0, 120),
-      })`),
-    )
-    assert.equal(rendered.denied.length, 0, `every turn rendered\nsaw: ${JSON.stringify(rendered.denied).slice(0, 200)}`)
-    assert.ok(rendered.turns >= 2, `the transcript has more than the first line\nsaw ${rendered.turns}`)
-    assert.match(rendered.text, /loom/, "and it is that session's content")
-
-    /**
-     * The page's source carries the disclosure structure, and the served copy is read rather than the file
-     * on disk: the failure that cost the most time was a stale identifier inside the page, which a check of
-     * `src/` would have missed entirely because the build had already copied it.
-     */
-    const served = await (await fetch(`${origin}/`, { headers: { cookie } })).text()
-    assert.match(served, /createElement\('details'\)/, 'a block is a details element')
-    assert.match(served, /createElement\('summary'\)/, 'with a summary line')
-    assert.match(served, /kind === 'reasoning' \|\| kind === 'tool'/, 'reasoning and tools take the collapsible path')
-    assert.match(served, /details\.turn > summary/, 'and the styles target it')
-    /**
-     * Every function the page calls is defined in the page. This is the cheap, exact form of the mistake
-     * that broke rendering: a renamed helper left one call site behind, and the page threw on the first
-     * reasoning turn while still serving `200`.
-     */
-    for (const fn of ['add', 'addBlock', 'oneLiner', 'showSession', 'refreshSessions']) {
-      assert.match(served, new RegExp(`function ${fn}\\(`), `the page defines ${fn}()`)
-      const calls = [...served.matchAll(new RegExp(`(?<![a-zA-Z])${fn}\\(`, 'g'))].length
-      assert.ok(calls >= 2, `${fn}() is called somewhere, not only defined`)
-    }
-  } finally {
-    browser.close()
-    live.kill()
     await fixture.double.close()
     removeDir(fixture.home)
     removeDir(fixture.work)

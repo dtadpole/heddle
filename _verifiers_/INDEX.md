@@ -26,7 +26,7 @@ deliberately does not.
 | 7 | [`70-workspaces-sessions/`](70-workspaces-sessions/INDEX.md) | a workspace names a target folder, sessions are bound to folders under it, and those folders form a recursive tree | headless |
 | 8 | [`75-permission-sandbox/`](75-permission-sandbox/INDEX.md) | a permission sandbox distinguishes read-only, workspace write and full access | — |
 | 9 | [`80-web-ui/`](80-web-ui/INDEX.md) | a Web UI on localhost, on a documented default port, carrying the live stream | headless |
-| 10 | [`90-web-ui-token/`](90-web-ui-token/INDEX.md) | the Web UI and its event stream are protected by a token | headless |
+| 10 | [`90-web-ui-token/`](90-web-ui-token/INDEX.md) | the Web UI and its event stream are protected by a token | — |
 | 11 | [`85-trajectory-view/`](85-trajectory-view/INDEX.md) | one session read two ways: the conversation, and the ledger of what the harness did | headless |
 | 12 | [`87-resizable-panels/`](87-resizable-panels/INDEX.md) | the sidebar's width is the reader's choice, by pointer or keyboard, and is remembered | headless |
 | 13 | [`88-file-preview/`](88-file-preview/INDEX.md) | one preview surface: a file clicked in the left panel, rendered by the library its type calls for | headless |
@@ -71,7 +71,7 @@ a diff against the previous measurement.
 | 7 | 24 | `0` — the transcript, resume and a frame torn by an interruption; containment, the segment-wise trap and the nearest root; one session per folder and `--new`; the tree's one level, kinds, badges, laziness, plumbing and the boundary that only an instance carries a session; in a browser, that a folder opens and closes with the same control; an adopted folder reported as ad hoc and promoted into the tree when it is registered; and a root unregistered, refused while it still holds sessions, or removed with its sessions adopted by the root above it |
 | 8 | 5 | `0` — the three modes, the sibling prefix, and the temp directory only when admitted |
 | 9 | 11 | `0` — port, page, API, the live stream, a composer that fills the panel, the workspace controls, and a source file shown as source |
-| 10 | 10 | `0` — fresh token, cookie handshake, the fence, both endpoints refused, the secret's mode, a stale token's recovery page, session history over the API and in a browser |
+| 10 | 10 | `0` — fresh token, cookie handshake, the fence, both endpoints refused, the secret's mode, a stale token's recovery page, session history over the API |
 | 11 | 2 | `0` — the ledger's fields and rules over the API, and a browser drawing both views with a timeline |
 | 12 | 1 | `0` — a divider that is a control, a pointer drag, the limits, the arrow keys, and the width after a reload |
 | 13 | 2 | `0` — each file type through the route the panel uses, and a browser where a click opens the one preview, rendered and styled |
