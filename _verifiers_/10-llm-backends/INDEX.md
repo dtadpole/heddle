@@ -12,6 +12,11 @@ Instance of this project's `_verifiers_`. **The claim it decides:** heddle conne
 
 One endpoint is not a backend tier. This part judges that more than one wire shape is spoken, that the endpoint list is configuration rather than code, and that a real configured backend answers — the last of those spending one short request, and reporting unjudged rather than passing when nothing is configured.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check-model-service.mjs` runs a turn against a local double that speaks the provider shape, `check-config-driven.mjs` judges that the tree itself is loaded from configuration, and `check-real-backend.mjs` asks a configured endpoint for one answer.

@@ -20,6 +20,12 @@ folder owns its session, that one folder holds one session, and that the tree cl
 and lists one level at a time. The model is stated in full, with the decisions behind it and what was
 rejected, in [`../../SESSION_TREE.md`](../../SESSION_TREE.md).
 
+## Where it runs
+
+**Headless browser.** The checks that need a page open a real Chrome with no window, through
+[`_tools_/browser-tool/`](../../_tools_/browser-tool/INDEX.md); the rest drive the CLI and local HTTP
+doubles. Nothing here needs a display, so it runs unattended.
+
 ## What decides it
 
 `check.mjs` — one file, twenty-two checks in three groups:

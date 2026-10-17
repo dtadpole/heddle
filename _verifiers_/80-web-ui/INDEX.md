@@ -12,6 +12,12 @@ Instance of this project's `_verifiers_`. **The claim it decides:** a Web UI on 
 
 The harness needs a face. This part judges that a documented default port serves a page, that the page carries the session list and a live region, and that a browser-shaped request without a token is not the same answer as one with it.
 
+## Where it runs
+
+**Headless browser.** The checks that need a page open a real Chrome with no window, through
+[`_tools_/browser-tool/`](../../_tools_/browser-tool/INDEX.md); the rest drive the CLI and local HTTP
+doubles. Nothing here needs a display, so it runs unattended.
+
 ## What decides it
 
 `check.mjs` starts the server on an ephemeral port and fetches the root and the API.

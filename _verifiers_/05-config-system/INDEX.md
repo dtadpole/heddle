@@ -17,6 +17,11 @@ The whole harness sits on this. It is numbered `05` because it is checked before
 rather than beside them: every one of them is configured through it, and a configuration system that
 silently ignores a layer would make the other ten report on a tree nobody asked for.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check.mjs` drives the CLI against fixture profiles under `.heddle-tmp/`, each carrying its own plugin

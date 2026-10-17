@@ -12,6 +12,12 @@ Instance of this project's `_verifiers_`. **The claim it decides:** the Web UI a
 
 A UI on localhost is still a door. This part judges that a token is generated and stored where a person can find it, that a request without it is refused with a status that says so, that a request with it is answered, and that the event stream enforces the same rule as the API.
 
+## Where it runs
+
+**Headless browser.** The checks that need a page open a real Chrome with no window, through
+[`_tools_/browser-tool/`](../../_tools_/browser-tool/INDEX.md); the rest drive the CLI and local HTTP
+doubles. Nothing here needs a display, so it runs unattended.
+
 ## What decides it
 
 `check.mjs` starts the server, probes it with no token, a wrong token and the right one, and opens the stream with each.

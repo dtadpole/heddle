@@ -17,6 +17,11 @@ the **server**: what it answers, on an ephemeral port and on the default. This p
 a definition, an installer, a supervisor that restarts it, and a liveness decision that a process name
 cannot fake.
 
+## Where it runs
+
+**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
+a display or a window.
+
 ## What decides it
 
 `check.mjs` has three checks, and they answer different questions:

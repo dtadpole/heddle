@@ -14,6 +14,12 @@ sidebar gets, with a pointer **or** a keyboard, and the choice survives a reload
 It sits beside [`80-web-ui`](../80-web-ui/INDEX.md) because it judges the page's *shape* rather than its
 content: not what a view says, but how much of the window it is given.
 
+## Where it runs
+
+**Headless browser.** The checks that need a page open a real Chrome with no window, through
+[`_tools_/browser-tool/`](../../_tools_/browser-tool/INDEX.md); the rest drive the CLI and local HTTP
+doubles. Nothing here needs a display, so it runs unattended.
+
 ## What is resizable today, and what is not
 
 The layout is a sidebar and one content column, so what can be resized is the boundary between them —

@@ -14,27 +14,40 @@ the owner stated rather than after the layer that happens to decide it. Each is 
 the check files beside it, and each check file states in its own header what it judges and what it
 deliberately does not.
 
-| # | Folder | The claim |
-|---|---|---|
-| 0 | [`05-config-system/`](05-config-system/INDEX.md) | a run composes its tree from profiles and layers, resolves environment references, and fails loudly |
-| 1 | [`10-llm-backends/`](10-llm-backends/INDEX.md) | heddle connects to backend model servers and runs agent loops over them |
-| 2 | [`20-streaming/`](20-streaming/INDEX.md) | streaming text and reasoning arrive as separate deltas, with no Web UI involved |
-| 3 | [`30-context-management/`](30-context-management/INDEX.md) | context and prompt are composed with retention, a budget and compaction |
-| 4 | [`40-pluggable-tools/`](40-pluggable-tools/INDEX.md) | tools are configurable and pluggable |
-| 5 | [`50-agentic-loop/`](50-agentic-loop/INDEX.md) | the agentic loop runs with tool calls |
-| 6 | [`60-hooks/`](60-hooks/INDEX.md) | hooks intercept a model or a tool call |
-| 7 | [`70-workspaces-sessions/`](70-workspaces-sessions/INDEX.md) | a workspace names a target folder, sessions are bound to folders under it, and those folders form a recursive tree |
-| 8 | [`75-permission-sandbox/`](75-permission-sandbox/INDEX.md) | a permission sandbox distinguishes read-only, workspace write and full access |
-| 9 | [`80-web-ui/`](80-web-ui/INDEX.md) | a Web UI on localhost, on a documented default port, carrying the live stream |
-| 10 | [`90-web-ui-token/`](90-web-ui-token/INDEX.md) | the Web UI and its event stream are protected by a token |
-| 11 | [`85-trajectory-view/`](85-trajectory-view/INDEX.md) | one session read two ways: the conversation, and the ledger of what the harness did |
-| 12 | [`87-resizable-panels/`](87-resizable-panels/INDEX.md) | the sidebar's width is the reader's choice, by pointer or keyboard, and is remembered |
-| 13 | [`88-file-preview/`](88-file-preview/INDEX.md) | one preview surface: a file clicked in the left panel, rendered by the library its type calls for |
-| 14 | [`95-web-daemon/`](95-web-daemon/INDEX.md) | a launchd agent keeps the Web UI running at the documented port |
+| # | Folder | The claim | Surface |
+|---|---|---|---|
+| 0 | [`05-config-system/`](05-config-system/INDEX.md) | a run composes its tree from profiles and layers, resolves environment references, and fails loudly | — |
+| 1 | [`10-llm-backends/`](10-llm-backends/INDEX.md) | heddle connects to backend model servers and runs agent loops over them | — |
+| 2 | [`20-streaming/`](20-streaming/INDEX.md) | streaming text and reasoning arrive as separate deltas, with no Web UI involved | — |
+| 3 | [`30-context-management/`](30-context-management/INDEX.md) | context and prompt are composed with retention, a budget and compaction | — |
+| 4 | [`40-pluggable-tools/`](40-pluggable-tools/INDEX.md) | tools are configurable and pluggable | — |
+| 5 | [`50-agentic-loop/`](50-agentic-loop/INDEX.md) | the agentic loop runs with tool calls | — |
+| 6 | [`60-hooks/`](60-hooks/INDEX.md) | hooks intercept a model or a tool call | — |
+| 7 | [`70-workspaces-sessions/`](70-workspaces-sessions/INDEX.md) | a workspace names a target folder, sessions are bound to folders under it, and those folders form a recursive tree | headless |
+| 8 | [`75-permission-sandbox/`](75-permission-sandbox/INDEX.md) | a permission sandbox distinguishes read-only, workspace write and full access | — |
+| 9 | [`80-web-ui/`](80-web-ui/INDEX.md) | a Web UI on localhost, on a documented default port, carrying the live stream | headless |
+| 10 | [`90-web-ui-token/`](90-web-ui-token/INDEX.md) | the Web UI and its event stream are protected by a token | headless |
+| 11 | [`85-trajectory-view/`](85-trajectory-view/INDEX.md) | one session read two ways: the conversation, and the ledger of what the harness did | headless |
+| 12 | [`87-resizable-panels/`](87-resizable-panels/INDEX.md) | the sidebar's width is the reader's choice, by pointer or keyboard, and is remembered | headless |
+| 13 | [`88-file-preview/`](88-file-preview/INDEX.md) | one preview surface: a file clicked in the left panel, rendered by the library its type calls for | headless |
+| 14 | [`95-web-daemon/`](95-web-daemon/INDEX.md) | a launchd agent keeps the Web UI running at the documented port | — |
+
+### The surface each one runs on
+
+Every verifier states in its own `INDEX.md` — and in the last column above — whether it runs **headless**,
+**headed**, or **needs no browser**. The distinction is not decoration: a headed verifier needs a seat, takes
+the focus of the machine it runs on and cannot be run unattended, while a headless one can run in a terminal
+with nobody watching. A reader planning a run has to know which kind they are about to start before they start
+it, and a reader in an unattended context has to know which ones they must skip.
+
+Today every browser-driven verifier here runs **headless**; the window is judged by the browser tool's own
+`browser-surface` verifier (`_tools_/browser-tool/_verifiers/`), whose headed run checks that a window really
+was opened. That is deliberate: the repository's verifications judge heddle, and none of them claims anything
+about a window; a check that needs one belongs beside the thing whose window it is.
 
 ## Where each stands, 2026-10-11
 
-**114 checks, 0 failures, 0 unjudged**, measured by running every verifier after `npm run build` on
+**112 checks, 0 failures, 0 unjudged**, measured by running every verifier after `npm run build` on
 2026-10-11. Nothing is left unjudged: the fourteen checks that were waiting on part 7's mechanism —
 written ahead of it because the owner asked for the checks first — now pass, and the two that are
 allowed to report unjudged (part 1's real-backend probe and the daemon check) both found their subject
