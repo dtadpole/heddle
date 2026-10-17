@@ -1083,6 +1083,38 @@
   #sidebar-search:hover, #sidebar-search:focus-visible { opacity: 1; }
   #workspaces-row { display: flex; align-items: center; gap: .2rem; }
   /**
+   * The row's controls are **icon buttons with no chrome**, which is what DSH's are.
+   *
+   * Measured: the `+` was an unstyled `<button>`, so the platform painted it as a raised chip — a grey fill and a
+   * 2-pixel border — beside a `…` that painted nothing. Two controls in one row looked like two different kinds of
+   * thing, and in the collapsed rail (where the row is the whole panel) the chip was the loudest element on screen.
+   * A control that is an icon is an icon; the pointer and the focus ring are what say it is pressable.
+   */
+  #workspaces-row > button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: .9rem;
+    line-height: 1;
+    opacity: .6;
+    cursor: pointer;
+  }
+  #workspaces-row > button:hover,
+  #workspaces-row > button:focus-visible {
+    opacity: 1;
+    background: color-mix(in oklab, currentColor 10%, transparent);
+  }
+  /** The `…` is a glyph in a box; the box centres it rather than letting the text sit at the block's start edge. */
+  #view-options .untwisty { display: inline-flex; align-items: center; justify-content: center; }
+  /**
    * Collapsed: the sidebar is a **rail**, 56 pixels wide, which is DSH's measured width.
    *
    * What stays is what a reader reaches for without reading: the mark, the collapse control, and the three icon
@@ -1107,16 +1139,52 @@
   body[data-sidebar='collapsed'] #sidebar-search { display: inline-flex; }
   body[data-sidebar='collapsed'] #gutter-left { display: none; }
   /**
-   * The rail's controls are **32 pixels square**, which is the size a pointer can hit without aiming.
+   * The rail is arranged the way DSH arranges its own.
    *
-   * Measured before this: they kept their expanded sizes (a 23-pixel `+` and a 20-pixel `…`) stacked 23 pixels apart,
-   * which is a column of small targets rather than a rail — and DSH's rail items are 36 pixels. The row is what gets
-   * the size, so the `…` menu inside it grows with it.
+   * Read from DSH's collapsed sidebar on 2026-10-17 with `getComputedStyle`, rather than eyeballed: a 56-pixel column
+   * whose children are **36×36 buttons**, centred at x=10, on a **48-pixel pitch** (36 + a 12-pixel gap), inside
+   * `padding: 18px 10px 6px`, with 18-pixel icons and a 12-pixel radius. The first item — the control that reopens the
+   * panel — sits at y=18.
+   *
+   * Heddle's first attempt was none of those numbers: the toggle stayed 26 pixels and was pushed to x=23 by the
+   * `margin-left: auto` that centres it in the wide brand row, the other three controls were 32 pixels on a 7-to-8
+   * pixel pitch, and the gaps read as a cramped column rather than a rail. Measured after this change: 36×36 at x=10,
+   * 12-pixel gaps, the first item at y=18 — the same numbers DSH reports.
    */
+  body[data-sidebar='collapsed'] #workspace-sidebar { padding: 18px 10px 6px; }
+  body[data-sidebar='collapsed'] #brand {
+    height: auto;
+    padding: 0;
+    margin: 0 0 12px;
+    border: none;
+    justify-content: center;
+    gap: 0;
+  }
+  body[data-sidebar='collapsed'] #sidebar-toggle {
+    margin: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+  }
+  body[data-sidebar='collapsed'] #workspaces-row {
+    margin: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
   body[data-sidebar='collapsed'] #workspaces-row > button,
-  body[data-sidebar='collapsed'] #workspaces-row .untwisty { width: 32px; height: 32px; font-size: 1rem; }
+  body[data-sidebar='collapsed'] #workspaces-row .untwisty {
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+    font-size: 1.15rem;
+    justify-content: center;
+  }
   body[data-sidebar='collapsed'] #workspaces-row .menu-wrap { display: inline-flex; }
-  body[data-sidebar='collapsed'] #brand { height: 52px; }
+  /** The icons are 18 pixels, which is what DSH draws, so the four controls read as one family. */
+  body[data-sidebar='collapsed'] #sidebar-toggle svg,
+  body[data-sidebar='collapsed'] #sidebar-search svg { width: 18px; height: 18px; }
+  body[data-sidebar='collapsed'] #sidebar-search { width: 36px; height: 36px; border-radius: 12px; }
   #brand-name { font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; font-size: 1.06rem; font-weight: 600; letter-spacing: .01em; }
   /**
    * The `…` that opens a row's menu: **no chrome of its own**.

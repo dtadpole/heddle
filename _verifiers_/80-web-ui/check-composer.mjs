@@ -153,7 +153,12 @@ const press = (browser, init) =>
 
 test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends what is queued', async (context) => {
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  const server = await startServer('queue')
+  /**
+   * A longer hold than the others: this test measures the dock's placement while a turn runs, and a turn that
+   * ended before the measurement would hide the dock — which is the race that made the flush assertion flaky
+   * under load, not a placement bug.
+   */
+  const server = await startServer('queue', { holdOpenMs: 2500 })
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
     await browser.goto(server.url)
@@ -197,11 +202,19 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
      * panel's bottom edge meets the card's top edge rather than floating above it.
      */
     const edges = JSON.parse(
-      await browser.evaluate(`JSON.stringify({
-        panel: Math.round((document.querySelector('#queue .panel') || { getBoundingClientRect: () => ({ bottom: -999 }) }).getBoundingClientRect().bottom),
-        card: Math.round(document.getElementById('composer-card').getBoundingClientRect().top),
-      })`),
+      await browser.evaluate(`(() => {
+        const queue = document.getElementById('queue')
+        const panel = document.querySelector('#queue .panel')
+        const card = document.getElementById('composer-card')
+        if (queue.hidden || panel === null) return JSON.stringify({ visible: false })
+        return JSON.stringify({
+          visible: true,
+          panel: Math.round(panel.getBoundingClientRect().bottom),
+          card: Math.round(card.getBoundingClientRect().top),
+        })
+      })()`),
     )
+    assert.equal(edges.visible, true, 'the dock is still on screen while it is measured')
     assert.ok(Math.abs(edges.panel - edges.card) <= 1, `the dock is flush against the card (${edges.panel} vs ${edges.card})`)
 
     /** The header is the disclosure, so opening it shows the rows — one per message in the dock. */
@@ -372,7 +385,8 @@ test('the composer is one card, and every control lives inside it', async (conte
      */
     assert.ok(card.gutterLeft > 0 && card.gutterLeft === card.gutterRight, `the card is centred in the conversation column (${card.gutterLeft} / ${card.gutterRight})`)
     assert.deepEqual(card.inside, [true, true, true, true, true], 'the editor, +, access mode, model seat and send are all inside the card')
-    assert.deepEqual(card.editor, { font: '14px', line: '24px' }, 'the editor is DSH\u2019s 14/24 type')
+    /** The owner asked for the reference's composer leading: 14px on a 21px line, not DSH's 24. */
+    assert.deepEqual(card.editor, { font: '14px', line: '21px' }, 'the editor is the reference 14/21 type')
     assert.equal(card.status, true, 'and the status line exists under the card')
   } finally {
     browser.close()
