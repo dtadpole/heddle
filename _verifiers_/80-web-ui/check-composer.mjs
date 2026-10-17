@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -65,10 +66,17 @@ async function startServer(label, options = {}) {
   })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'held', '--session-root', join(home, 'sessions')],
-    { env: { HEDDLE_CONFIG: config } },
+    /**
+     * `HEDDLE_HOME` keeps the workspace store inside the fixture too: the attach test registers a folder, and
+     * without it that registration would land in the operator's real `~/.heddle/workspaces.json` — which it
+     * did, once, before this line existed.
+     */
+    { env: { HEDDLE_CONFIG: config, HEDDLE_HOME: home } },
   )
   return {
     double,
+    /** The fixture folder, for a test that needs a real file for the attach menu to offer. */
+    work,
     url: child.url,
     close: async () => {
       child.kill()
@@ -184,6 +192,17 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
     assert.match(dock.header, /3 queued messages/, `the header says how many are in the dock (${dock.header})`)
     assert.equal(dock.listHidden, true, 'and the rows are folded away until asked for')
     assert.equal(dock.label, 'Queue message', 'the arrow says what pressing it will do while a turn runs')
+    /**
+     * The dock is **attached** to the composer: what is waiting belongs to the thing it waits for, so the
+     * panel's bottom edge meets the card's top edge rather than floating above it.
+     */
+    const edges = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        panel: Math.round((document.querySelector('#queue .panel') || { getBoundingClientRect: () => ({ bottom: -999 }) }).getBoundingClientRect().bottom),
+        card: Math.round(document.getElementById('composer-card').getBoundingClientRect().top),
+      })`),
+    )
+    assert.ok(Math.abs(edges.panel - edges.card) <= 1, `the dock is flush against the card (${edges.panel} vs ${edges.card})`)
 
     /** The header is the disclosure, so opening it shows the rows — one per message in the dock. */
     await browser.evaluate('document.querySelector("#queue .header").click()')
@@ -511,9 +530,13 @@ test('the composer is the text column plus 32px, and the handle widens both', as
         return true
       })()`)
     }
-    await drag(50)
+    /**
+     * The default now sits at the ceiling (80–85% of the window, clamped), so the 2× maths is shown by narrowing:
+     * 50px inward is 100px narrower, which is what "both edges move" means.
+     */
+    await drag(-50)
     const dragged = JSON.parse(await widths())
-    assert.equal(dragged.column, before.column + 100, 'one pointer pixel widens each side, so 50px widens the column by 100')
+    assert.equal(dragged.column, before.column - 100, 'one pointer pixel moves each side, so 50px narrows the column by 100')
     assert.equal(dragged.card - dragged.text, 32, 'and the card follows the text column exactly')
 
     await drag(-200)
@@ -569,6 +592,56 @@ test('the status line derives a token rate and a context share from reported usa
     assert.match(filled.tokens, /^\d+ tok\/s$/, `the rate is output tokens over the turn's duration (${filled.tokens})`)
     assert.equal(filled.context, '50% context', 'the share is reported input tokens over the declared window')
     assert.equal(filled.turns, '1 turn', 'and the turn count still follows the transcript')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The `+` menu is the composer's file entry: it opens the workspace tree, descends one level at a time, and
+ * inserts a file's path at the cursor — DSH's `+`, reduced to what this harness has (files, not commands).
+ */
+test('the + menu inserts a workspace file path into the draft', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach')
+  const browser = await openBrowser()
+  try {
+    /** A real folder with a real file, registered through the API the page's own controls call. */
+    writeFileSync(join(server.work, 'note.md'), '# a note\n')
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    const registered = await browser.evaluate(`(async () => {
+      const response = await fetch('/api/workspaces', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: ${JSON.stringify(server.work)} }),
+      })
+      return response.status
+    })()`)
+    assert.equal(registered, 200, 'the fixture folder is a workspace root')
+
+    await browser.evaluate('document.getElementById("attach").click()')
+    assert.ok(await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000), 'the menu opens')
+    const rootLabel = server.work.split('/').filter(Boolean).pop() + '/'
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#attach-menu button')).some((item) => item.textContent === ${JSON.stringify(rootLabel)})`, 10_000),
+      `the workspace root is listed (${rootLabel})`,
+    )
+    await browser.evaluate(`Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === ${JSON.stringify(rootLabel)}).click()`)
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#attach-menu button')).some((item) => item.textContent === 'note.md')`, 10_000),
+      'descending one level lists the folder\'s files',
+    )
+    await browser.evaluate(`Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'note.md').click()`)
+    const after = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        value: document.querySelector('#prompt textarea').value,
+        hidden: document.getElementById('attach-menu').hidden,
+      })`),
+    )
+    assert.equal(after.value, join(server.work, 'note.md'), 'the file path lands in the draft')
+    assert.equal(after.hidden, true, 'and choosing it closes the menu')
   } finally {
     browser.close()
     await server.close()
