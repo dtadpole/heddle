@@ -65,6 +65,18 @@ The launch token is minted **per process** and never stored, which does not chan
 supervised: each restart prints a new one into the log. The installer says so and gives the command that
 reads the last one, rather than printing a URL whose token would be stale by the time it was used.
 
+## A build is only visible after a restart
+
+The agent runs the built files, and **the page and every module are read when the process starts**. After
+`npm run build`, restart the agent (`sh install.sh --restart`, or `launchctl kickstart -k
+gui/$UID/<label>`) or the browser keeps being served the previous page and the previous projections.
+
+Measured on 2026-10-17, and it cost a false bug report: the owner saw rounded panes and a duplicated
+assistant row after the fixes had been committed, while the running process had started before the build
+that carried them. Restarting the agent made the same browser show the fixed page — `aside` radius
+`28px → 0px`, one assistant row per turn — with no code change in between. A stale process looks exactly
+like a broken fix.
+
 ## Read next
 
 [`../../_verifiers_/95-web-daemon/INDEX.md`](../../_verifiers_/95-web-daemon/INDEX.md) for the claim this
