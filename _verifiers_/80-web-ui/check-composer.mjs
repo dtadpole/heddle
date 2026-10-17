@@ -117,7 +117,15 @@ function startCli(args, options) {
  * which gesture it is.
  */
 const type = (browser, text) =>
-  browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = ${JSON.stringify(text)}; return true })()`)
+  browser.evaluate(`(() => {
+    const field = document.querySelector('textarea')
+    field.value = ${JSON.stringify(text)}
+    // A person's typing fires an input event, and the composer's own rules depend on it: the editor grows
+    // with the draft and the send button's disabled state follows it. Writing the value alone is a state the
+    // page can never observe, so the helper does what a keyboard does.
+    field.dispatchEvent(new Event('input', { bubbles: true }))
+    return true
+  })()`)
 const press = (browser, init) =>
   browser.evaluate(`(() => {
     const field = document.querySelector('textarea')
@@ -231,7 +239,18 @@ test('Ctrl+Enter on an empty draft sends everything still queued, in order', asy
     const order = ['running', 'queued one', 'queued two', 'queued three'].map((text) => log.indexOf(text))
     assert.ok(order.every((at) => at !== -1), `every queued message was sent (${log})`)
     assert.deepEqual([...order].sort((left, right) => left - right), order, 'in FIFO order')
-    assert.equal(server.double.requests.length, 4, 'one turn per message, including the one that was running')
+    /**
+     * Every message reached the model, which is the claim — not a request count.
+     *
+     * A message sent while the turn is still running is **steered into it**, so several share one model call;
+     * the count therefore depends on whether the first turn was still open when the chord fired, which is a
+     * race this check was previously measuring by accident. What must hold either way is that each queued
+     * message was actually asked.
+     */
+    const asked = server.double.requests.map((entry) => entry.body).join('\n')
+    for (const text of ['queued one', 'queued two', 'queued three']) {
+      assert.ok(asked.includes(text), `the model was asked '${text}'`)
+    }
   } finally {
     browser.close()
     await server.close()
@@ -274,6 +293,223 @@ test('a steered message is answered by the running turn, and a steer with nothin
     assert.ok(await until(() => server.double.requests.length === 2), 'and the running turn asked the model again for it')
     const log = await browser.evaluate('document.getElementById("log").innerText')
     assert.ok(log.includes('the answer'), 'the steered message was answered inside that turn')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The composer's **shape**, judged in the browser against the values measured from DSH's own page.
+ *
+ * This is the part a person sees before touching anything, and it is measurable rather than a matter of
+ * taste: DSH's card is 712px wide inside the conversation column, `border-radius: 28px`, surface `#2c2c2e`,
+ * with a 0.5px light ring instead of a border, and every control **inside** the card. The old composer was a
+ * full-width band with the editor in a card and the controls on the page background below it.
+ */
+test('the composer is one card, and every control lives inside it', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('card')
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    const card = JSON.parse(
+      await browser.evaluate(`(() => {
+        const node = document.getElementById('composer-card')
+        const style = getComputedStyle(node)
+        const box = node.getBoundingClientRect()
+        const inside = ['#prompt textarea', '#attach', '#access', '#model-seat', '#send'].map((selector) => node.contains(document.querySelector(selector)))
+        const host = document.getElementById('composer').getBoundingClientRect()
+        return JSON.stringify({
+          radius: style.borderRadius,
+          background: style.backgroundColor,
+          ring: style.boxShadow.includes('0.5px'),
+          width: Math.round(box.width),
+          gutterLeft: Math.round(box.left - host.left),
+          gutterRight: Math.round(host.right - box.right),
+          inside,
+          editor: (() => { const s = getComputedStyle(document.querySelector('#prompt textarea')); return { font: s.fontSize, line: s.lineHeight } })(),
+          status: document.getElementById('composer-status') !== null,
+        })
+      })()`),
+    )
+    assert.equal(card.radius, '28px', 'the card is DSH\u2019s rounded card')
+    assert.equal(card.background, 'rgb(44, 44, 46)', 'on DSH\u2019s card surface')
+    assert.equal(card.ring, true, 'with a hairline ring rather than a border')
+    /**
+     * The card's width is the **column's**, not a constant: DSH's card is the text column plus 32px, and the
+     * column is resizable, so a fixed cap is exactly what this composer stopped being.
+     */
+    assert.ok(card.gutterLeft > 0 && card.gutterLeft === card.gutterRight, `the card is centred in the conversation column (${card.gutterLeft} / ${card.gutterRight})`)
+    assert.deepEqual(card.inside, [true, true, true, true, true], 'the editor, +, access mode, model seat and send are all inside the card')
+    assert.deepEqual(card.editor, { font: '14px', line: '24px' }, 'the editor is DSH\u2019s 14/24 type')
+    assert.equal(card.status, true, 'and the status line exists under the card')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/** The editor grows with the draft and stops at 336px, then scrolls — DSH's own cap. */
+test('the editor grows with the draft and stops at its cap', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('grow')
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector("#prompt textarea") !== null', 20_000)
+    const heightOf = () => browser.evaluate('Math.round(document.querySelector("#prompt textarea").getBoundingClientRect().height)')
+    const setLines = (count) =>
+      browser.evaluate(`(() => {
+        const field = document.querySelector('#prompt textarea')
+        field.value = Array.from({ length: ${count} }, (_, index) => 'line ' + (index + 1)).join('\\n')
+        field.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`)
+    const empty = await heightOf()
+    assert.ok(empty >= 36 && empty <= 60, `one line is the resting height (${empty})`)
+    await setLines(4)
+    const four = await heightOf()
+    assert.ok(four > empty, `four lines are taller than one (${four} > ${empty})`)
+    await setLines(40)
+    const capped = await heightOf()
+    assert.equal(capped, 336, 'forty lines stop at DSH\u2019s 336px cap')
+    await setLines(0)
+    assert.ok((await heightOf()) <= empty + 1, 'and clearing the draft returns the resting height')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * One action at a time: Stop takes Send's place while a turn runs, and pressing it ends the turn without
+ * drawing a failure. DSH draws the same pair.
+ */
+test('a running turn offers Stop, and Stop ends it', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('stop', { holdOpenMs: 60_000 })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    assert.equal(await browser.evaluate('document.getElementById("stop").hidden'), true, 'idle: Stop is not offered')
+    assert.equal(await browser.evaluate('document.getElementById("send").hidden'), false, 'idle: Send is')
+
+    await type(browser, 'a question that will not finish on its own')
+    await press(browser, { key: 'Enter' })
+    assert.ok(
+      await browser.waitFor('document.getElementById("stop").hidden === false', 15_000),
+      'while the turn runs, Stop takes Send\u2019s place',
+    )
+    assert.equal(await browser.evaluate('document.getElementById("send").hidden'), true, 'and Send is out of the way')
+    assert.ok(await until(() => server.double.requests.length === 1), 'the model call is in flight')
+
+    await browser.evaluate('document.getElementById("stop").click()')
+    assert.ok(
+      await browser.waitFor('document.getElementById("stop").hidden === true', 20_000),
+      'pressing Stop ends the turn and hands the action back',
+    )
+    assert.equal(await browser.evaluate('document.getElementById("send").hidden'), false, 'Send is back')
+    assert.equal(
+      await browser.evaluate('document.querySelectorAll("#log .turn.denied").length'),
+      0,
+      'a stopped turn is not drawn as a failure',
+    )
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/** The access chip names the sandbox mode the server actually runs under — read, not guessed. */
+test('the access chip reports the server\u2019s sandbox mode', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('access')
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("access") !== null', 20_000)
+    /**
+     * The mode arrives from `/api/status` after the page boots, so the chip's *text* is what is awaited — the
+     * element itself exists before that answer does.
+     */
+    await browser.waitFor('document.getElementById("access").textContent !== "Access"', 10_000)
+    const chip = JSON.parse(
+      await browser.evaluate('JSON.stringify({ text: document.getElementById("access").textContent, title: document.getElementById("access").title })'),
+    )
+    assert.match(chip.text, /^(Read only|Workspace write|Full access)$/, `the chip names the mode (${chip.text})`)
+    assert.match(chip.title, /sandbox mode/, 'and says where the name comes from')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The composer is **the text column plus 32px**, and one handle widens both.
+ *
+ * Measured from DSH's own page: text 680px, composer card 712px (16px overhang each side), in one column a
+ * 10px `col-resize` grip resizes. The composer used to be a fixed 712px card under a 872px transcript, which
+ * is the mismatch this judges: the input and the text must be one column, not two widths that disagree.
+ */
+test('the composer is the text column plus 32px, and the handle widens both', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('column')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+
+    /** A turn gives the transcript a row to measure; the double answers it. */
+    await type(browser, 'width check')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 15_000)
+
+    const widths = () =>
+      browser.evaluate(`(() => {
+        const row = document.querySelector('#log .turn.assistant')
+        const card = document.getElementById('composer-card')
+        const gutter = document.getElementById('gutter-column')
+        return JSON.stringify({
+          text: Math.round(row.getBoundingClientRect().width),
+          card: Math.round(card.getBoundingClientRect().width),
+          cursor: getComputedStyle(gutter).cursor,
+          column: Math.round(Number.parseFloat(getComputedStyle(document.querySelector('main')).getPropertyValue('--chat-column'))),
+        })
+      })()`)
+    const before = JSON.parse(await widths())
+    assert.ok(before.text > 0, `the transcript has a measurable text column (${before.text})`)
+    assert.equal(before.card - before.text, 32, `the composer hangs 16px over each side of the text (${before.card} vs ${before.text})`)
+    assert.equal(before.cursor, 'col-resize', 'the handle is a column-resize grip')
+
+    /** Dragging the handle left by 60px narrows the column by 120, both sides moving together. */
+    await browser.evaluate(`(() => {
+      const gutter = document.getElementById('gutter-column')
+      const box = gutter.getBoundingClientRect()
+      const startX = box.x + box.width / 2
+      try { gutter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: startX, clientY: 400, button: 0, pointerId: 1 })) } catch {}
+      window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: startX - 60, clientY: 400, pointerId: 1 }))
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: startX - 60, clientY: 400, pointerId: 1 }))
+      return true
+    })()`)
+    const dragged = JSON.parse(await widths())
+    assert.equal(dragged.column, before.column - 120, 'one pointer pixel widens each side, so 60px narrows the column by 120')
+    assert.equal(dragged.card - dragged.text, 32, 'and the card follows the text column exactly')
+
+    /** The chosen width is a preference, so a reload keeps it. */
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    /**
+     * Only the column is read here: a fresh page has no selected session, so there is no transcript row to
+     * measure — the width itself is the fact that has to survive.
+     */
+    const reloaded = await browser.evaluate(
+      'Math.round(Number.parseFloat(getComputedStyle(document.querySelector("main")).getPropertyValue("--chat-column")))',
+    )
+    assert.equal(reloaded, dragged.column, 'the width survives a reload')
+    await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
   } finally {
     browser.close()
     await server.close()

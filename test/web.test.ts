@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { pageAccess, tokenFormPage, transcriptTurns } from '../src/server/web.ts'
+import { pageAccess, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
 
 /**
  * Unit tests for the Web UI's two pure pieces.
@@ -212,4 +212,24 @@ test('a tool call separates the text runs around it', () => {
   assert.equal(turns[0]?.text, 'let me check. ', 'the text before the call stays one turn')
   assert.equal(turns[1]?.result, '/tmp', 'the result still fills the call it answers')
   assert.equal(turns[2]?.text, 'done.', 'and the text after it is a new one')
+})
+
+test('a stop aborts every running turn of one session, and finds none the second time', () => {
+  /**
+   * The rule the composer's Stop button asks about: it aborts the handles that session is running under and
+   * clears them, so a second click is a no-op rather than an abort of something else.
+   */
+  const first = new AbortController()
+  const second = new AbortController()
+  const other = new AbortController()
+  const controllers = new Map<string, Set<AbortController>>([
+    ['session-a', new Set([first, second])],
+    ['session-b', new Set([other])],
+  ])
+  assert.equal(abortSession(controllers, 'session-a'), 2)
+  assert.equal(first.signal.aborted, true, 'every handle of the session is aborted')
+  assert.equal(second.signal.aborted, true)
+  assert.equal(other.signal.aborted, false, 'another session is untouched')
+  assert.equal(abortSession(controllers, 'session-a'), 0, 'a second stop finds nothing')
+  assert.equal(controllers.has('session-a'), false, 'and the session holds no handles')
 })
