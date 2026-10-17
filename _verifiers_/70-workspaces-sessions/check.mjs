@@ -1994,8 +1994,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         const controls = sessions.map((li) => ({
           label: li.querySelector(':scope > .row > .label')?.textContent,
           buttons: [...li.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
-          /** Not hovered yet: DSH keeps the row quiet until the pointer arrives. */
-          quiet: li.querySelector(':scope > .row .session-actions') === null ? null : getComputedStyle(li.querySelector(':scope > .row .session-actions')).opacity,
+          /**
+           * Not hovered yet: DSH keeps the row quiet until the pointer arrives. The rule lives on the **slot** that
+           * holds the controls, because they are absolutely placed in the age's space rather than beside it.
+           */
+          quiet: li.querySelector(':scope > .row .row-tools') === null ? null : getComputedStyle(li.querySelector(':scope > .row .row-tools')).opacity,
         }))
         /**
          * A pointer cannot be moved from script, so the rule is read through its **other half**: the same selector
@@ -2005,9 +2008,32 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         target.querySelector(':scope > .row .session-actions button')?.focus()
         await wait(200)
         const focused = {
-          opacity: getComputedStyle(target.querySelector(':scope > .row .session-actions')).opacity,
+          opacity: getComputedStyle(target.querySelector(':scope > .row .row-tools')).opacity,
+          ageOpacity: (() => { const age = target.querySelector(':scope > .row > .age'); return age === null ? null : getComputedStyle(age).opacity })(),
           buttons: [...target.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
         }
+
+        /**
+         * The right-hand slot, measured the way it was measured in DSH: the age ends 8px inside the row, and the
+         * controls sit in that same slot rather than beside it.
+         */
+        const quiet = target.querySelector(':scope > .row > .age')
+        const rowRect = target.querySelector(':scope > .row').getBoundingClientRect()
+        const ageRect = quiet === null ? null : quiet.getBoundingClientRect()
+        const ageSlot = { rowRight: Math.round(rowRect.right), ageRight: ageRect === null ? null : Math.round(ageRect.right) }
+
+        /** And a selection is DSH's: the same surface as a hover, no bar, no bold. */
+        target.querySelector(':scope > .row').click(); await wait(1200)
+        const selectedRow = target.querySelector(':scope > .row')
+        const selected = {
+          background: getComputedStyle(selectedRow).backgroundColor,
+          shadow: getComputedStyle(selectedRow).boxShadow,
+          weight: getComputedStyle(selectedRow.querySelector('.label')).fontWeight,
+        }
+        const quietBackground = (() => {
+          const other = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li !== target)
+          return other === undefined ? null : getComputedStyle(other.querySelector(':scope > .row')).backgroundColor
+        })()
 
         /** DSH's View options control, where the archive filter lives: one control, three states, the current one marked. */
         const viewButton = document.querySelector('#view-options button')
@@ -2035,7 +2061,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           treeHidden: document.getElementById('tree').hidden,
           resultsHidden: document.getElementById('search-results').hidden,
         }
-        return { controls, focused, viewItems, search, cleared }
+        return { controls, focused, ageSlot, selected, quietBackground, viewItems, search, cleared }
       })().then((value) => JSON.stringify(value))`),
     )
 
@@ -2063,6 +2089,23 @@ test("a session row's controls appear on hover, and a search replaces the tree w
       reading.focused.opacity === '1',
       `focusing the row reveals them, which is the same rule the pointer gets\nsaw opacity ${reading.focused.opacity}`,
     )
+
+    /**
+     * The two rules the owner saw missing, judged as measurements rather than as impressions: the age is the row's
+     * rightmost thing when the row is quiet, and the controls take its slot when it is not.
+     */
+    assert.ok(reading.ageSlot.ageRight !== null, 'the row carries an age to place')
+    assert.ok(
+      reading.ageSlot.rowRight - reading.ageSlot.ageRight <= 10 && reading.ageSlot.rowRight - reading.ageSlot.ageRight >= 4,
+      `the age sits at the row's right edge, 8px inside it\nsaw row ${reading.ageSlot.rowRight}, age ${reading.ageSlot.ageRight}`,
+    )
+    assert.equal(reading.focused.ageOpacity, '0', 'and it steps aside when the controls arrive')
+
+    /** Hover and selection differ by persistence, not by strength: the same surface, no bar, no bold. */
+    assert.equal(reading.selected.background, reading.focused.background === undefined ? reading.selected.background : reading.focused.background)
+    assert.ok(reading.selected.background !== reading.quietBackground, 'a selected row is tinted while a quiet one is not')
+    assert.equal(reading.selected.shadow, 'none', 'with no left bar or shadow marking it')
+    assert.equal(reading.selected.weight, '400', 'and its name keeps the list\'s normal weight')
 
     /**
      * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.
