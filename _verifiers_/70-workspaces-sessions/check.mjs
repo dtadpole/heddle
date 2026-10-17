@@ -1785,7 +1785,7 @@ test('a session is renamed from its own menu, and the row and its definition fol
         const items = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].map((button) => button.textContent)
         /** The prompt is stubbed, so the whole handler runs — the fetch, the redraw and the label — without a dialog. */
         window.prompt = () => 'a session with a name'
-        const item = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].find((button) => button.textContent === 'Rename…')
+        const item = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].find((button) => button.textContent === 'Rename')
         if (item === undefined) return { error: 'no rename item', items }
         item.click(); await wait(1800)
         const after = rows().find((entry) => entry.parentElement.dataset.kind === 'session')
@@ -1794,7 +1794,15 @@ test('a session is renamed from its own menu, and the row and its definition fol
     )
 
     assert.equal(reading.error, undefined, `the session row offers its menu\nsaw: ${JSON.stringify(reading)}`)
-    assert.ok(reading.items.includes('Rename…'), `the menu holds the rename\nsaw: ${reading.items.join(', ')}`)
+    /**
+     * DSH's names, verbatim — that is the parity claim, so the check names all four rather than just the one it clicks.
+     * A menu that drifts back to `Pin` / `Rename…` / `Fork` / `Archive` is a menu nobody who knows DSH recognises.
+     */
+    assert.deepEqual(
+      reading.items,
+      ['Pin session', 'Rename', 'Fork session', 'Archive session'],
+      `the menu reads what DSH's reads\nsaw: ${reading.items.join(', ')}`,
+    )
     assert.match(reading.label, /^session-\d{8}-\d{4}$/, 'the row starts with the folder name, because nothing has named it yet')
     assert.equal(reading.renamed, 'a session with a name', 'after the rename the row shows the name it was given')
     assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', reading.label), 'while the folder stays reachable as the tooltip, because it is the identity')
@@ -2038,7 +2046,10 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         /** DSH's View options control, where the archive filter lives: one control, three states, the current one marked. */
         const viewButton = document.querySelector('#view-options button')
         viewButton.click(); await wait(250)
-        const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].map((b) => b.textContent.trim())
+        const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].map((b) => ({
+          label: b.textContent.trim(),
+          checked: b.getAttribute('aria-checked'),
+        }))
         document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
         await wait(100)
 
@@ -2119,12 +2130,19 @@ test("a session row's controls appear on hover, and a search replaces the tree w
       assert.match(String(hit.where), /·/, 'and says where it lives, beside its age')
     }
     /**
-     * And the filter is one control with DSH's three states, not a toggle that has to be toggled twice to learn
-     * what it is: the current one is marked, and `Archived only` exists at all.
+     * And the filter is one control with DSH's three states, named the way DSH names them — the labels are the
+     * parity claim — with the current state carried by `aria-checked` rather than by a character in the name.
      */
-    assert.equal(reading.viewItems.length, 3, `View options holds the three archive states\nsaw: ${JSON.stringify(reading.viewItems)}`)
-    assert.ok(reading.viewItems.some((item) => item.includes('Archived only')), 'including the one a vanished session is found under')
-    assert.ok(reading.viewItems.some((item) => item.startsWith('✓')), 'with the current state marked')
+    assert.deepEqual(
+      reading.viewItems.map((item) => item.label),
+      ['Hide archived', 'All conversations (show archived)', 'Archived only'],
+      `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
+    )
+    assert.equal(
+      reading.viewItems.filter((item) => item.checked === 'true').length,
+      1,
+      `exactly one state is marked current\nsaw: ${JSON.stringify(reading.viewItems.map((item) => item.checked))}`,
+    )
 
     assert.equal(reading.cleared.treeHidden, false, 'clearing the query restores the tree')
     assert.equal(reading.cleared.resultsHidden, true, 'and puts the results away')
