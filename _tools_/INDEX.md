@@ -29,6 +29,13 @@ rather than the harness. The test is the one the conventions give: if the packag
 were published tomorrow, would this file still be needed? A check that judges the
 harness belongs to the harness; the runner that scores it belongs to the project.
 
+## Where the tests live
+
+A tool's component tests live in [`_tests_/<tool>/`](../_tests_/INDEX.md), one suite named for its
+subject, because a test of a tool is itself part of this repository rather than of the package. The
+framework's shipped source has its own suite in [`test/`](../test/INDEX.md), and a delivered capability
+is judged by [`_verifiers_/`](../_verifiers_/INDEX.md) — three homes for three different questions.
+
 ## Read next
 
 [`verify-runner/INDEX.md`](verify-runner/INDEX.md) for the exit contract every verifier keeps,

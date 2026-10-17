@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { decodeFrame, encodeFrame } from './cdp.mjs'
-import { browserPath, stateDir } from './chrome.mjs'
-import { keyDescription, parseKey } from './actions.mjs'
-import { parseGeolocation, parseHeaders, parseViewport } from './emulate.mjs'
+import { decodeFrame, encodeFrame } from '../../_tools_/browser-use/cdp.mjs'
+import { browserPath, stateDir } from '../../_tools_/browser-use/chrome.mjs'
+import { keyDescription, parseKey } from '../../_tools_/browser-use/actions.mjs'
+import { parseGeolocation, parseHeaders, parseViewport } from '../../_tools_/browser-use/emulate.mjs'
 import {
   formatConsoleList,
   formatNetworkRequest,
@@ -14,9 +14,9 @@ import {
   paginationLines,
   responseBodyText,
   networkStatus,
-} from './format.mjs'
-import { attributesOf, formatSnapshot } from './snapshot.mjs'
-import { TOOL_NAMES } from './tools.mjs'
+} from '../../_tools_/browser-use/format.mjs'
+import { attributesOf, formatSnapshot } from '../../_tools_/browser-use/snapshot.mjs'
+import { TOOL_NAMES } from '../../_tools_/browser-use/tools.mjs'
 
 /**
  * The browser tool's **unit** tests: the rules its helpers implement, judged without a browser.
@@ -26,7 +26,7 @@ import { TOOL_NAMES } from './tools.mjs'
  * bug in one of them shows up as a mysterious failure much later, and because a rule written in a
  * helper deserves a claim that can fail.
  *
- *     node --test _tools_/browser-use/unit.test.mjs
+ *     node --test _tests_/browser-use/unit.test.mjs
  */
 
 /** One masked text frame, decoded back to its payload and flags. */

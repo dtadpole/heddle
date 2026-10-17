@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { classify, collectNames, tapCounts } from './run.mjs'
+import { classify, collectNames, tapCounts } from '../../_tools_/verify-runner/run.mjs'
 
 /**
  * The runner's own **component tests**.
@@ -11,7 +11,7 @@ import { classify, collectNames, tapCounts } from './run.mjs'
  * implementation would hide behind a green run: a skipped check is never a pass, a failure outranks an
  * unjudged check, and nothing collected is unjudged rather than passed.
  *
- *     node --test _tools_/verify-runner/unit.test.mjs
+ *     node --test _tests_/verify-runner/unit.test.mjs
  */
 
 /** One TAP tail, as node v24 writes it: no colon after the key. */

@@ -49,7 +49,7 @@ repository in [`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/IND
 | [`client.mjs`](client.mjs) | the command side — is a host alive, start one, call a tool, stop it |
 | [`lib.mjs`](lib.mjs) | the library face, including the one-page API the repository's checks use |
 | [`cli.mjs`](cli.mjs) | the command line |
-| [`unit.test.mjs`](unit.test.mjs) | the **component tests** — frame codec, keys, viewport syntax, snapshot text, pagination, the tool table |
+| [`_tests_/browser-use/`](../../_tests_/browser-use/INDEX.md) | the **component tests** — frame codec, keys, viewport syntax, snapshot text, pagination, the tool table |
 | [`_verifiers_/`](_verifiers_/INDEX.md) | the claims this tool must keep, one folder each, checked against real browsers |
 
 ## Run it
@@ -70,6 +70,46 @@ should be able to be watched from the beginning. Arguments are one JSON object o
 From the library, `openPage()` is the one-browser-one-page shape the verifiers use, and
 `openBrowser()` plus `createTools()` is the session shape the CLI uses — both run this same driver, so
 a check that passes through `openPage` has exercised what the command line runs.
+
+## Using it in heddle
+
+There are three ways this tool is used, and they share the one driver:
+
+| Who | How | Why that way |
+|---|---|---|
+| a **check or verifier** | import the one-page wrapper, [`_tools_/check-helpers/browser.mjs`](../check-helpers/browser.mjs): `openBrowser()` returns `goto`, `evaluate`, `waitFor`, `screenshot`, `close` | the wrapper opens a browser and a temporary profile per call, headless by default, so a check that opens a window steals no focus and leaves no login behind |
+| a **person** | the command line, `node _tools_/browser-use/cli.mjs …` | headed by default, one browser kept between commands, a snapshot's uids drive the next click |
+| an **agent in a heddle session** | the same command line, through the shell (`bash`), or the library imported from a script | the tool is **not registered as a heddle tool**: it is repository tooling, not part of the shipped harness. An agent that needs it runs it, and `cli.mjs tools` is how it discovers the surface |
+
+A check that needs a page looks like this — the pattern every browser check in `_verifiers_/` follows:
+
+```js
+import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
+
+const browser = await openBrowser({ width: 1400, height: 900 })
+try {
+  await browser.goto(server.url)
+  assert.ok(await browser.waitFor('document.getElementById("prompt") !== null', 20_000), 'the page is up')
+  await browser.evaluate('document.querySelector("#send").click()')
+} finally {
+  browser.close()
+}
+```
+
+**Prerequisites and state.** The only requirement is Chrome or Chromium: discovery tries the usual
+locations, and `HEDDLE_BROWSER=/path/to/chrome` names one that is elsewhere. Nothing is installed by
+npm. The profile and the session record live under `.heddle-tmp/browser/` in this checkout;
+`HEDDLE_BROWSER_HOME` moves them, and removing the profile forgets every login. `cli.mjs status` says
+what is running, `cli.mjs stop` ends it.
+
+**Watching it work.** The command line is headed by default, so a person can watch and sign in; a check
+is headless by default. The tool's own surface verifier runs headed with
+`HEDDLE_BROWSER_HEADED=1 _tools_/browser-use/_verifiers/browser-surface/verify.sh`, and a library caller
+asks for a window with `openPage({ visible: true })`.
+
+**Two agents at once.** Give each a session name: `cli.mjs --session=NAME …` or
+`HEDDLE_BROWSER_SESSION=NAME`. Each gets its own browser, profile and tabs, so neither can name the
+other's pages.
 
 ## The decisions worth knowing
 
@@ -122,7 +162,7 @@ being true.
 
 The two kinds of check are kept apart, and the split is a rule rather than a filing decision.
 
-- **`unit.test.mjs` is the component suite.** It runs with no browser and no session: the frame codec,
+- **`_tests_/browser-use/` is the component suite.** It runs with no browser and no session: the frame codec,
   the key names, the viewport syntax, the snapshot's text form, pagination, and the table of tools. A
   rule that can be stated about one function belongs here, because it is fast, deterministic, and can be
   read next to the function it judges.
@@ -142,7 +182,7 @@ The verifiers live beside the tool, in [`_verifiers_/`](_verifiers_/INDEX.md), b
 tool rather than heddle's ultimate goal:
 
 ```bash
-node --test _tools_/browser-use/unit.test.mjs                                  # no browser
+node --test _tests_/browser-use/unit.test.mjs                                  # no browser
 _tools_/browser-use/_verifiers/browser-surface/verify.sh                      # headless
 _tools_/browser-use/_verifiers/browser-session/verify.sh                      # headless
 HEDDLE_BROWSER_HEADED=1 _tools_/browser-use/_verifiers/browser-surface/verify.sh   # watch it
