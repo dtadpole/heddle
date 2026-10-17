@@ -295,9 +295,15 @@
     padding: 4px 6px 4px 0; margin-right: -6px; will-change: transform;
   }
   #minimap .mm-row { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; height: 12px; padding-right: 4px; }
+  /**
+   * The reference's bar carries **no transition at all** (`transition: all 0s` measured on the reference), so its hover
+   * swell is instant: the ramp is applied in the frame the pointer arrives. Ours eased it over .18s and read as
+   * sluggish — the owner's "fast expansion" was the reference's zero duration. Opacity keeps a short ease because
+   * that is the scroll window's motion, which the reference paints without one but which is not what was reported.
+   */
   #minimap .mm-bar {
     width: 12px; border-radius: 1px; transform-origin: right center;
-    transition: opacity .18s ease, transform .18s ease, background-color .18s ease;
+    transition: opacity .18s ease, background-color .18s ease;
   }
   /** The two inks of the reference: the person in the read ink, the answer in the secondary one. */
   #minimap .mm-bar[data-role='user'] { background: var(--text); }
@@ -347,14 +353,16 @@
    * small radius; that was wrong, and the measurement is written here so it is not "fixed" back.
    */
   /**
-   * DSH's user turn, measured on its own chat on 2026-10-17: **the full width of the reading column, left-aligned**, on a
-   * quiet surface with a 12px radius. A right-hand bubble is the shape a chat app uses; a session reader is reading a
-   * transcript, so the column stays one column and the surface marks whose turn it is. This rule was aligned once and a
-   * later whole-file pass replaced it back into a bubble, which is why the checks now assert the alignment.
+   * **Right-aligned and content-width**, which is what DSH's own chat shows and what the owner confirmed against it:
+   * `align-self: flex-end` inside the flex column puts the bubble against the right edge of the reading column, and
+   * with `width: auto` it hugs its text instead of stretching. The full-width 12px-radius reading that briefly
+   * replaced this rule was wrong for DSH — its bubble is 20px on `#2c2c2e` with 10px/16px padding, and its
+   * `userStack` is `align-items: flex-end`. A stretched block can have the same right edge as a right-aligned
+   * bubble, which is why the check measures the bubble's **own width** as well as its edge.
    */
   .turn.user {
-    align-self: stretch; max-width: 100%; padding: 10px 14px;
-    border: 0; border-radius: 12px;
+    align-self: flex-end; max-width: 100%; width: fit-content; padding: 10px 16px;
+    border: 0; border-radius: 20px;
     background: var(--chat-bubble); color: var(--chat-text);
     font-size: 14px; line-height: 22px; white-space: pre-wrap;
   }
@@ -378,6 +386,30 @@
   .turn.assistant.markdown pre { margin: 16px 0; padding: 10px 12px; background: var(--chat-code); border-radius: 8px; overflow-x: auto; }
   .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: 12.5px; line-height: 19px; background: none; padding: 0; }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
+  /**
+   * **The live state**, read from DSH's own stylesheets: a row that is still arriving carries a slow masked sweep — its
+   * `.sweep` is `mask-image: linear-gradient(105deg, transparent 0, black 40%, black 60%, transparent 100%)` driven by a
+   * `shimmer-sweep` keyframe — rather than only a static caret. This adds that sweep on top of the caret, at the same
+   * 105° angle, and lets a reader who asked for reduced motion keep the caret alone.
+   */
+  .turn.assistant[data-state='running'] { position: relative; }
+  .turn.assistant[data-state='running']::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 0%, color-mix(in oklab, var(--chat-text) 10%, transparent) 50%, transparent 100%);
+    -webkit-mask-image: linear-gradient(105deg, transparent 0%, #000 40%, #000 60%, transparent 100%);
+    mask-image: linear-gradient(105deg, transparent 0%, #000 40%, #000 60%, transparent 100%);
+    animation: heddle-shimmer-sweep 1.6s linear infinite;
+  }
+  @keyframes heddle-shimmer-sweep {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(100%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .turn.assistant[data-state='running']::before { animation: none; }
+  }
   /**
    * A drawn answer is a document, so it follows the document's whitespace rather than the row's `pre-wrap`
    * (which would double every newline the markup already carries), and its first and last blocks sit flush.
@@ -475,13 +507,24 @@
    * selected tab is told apart by **colour alone** (`rgb(122,170,255)`) against the muted `rgb(173,178,184)` of the other.
    * This UI drew a bordered, tinted, rounded box, which is the shape of a segmented control rather than DSH's ring.
    */
-  nav#views { display: flex; gap: 1.5rem; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
+  /**
+   * Measured from DSH's own tablist, property by property: a **36px gap** between tabs, tabs at 13px/500 with
+   * `padding: 0 0 9px`, and the selected tab marked two ways — the accent colour (`rgb(122,170,255)`) **and** a 2px
+   * `::after` underline sitting 1px below the padding box. The underline is a pseudo-element, which a first pass missed
+   * because it read only the element's own background and border.
+   */
+  nav#views { display: flex; gap: 36px; padding: .5rem .75rem 0; border-bottom: 1px solid var(--line); }
   nav#views button {
+    position: relative;
     font: inherit; font-size: 13px; font-weight: 500; padding: 0 0 9px;
     background: none; border: 0; border-radius: 0; color: var(--text-3); cursor: pointer;
   }
-  nav#views button:hover { color: var(--text-2); }
+  nav#views button:hover { color: var(--text); }
   nav#views button[aria-selected='true'] { color: #7aaaff; }
+  nav#views button[aria-selected='true']::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; border-radius: 2px 2px 0 0; background: #7aaaff;
+  }
   /**
    * `hidden` has to win over this file's own display rules.
    *
@@ -780,6 +823,11 @@
   #tree li { display: block; padding: 0; }
   #tree ul[role='group'] { padding-left: .85rem; border-left: 1px solid var(--line); }
   #tree .row { position: relative; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border-radius: var(--radius-md); cursor: pointer; }
+  /**
+   * DSH's two row heights, measured: a workspace (its `projectRow`) is 34px and a session is **32px**. This UI drew
+   * every row at 34px, so a list of sessions was 2px denser in DSH than here.
+   */
+  #tree li[data-kind='session'] > .row { height: 32px; }
   /**
    * The row's three states, read from DSH's own rows on 2026-10-17 and copied rather than invented:
    *
@@ -1114,6 +1162,8 @@
     cursor: pointer;
   }
   #sidebar-toggle:hover, #sidebar-toggle:focus-visible { opacity: 1; background: color-mix(in oklab, currentColor 10%, transparent); }
+  /** The icon is the collapsed rail's top control, so it is hidden while the panel is wide. */
+  #sidebar-toggle-mark { display: none; width: 24px; height: 24px; }
   #sidebar-search {
     display: none;
     align-items: center;
@@ -1229,8 +1279,13 @@
   }
   body[data-sidebar='collapsed'] #workspaces-row .menu-wrap { display: inline-flex; }
   /** The icons are 18 pixels, which is what DSH draws, so the four controls read as one family. */
-  body[data-sidebar='collapsed'] #sidebar-toggle svg,
   body[data-sidebar='collapsed'] #sidebar-search svg { width: 18px; height: 18px; }
+  /**
+   * Collapsed, the toggle **is** the Heddle icon — the same arrangement DSH uses, where the top control of the rail is
+   * the brand mark and its accessible name is "Open sidebar".
+   */
+  body[data-sidebar='collapsed'] #sidebar-toggle-mark { display: block; width: 24px; height: 24px; }
+  body[data-sidebar='collapsed'] #sidebar-toggle-glyph { display: none; }
   body[data-sidebar='collapsed'] #sidebar-search { width: 36px; height: 36px; border-radius: 12px; }
   #brand-name { font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; font-size: 1.06rem; font-weight: 600; letter-spacing: .01em; }
   /**
@@ -1398,17 +1453,17 @@
     height: 19px;
     padding: 0 5px;
     border: 1px solid transparent;
-    border-radius: 3px;
+    border-radius: 4px;
     font-size: 10px;
     font-weight: 650;
     letter-spacing: .035em;
     line-height: 16px;
   }
-  .tr-kind[data-kind='user'] { color: #6ea8f7; background: color-mix(in oklab, #4b8bf5 16%, transparent); }
-  .tr-kind[data-kind='assistant'] { color: #b29bfa; background: color-mix(in oklab, #8b5cf6 16%, transparent); }
-  .tr-kind[data-kind='reasoning'] { color: #b29bfa; background: color-mix(in oklab, #8b5cf6 10%, transparent); }
-  .tr-kind[data-kind='tool'] { color: #d9a441; background: color-mix(in oklab, #b7791f 18%, transparent); }
-  .tr-kind[data-kind='context'] { color: #6ee7a0; background: color-mix(in oklab, #2fa36b 16%, transparent); }
+  .tr-kind[data-kind='user'] { color: #7aaaff; background: #34415b; }
+  .tr-kind[data-kind='assistant'] { color: #9474bc; background: #352f3a; }
+  .tr-kind[data-kind='reasoning'] { color: #9474bc; background: #2f2c34; }
+  .tr-kind[data-kind='tool'] { color: #dd8629; background: #27241f; }
+  .tr-kind[data-kind='context'] { color: #59c984; background: #233c2c; }
   .tr-kind[data-kind='system'], .tr-kind[data-kind='compaction'] { color: var(--text-2); background: var(--surface-2); }
   #tr-table tbody tr[data-error='true'] .tr-kind { color: #d14343; }
   .tr-when { margin-left: 6px; color: var(--text-3); font: 10px var(--mono); }
@@ -1488,7 +1543,14 @@
     -->
     <button id="sidebar-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true"
             aria-controls="workspace-sidebar" title="Collapse sidebar (⌥⌘B)">
-      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <!--
+        Two glyphs for two jobs. Expanded, the control is a panel with a divider — the shape of a sidebar, because the
+        action is "put this panel away". Collapsed, it is the **Heddle icon**, which is what the first control of DSH's
+        rail is: measured at x=10, y=18, 36x36, `aria-label="Open sidebar"`, containing the brand mark (an SVG of its
+        whale). A rail whose top control is a generic panel glyph loses the one thing that says which app this is.
+      -->
+      <img id="sidebar-toggle-mark" src="/favicon.svg" alt="" width="24" height="24">
+      <svg id="sidebar-toggle-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
         <rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
         <line x1="6.5" y1="3" x2="6.5" y2="13" stroke="currentColor" stroke-width="1.3"/>
       </svg>
@@ -2259,8 +2321,18 @@ function refreshMinimapLight() {
 }
 
 /** Read the transcript again: rows, thickness, text and the rail's height. */
+/**
+ * The reference's rail is **section level**, measured on the reference: its 27-row conversation held 5 user and 5
+ * assistant messages with **no rows for tool or reasoning segments**, so its unit is the person's message and the
+ * answer — never a tool call. Heddle built one row per `.turn`, which gave four rows for an exchange that used a
+ * tool (user, reasoning, tool, assistant) and read as a tool-grained structure. The sections are therefore the
+ * user and assistant turns only; the reasoning and tool rows stay in the transcript where they belong.
+ */
 function syncMinimap() {
-  const turns = [...log.querySelectorAll(':scope > .turn')]
+  const turns = [...log.querySelectorAll(':scope > .turn')].filter((turn) => {
+    const kind = turn.dataset.kind
+    return kind === 'user' || kind === 'assistant'
+  })
   const wanted = view === 'chat' && turns.length >= 3
   minimap.hidden = !wanted
   if (!wanted) {
