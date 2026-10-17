@@ -1,3 +1,8 @@
+/**
+ * NOTE FOR WHOEVER EDITS THIS FILE: the in-page scripts are passed as **template literals**, so a backtick inside one of
+ * them ends the string and the file stops parsing. That mistake has cost five debugging rounds; write quotes or plain
+ * words in those comments, never backticks.
+ */
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -2063,6 +2068,21 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         /** DSH's View options control, where the archive filter lives: one control, three states, the current one marked. */
         const viewButton = document.querySelector('#view-options button')
         viewButton.click(); await wait(250)
+        /**
+         * The chrome's own ARIA, named after DSH's own controls: its tabs are role=tab inside a role=tablist with one
+         * selected and a roving tabindex, its access control is named "Access mode, current <value>", and its model seat
+         * "Select model, current <value>". A control named after its kind alone hides the value it is showing.
+         */
+        const chrome = {
+          tablist: document.querySelector('#views')?.getAttribute('role') ?? null,
+          tabs: [...document.querySelectorAll('#views button[role="tab"]')].map((tab) => ({
+            selected: tab.getAttribute('aria-selected'),
+            tabindex: tab.tabIndex,
+          })),
+          access: document.querySelector('#access')?.getAttribute('aria-label') ?? null,
+          model: document.querySelector('#model-trigger')?.getAttribute('aria-label') ?? null,
+        }
+
         const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) > *')].map((b) => ({
           heading: b.tagName === 'BUTTON' ? null : b.textContent.trim(),
           label: b.tagName === 'BUTTON' ? b.textContent.trim() : null,
@@ -2090,7 +2110,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           treeHidden: document.getElementById('tree').hidden,
           resultsHidden: document.getElementById('search-results').hidden,
         }
-        return { controls, focused, ageSlot, selected, quietBackground, aria: ariaShape(), viewItems, search, cleared }
+        return { controls, focused, ageSlot, selected, quietBackground, aria: ariaShape(), chrome, viewItems, search, cleared }
       })().then((value) => JSON.stringify(value))`),
     )
 
@@ -2151,6 +2171,13 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.aria.leafExpanded, 0, 'and none of them claims to have something under it')
     assert.equal(reading.aria.workspaceExpanded, true, 'while a branch row carries aria-expanded')
     assert.equal(reading.aria.workspaceSelected, 0, 'and no chosen state, which is not what a branch has')
+
+    /** The chrome's names, read from DSH's own controls: tabs say which is selected, and the two seats say their value. */
+    assert.equal(reading.chrome.tablist, 'tablist', 'the view ring is a tablist')
+    assert.equal(reading.chrome.tabs.filter((tab) => tab.selected === 'true').length, 1, 'with exactly one selected tab')
+    assert.equal(reading.chrome.tabs.filter((tab) => tab.tabindex === 0).length, 1, 'and one reachable by Tab')
+    assert.match(String(reading.chrome.access), /^Access mode, current: /, `the access control names its value\nsaw: ${reading.chrome.access}`)
+    assert.match(String(reading.chrome.model), /^Select model, current /, `and so does the model seat\nsaw: ${reading.chrome.model}`)
 
     /**
      * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.
