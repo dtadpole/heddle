@@ -232,6 +232,17 @@ test('an html document is previewed as a page, and nothing in it can act', async
     const clicked = await browser.evaluate(`(() => { const row = [...document.querySelectorAll('#tree .row')].find((x) => x.querySelector('.label').textContent === 'page.html'); if (row === undefined) return false; row.click(); return true })()`)
     assert.ok(clicked, 'the page is in the tree')
     assert.ok(await browser.waitFor('!document.getElementById("file-html").hidden', 20_000), 'the frame is shown rather than the text pane')
+    /**
+     * Wait for the document's own image to **decode**, not merely to be requested.
+     *
+     * Measured: the reading was taken as soon as the frame appeared, and under the load of the whole part the image
+     * had not finished — 0 of 2, while the same check passed alone. `complete && naturalWidth > 0` is the only reading
+     * that means the browser has the picture.
+     */
+    await browser.waitFor(
+      `(() => { const frame = document.getElementById('html-view'); const inner = frame.contentDocument; return inner !== null && [...inner.querySelectorAll('img')].some((image) => image.complete && image.naturalWidth > 0) })()`,
+      15_000,
+    )
 
     const framed = JSON.parse(
       await browser.evaluate(`(() => {
@@ -305,7 +316,28 @@ test('a click in the left panel opens the one preview, rendered for its type and
     const openFile = async (name) => {
       const found = await browser.evaluate(`(() => { const row = [...document.querySelectorAll('#tree .row')].find((x) => x.querySelector('.label').textContent === ${JSON.stringify(name)}); if (row === undefined) return false; row.click(); return true })()`)
       assert.ok(found, `${name} is in the tree`)
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500))
+      /**
+       * Wait for **this file**, not for a fixed moment.
+       *
+       * Measured: with a 1.5 s sleep the full-file run read the previous document — the reader was still drawing under
+       * the load of the other checks — while the same check passed alone. Waiting on the pane's own header removes the
+       * race instead of making it less likely.
+       */
+      assert.ok(
+        await browser.waitFor(`document.getElementById('file-head').textContent.includes(${JSON.stringify(name)})`, 20_000),
+        `${name} is the file the pane is showing`,
+      )
+      /**
+       * And for the **placeholder to go**, not for the pane to have text.
+       *
+       * Measured: the pane says `reading…` while the fetch is in flight, and that is text — so a wait on "has text"
+       * passed before the file arrived and the check read the previous file's renderer. The placeholder is the signal
+       * that the read has finished, and it is the only one the page offers before the body is drawn.
+       */
+      assert.ok(
+        await browser.waitFor(`document.getElementById('file-body').innerText.trim() !== 'reading…'`, 20_000),
+        `${name} finished reading`,
+      )
       return JSON.parse(
         await browser.evaluate(`(() => {
           const body = document.getElementById('file-body')
