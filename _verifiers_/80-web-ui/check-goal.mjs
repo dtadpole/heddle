@@ -23,8 +23,8 @@ import { fixtureDir, isolatedHome, readTranscript, removeDir, repoRoot, runCli, 
 const CAPABILITY = 'the Web UI'
 
 async function startServer(label, steps, options = {}) {
-  const home = isolatedHome(`goal-${label}`)
-  const work = fixtureDir(`goal-${label}-work`)
+  const home = options.home ?? isolatedHome(`goal-${label}`)
+  const work = options.work ?? fixtureDir(`goal-${label}-work`)
   mkdirSync(work, { recursive: true })
   const { config } = scriptedConfig({
     home,
@@ -52,6 +52,8 @@ async function startServer(label, steps, options = {}) {
     url: child.url,
     close: async () => {
       child.kill()
+      /** A restart test keeps the home between lifetimes; the caller removes it at the end. */
+      if (options.keep === true) return
       removeDir(home)
       removeDir(work)
     },
@@ -110,6 +112,77 @@ async function api(url, cookie, path, init = {}) {
   })
   return { status: response.status, body: await response.json().catch(() => ({})) }
 }
+
+test('an active goal keeps being pushed after the harness restarts', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * The owner's rule, judged end to end: a restart must not stop an active goal. The harness is killed while
+   * it is pushing, started again on the same session store, and the goal is expected to pick up **without a
+   * turn and without a person** — because the durable phase is the authority and the server sweeps runnable
+   * goals at boot. A purely edge-driven driver would leave it idle here: no event fires for a session that
+   * was already active when the process died.
+   */
+  const home = isolatedHome('goal-restart')
+  const work = fixtureDir('goal-restart-work')
+  mkdirSync(work, { recursive: true })
+  const steps = [{ text: 'keep working' }]
+  let server = await startServer('restart', steps, { home, work, keep: true })
+  try {
+    let cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+
+    // An armed goal at rest starts pushing by itself.
+    await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'create', objective: 'survive a restart', max_goal_rounds: 500 }),
+    })
+    let before
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      before = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      if ((before?.roundsStarted ?? 0) >= 1) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.ok((before?.roundsStarted ?? 0) >= 1, `the goal was being pushed before the restart\nsaw: ${JSON.stringify(before).slice(0, 240)}`)
+    const roundsBeforeRestart = before.roundsStarted
+
+    // Kill the harness mid-push, then bring it back on the same store.
+    await server.close()
+    server = await startServer('restart', steps, { home, work, keep: true })
+    cookie = await cookieFor(server.url)
+
+    let after
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      after = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      if ((after?.roundsStarted ?? 0) > roundsBeforeRestart) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.ok(
+      (after?.roundsStarted ?? 0) > roundsBeforeRestart,
+      `pushing survived the restart\nbefore: ${roundsBeforeRestart}, after: ${JSON.stringify(after).slice(0, 240)}`,
+    )
+    assert.equal(after.phase, 'active', 'and the goal is still the active one')
+
+    // Leave nothing pushing: complete it and check the rounds stop.
+    const completed = (await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'complete', goal_id: after.id, revision: after.revision }),
+    })).body.goal
+    assert.equal(completed.phase, 'complete')
+    const stoppedAt = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.roundsStarted
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(
+      (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.roundsStarted,
+      stoppedAt,
+      'no round ran after the completion',
+    )
+  } finally {
+    await server.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
 
 test('the model starts a goal through its tool, and a person drives it from the bar', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
@@ -192,26 +265,56 @@ test('the model starts a goal through its tool, and a person drives it from the 
      */
     const second = await api(server.url, cookie, '/api/goal', {
       method: 'POST',
-      body: JSON.stringify({ session, action: 'create', objective: 'a goal with room to run', max_goal_rounds: 5 }),
+      body: JSON.stringify({ session, action: 'create', objective: 'a goal with room to run', max_goal_rounds: 500 }),
     })
     assert.equal(second.status, 200, 'the person started a second goal')
-    await browser.goto(server.url)
-    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "active"', 20_000)
-    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="pause"]\').click()')
-    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "paused"', 10_000)
-    const paused = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
-    assert.equal(paused.phase, 'paused')
-    assert.equal(paused.activation, 'disarmed', 'pausing stops automatic continuation')
 
+    /**
+     * A goal created at rest is armed, so the driver starts rounds on its own — the behaviour the rounds test
+     * judges by counts. Here it is stopped immediately with the person's own verb, because this test is about
+     * the **bar** rather than the loop: pausing at rest must leave a paused goal with no round in flight.
+     */
+    const paused = (await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'pause', goal_id: second.body.goal.id, revision: second.body.goal.revision }),
+    })).body.goal
+    assert.equal(paused.phase, 'paused')
+    assert.equal(paused.activation, 'disarmed')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    assert.equal(
+      (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.roundsStarted,
+      paused.roundsStarted,
+      'no round ran after the pause',
+    )
+
+    // Reload so the bar is drawn from the paused goal, then drive it with the person's verbs.
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "paused"', 20_000)
     await browser.waitFor('document.querySelector(\'#goal-actions button[data-goal-action="resume"]\') !== null', 10_000)
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="resume"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "active"', 10_000)
     const resumed = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
     assert.equal(resumed.phase, 'active')
     assert.equal(resumed.activation, 'armed')
+    const verbs = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#goal-actions button')].map((button) => button.dataset.goalAction))`))
+    assert.deepEqual(verbs, ['pause', 'complete', 'edit', 'clear'], 'an active goal offers pause')
+
+    // Pause from the bar: the driver must stop after whatever round is in flight.
+    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="pause"]\').click()')
+    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "paused"', 10_000)
+    const pausedAgain = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+    assert.equal(pausedAgain.phase, 'paused')
+    assert.equal(pausedAgain.activation, 'disarmed')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(
+      (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.roundsStarted,
+      pausedAgain.roundsStarted,
+      'no round ran after the bar paused the goal',
+    )
 
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="complete"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "complete"', 10_000)
+    assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.phase, 'complete')
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="clear"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
 
@@ -247,12 +350,7 @@ test('an armed goal continues by itself, round by round, and blocks at its cap',
     const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
     const session = opened.body.session?.id ?? opened.body.id
 
-    const created = await api(server.url, cookie, '/api/goal', {
-      method: 'POST',
-      body: JSON.stringify({ session, action: 'create', objective: 'walk two rounds and stop', max_goal_rounds: 2 }),
-    })
-    assert.equal(created.status, 200, 'the person started a capped goal')
-
+    // A turn first, so the goal is created **at rest** and the driver's rounds never race a human turn.
     const turn = await fetch(new URL('/api/turn', server.url), {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
@@ -260,6 +358,16 @@ test('an armed goal continues by itself, round by round, and blocks at its cap',
     })
     assert.equal(turn.status, 200, `the first turn ran (${turn.status})`)
     await turn.text()
+
+    /**
+     * Creating an armed goal while the session is idle is itself an edge: the reckoner starts the rounds
+     * with no turn sent, which is what "an armed goal" means to a person.
+     */
+    const created = await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'create', objective: 'walk two rounds and stop', max_goal_rounds: 2 }),
+    })
+    assert.equal(created.status, 200, 'the person started a capped goal')
 
     // The driver runs in the server process after the turn; wait for the cap to turn into a block.
     let goal

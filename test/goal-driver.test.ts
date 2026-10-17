@@ -115,12 +115,68 @@ test('a chain stops when the goal is not runnable', async () => {
   assert.equal(calls.length, 0, 'a paused goal runs no round')
 })
 
-test('a goal disarmed by a new process runs no round', async () => {
+test('an active goal continues in a reopened process — pushing survives a restart', async () => {
   const { store, goals, handle } = setup()
-  goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+  const created = goals.create(handle, { objective: 'one', maxGoalRounds: 2 })
   const reopened = new GoalService(new Context(), store)
-  const driver = new GoalDriver(new Context(), reopened, { run: async () => ({}) })
-  assert.equal((await driver.advance(handle)).stopped, 'disarmed')
+  const calls: { round: number; prompt: string }[] = []
+  const driver = new GoalDriver(new Context(), reopened, recordingRun(store, calls))
+  const outcome = await driver.advance(handle)
+  assert.equal(outcome.rounds, 2, 'the reopened process ran the rounds')
+  assert.equal(outcome.stopped, 'round-limit')
+  assert.equal(calls.length, 2)
+  assert.equal(reopened.get(handle)?.id, created.id)
+})
+
+test('the boot sweep requests exactly the runnable goals, and nothing else', async () => {
+  /**
+   * The startup edge of a level-triggered reconciler: no event fires for a session that was being pushed
+   * before a restart, so the sweep reads durable state and asks the same condition. It must find the active
+   * goal, ignore a paused one and a session with no goal.
+   */
+  const first = setup()
+  const second = setup()
+  const third = setup()
+  first.goals.create(first.handle, { objective: 'active', maxGoalRounds: 4 })
+  const paused = second.goals.create(second.handle, { objective: 'paused', maxGoalRounds: 4 })
+  second.goals.pause(second.handle, { id: paused.id, revision: paused.revision })
+
+  const calls: { round: number; prompt: string }[] = []
+  const driver = new GoalDriver(new Context(), first.goals, recordingRun(first.store, calls))
+  const resumed = await driver.resumeAtStart([first.handle, second.handle, third.handle])
+  assert.equal(resumed.requested, 1, 'one goal was runnable')
+  // Wait for the fire-and-forget chain it started.
+  await driver.advance(first.handle)
+  assert.ok(calls.length >= 1, 'the runnable goal was driven')
+})
+
+test('a round yields to the event loop, so a pause scheduled during it takes effect', async () => {
+  /**
+   * A fast model resolves every await as a microtask, and a chain of microtasks starves the macrotask queue:
+   * measured with a 500-round goal the server stayed alive but stopped answering requests. The yield is what
+   * keeps the process responsive — and what lets a person's pause land between rounds.
+   */
+  const { store, goals, handle } = setup()
+  const created = goals.create(handle, { objective: 'one', maxGoalRounds: 100 })
+  let calls = 0
+  const driver = new GoalDriver(new Context(), goals, {
+    run: async (session, prompt, source) => {
+      calls += 1
+      store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
+      if (calls === 1) {
+        /** A macrotask, exactly like an HTTP request from the Web UI, must get a turn before the cap. */
+        setTimeout(() => {
+          goals.pause(session, { id: created.id, revision: created.revision })
+          void driver.request(session)
+        }, 0)
+      }
+      return {}
+    },
+  })
+  const outcome = await driver.advance(handle)
+  assert.equal(goals.get(handle)?.phase, 'paused', 'the pause landed while the goal was running')
+  assert.ok(calls <= 3, `the chain stopped soon after the pause, not at the cap (ran ${calls} rounds)`)
+  assert.equal(outcome.stopped, 'phase-paused')
 })
 
 test('a round that was not admitted stops the chain instead of repeating forever', async () => {
@@ -198,4 +254,44 @@ test('a turn that throws leaves the goal runnable for a later trigger', async ()
   assert.equal(outcome.error, 'provider down')
   assert.equal(goals.get(handle)?.phase, 'active', 'a failed turn does not block the goal')
   assert.equal(goals.get(handle)?.activation, 'armed')
+})
+
+test('an edge that arrives during a chain is re-evaluated after it, not lost', async () => {
+  /**
+   * The reason the driver is a reconciler rather than an event subscriber. A round is running; the goal is
+   * completed while it runs, and the completion's own edge calls `request`. The pass that ran the round
+   * decides to stop on "the goal moved" — and without the re-evaluation pass that edge would be dropped on
+   * the floor, leaving a completion nobody acted on. With the lane, the second pass sees the completion and
+   * settles with `phase-complete`.
+   */
+  const { store, goals, handle } = setup()
+  const created = goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+  let calls = 0
+  let driver: GoalDriver
+  driver = new GoalDriver(new Context(), goals, {
+    run: async (session, prompt, source) => {
+      calls += 1
+      store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
+      /** The model completes the goal in this round; the completion's edge arrives mid-chain. */
+      goals.complete(session, { id: created.id, revision: created.revision })
+      void driver.request(session)
+      return {}
+    },
+  })
+
+  const outcome = await driver.request(handle)
+  assert.equal(calls, 1, 'no extra round ran')
+  assert.equal(outcome.stopped, 'phase-complete', 'and the pass re-evaluated the edge that arrived during the round')
+  assert.equal(goals.get(handle)?.phase, 'complete')
+})
+
+test('requesting an idle session with a paused goal settles without running a round', async () => {
+  const { store, goals, handle } = setup()
+  const created = goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+  goals.pause(handle, { id: created.id, revision: created.revision })
+  let calls = 0
+  const driver = new GoalDriver(new Context(), goals, { run: async () => { calls += 1; return {} } })
+  const outcome = await driver.request(handle)
+  assert.equal(calls, 0)
+  assert.equal(outcome.stopped, 'phase-paused')
 })

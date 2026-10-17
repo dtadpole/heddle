@@ -497,6 +497,22 @@ async function runWeb(args: Args): Promise<void> {
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
     })
+    /**
+     * A restarted harness picks up the goals it finds still active.
+     *
+     * Only the **server** does this: a one-shot command (`heddle tree`, `--turn`) must not start model calls
+     * for sessions it is not working on, which is why this is an explicit call here rather than a boot sweep
+     * inside the plugin. No new event is invented — the goal's durable phase is the condition, and this is
+     * the startup edge that asks it.
+     */
+    if (app.ctx.goalDriver !== undefined) {
+      const handles = app.ctx.session
+        .list()
+        .map((meta) => app.ctx.session.store.open(meta.id))
+        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const resumed = await app.ctx.goalDriver.resumeAtStart(handles)
+      if (resumed.requested > 0) process.stdout.write(`heddle web: resuming ${resumed.requested} active goal(s)\n`)
+    }
     process.stdout.write(`heddle web: ${server.url}\n`)
     process.stdout.write(`heddle web: serving on ${server.host}:${server.port}; pass --port to change it\n`)
     if (args.json) process.stdout.write(`${JSON.stringify({ url: server.url, host: server.host, port: server.port, token: server.token })}\n`)

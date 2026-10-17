@@ -153,6 +153,15 @@ session log and a projection fold. Heddle's version keeps:
 What heddle does **not** copy: DSH's Typert remote-service transport and its per-agent runtime registry —
 heddle's session handle *is* the owner of a goal, so `GoalService` is keyed by `SessionHandle`.
 
+**One deliberate divergence: activation across a restart.** DSH keeps `activation` process-local and disarms
+a reopened goal, so a restarted process cannot spend rounds unsupervised. Heddle's owner decided the opposite
+— pushing must survive a restart — so heddle derives the default activation from the durable phase (an
+`active` goal is armed again in a new process) and the Web server sweeps runnable goals at boot
+(`resumeAtStart`), because no event fires for a session that was already active before the restart. The
+in-process override survives for a lifecycle owner that wants to stop pushing without pausing the goal. This
+is recorded as a decision, with its cost — a restarted process can resume spending rounds without a person
+asking — rather than left as an omission.
+
 ## Read next
 
 [`dsh-context.md`](dsh-context.md) for the same treatment of context, and heddle's own

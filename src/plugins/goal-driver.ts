@@ -41,12 +41,43 @@ export function apply(ctx: Context): void {
     },
   })
 
-  ctx.on('session/event', ({ session, event }) => {
-    if (event.type !== 'turn/completed') return
+  /**
+   * The driver is a **reconciler**: an edge only says "the state may have changed", and the same pure
+   * condition decides. That is why there are several edges and why none of them carries meaning:
+   *
+   * - `turn/completed` — a turn settled, so the session is idle and a round may be started;
+   * - `goal/change` **while the session is at rest** — a goal was created, edited, resumed, paused, completed
+   *   or cleared by a person or by the API. Without this edge, a goal resumed while idle would wait for a
+   *   turn that may never come, which is the fragility of an event-only trigger;
+   * - `goal/change` **during a turn** is ignored here on purpose: the running turn must not have a second
+   *   turn started inside it, and its own completion edge will re-evaluate the condition.
+   *
+   * The idle half is read from the log because heddle has no agent-status field: a turn's own events mark
+   * the session busy, `turn/completed` marks it idle again. It is the equivalent of DSH's
+   * `agent.status === 'idle'` in `readyToDrive`.
+   */
+  const inTurn = new Set<string>()
+  const requestFor = (session: string): void => {
     const handle = ctx.session.store.open(session)
     if (handle === null) return
-    void driver.advance(handle).catch((error: unknown) => {
+    void driver.request(handle).catch((error: unknown) => {
       ctx.logger.warn('goal driver: %s', error instanceof Error ? error.message : String(error))
     })
+  }
+  ctx.on('session/event', ({ session, event }) => {
+    if (event.type === 'turn/completed') {
+      inTurn.delete(session)
+      requestFor(session)
+      return
+    }
+    /**
+     * Events a turn writes. `model/request` is the loop's own marker before every model call, so a turn is
+     * known to be in flight from its first model call to its completion.
+     */
+    if (event.type === 'model/request' || event.type === 'assistant/chunk' || event.type === 'turn/retry' || event.type === 'tool/result') {
+      inTurn.add(session)
+      return
+    }
+    if (event.type === 'goal/change' && !inTurn.has(session)) requestFor(session)
   })
 }
