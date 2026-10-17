@@ -111,7 +111,62 @@ The line is drawn by **what is being judged**: a claim about the delivered harne
 about a Cordis primitive belongs in the unit suite. A verifier that re-tested Cordis would be testing a
 dependency, and one that tested nothing but its own fixture would be testing the fixture.
 
+## Coverage review, 2026-10-17
+
+A reading of the set as a whole — what each part owns, where the set overlaps itself, and what nothing
+judges yet. It is a review rather than a contract; the proposals at the end are marked as not yet made.
+
+**What the set is.** Twelve instances answer the twelve parts of `ULTIMATE_GOAL.md`; three more
+(`85-trajectory-view`, `87-resizable-panels`, `88-file-preview`) were asked for by the owner after the
+goal was written and are not rows in its table. That gap is itself a finding: a verifier outside the
+goal's table still reads as a completed part, and the goal file's prose mentions two of the three.
+
+**Where the set overlaps itself.**
+
+- `80-web-ui` has become the **UI layer** rather than one part: nine check files and about thirty tests,
+  of which only `check.mjs` judges its stated claim (a documented port, the page, the API, the live
+  stream). The other eight judge views: chat, composer, context, file, goal, model switcher, trajectory
+  and workspace controls. Three of those duplicate a part that owns the same subject — `check-file-view`
+  against `88-file-preview`, `check-trajectory-view` against `85-trajectory-view`, `check-workspaces`
+  against `70-workspaces-sessions` — and `check-goal` is the only judgement of the goal feature at all.
+- `90-web-ui-token` used to carry a chat-rendering test duplicating `80-web-ui/check-chat-view.mjs`.
+  It was removed in this pass: the token part judges access, and rendering belongs to the part that owns
+  how a session is drawn.
+- `70-workspaces-sessions` is the widest instance (36 tests) and mixes the mechanism with
+  session-management UI (rename, pin, archive, fork, shortcuts). The mix is coherent with its claim but
+  makes one instance the size of three.
+- `95-web-daemon` re-judges that a restart does not weaken the token. That overlap with
+  `90-web-ui-token` is deliberate and stated there.
+
+**What nothing judges yet.**
+
+1. **The goal mechanism.** `src/goal/{service,tool,driver}.ts` is covered by unit tests, but no verifier
+   claims it: that a goal is durable across turns and a restart, that the driver advances its rounds and
+   stops at the round limit, that only a person may resume a paused goal, and that its completion is
+   recorded once. Only the bar's drawing is judged, inside `80-web-ui/check-goal.mjs`.
+2. **The approvals policy.** `src/approvals/service.ts` — `allow`, `deny` and `ask`, a per-tool deny
+   list with an allow override, and the rule that an `ask` with nobody to answer is a refusal with a
+   reason — has no verifier and no unit test. A permission sandbox and an approval policy are different
+   claims: one is what may be touched, the other is who decides.
+3. **The published package.** `ULTIMATE_GOAL.md` says distribution is where the end-to-end claim is
+   judged, and no verifier packs the tarball, installs it and runs the CLI or imports the package from
+   it.
+
+**Proposals, in order** (none of these has been made except the token refactor above):
+
+| Priority | Change | Why |
+|---|---|---|
+| P0 | make `ULTIMATE_GOAL.md` and this table agree — either add the three owner-requested parts to the goal's table, or state plainly that they sit outside it | a set larger than its contract is a contract that under-describes itself |
+| P1 | split `80-web-ui`: keep `check.mjs` there, move the view checks into a `82-web-ui-views` instance, and move the trajectory, file and workspace duplications to their owning parts | one part, one claim; today the UI part is a layer and the layer parts are parts |
+| P2 | add `77-approvals-policy`, `83-goal-objective`, `99-published-package` | three mechanisms are delivered and unjudged, one of them named by the goal itself |
+| P3 | split `70-workspaces-sessions` into the mechanism and the session-management UI, or move its drawing claims to the UI instance | 36 tests in one instance hide which claim failed |
+| P4 | extract the server-plus-double-plus-browser setup the `80-web-ui` checks each repeat into `_tools_/check-helpers` | nine copies of one teardown is nine places a leak can hide |
+
+Each proposal is a separate pass; none should be made while another session is editing the same checks,
+and each is a change to this contract rather than to a check.
+
+
 ## Read next
 
-[`ULTIMATE_GOAL.md`](../ULTIMATE_GOAL.md) for the parts these ten decide, and each folder's `INDEX.md`
+[`ULTIMATE_GOAL.md`](../ULTIMATE_GOAL.md) for the parts these decide, and each folder's `INDEX.md`
 for what its claim judges and what it deliberately does not.
