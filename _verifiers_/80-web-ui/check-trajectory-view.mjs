@@ -203,6 +203,55 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.match(examined.result, /a\.txt/, 'the Result tab shows what the tool answered in full')
 
     // The toolbar's two collapse switches and the search box, as DSH's.
+    // DSH's details pane is resizable: drag its 8px handle and it keeps the width asked for.
+    const resized = JSON.parse(
+      await browser.evaluate(`(() => {
+        const pane = document.getElementById('tr-details')
+        const before = pane.getBoundingClientRect().width
+        const handle = document.querySelector('.tr-d-resize')
+        const rect = handle.getBoundingClientRect()
+        handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: rect.right, pointerId: 1 }))
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.right - 120, pointerId: 1 }))
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: rect.right - 120, pointerId: 1 }))
+        return JSON.stringify({ before, after: pane.getBoundingClientRect().width })
+      })()`),
+    )
+    assert.ok(resized.after > resized.before + 60, `the details pane is resizable (${Math.round(resized.before)}px to ${Math.round(resized.after)}px)`)
+
+    // Dragging across the lane strip focuses a window, and rows outside it dim — DSH's own interaction.
+    const focused = JSON.parse(
+      await browser.evaluate(`(() => {
+        const strip = document.getElementById('timeline')
+        const rect = strip.getBoundingClientRect()
+        const at = (fraction) => rect.left + rect.width * fraction
+        strip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: at(0.02), pointerId: 2 }))
+        strip.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: at(0.35), pointerId: 2 }))
+        strip.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: at(0.35), pointerId: 2 }))
+        const outside = [...document.querySelectorAll('#tr-table tbody tr[data-focus="outside"]')]
+        return JSON.stringify({ outside: outside.length, opacity: outside.length > 0 ? getComputedStyle(outside[0]).opacity : null })
+      })()`),
+    )
+    assert.ok(focused.outside > 0, 'a dragged focus window dims the rows outside it')
+    assert.equal(focused.opacity, '0.24', 'to DSH’s 0.24')
+
+    // Collapse calls: one compact line per call, its arguments and result tucked away until examined.
+    const calls = JSON.parse(
+      await browser.evaluate(`(() => {
+        document.getElementById('tr-calls').click()
+        const tool = document.querySelector('#tr-table tbody tr[data-kind="tool"]')
+        return JSON.stringify({
+          pressed: document.getElementById('tr-calls').getAttribute('aria-pressed'),
+          compact: tool?.classList.contains('tr-compact') ?? false,
+          args: tool === null ? null : getComputedStyle(tool.querySelector('.tr-args')).display,
+          result: tool === null ? null : getComputedStyle(tool.querySelector('.tr-result')).display,
+        })
+      })()`),
+    )
+    assert.equal(calls.pressed, 'true')
+    assert.ok(calls.compact, 'collapsing calls compacts the tool rows')
+    assert.equal(calls.args, 'none', 'hiding the arguments')
+    assert.equal(calls.result, 'none', 'and the result preview, until a row is opened')
+
     const collapsed = JSON.parse(
       await browser.evaluate(`(() => {
         document.getElementById('tr-turns').click()
