@@ -46,6 +46,10 @@ the frontmatter every authored artifact carries.
   exchanged for a cookie, and the Host and Origin fence that runs before any secret is compared.
 - [`dsh-workspaces.md`](dsh-workspaces.md) — the workspace record, the bucket-naming rule, the
   equality that decides membership, and the session tree.
+- [`dsh-agent-teams.md`](dsh-agent-teams.md) — the three layers: an agent is a session's driver, a subagent is a
+  child run (one-shot or continuable, fresh or forked), and the experimental Agent Teams layer is a Lead plus
+  durable teammates coordinated by a journal in the Lead's session, a target-confirmed mailbox and a shared
+  task board; read from implementation, not only types, against 0.2.0-rc.2.
 - [`dsh-conversation-views.md`](dsh-conversation-views.md) — the view ring over one session, and the
   Trajectory ledger as a pure projection of the session window.
 - [`dsh-trajectory-ui.md`](dsh-trajectory-ui.md) — the Trajectory tab measured in a browser: the dense
