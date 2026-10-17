@@ -54,6 +54,24 @@ Driver of every disagreement here was the palette: heddle had mixed translucent 
 paints opaque tag backgrounds from its token scale. The fix writes the measured opaque colours, so the
 tag now sits on the same ground as the row (which a translucent mix could not guarantee).
 
+## Batch B — row states (measured once each side)
+
+| Metric | DSH | heddle | Verdict |
+|---|---|---|---|
+| idle row background | transparent | transparent | agree |
+| idle row text colour | rgb(249,250,251) | rgb(249,250,251) | agree |
+| row height | 30px | 30px | agree |
+| selected row background | **rgba(255,255,255,0.14)** | 10% mix | **fixed → 14% white** |
+| selected marker | `aria-selected="true"` + `data-selected="true"` | `data-selected="true"` | agree in effect; heddle adds no aria-selected |
+
+The driver of the selection difference was the **paint value**, not the mechanism: both UIs mark the row
+with a data attribute and paint the whole row, but heddle mixed 10% and DSH paints 14% white. The rule now
+names the measured paint directly (`rgba(255, 255, 255, .14)`) so a computed-style assertion can pin it.
+
+Unknowns from this batch: DSH's **row hover** paint was not found in the stylesheet scan (its hover may be
+applied on an inner element or a class outside the table), so heddle's hover stays what it was and is not
+claimed to match. The trusted-hover computed values for both sides still need the pointer pass.
+
 ## Unknowns (not measured, never filled in from plausibility)
 
 - DSH's SYSTEM and COMPACTED tag colours: those rows were not in the rendered window (virtualised table).

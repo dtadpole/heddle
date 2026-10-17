@@ -1427,7 +1427,7 @@
   #tr-table td { height: 30px; padding: 0 8px; border-bottom: .5px solid var(--line); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #tr-table tbody tr { cursor: default; outline: none; transition: background-color .12s ease, opacity .12s ease; }
   #tr-table tbody tr:hover { background: var(--hover); }
-  #tr-table tbody tr[data-selected='true'] { background: color-mix(in oklab, var(--text) 10%, transparent); }
+  #tr-table tbody tr[data-selected='true'] { background: rgba(255, 255, 255, .14); }
   #tr-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   #tr-table tbody tr[data-turn-start='true'] > td { border-top: 2px solid var(--border-strong); }
   #tr-table tbody tr[data-focus='outside'] { opacity: .24; }
@@ -3697,8 +3697,16 @@ function columnMax() {
  * band, and it is still clamped to what the view area can hold (`columnMax`), so a narrow window shows the widest
  * column that fits instead of one that overflows. A stored preference always wins over this.
  */
+/**
+ * The column's default measure — DSH's reading width, fitted rather than guessed.
+ *
+ * Measured in DSH's page at four viewport widths on 2026-10-17: conversation area 920 → text 680 (the floor),
+ * 1077 → 689, 1320 → 845, 1620 → 920 (the cap). That is `clamp(680px, viewArea * .64, 920px)`, and the card is
+ * always that plus 32px. The previous default was a fraction of the **window** (82.5%), which is a different
+ * relation with a different floor.
+ */
 function columnDefault() {
-  return Math.min(columnMax(), Math.max(COLUMN_MIN, Math.round(window.innerWidth * 0.825)))
+  return Math.min(columnMax(), Math.max(680, Math.min(920, Math.round(chatMain.clientWidth * 0.64))))
 }
 /** Write the column, clamped, and report what was actually written. The grips follow it. */
 function setColumn(width) {
