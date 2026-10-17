@@ -42,7 +42,7 @@ export interface LedgerEvent {
 }
 
 /** What produced a record. The vocabulary is DSH's, so a reader of either tool sees the same words. */
-export type LedgerKind = 'user' | 'assistant' | 'tool' | 'reasoning' | 'system' | 'compaction'
+export type LedgerKind = 'user' | 'assistant' | 'tool' | 'reasoning' | 'system' | 'context' | 'compaction'
 
 /** One row of the ledger. */
 export interface LedgerRecord {
@@ -75,6 +75,26 @@ export interface LedgerRecord {
   readonly usageSource?: 'provider' | 'estimated'
   /** Whatever else the event said that a reader would want: finish reason, denials, pruned count. */
   readonly note?: string
+  /**
+   * A tool call's name, without the arrow its label carries.
+   *
+   * The label is what the collapsed one-liner shows; the name is what the row's own typeface says, and a
+   * renderer that had to strip the arrow off a label would be parsing a string this file just built.
+   */
+  readonly name?: string
+  /** The call this result answers — the field that pairs the two halves into one row. */
+  readonly toolCallId?: string
+  /**
+   * What the tool answered.
+   *
+   * Held on the call's own record, so one row shows "it ran this and got that" as DSH does, rather than
+   * two rows a reader has to match up by eye.
+   */
+  readonly result?: string
+  /** A call is running until its result says otherwise; an error result marks the row. */
+  readonly state?: 'running' | 'ok' | 'error'
+  /** Which note wrote a context row: the system prompt, the instruction baseline, or another note. */
+  readonly origin?: string
 }
 
 /** A step: one model request and everything it produced. */
@@ -104,6 +124,55 @@ export interface Ledger {
   readonly tokens: { readonly input?: number; readonly output?: number; readonly estimated?: number }
   readonly records: number
   readonly inFlight: number
+}
+
+/** One row of the Trajectory table: a record, plus where it sits. */
+export interface LedgerRow {
+  readonly turn: number
+  readonly step?: number
+  readonly kind: LedgerKind
+  readonly record: LedgerRecord
+  /** True on a turn's first row — what draws its label and the separator above it. */
+  readonly turnStart: boolean
+  /** True on a step's first row. */
+  readonly stepStart: boolean
+  /** True for a record that belongs to no turn: a session that logged before its first prompt. */
+  readonly loose: boolean
+}
+
+/**
+ * Flatten the ledger into the rows a Trajectory table draws.
+ *
+ * DSH's table is one row per event with turn and step boundaries carried *on the rows* (its rows have
+ * `data-turn-start` / `data-step` attributes), rather than as nested containers. That is what lets the
+ * table be virtualised, filtered by search, and collapsed by turn without rebuilding a tree — so the
+ * projection does the flattening here, where a unit test can judge it, and the page only draws rows.
+ */
+export function projectRows(ledger: Ledger): readonly LedgerRow[] {
+  const rows: LedgerRow[] = []
+  for (const turn of ledger.turns) {
+    for (const step of turn.steps) {
+      step.records.forEach((record, index) => {
+        rows.push({
+          turn: turn.index,
+          step: step.index,
+          kind: record.kind,
+          record,
+          turnStart: rows.length === 0 || rows[rows.length - 1]?.turn !== turn.index,
+          stepStart: index === 0,
+          loose: false,
+        })
+      })
+    }
+  }
+  /**
+   * Records that belong to no turn come last, and say so rather than inventing a turn number: a session
+   * that recorded context before its first prompt has no turn to belong to.
+   */
+  for (const record of ledger.loose) {
+    rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true })
+  }
+  return rows
 }
 
 /** Milliseconds between two timestamps, or `undefined` when either is missing or the pair is backwards. */
@@ -210,6 +279,25 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     else loose.push(record)
   }
 
+  /**
+   * The open tool call a result belongs to, if one is still unanswered.
+   *
+   * Searched newest-first through the step, then the prologue, then the loose records, because a tool's
+   * result is written after its call and the newest open call is the one a provider without ids means.
+   */
+  const openCall = (toolCallId?: string): { readonly list: LedgerRecord[]; readonly index: number } | null => {
+    const lists: LedgerRecord[][] = step !== null ? [step.records, prologue, loose] : [prologue, loose]
+    for (const list of lists) {
+      for (let index = list.length - 1; index >= 0; index -= 1) {
+        const record = list[index]
+        if (record === undefined || record.kind !== 'tool' || record.result !== undefined) continue
+        if (toolCallId !== undefined && record.toolCallId !== undefined && record.toolCallId !== toolCallId) continue
+        return { list, index }
+      }
+    }
+    return null
+  }
+
   /** Close an in-flight assistant stream. `settled` decides whether it gets a duration or is marked running. */
   const settleAssistant = (at?: string, settled = false): void => {
     if (pending === null) return
@@ -259,10 +347,29 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       }
       if (role === 'tool') {
         const refused = /^error/i.test(text)
+        /**
+         * A result fills the call it answers, so the two are one row.
+         *
+         * This is DSH's shape — one element per call, carrying its result — and the id is what pairs them.
+         * A provider that sends no id is paired with the newest call still open; a result that matches
+         * nothing is still shown, because losing what a tool said would be worse than an unpaired row.
+         */
+        const open = openCall(event.message?.toolCallId)
+        if (open !== null) {
+          open.list[open.index] = {
+            ...(open.list[open.index] as LedgerRecord),
+            result: text,
+            state: refused ? 'error' : 'ok',
+            ...(refused ? { note: 'the tool refused this call' } : {}),
+          }
+          continue
+        }
         put({
           kind: 'tool',
           label: refused ? 'tool (refused)' : 'tool result',
-          text,
+          text: '',
+          result: text,
+          state: refused ? 'error' : 'ok',
           ...(event.at !== undefined ? { startedAt: event.at } : {}),
           ...(refused ? { note: 'the tool refused this call' } : {}),
         })
@@ -315,7 +422,15 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       else if (chunk.type === 'reasoning-delta' && chunk.text !== undefined) pending.reasoning.push(chunk.text)
       else if (chunk.type === 'tool-call' && chunk.name !== undefined) {
         settleAssistant(event.at, true)
-        put({ kind: 'tool', label: `→ ${chunk.name}`, text: chunk.arguments ?? '{}', ...(event.at !== undefined ? { startedAt: event.at } : {}) })
+        put({
+          kind: 'tool',
+          label: `→ ${chunk.name}`,
+          name: chunk.name,
+          text: chunk.arguments ?? '{}',
+          state: 'running',
+          ...(chunk.id !== undefined ? { toolCallId: chunk.id } : {}),
+          ...(event.at !== undefined ? { startedAt: event.at } : {}),
+        })
       }
       /**
        * Provider usage, when the provider reported it. This is the truth the estimate approximates, and the
@@ -373,6 +488,27 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     if (event.type === 'turn/completed') {
       settleAssistant(event.at, true)
       closeTurn(event.at, event.rounds)
+      continue
+    }
+
+    /**
+     * A context note is what the **harness** composed: the system prompt or the instruction baseline.
+     *
+     * DSH gives these their own SYSTEM and CONTEXT tags, so they get their own kinds here rather than
+     * falling through to the generic record — which dumped the event as JSON and put a raw
+     * `{"seq":2,"at":"…","type":"context/note",…` in a one-line row.
+     */
+    if (event.type === 'context/note') {
+      const note = event.message as { content?: readonly { type?: string; text?: string }[] } | undefined
+      const text = (note?.content ?? []).map((part) => part.text ?? '').join('')
+      const origin = typeof (event as { origin?: unknown }).origin === 'string' ? String((event as { origin?: unknown }).origin) : 'note'
+      put({
+        kind: origin === 'system-prompt' ? 'system' : 'context',
+        label: origin === 'system-prompt' ? 'system prompt' : origin === 'instructions' ? 'instructions' : origin,
+        text,
+        origin,
+        ...(event.at !== undefined ? { startedAt: event.at } : {}),
+      })
       continue
     }
 
@@ -509,7 +645,7 @@ export function projectTimeline(ledger: Ledger): Timeline {
      * and told a reader nothing — measured, and it defeated the point of colouring at all. The band should
      * say what the turn *did*: a call, an answer, reasoning, or nothing but a prompt.
      */
-    const order: LedgerKind[] = ['tool', 'assistant', 'reasoning', 'compaction', 'user', 'system']
+    const order: LedgerKind[] = ['tool', 'assistant', 'reasoning', 'compaction', 'context', 'user', 'system']
     const kinds = [...new Set(span.kinds)].sort((left, right) => order.indexOf(left) - order.indexOf(right))
     const start = (span.start - domainStart) / durationMs
     /**

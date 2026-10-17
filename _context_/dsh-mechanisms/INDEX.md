@@ -44,6 +44,9 @@ the frontmatter every authored artifact carries.
   equality that decides membership, and the session tree.
 - [`dsh-conversation-views.md`](dsh-conversation-views.md) — the view ring over one session, and the
   Trajectory ledger as a pure projection of the session window.
+- [`dsh-trajectory-ui.md`](dsh-trajectory-ui.md) — the Trajectory tab measured in a browser: the dense
+  table, the kind tags, the tool row that carries its result, the details pane, the toolbar and the
+  timeline; plus the mapping heddle's Trajectory area is being brought to.
 
 ## The check that keeps the context reading honest
 

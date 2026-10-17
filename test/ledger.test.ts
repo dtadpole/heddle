@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { projectLedger, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
+import { projectLedger, projectRows, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
 
 /**
  * Unit tests for the Trajectory ledger.
@@ -102,7 +102,12 @@ test('provider usage is kept apart from the harness estimate', () => {
   assert.deepEqual(ledger.tokens, { input: 812, output: 7, estimated: 900 }, 'the totals keep the two apart')
 })
 
-test('a tool call and its result are separate records, and a refusal says so', () => {
+test('a tool call and its result are one record, and a refusal marks that record', () => {
+  /**
+   * The owner's rule of 2026-10-17, and DSH's shape: one element per call, carrying its result. The two
+   * halves are in the log as separate events; the projection is where they become one row, because a
+   * client that had to pair them would be re-deriving the transcript from a flat list.
+   */
   const ledger = projectLedger([
     event(1, '2026-10-11T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'run it' }] } }),
     event(2, '2026-10-11T10:00:00.000Z', { type: 'model/request', estimatedTokens: 10 }),
@@ -111,15 +116,15 @@ test('a tool call and its result are separate records, and a refusal says so', (
     event(5, '2026-10-11T10:00:00.300Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c2', name: 'write_file', arguments: '{"path":"/etc/x"}' } }),
     event(6, '2026-10-11T10:00:00.400Z', { type: 'message', message: { role: 'tool', toolCallId: 'c2', content: [{ type: 'text', text: 'error: outside the sandbox root' }] } }),
   ])
-  const records = ledger.turns[0]!.steps[0]!.records
-  const call = records.find((record) => record.label === '→ bash')
-  assert.ok(call, 'the call is identified by its tool name')
-  assert.equal(call.text, '{"command":"pwd"}', 'and holds the arguments exactly as recorded')
-  assert.ok(records.some((record) => record.kind === 'tool' && record.text === '/Users/zhenc'), 'the result is its own record')
-  assert.ok(
-    records.some((record) => record.label === 'tool (refused)' && record.note !== undefined),
-    'and a refused call is marked rather than looking like a result',
-  )
+  const calls = ledger.turns[0]!.steps[0]!.records.filter((record) => record.kind === 'tool')
+  assert.equal(calls.length, 2, 'two calls, two records — not four')
+  assert.equal(calls[0]!.name, 'bash', 'the first names its tool')
+  assert.equal(calls[0]!.text, '{"command":"pwd"}', 'and holds the arguments exactly as recorded')
+  assert.equal(calls[0]!.result, '/Users/zhenc', 'with the answer on the same record')
+  assert.equal(calls[0]!.state, 'ok')
+  assert.equal(calls[1]!.name, 'write_file')
+  assert.equal(calls[1]!.state, 'error', 'a refusal marks the call it answers')
+  assert.equal(calls[1]!.note, 'the tool refused this call', 'and says so in words')
 })
 
 test('records that belong to no turn are kept, not dropped', () => {
@@ -253,4 +258,104 @@ test("a turn's band is coloured by what it did, not by the prompt that opened it
   )
   assert.equal(withTool.spans[0]!.kinds[0]!, 'tool', 'a turn that called a tool leads with the tool')
   assert.equal(withAnswer.spans[0]!.kinds[0]!, 'assistant', 'and a turn that only answered leads with the answer')
+})
+
+test('a tool result fills the call it answers, so one row holds both halves', () => {
+  /**
+   * The Trajectory table shows one row per tool **call**, with the result inside it — DSH's shape. Two rows
+   * per call is what the owner asked to replace: matching them up by eye is the reader's problem, and it is
+   * a problem the projection can solve because the id is already in the log.
+   */
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'list it' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'list_dir', arguments: '{"path":"/tmp"}' } }),
+    event(4, '2026-10-17T10:00:00.300Z', { type: 'message', message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'a.txt\nb.txt' }] } }),
+    event(5, '2026-10-17T10:00:00.400Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const tools = ledger.turns[0]!.steps[0]!.records.filter((record) => record.kind === 'tool')
+  assert.equal(tools.length, 1, 'one call, one record')
+  assert.equal(tools[0]!.name, 'list_dir', 'the call names the tool, apart from the arrow its label carries')
+  assert.equal(tools[0]!.text, '{"path":"/tmp"}', 'and keeps its arguments')
+  assert.equal(tools[0]!.result, 'a.txt\nb.txt', 'with the answer on the same record')
+  assert.equal(tools[0]!.state, 'ok', 'and a state that says it worked')
+})
+
+test('an error result marks the call failed, and a result with no call is still shown', () => {
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{"command":"false"}' } }),
+    event(4, '2026-10-17T10:00:00.300Z', { type: 'message', message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'error: exit 1' }] } }),
+    event(5, '2026-10-17T10:00:00.400Z', { type: 'message', message: { role: 'tool', toolCallId: 'c9', content: [{ type: 'text', text: 'orphan output' }] } }),
+    event(6, '2026-10-17T10:00:00.500Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const tools = ledger.turns[0]!.steps[0]!.records.filter((record) => record.kind === 'tool')
+  assert.equal(tools[0]!.state, 'error', 'a refusal marks the call it answers')
+  assert.equal(tools[0]!.result, 'error: exit 1')
+  assert.equal(tools[1]!.result, 'orphan output', 'a result with no call is still shown rather than dropped')
+  assert.equal(tools[1]!.state, 'ok')
+})
+
+test('a call with no id is paired with the newest call still open', () => {
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', name: 'bash', arguments: '{"command":"one"}' } }),
+    event(4, '2026-10-17T10:00:00.300Z', { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'first' }] } }),
+    event(5, '2026-10-17T10:00:00.400Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', name: 'bash', arguments: '{"command":"two"}' } }),
+    event(6, '2026-10-17T10:00:00.500Z', { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'second' }] } }),
+    event(7, '2026-10-17T10:00:00.600Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const tools = ledger.turns[0]!.steps[0]!.records.filter((record) => record.kind === 'tool')
+  assert.deepEqual(
+    tools.map((record) => [record.text, record.result]),
+    [
+      ['{"command":"one"}', 'first'],
+      ['{"command":"two"}', 'second'],
+    ],
+    'each result fills its own call, not the previous one',
+  )
+})
+
+test('a context note is a row with its text and its origin, not a JSON dump', () => {
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'context/note', origin: 'instructions', message: { role: 'user', content: [{ type: 'text', text: 'be terse' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'context/note', origin: 'system-prompt', message: { role: 'system', content: [{ type: 'text', text: 'you are heddle' }] } }),
+  ])
+  const notes = ledger.loose
+  assert.equal(notes[0]!.kind, 'context', 'the instruction baseline is a CONTEXT row, as DSH tags it')
+  assert.equal(notes[0]!.text, 'be terse', 'the note’s own words, not the event as JSON')
+  assert.equal(notes[0]!.origin, 'instructions')
+  assert.equal(notes[1]!.kind, 'system', 'the system prompt is a SYSTEM row')
+  assert.equal(notes[1]!.text, 'you are heddle')
+})
+
+test('rows carry where they sit, so a table can draw boundaries without a tree', () => {
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'a' } }),
+    event(4, '2026-10-17T10:00:00.300Z', { type: 'assistant/completed', text: 'a', finishReason: 'stop', rounds: 1 }),
+    event(5, '2026-10-17T10:00:00.400Z', { type: 'turn/completed', rounds: 1 }),
+    event(6, '2026-10-17T10:00:01.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } }),
+    event(7, '2026-10-17T10:00:01.100Z', { type: 'model/request', messages: 1 }),
+    event(8, '2026-10-17T10:00:01.200Z', { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'b' } }),
+    event(9, '2026-10-17T10:00:01.300Z', { type: 'assistant/completed', text: 'b', finishReason: 'stop', rounds: 1 }),
+    event(10, '2026-10-17T10:00:01.400Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const rows = projectRows(ledger)
+  assert.deepEqual(
+    rows.map((row) => [row.turn, row.step, row.turnStart, row.stepStart]),
+    [
+      [1, 1, true, true],
+      [1, 1, false, false],
+      [1, 1, false, false],
+      [2, 1, true, true],
+      [2, 1, false, false],
+      [2, 1, false, false],
+    ],
+    'the first row of each turn is marked, and so is the first row of each step',
+  )
+  assert.equal(rows.filter((row) => row.turnStart).length, 2, 'one boundary per turn')
 })
