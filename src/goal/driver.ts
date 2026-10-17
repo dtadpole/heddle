@@ -87,14 +87,30 @@ export interface DriverOutcome {
   readonly error?: string
 }
 
+/** One session's reconciliation lane: the in-flight chain and whether a re-evaluation is pending. */
+interface Lane {
+  /** An edge arrived while the chain was running, so the condition must be evaluated once more. */
+  requested: boolean
+  /** The chain currently draining, if any. */
+  run?: Promise<DriverOutcome>
+}
+
 /** The driver service: one serialized chain per session, started from the session's own turn events. */
 export class GoalDriver extends Service {
   static readonly provide = 'goalDriver'
 
   private readonly goals: GoalService
   private readonly deps: GoalDriverDeps
-  /** The chain already running for a session, so a second trigger joins it rather than racing it. */
-  private readonly running = new Map<string, Promise<DriverOutcome>>()
+  /**
+   * One reconciliation lane per session.
+   *
+   * The driver is a **reconciler**, not a subscriber: an edge (a turn completed, the goal changed) never
+   * carries meaning of its own, it only says "the state may have changed, look again". Edges are collapsed
+   * into a `requested` flag on the lane, and a lane that is already draining keeps the flag set — so an
+   * edge that arrives **while a chain is running is not lost**: when the current pass ends, the lane
+   * re-evaluates the same condition once more before it settles.
+   */
+  private readonly lanes = new Map<string, Lane>()
 
   constructor(ctx: Context, goals: GoalService, deps: GoalDriverDeps) {
     super(ctx, 'goalDriver')
@@ -103,23 +119,104 @@ export class GoalDriver extends Service {
   }
 
   /**
-   * Continue the session's goal until it stops being runnable, returns, or is exhausted.
+   * Ask the driver to re-evaluate one session.
    *
-   * Joining an in-flight chain is deliberate: the driver triggers off `turn/completed`, which fires for
-   * *every* turn — including the ones this driver itself runs — so without joining, each round would start
-   * another chain and the rounds would multiply.
+   * Idempotent and reentrant: calling it from any edge, any number of times, is safe. A call while a chain
+   * is running joins that chain **and** requests one more pass after it; a call after it has settled starts
+   * a new chain. This is what makes the trigger robust to a dropped or duplicated event — the condition,
+   * not the event, decides.
    */
-  advance(handle: SessionHandle): Promise<DriverOutcome> {
-    const existing = this.running.get(handle.id)
-    if (existing !== undefined) return existing
-    const chain = this.drive(handle).finally(() => {
-      this.running.delete(handle.id)
-    })
-    this.running.set(handle.id, chain)
-    return chain
+  request(handle: SessionHandle): Promise<DriverOutcome> {
+    const lane = this.laneFor(handle.id)
+    lane.requested = true
+    if (lane.run === undefined) {
+      /**
+       * Start the drain **after** the promise is stored on the lane.
+       *
+       * `drain` runs synchronously up to its first await, and the first thing it does is run a round — which
+       * can itself call `request` (the round's own edges). Storing the promise first means that nested call
+       * sees the lane as busy and only sets `requested`, instead of starting an overlapping second drain.
+       * Measured by a unit test whose round completed the goal: without this the nested call started its own
+       * drain and the awaited one settled with the stale outcome.
+       */
+      lane.run = Promise.resolve().then(() => this.drain(handle, lane))
+    }
+    return lane.run
   }
 
-  private async drive(handle: SessionHandle): Promise<DriverOutcome> {
+  /** Await a chain. The CLI's join after a one-shot turn; identical to `request`. */
+  advance(handle: SessionHandle): Promise<DriverOutcome> {
+    return this.request(handle)
+  }
+
+  private laneFor(id: string): Lane {
+    const existing = this.lanes.get(id)
+    if (existing !== undefined) return existing
+    const lane: Lane = { requested: false }
+    this.lanes.set(id, lane)
+    return lane
+  }
+
+  /**
+   * Drain a lane: one pass per requested evaluation, re-evaluated after every pass.
+   *
+   * A pass runs rounds until the condition says stop, so the usual chain is one pass. The loop exists for
+   * the other case: an edge that arrived while the pass was running. The pass may have decided to stop
+   * *before* that edge landed, and without this loop the edge would be silently dropped — which is exactly
+   * the fragility of an event-only trigger.
+   */
+  private async drain(handle: SessionHandle, lane: Lane): Promise<DriverOutcome> {
+    let rounds = 0
+    let stopped = 'idle'
+    let blocked: GoalBlockReason | undefined
+    let error: string | undefined
+    try {
+      while (lane.requested) {
+        lane.requested = false
+        const outcome = await this.reconcile(handle)
+        rounds += outcome.rounds
+        stopped = outcome.stopped
+        if (outcome.blocked !== undefined) blocked = outcome.blocked
+        if (outcome.error !== undefined) error = outcome.error
+      }
+    } finally {
+      lane.run = undefined
+    }
+    return {
+      rounds,
+      stopped,
+      ...(blocked !== undefined ? { blocked } : {}),
+      ...(error !== undefined ? { error } : {}),
+    }
+  }
+
+  /**
+   * Start the goals this process finds already runnable.
+   *
+   * The reason the driver is a **level-triggered reconciler** rather than an event subscriber: after a
+   * harness restart no edge ever fires for a session that was being pushed, so a purely edge-driven driver
+   * would leave an active goal idle until a person happened to send a message. This sweep is the missing
+   * edge — it reads durable state and asks the same condition, which is why it needs no new persisted field:
+   * an **active** goal is armed again in a new process, on purpose (the owner's rule: pushing survives a
+   * restart).
+   */
+  async resumeAtStart(handles: readonly SessionHandle[]): Promise<{ readonly requested: number }> {
+    let requested = 0
+    for (const handle of handles) {
+      const view = this.goals.get(handle)
+      if (view === undefined) continue
+      const decision = decideGoalRound(view)
+      if (decision.kind !== 'round') continue
+      requested += 1
+      void this.request(handle).catch(() => {
+        // A failed chain is reported by its own outcome; boot must not be kept waiting on it.
+      })
+    }
+    return { requested }
+  }
+
+  /** One evaluation of the condition: act on it until it stops being runnable. */
+  private async reconcile(handle: SessionHandle): Promise<DriverOutcome> {
     let rounds = 0
     for (;;) {
       const view = this.goals.get(handle)
@@ -153,6 +250,16 @@ export class GoalDriver extends Service {
          */
         return { rounds, stopped: 'turn-failed', error: messageOf(error) }
       }
+
+      /**
+       * Yield to the event loop between rounds.
+       *
+       * A round is an await, but a fast model resolves every await as a microtask, and a chain of microtasks
+       * never gives the HTTP server a turn: measured with a scripted endpoint and a 500-round goal, the
+       * process stayed alive and stopped answering requests (the page's fetch failed while the loop ran).
+       * The yield is also what lets a person's pause land between rounds instead of after the whole chain.
+       */
+      await new Promise<void>((resolve) => setImmediate(resolve))
 
       const after = this.goals.get(handle)
       if (after === undefined) return { rounds: rounds + 1, stopped: 'cleared' }

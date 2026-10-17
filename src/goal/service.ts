@@ -475,8 +475,17 @@ export class GoalService extends Service {
     )
   }
 
+  /**
+   * The process-local activation, defaulting from the **durable** phase.
+   *
+   * The owner's rule: goal pushing survives a harness restart. So an `active` goal is armed again by
+   * default when a new process folds it; only a non-runnable phase starts disarmed. The map still carries an
+   * in-process override (`disarm`), which is what a lifecycle owner uses without touching durable state.
+   * This is a deliberate divergence from DSH, which disarms a reopened goal to stop a restarted process
+   * spending rounds unsupervised; the cost of that is exactly the behaviour the owner rejected.
+   */
   private activationOf(handle: SessionHandle, goal: GoalSnapshot): GoalActivation {
-    return this.activation.get(handle.id) ?? 'disarmed'
+    return this.activation.get(handle.id) ?? (goal.phase === 'active' ? 'armed' : 'disarmed')
   }
 
   private view(handle: SessionHandle, folded: FoldedGoal): GoalView | undefined {

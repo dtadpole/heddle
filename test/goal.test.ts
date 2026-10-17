@@ -222,62 +222,29 @@ test('a goal tool call with no session is refused rather than guessed', async ()
   assert.equal(result.error?.code, 'GOAL_TOOL_NO_SESSION')
 })
 
-test('a goal opened in a new process is disarmed until a person resumes it', async () => {
-  const { goals, sessions, handle } = await service()
-  const created = goals.create(handle, { objective: 'one' })
-  assert.equal(goals.get(handle)?.activation, 'armed')
-  // A new service over the same log is what a reopened process is.
-  const { GoalService } = await import('../src/goal/service.ts')
-  const reopened = new GoalService(new Context(), sessions)
-  const view = reopened.get(handle)
-  assert.equal(view?.id, created.id, 'the durable goal is there')
-  assert.equal(view?.activation, 'disarmed', 'but continuation is not armed by a restart')
-})
-
-test('leaving the blocked phase drops the reason, so the log it writes is the log it can read', () => {
+test('an active goal is armed again in a new process, because pushing survives a restart', () => {
   /**
-   * The bug this pins was found by the round-driver check, not by a unit test: a goal blocked at its cap
-   * was then completed, and the completion carried the block reason along — so the very next fold refused
-   * the log as invalid ("a blockedReason exists exactly while the phase is blocked"). The invariant is
-   * worth a test of its own because it is a claim about *every* transition out of blocked.
+   * The owner's rule. DSH disarms a reopened goal so a restarted process cannot spend rounds unsupervised;
+   * heddle keeps pushing, so an `active` goal is armed by default when a new process folds it. The durable
+   * phase is the authority — a **paused** goal is still not runnable, and the process-local override still
+   * exists for an in-process lifecycle owner.
    */
-  const store = new SessionStore(join(root, 'reason-drop'))
+  const store = new SessionStore(join(root, 'restart'))
   const goals = new GoalService(new Context(), store)
   const handle = store.create({ cwd: root })
   const created = goals.create(handle, { objective: 'one', maxGoalRounds: 2 })
-  const blocked = goals.block(handle, { id: created.id, revision: 1 }, { code: 'missing-input', message: 'needs a key' })
-  assert.deepEqual(blocked.blockedReason, { code: 'missing-input', message: 'needs a key' })
+  const pausedStore = new SessionStore(join(root, 'restart-paused'))
+  const pausedGoals = new GoalService(new Context(), pausedStore)
+  const pausedHandle = pausedStore.create({ cwd: root })
+  const pausedGoal = pausedGoals.create(pausedHandle, { objective: 'two', maxGoalRounds: 2 })
+  pausedGoals.pause(pausedHandle, { id: pausedGoal.id, revision: pausedGoal.revision })
 
-  const completed = goals.complete(handle, { id: blocked.id, revision: blocked.revision })
-  assert.equal(completed.phase, 'complete')
-  assert.equal(completed.blockedReason, undefined, 'the reason does not outlive the phase')
-  assert.equal(goals.get(handle)?.phase, 'complete', 'and the log reads back')
+  // A new service over the same log is what a reopened harness is.
+  const reopened = new GoalService(new Context(), store)
+  const view = reopened.get(handle)
+  assert.equal(view?.id, created.id, 'the durable goal is there')
+  assert.equal(view?.activation, 'armed', 'and an active goal is armed again')
 
-  const store2 = new SessionStore(join(root, 'reason-drop-resume'))
-  const goals2 = new GoalService(new Context(), store2)
-  const handle2 = store2.create({ cwd: root })
-  const created2 = goals2.create(handle2, { objective: 'two', maxGoalRounds: 2 })
-  const blocked2 = goals2.block(handle2, { id: created2.id, revision: 1 }, { code: 'missing-input', message: 'needs a key' })
-  const resumed = goals2.resume(handle2, { id: blocked2.id, revision: blocked2.revision })
-  assert.equal(resumed.phase, 'active')
-  assert.equal(resumed.blockedReason, undefined)
-  assert.equal(goals2.get(handle2)?.phase, 'active')
-})
-
-test('the fold refuses a snapshot whose phase and reason disagree', () => {
-  const store = new SessionStore(join(root, 'reason-invalid'))
-  const handle = store.create({ cwd: root })
-  store.append(handle, {
-    type: 'goal/change',
-    version: 1,
-    operation: 'create',
-    goal: { id: 'goal-bad', revision: 1, objective: 'one', phase: 'active', maxGoalRounds: 2, blockedReason: { code: 'x', message: 'y' } },
-    roundsStarted: 0,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-  })
-  assert.throws(
-    () => foldGoal(store.read(handle)),
-    (error: unknown) => error instanceof GoalError && error.code === 'GOAL_INVALID_LOG',
-  )
+  const reopenedPaused = new GoalService(new Context(), pausedStore)
+  assert.equal(reopenedPaused.get(pausedHandle)?.activation, 'disarmed', 'a paused goal is not runnable after a restart')
 })
