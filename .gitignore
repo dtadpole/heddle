@@ -4,3 +4,9 @@ dist/
 .DS_Store
 # Scratch fixtures for the verifier checks; generated per run and removed after.
 .heddle-tmp/
+
+# A session's definition folder is written by heddle into the branch it ran in, and the owner asked on
+# 2026-10-12 that it be **kept locally and kept out of the repository**: one folder per session is machine
+# state, not project content. The transcript already lives outside every repository under ~/.heddle/sessions;
+# this line keeps the readable half out of commits too, while leaving both on disk.
+_sessions_/
