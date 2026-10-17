@@ -28,6 +28,22 @@ export interface Config {
  * and never touches a path. The store itself stays a plain class with no Cordis
  * dependency, which is what lets it be tested without a context.
  */
+/**
+ * A session's name taken from its first message: one line, shortened at a word, no trailing punctuation.
+ *
+ * The same shape DSH shows in its session list. It is a *label*, so it may be lossy; the id stays the identity
+ * and the full message stays in the log.
+ */
+function titleFrom(text: string): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  if (line.length === 0) return ''
+  const limit = 48
+  if (line.length <= limit) return line.replace(/[.,;:!?]+$/, '')
+  const cut = line.slice(0, limit)
+  const at = cut.lastIndexOf(' ')
+  return (at > limit / 2 ? cut.slice(0, at) : cut).replace(/[.,;:!?]+$/, '') + '…'
+}
+
 export class SessionService extends Service {
   static readonly provide = 'session'
 
@@ -83,9 +99,51 @@ export class SessionService extends Service {
     return { handle, definition }
   }
 
-  /** Record a user turn and return once it is on disk. */
+  /**
+   * Fork a session: a new one that continues from where that one stood.
+   *
+   * DSH's behaviour, observed on 2026-10-17: the item acts on the session it belongs to, the fork is named
+   * `<title> (1)` with a rising ordinal, it appears beside its parent, and the view **does not** navigate to it.
+   * The folder keeps the conventions' instance naming rule — a title with spaces and brackets is a label, not
+   * an instance name — so the identity is generated as for any other session while the title carries the name.
+   */
+  fork(id: SessionId): { readonly handle: SessionHandle; readonly definition: SessionDefinition } | null {
+    const source = this.store.list().find((one) => one.id === id)
+    if (source === undefined) return null
+    const handle = this.store.fork(id)
+    if (handle === null) return null
+    const created = this.store.list().find((one) => one.id === handle.id)
+    const base = source.title !== undefined && source.title.trim().length > 0 ? source.title.trim() : 'session'
+    const takenTitles = this.store.list().map((one) => one.title ?? '')
+    let ordinal = 1
+    while (takenTitles.includes(`${base} (${ordinal})`)) ordinal += 1
+    const title = `${base} (${ordinal})`
+    this.store.rename(handle.id, title)
+    const definition = writeSessionDefinition(handle, source.cwd, {
+      createdAt: created?.created ?? new Date().toISOString(),
+      title,
+      taken: existingSessionNames(source.cwd),
+      ...(source.endpoint !== undefined ? { endpoint: source.endpoint } : {}),
+      ...(source.model !== undefined ? { model: source.model } : {}),
+    })
+    return { handle, definition }
+  }
+
+  /**
+   * Record a user turn and return once it is on disk.
+   *
+   * The first message also **names** the session when nothing has named it yet. DSH does this — its list reads
+   * `context-mgmt 4d`, not `session-20261017-1340` — and the reason is the same here: a clock name is an
+   * identity, and a list of identities is a list nobody can scan. A title the person typed afterwards wins,
+   * because this only fills a blank.
+   */
   user(handle: SessionHandle, text: string): void {
     this.store.message(handle, { role: 'user', content: [{ type: 'text', text }] })
+    const meta = this.store.list().find((one) => one.id === handle.id)
+    if (meta !== undefined && (meta.title === undefined || meta.title.trim().length === 0)) {
+      const title = titleFrom(text)
+      if (title.length > 0) this.store.rename(handle.id, title)
+    }
   }
 
   /**
@@ -163,6 +221,11 @@ export class SessionService extends Service {
   /** Retitle a session; the log is untouched and the meta record is the only thing rewritten. */
   rename(id: SessionId, title: string): SessionMeta | null {
     return this.store.rename(id, title)
+  }
+
+  /** Pin, unpin, archive or unarchive a session — the state behind a row's menu. */
+  flags(id: SessionId, patch: { readonly pinned?: boolean; readonly archived?: boolean }): SessionMeta | null {
+    return this.store.flags(id, patch)
   }
 
   /**

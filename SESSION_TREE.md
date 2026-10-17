@@ -119,6 +119,26 @@ choice of thing.*
 | a **file** | nothing | that file, and **only** its preview: no `Chat`, no `Trajectory`, no `Docs`, because all three are statements about a session and a file has none |
 | anything else — a folder | it opens or closes | nothing changes: the panel keeps showing whatever it was showing |
 
+**A session's menu is DSH's, and its list reads like DSH's.** The owner's instruction of 2026-10-17 was to
+review how DSH works and make this UI work similarly, so the session row now offers what DSH's session menu
+offers — `Pin`/`Unpin`, `Rename…`, `Archive`/`Unarchive` — and two things are missing on purpose: **delete**,
+because this store's log is append-only and archiving is the reversible act, and **duplicate**, because a
+session is a record of a run rather than a document.
+
+What the two menus say about a session, and where each fact lives:
+
+| Fact | Where | Why there |
+|---|---|---|
+| its **name** | the store's `title`, and the definition's `session.json` | a name is content: the committed record should call the session what its reader calls it |
+| its **pin** and its **archive** | the store's meta only | reading state rather than facts about the run: in the definition, the tree and the store disagreed and sessions vanished |
+| its **age** and turn count | the row (`6min`), the tooltip (the count) | DSH's list reads `context-mgmt 4d`; the age is what tells a reader which conversations are live |
+
+A session **names itself from its first message** when nothing has named it — one line, shortened at a word —
+because a list of clock names is a list nobody can scan. A title a person typed afterwards wins, because this
+only fills a blank. And the tree has a **search** over those names, which DSH has above its session list: the
+query filters *rows*, so the branches around a match stay where they are and the answer still shows where the
+sessions are.
+
 **A session's own `…` holds its name.** The owner's request of 2026-10-17: a session row offers
 `Rename…`, which sets the session's **title** — the label a person reads — and the row then shows that
 title instead of the folder it lives in. The folder stays the identity, and stays reachable as the row's

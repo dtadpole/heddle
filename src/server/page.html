@@ -28,6 +28,8 @@
     --surface: #222222;
     --surface-2: #242424;
     --sidebar: #1c1c1c;
+    /** The composer card's surface, read from DSH's own card (#2c2c2e). */
+    --composer: #2c2c2e;
     --hover: #2c2c2c;
     --border: #353535;
     --border-strong: #4a4a4a;
@@ -91,6 +93,8 @@
     --code-size: 12px;
     --code-leading: 19px;
   }
+  #session-search { width: 100%; margin: 0 0 .5rem; padding: .3rem .45rem; font: inherit; font-size: .8rem; color: inherit; background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: .3rem; }
+  #session-search::placeholder { opacity: .6; }
   aside { width: var(--sidebar-width); flex: none; border-right: 1px solid var(--border); overflow-y: auto; padding: .75rem; color: var(--text-2); background: var(--sidebar); }
   main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
   /**
@@ -484,14 +488,32 @@
    * check that exists now judges the composer's width. A column keeps that claim while it makes room for the
    * row: the textarea still takes the form's own width.
    */
-  form { display: flex; flex-direction: column; gap: .4rem; padding: .75rem 1rem 1rem; border-top: 1px solid var(--border); background: var(--bg); }
-  textarea {
-    flex: 1; resize: vertical; min-height: 4rem; font: inherit; padding: .7rem .9rem;
-    background: var(--surface-2); color: var(--text);
-    border: 1px solid var(--border); border-radius: 16px; outline: none;
+  /**
+   * The composer, drawn as DSH draws it: **one floating card** holding the draft and the control row, with a
+   * quiet status line under it.
+   *
+   * Measured from DSH's own page on 2026-10-17: card 712×98, `border-radius: 28px`, surface `#2c2c2e`, no
+   * border but a 0.5px light ring plus two soft shadows; editor inset 4/8/0/14 at 14px on a 24px line,
+   * growing to 336px; and the controls *inside* the card — `+`, access mode, model, send. These are those
+   * measurements rather than taste, which is the point of copying a renderer instead of describing one.
+   */
+  #composer { flex: none; padding: 0 1rem .5rem; position: relative; }
+  form { display: flex; flex-direction: column; gap: .4rem; padding: 0; border-top: none; background: none; }
+  #composer-card {
+    width: 100%; max-width: min(100%, 712px); margin: 0 auto;
+    display: flex; flex-direction: column;
+    background: var(--composer); border-radius: 28px; padding: 8px 0 0;
+    box-shadow: 0 0 0 .5px color-mix(in oklab, var(--text) 12%, transparent), 0 4px 16px rgba(0, 0, 0, .03), 0 0 24px rgba(0, 0, 0, .03);
   }
-  textarea::placeholder { color: var(--text-3); }
-  textarea:focus-visible { border-color: var(--border-strong); }
+  #prompt textarea {
+    display: block; width: 100%; box-sizing: border-box;
+    border: 0; outline: none; background: transparent; color: var(--text);
+    font: 14px/24px var(--font);
+    padding: 4px 8px 8px 14px;
+    min-height: 36px; max-height: 336px; resize: none; overflow-y: auto;
+  }
+  #prompt textarea::placeholder { color: var(--text-3); }
+  #prompt textarea:focus-visible { outline: none; }
   button { font: inherit; padding: .5rem 1rem; }
   /**
    * The tool row under the draft, in DSH's order: the model seat on the right, the submit action at the end.
@@ -500,7 +522,7 @@
    * left of the row is free for the controls heddle does not have yet — the same space DSH fills with plan
    * and permission controls.
    */
-  #prompt-tools { display: flex; align-items: center; gap: .35rem; }
+  #prompt-tools { display: flex; align-items: center; gap: 4px; padding: 4px 8px 8px; }
   #model-seat { position: relative; margin-left: auto; min-width: 0; }
   /**
    * The seat's trigger: the current model as a label with a chevron, which is DSH's `ModelSelect` trigger.
@@ -510,13 +532,13 @@
    * silently drop, leaving a person unable to see why their session stopped answering.
    */
   #model-trigger {
-    display: inline-flex; align-items: center; gap: .35rem; max-width: 22rem;
-    font-size: .75rem; line-height: 16px; padding: .3rem .7rem;
-    background: none; color: var(--text-2);
-    border: 1px solid var(--border); border-radius: var(--radius-pill); cursor: pointer;
+    display: inline-flex; align-items: center; gap: .3rem; max-width: 22rem;
+    height: 28px; font-size: 13px; line-height: 1; padding: 0 .5rem;
+    background: none; color: #cfd3d6;
+    border: 0; border-radius: var(--radius); cursor: pointer;
   }
   #model-trigger:hover, #model-trigger[aria-expanded='true'], #model-trigger:focus-visible {
-    color: var(--text); border-color: var(--border-strong); background: var(--surface); outline: none;
+    color: var(--text); background: color-mix(in oklab, var(--text) 8%, transparent); outline: none;
   }
   #model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #model-trigger .chevron { flex: none; }
@@ -547,13 +569,52 @@
    * The path is DSH's own (`IconArrowUp`), kept verbatim rather than redrawn: the shape is the one the owner
    * is asking for by name, and an approximation would be a different control wearing the same word.
    */
-  #send {
-    flex: none; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; padding: 0;
-    border: 1px solid transparent; border-radius: var(--radius-pill);
-    background: var(--text); color: var(--on-accent); cursor: pointer;
+  #send, #stop {
+    flex: none; display: grid; place-items: center; width: 2.125rem; height: 2.125rem; padding: 0;
+    border: 0; border-radius: var(--radius-pill);
+    background: var(--accent); color: #ffffff; cursor: pointer;
   }
-  #send:hover:not(:disabled) { background: #ffffff; }
+  #send:hover:not(:disabled), #stop:hover { background: color-mix(in oklab, var(--accent) 82%, #ffffff); }
   #send:disabled { background: var(--surface-2); color: var(--text-3); opacity: 1; cursor: default; }
+  /** One action at a time: a turn that can be stopped draws Stop in Send's place. */
+  #send[hidden], #stop[hidden] { display: none; }
+  /** The attach button: DSH's 28px circled `+`. */
+  #attach {
+    flex: none; display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+    font-size: 18px; line-height: 1; background: #353638; color: var(--text);
+    border: 0; border-radius: var(--radius-pill); cursor: pointer;
+  }
+  #attach:hover, #attach[aria-expanded='true'] { background: color-mix(in oklab, var(--text) 18%, #353638); }
+  /** The access chip: read, not chosen — the sandbox mode the server actually runs under. */
+  #access {
+    flex: none; display: inline-flex; align-items: center; gap: .35rem; height: 28px;
+    padding: 0 .5rem; font-size: 13px; line-height: 1; background: none;
+    color: #cfd3d6; border: 0; border-radius: var(--radius); cursor: default;
+  }
+  #access::before { content: ''; width: 11px; height: 11px; border: 1.3px solid currentColor; border-radius: 50%; opacity: .8; }
+  /** The status line under the card: only what the page can actually know. */
+  #composer-status {
+    display: flex; gap: .9rem; max-width: min(100%, 712px); margin: .3rem auto 0;
+    padding: 0 14px; font-size: 12px; line-height: 1.4; color: var(--text-3);
+  }
+  #composer-status:empty { display: none; }
+  #composer-status span:empty { display: none; }
+  #composer-status span + span::before { content: '·'; margin-right: .9rem; color: var(--text-3); }
+  /** The file-path menu opened by `+`, floating above the card on the raised surface. */
+  #attach-menu {
+    position: absolute; z-index: 6; left: 50%; bottom: calc(100% - .2rem); transform: translateX(-50%);
+    width: min(92%, 512px); max-height: 15rem; overflow-y: auto; padding: .25rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow-menu);
+  }
+  #attach-menu[hidden] { display: none; }
+  #attach-menu button {
+    display: block; width: 100%; text-align: left; font: inherit; font-size: .78rem;
+    padding: .3rem .5rem; background: none; border: 0; border-radius: 4px; color: var(--text-2);
+    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #attach-menu button:hover, #attach-menu button:focus-visible { background: var(--hover); color: var(--text); outline: none; }
+  #attach-menu .meta { padding: .3rem .5rem; }
   /**
    * The queue dock, above the composer — DSH's `QueueDock`, whose rules these follow.
    *
@@ -648,6 +709,10 @@
    * quiet affordance — the row is what a person is looking at — so it paints nothing, and only its opacity
    * answers the pointer.
    */
+  #tree .pin { display: inline-flex; align-items: center; opacity: .55; }
+  #tree .pin svg { width: 11px; height: 11px; }
+  /** An archived row is drawn only when asked for, and then quietly: it is not part of the live list. */
+  #tree li[data-archived='true'] { opacity: .55; }
   .untwisty { font: inherit; padding: 0 .3rem; opacity: .55; background: none; border: 0; color: inherit; line-height: 1; }
   .untwisty:hover { opacity: 1; }
 </style>
@@ -665,6 +730,13 @@
     <span id="brand-name">Heddle</span>
   </header>
   <h1>Workspaces <button id="add-workspace" type="button" title="register a folder as a workspace root" aria-label="register a folder">+</button></h1>
+  <!--
+    A search over the names in the tree, which DSH has above its session list and this view had nothing of.
+    It filters **rows**: a session that does not match is put away while the query stands, and the branches
+    around it stay where they are so the shape of the tree is still readable.
+  -->
+  <input id="session-search" type="search" placeholder="Search sessions" aria-label="search session names" autocomplete="off">
+  <p class="meta" id="search-note" hidden></p>
   <ul id="tree" role="tree" aria-label="workspace folders"></ul>
   <p id="tree-note" class="meta" hidden></p>
   <details id="history">
@@ -728,30 +800,37 @@
     composer, which is where DSH's `conversation.input.dock` sits.
   -->
   <div id="queue" hidden></div>
+  <div id="composer">
   <form id="prompt">
-    <textarea name="prompt" placeholder="ask heddle something" autofocus></textarea>
-    <!--
-      The tool row: the model seat and the submit action, under the draft.
-
-      DSH's composer is a draft on top and a control row underneath, and the model selector is a seat in that
-      row (`conversation.input.model`) rather than a separate panel — which is exactly what "the LLM switcher
-      at the bottom of the chat panel" means in DSH's own layout. The submit action is DSH's primary button,
-      drawn with DSH's own arrow: the button's label changes with what pressing it will do while a turn is
-      running (`Send message` → `Queue message`), the way DSH's does.
-    -->
-    <div id="prompt-tools">
-      <div id="model-seat">
-        <button type="button" id="model-trigger" aria-haspopup="menu" aria-expanded="false" title="the model that answers this session">
-          <span id="model-label">model</span>
-          <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 6.5 8 10.5l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div id="composer-card">
+      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
+      <!--
+        The control row, inside the card and in DSH's order: `+` and the access mode on the left, the model
+        seat on the right, then the one action button. The button is Send when nothing runs and Stop while a
+        turn does — one action at a time, in one place, which is DSH's own rule.
+      -->
+      <div id="prompt-tools">
+        <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" title="Insert a file path">+</button>
+        <button type="button" id="access" aria-label="Access mode" title="the sandbox mode this server runs under">Access</button>
+        <div id="model-seat">
+          <button type="button" id="model-trigger" aria-haspopup="menu" aria-expanded="false" title="the model that answers this session">
+            <span id="model-label">model</span>
+            <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 6.5 8 10.5l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div id="model-menu" role="menu" aria-label="the model that answers this session" hidden></div>
+        </div>
+        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating" hidden>
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/></svg>
         </button>
-        <div id="model-menu" role="menu" aria-label="the model that answers this session" hidden></div>
+        <button id="send" type="submit" aria-label="Send message">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z" fill="currentColor"/></svg>
+        </button>
       </div>
-      <button id="send" type="submit" aria-label="Send message">
-        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z" fill="currentColor"/></svg>
-      </button>
     </div>
   </form>
+  <div id="composer-status" aria-live="polite"><span data-stat="turns"></span><span data-stat="steps"></span></div>
+  <div id="attach-menu" role="menu" aria-label="Insert a file path" hidden></div>
+</div>
 </main>
 <script type="module">
 const log = document.getElementById('log')
@@ -1638,6 +1717,11 @@ const runningSessions = new Set()
 const composer = document.getElementById('prompt')
 const field = composer.elements.prompt
 const sendButton = document.getElementById('send')
+const stopButton = document.getElementById('stop')
+const attachButton = document.getElementById('attach')
+const attachMenu = document.getElementById('attach-menu')
+const accessButton = document.getElementById('access')
+const statusBar = document.getElementById('composer-status')
 const queueDock = document.getElementById('queue')
 const modelTrigger = document.getElementById('model-trigger')
 const modelMenu = document.getElementById('model-menu')
@@ -1721,6 +1805,8 @@ function submitDraft(gesture) {
     return
   }
   field.value = ''
+  growComposer()
+  updateSendDisabled()
   const mode = resolveSubmitMode(BUSY_ENTER, anyRunning(), gesture)
   if (mode === 'steer') {
     void deliverSteered(text)
@@ -2120,10 +2206,20 @@ async function runTurn(text, key) {
          */
         await renderTree()
         await refreshSessions()
+      } else if (name === 'cancelled') {
+        /**
+         * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
+         * sentence in the transcript for something the reader asked for.
+         */
+        settleChat()
+        void renderSettledAnswers()
+        if (typeof payload.session === 'string') runningSessions.delete(payload.session)
+        renderComposerState()
       } else if (name === 'error') {
         add('denied', payload.message)
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
         if (typeof payload.session === 'string') runningSessions.delete(payload.session)
+        renderComposerState()
       }
     }
     const lastBreak = buffer.lastIndexOf('\n\n')
@@ -2138,6 +2234,27 @@ async function runTurn(text, key) {
  * with Enter, so submitting on a composition-closing key would send half a word. `isComposing` covers most
  * engines and `keyCode === 229` is the legacy signal they emit without it — both are what DSH's keymap checks.
  */
+/**
+ * DSH's editor grows with the draft and stops at 336px, after which it scrolls.
+ *
+ * The manual resize handle the composer used to carry is the one thing that cannot coexist with this: it
+ * remembers a height the growth logic does not know about, so the two fight and the box jumps. DSH's cap is
+ * the contract and is measured from its own page.
+ */
+const COMPOSER_MAX_HEIGHT = 336
+function growComposer() {
+  field.style.height = 'auto'
+  field.style.height = `${Math.min(field.scrollHeight, COMPOSER_MAX_HEIGHT)}px`
+}
+function updateSendDisabled() {
+  /** While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. */
+  sendButton.disabled = !anyRunning() && field.value.trim().length === 0
+}
+field.addEventListener('input', () => {
+  growComposer()
+  updateSendDisabled()
+})
+
 field.addEventListener('keydown', (keyEvent) => {
   if (keyEvent.key !== 'Enter') return
   if (keyEvent.isComposing || keyEvent.keyCode === 229) return
@@ -2168,6 +2285,166 @@ function renderComposerState() {
   const label = running ? (mode === 'steer' ? 'Steer message' : 'Queue message') : 'Send message'
   sendButton.setAttribute('aria-label', label)
   sendButton.title = running ? `${label} — Enter · Ctrl+Enter sends the queue` : `${label} — Enter · Shift+Enter for a new line`
+  /**
+   * One action at a time: while a turn runs, the button that can **end** it takes Send's place, which is
+   * DSH's own pair. The send button stays in the DOM (hidden) so the form still submits on Enter — Enter
+   * queues while a turn runs, exactly as before.
+   */
+  stopButton.hidden = !running
+  sendButton.hidden = running
+  updateSendDisabled()
+  updateStatusBar()
+}
+
+/**
+ * The status line under the card: what this page can actually know.
+ *
+ * DSH prints turns, steps, token rate and context use; heddle records turns and tool calls in the transcript
+ * and nothing about tokens yet, so the line prints the two it has and the model that answers. A number this
+ * page cannot measure is not printed rather than invented.
+ */
+function updateStatusBar() {
+  if (statusBar === null) return
+  let turns = 0
+  let steps = 0
+  for (const node of log.querySelectorAll('.turn')) {
+    if (node.dataset.kind === 'user') turns += 1
+    else if (node.dataset.kind === 'tool') steps += 1
+  }
+  const turnsCell = statusBar.querySelector('[data-stat="turns"]')
+  const stepsCell = statusBar.querySelector('[data-stat="steps"]')
+  if (turnsCell !== null) turnsCell.textContent = `${turns} turn${turns === 1 ? '' : 's'}`
+  if (stepsCell !== null) stepsCell.textContent = `${steps} step${steps === 1 ? '' : 's'}`
+}
+
+/** Ask the server to end the turn that is running. A no-op when it already ended is not a failure. */
+async function stopTurn() {
+  if (composerKey === QUEUE_KEY_NONE) return
+  try {
+    await fetch(`/api/sessions/${encodeURIComponent(composerKey)}/stop`, { method: 'POST' })
+  } catch {
+    // The turn may have ended between the click and the request; the stream settles the row either way.
+  }
+}
+stopButton.addEventListener('click', () => void stopTurn())
+
+/**
+ * The `+` menu: insert a workspace file's path at the cursor.
+ *
+ * DSH's `+` opens files and commands; heddle's agent already reads files by path, so the useful half here is
+ * the path itself — one level at a time, the same shape `/api/tree` serves, so a large workspace is never
+ * walked to open a menu.
+ */
+let attachTrail = []
+function closeAttachMenu() {
+  attachMenu.hidden = true
+  attachButton.setAttribute('aria-expanded', 'false')
+}
+function insertAtCursor(text) {
+  const start = field.selectionStart ?? field.value.length
+  const end = field.selectionEnd ?? start
+  field.value = `${field.value.slice(0, start)}${text}${field.value.slice(end)}`
+  field.focus()
+  field.selectionStart = start + text.length
+  field.selectionEnd = field.selectionStart
+  growComposer()
+}
+function renderAttachMenu(node) {
+  attachMenu.replaceChildren()
+  if (attachTrail.length > 0) {
+    const up = document.createElement('button')
+    up.type = 'button'
+    up.textContent = '↑ up'
+    up.addEventListener('click', () => {
+      attachTrail.pop()
+      void openAttachLevel(attachTrail[attachTrail.length - 1] ?? null)
+    })
+    attachMenu.append(up)
+  }
+  const children = [...(node?.children ?? []), ...(node?.adHoc ?? [])]
+  if (children.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'meta'
+    empty.textContent = 'nothing to insert here'
+    attachMenu.append(empty)
+    return
+  }
+  for (const child of children) {
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.textContent = child.kind === 'file' ? child.label : `${child.label}/`
+    item.title = child.path
+    item.addEventListener('click', () => {
+      if (child.kind === 'file') {
+        insertAtCursor(child.path)
+        closeAttachMenu()
+        return
+      }
+      attachTrail.push(child)
+      void openAttachLevel(child)
+    })
+    attachMenu.append(item)
+  }
+}
+async function openAttachLevel(node) {
+  attachMenu.hidden = false
+  attachButton.setAttribute('aria-expanded', 'true')
+  if (node === null) {
+    attachTrail = []
+    try {
+      const response = await fetch('/api/tree')
+      const body = await response.json()
+      attachMenu.replaceChildren()
+      renderAttachMenu(body)
+    } catch {
+      renderAttachMenu(null)
+    }
+    return
+  }
+  try {
+    const response = await fetch(`/api/tree?path=${encodeURIComponent(node.path)}`)
+    renderAttachMenu(await response.json())
+  } catch {
+    renderAttachMenu(null)
+  }
+}
+attachButton.addEventListener('click', () => {
+  if (attachMenu.hidden) void openAttachLevel(null)
+  else closeAttachMenu()
+})
+document.addEventListener('click', (clickEvent) => {
+  if (attachMenu.hidden) return
+  if (attachMenu.contains(clickEvent.target)) return
+  if (clickEvent.target === attachButton) return
+  closeAttachMenu()
+})
+document.addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key === 'Escape' && !attachMenu.hidden) closeAttachMenu()
+})
+
+/**
+ * The access chip: the sandbox mode the server runs under, read from `/api/status`.
+ *
+ * The mode is fixed when the server constructs its sandbox, so this is a read-out rather than a control —
+ * which is exactly why it is worth showing: a person should not have to guess whether the agent can write.
+ */
+function accessTitle(mode) {
+  if (mode === 'read-only') return 'Read only'
+  if (mode === 'danger-full-access') return 'Full access'
+  return 'Workspace write'
+}
+async function loadStatus() {
+  try {
+    const response = await fetch('/api/status')
+    if (!response.ok) return
+    const body = await response.json()
+    const mode = body?.sandbox?.mode
+    if (typeof mode !== 'string') return
+    accessButton.textContent = accessTitle(mode)
+    accessButton.title = `the sandbox mode this server runs under: ${mode}`
+  } catch {
+    // A status the page cannot read must not stop the composer from being one.
+  }
 }
 
 /**
@@ -2381,6 +2658,30 @@ function readExpanded() {
 
 const expanded = readExpanded()
 
+/**
+ * Whether sessions the owner archived are drawn.
+ *
+ * A reading preference, so it persists like the expansion set; `off` is the default because a row a person put
+ * away is not one they asked to see. The alternative — a session that disappears with no way back — is what
+ * archiving would be if this did not exist.
+ */
+const ARCHIVED_KEY = 'heddle.tree.archived.v1'
+let showingArchived = (() => {
+  try {
+    return localStorage.getItem(ARCHIVED_KEY) === 'true'
+  } catch (error) {
+    return false
+  }
+})()
+
+function rememberArchived() {
+  try {
+    localStorage.setItem(ARCHIVED_KEY, String(showingArchived))
+  } catch (error) {
+    /* A browser with no storage still draws the tree; the preference is what is lost. */
+  }
+}
+
 function rememberExpanded() {
   try {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expanded]))
@@ -2413,6 +2714,19 @@ function svgPath(d) {
  * folder is the outline, and the open one adds the tilted front panel inside the same 16px box, so the
  * state is visible without moving any other row — the owner's rule of 2026-10-11.
  */
+/** How long ago, in the compact form a list uses: `now`, `12min`, `3h`, `4d`. */
+function relativeAge(created) {
+  const then = Date.parse(created)
+  if (!Number.isFinite(then)) return ''
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000))
+  if (seconds < 60) return 'now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return minutes + 'min'
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return hours + 'h'
+  return Math.round(hours / 24) + 'd'
+}
+
 function kindIcon(kind, open = false) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('viewBox', '0 0 16 16')
@@ -2431,6 +2745,11 @@ function kindIcon(kind, open = false) {
      * that says "you can open this and read it" next to a row that says "you can go into this".
      */
     svg.append(svgPath('M4 2h5l3 3v9H4z'), svgPath('M9 2v3h3'))
+    return svg
+  }
+  if (kind === 'pin') {
+    /** A pin, drawn rather than borrowed from the emoji font, which renders in a different style on every machine. */
+    svg.append(svgPath('M6 2.2h4v1.1l-.9.5v3l1.4 1.3H3.5l1.4-1.3v-3L4 3.3z'), svgPath('M8 8.2v4.4'))
     return svg
   }
   if (kind === 'session') {
@@ -2813,6 +3132,14 @@ function menuItemsFor(node) {
      * not available.
      */
     items.push({
+      label: showingArchived ? 'Hide archived' : 'Show archived',
+      run: async () => {
+        showingArchived = !showingArchived
+        rememberArchived()
+        await renderTree()
+      },
+    })
+    items.push({
       label: 'Unregister',
       run: async () => {
         const response = await fetch('/api/workspaces/' + encodeURIComponent(node.path), { method: 'DELETE' })
@@ -2828,10 +3155,18 @@ function menuItemsFor(node) {
   }
   if (node.kind === 'session') {
     /**
-     * A session's row offers what can be done with that session, and the owner asked for one thing: its name.
+     * A session's row offers what DSH's own session menu offers — pin, rename, archive — because that is the set a
+     * person expects from this control. Two of them are missing on purpose: **delete**, because this store's log is
+     * append-only and archiving is the reversible act, and **duplicate**, because a session is a record of a run
+     * rather than a document.
+     *
      * The name is the **title**, not the folder — the folder is the identity the conventions require, while the
      * title is what a person reads — so renaming writes the title and the row shows it.
      */
+    items.push({
+      label: node.pinned ? 'Unpin' : 'Pin',
+      run: () => setSessionFlags(node, { pinned: !node.pinned }),
+    })
     items.push({
       label: 'Rename…',
       run: async () => {
@@ -2851,6 +3186,28 @@ function menuItemsFor(node) {
         await renderTree()
         await refreshSessions()
       },
+    })
+    items.push({
+      /**
+       * DSH's item and DSH's naming: the fork is `<title> (1)`, it appears beside its parent, and the view does
+       * not move — a fork is a branch, not a departure.
+       */
+      label: 'Fork',
+      run: async () => {
+        const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
+        const body = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          setNote(body.error ?? 'could not fork that session')
+          return
+        }
+        setNote('')
+        await renderTree()
+        await refreshSessions()
+      },
+    })
+    items.push({
+      label: node.archived ? 'Unarchive' : 'Archive',
+      run: () => setSessionFlags(node, { archived: !node.archived }),
     })
   }
   if (node.kind === 'instance') {
@@ -2889,6 +3246,28 @@ function menuItemsFor(node) {
     }
   }
   return items
+}
+
+/**
+ * Pin, unpin, archive or unarchive a session, then redraw what the change affects.
+ *
+ * One function for both flags because the route is one: the record and the definition are written together, and
+ * a row's menu only decides which of the two it is changing.
+ */
+async function setSessionFlags(node, patch) {
+  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...patch, folder: node.path }),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    setNote(body.error ?? 'could not change that session')
+    return
+  }
+  setNote('')
+  await renderTree()
+  await refreshSessions()
 }
 
 /**
@@ -2987,6 +3366,19 @@ function nodeRow(node) {
     badge.textContent = node.badge
     row.append(badge)
   }
+  /**
+   * A pinned session says so on the row, because a pin that only reorders rows is a rule a reader has to know;
+   * this is the same mark DSH puts beside a session it holds at the top.
+   */
+  if (node.pinned) {
+    const pin = document.createElement('span')
+    pin.className = 'pin'
+    pin.title = 'pinned'
+    pin.setAttribute('aria-label', 'pinned')
+    pin.append(kindIcon('pin'))
+    row.append(pin)
+  }
+  if (node.archived) li.dataset.archived = 'true'
   const label = document.createElement('span')
   label.className = 'label'
   /**
@@ -3008,10 +3400,18 @@ function nodeRow(node) {
    * and the folder glyph changes when one is opened. Nothing is lost by removing a third statement of it.
    */
   if (node.session) {
-    const turns = document.createElement('span')
-    turns.className = 'turns'
-    turns.textContent = node.session.turns + 't'
-    row.append(turns)
+    /**
+     * The row says **how long ago**, and the turn count moves to the tooltip.
+     *
+     * DSH's list reads `context-mgmt 4d` and `Running Heddle browser tool 24min`: the age is what tells a reader
+     * which conversations are live, while a count of turns says how long one was. Both are here, in the order a
+     * person asks for them — the age on the row, the count on hover.
+     */
+    const age = document.createElement('span')
+    age.className = 'age'
+    age.textContent = relativeAge(node.session.created)
+    row.append(age)
+    if (node.session.turns > 0) row.title = row.title.length > 0 ? row.title : `${node.session.turns} turn${node.session.turns === 1 ? '' : 's'}`
   }
 
   /**
@@ -3064,7 +3464,12 @@ async function loadChildren(node, li) {
   let children = node.children
   if (children === null) {
     try {
-      const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path))
+      /**
+       * The same filter the roots were read with. Measured: expanding a branch re-read it **without** the
+       * archived flag, so after toggling `Show archived` the roots came back with the archived session and
+       * every reopened branch replaced it with the unfiltered list — the row existed and could not be seen.
+       */
+      const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + (showingArchived ? '&archived=1' : ''))
       if (!response.ok) throw new Error('the tree answered ' + response.status)
       children = (await response.json()).children ?? []
     } catch (error) {
@@ -3116,13 +3521,39 @@ async function toggle(node, li) {
   expanded.add(node.path)
   rememberExpanded()
   await loadChildren(node, li)
+  applySearch()
+}
+
+/**
+ * Filter the tree by name, without asking the server.
+ *
+ * A session's name is on its row already, so the filter is a walk over the drawn rows rather than another
+ * request — which is also why it can run on every keystroke. Only rows are put away: the branches stay, so the
+ * answer still shows *where* the matching sessions are.
+ */
+function applySearch() {
+  const query = document.getElementById('session-search').value.trim().toLowerCase()
+  const note = document.getElementById('search-note')
+  let hidden = 0
+  let shown = 0
+  for (const li of treeList.querySelectorAll('li')) {
+    const label = li.querySelector(':scope > .row > .label')?.textContent ?? ''
+    const isSession = li.dataset.kind === 'session'
+    if (!isSession) continue
+    const matches = query.length === 0 || label.toLowerCase().includes(query)
+    li.hidden = !matches
+    if (matches) shown += 1
+    else hidden += 1
+  }
+  note.hidden = query.length === 0
+  note.textContent = query.length === 0 ? '' : shown === 0 ? `no session matches “${query}”` : `${shown} session${shown === 1 ? '' : 's'} match${shown === 1 ? 'es' : ''}`
 }
 
 async function renderTree() {
   rowIndex.clear()
   let body
   try {
-    const response = await fetch('/api/tree')
+    const response = await fetch('/api/tree' + (showingArchived ? '?archived=1' : ''))
     if (!response.ok) {
       treeList.replaceChildren()
       setNote(
@@ -3224,9 +3655,13 @@ document.getElementById('add-workspace').onclick = async () => {
  * is drawn last: it is empty at boot, and drawing it once is what gives the submit action its first label.
  */
 await loadEndpoints()
+await loadStatus()
+growComposer()
 await refreshSessions()
-renderTree()
+document.getElementById('session-search').addEventListener('input', applySearch)
+renderTree().then(() => applySearch())
 renderQueue()
+renderComposerState()
 </script>
 </body>
 </html>

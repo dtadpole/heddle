@@ -14,7 +14,7 @@ import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints } from '../endpoints.ts'
 import { canonicalPath } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinitionTitle } from '../session/definition.ts'
+import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import {
@@ -120,6 +120,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const subscribers = new Set<ServerResponse>()
   /** Sessions with a turn in flight, which is what the steer route asks about before it accepts one. */
   const running = new Map<string, number>()
+  /** The handles a stop aborts, per session. */
+  const controllers = new Map<string, Set<AbortController>>()
   // Tracked so shutdown can reach a connection whose handler is still awaiting a turn.
   const sockets = new Set<import('node:net').Socket>()
 
@@ -147,6 +149,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       clients,
       subscribers,
       running,
+      controllers,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
     }).catch((error: unknown) => {
@@ -222,6 +225,15 @@ interface RequestState {
    * DSH refuses a steer whose turn has ended, and this is the same question about the same fact.
    */
   readonly running: Map<string, number>
+  /**
+   * The abort handle of each running turn, per session.
+   *
+   * A stop and a steer ask about the same fact — is there a turn to act on — but a stop needs the handle
+   * itself: the provider request is where a turn spends its time, and DSH's stop button ends the answer
+   * rather than waiting for it. `runTurn` has taken a signal since it was written; nothing passed one until
+   * the composer grew a Stop.
+   */
+  readonly controllers: Map<string, Set<AbortController>>
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
 }
@@ -528,6 +540,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
       sessions: ctx.session.list(),
       generated: workspaces.generated,
+      /** `?archived=1` asks for the sessions a person put away; without it they are not drawn. */
+      archived: url.searchParams.get('archived') === '1',
     })
     respond(response, 200, 'application/json', `${JSON.stringify(node, null, 2)}\n`)
     return
@@ -801,6 +815,68 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * Fork a session — `Fork session` in its menu, DSH's item.
+   *
+   * The answer carries the new session's id, name and definition so the page can redraw the tree; the view is
+   * deliberately **not** sent there, which is what DSH does and what keeps a fork an act of branching rather
+   * than of navigating away from the conversation a person was reading.
+   */
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/fork') && request.method === 'POST') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/fork'.length))
+    if (!/^session-[0-9a-f-]{36}$/i.test(id)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
+      return
+    }
+    const forked = ctx.session.fork(id)
+    if (forked === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    respond(
+      response,
+      200,
+      'application/json',
+      `${JSON.stringify({ session: forked.handle.id, name: forked.definition.name, definition: forked.definition.file, log: forked.handle.transcript }, null, 2)}\n`,
+    )
+    return
+  }
+
+  /**
+   * Pin, unpin, archive or unarchive a session — the rest of a session's menu.
+   *
+   * `pinned` holds a session at the top of its branch; `archived` takes it out of the tree without touching a
+   * byte of its log, which is why archiving is what this UI offers and deleting is not: an append-only record
+   * is the one thing here that a menu must not try to erase. Both live in the **store's** meta record and
+   * nowhere else: they are this reader's state, not facts about the run, so the committed definition keeps
+   * naming the session and never claims it is archived.
+   */
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/flags') && request.method === 'POST') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/flags'.length))
+    if (!/^session-[0-9a-f-]{36}$/i.test(id)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    const pinned = typeof body.pinned === 'boolean' ? body.pinned : undefined
+    const archived = typeof body.archived === 'boolean' ? body.archived : undefined
+    if (pinned === undefined && archived === undefined) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'pinned or archived is required' })}\n`)
+      return
+    }
+    const meta = ctx.session.flags(id, {
+      ...(pinned !== undefined ? { pinned } : {}),
+      ...(archived !== undefined ? { archived } : {}),
+    })
+    if (meta === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
+    return
+  }
+
+  /**
    * Retitle a conversation — the `Rename…` item in a session's or an instance's menu.
    *
    * The session's own log is append-only and stays that way: this rewrites the meta record, which is
@@ -837,7 +913,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
-    if (folder !== undefined) updateSessionDefinitionTitle(folder, body.title)
+    if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -1111,6 +1187,46 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  /**
+   * Stop: end the turn that is running, now.
+   *
+   * DSH draws one button that is Send when idle and Stop while a turn runs; the difference is not cosmetic,
+   * because a turn that has gone wrong costs the reader the answer they are waiting for and the provider
+   * request they are paying for. The abort reaches the HTTP request itself (`src/llm/http.ts` destroys the
+   * connection on `abort`), so a slow provider is interrupted rather than waited out.
+   *
+   * `stopped: 0` is not an error: the turn may have ended between the click and the request, which is the
+   * same race the steer route answers with `409`. Answering it as success keeps the button honest — pressing
+   * Stop when nothing runs is a no-op, not a failure the page has to draw.
+   */
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/stop') && request.method === 'POST') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/stop'.length))
+    if (!/^session-[0-9a-f-]{36}$/i.test(id)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
+      return
+    }
+    const stopped = abortSession(state.controllers, id)
+    respond(response, 200, 'application/json', `${JSON.stringify({ stopped, session: id })}\n`)
+    return
+  }
+
+  /**
+   * What the composer needs to describe the machine it is talking to.
+   *
+   * The access chip names the sandbox mode the server actually runs under: `read-only`, `workspace-write` or
+   * `danger-full-access`. It is read, not chosen, because the mode is fixed when the sandbox is constructed —
+   * the chip's job is to stop a person assuming they have write access they do not have.
+   */
+  if (url.pathname === '/api/status' && request.method === 'GET') {
+    respond(
+      response,
+      200,
+      'application/json',
+      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot })}\n`,
+    )
+    return
+  }
+
   if (url.pathname === '/api/turn' && request.method === 'POST') {
     await handleTurn(ctx, request, response, state)
     return
@@ -1213,6 +1329,25 @@ async function readJson(request: IncomingMessage, response: ServerResponse): Pro
  * An empty string is absence rather than a name — a page that sends `endpoint: ''` must fall through
  * instead of asking the model service for an endpoint called nothing.
  */
+/**
+ * Abort every running turn of one session, and report how many were running.
+ *
+ * A function over the map rather than over the server so the rule can be judged without a socket: a stop
+ * aborts the handles it finds, clears them, and a second stop finds none.
+ */
+export function abortSession(controllers: Map<string, Set<AbortController>>, id: string): number {
+  const set = controllers.get(id)
+  if (set === undefined) return 0
+  let stopped = 0
+  for (const controller of set) {
+    if (!controller.signal.aborted) stopped += 1
+    controller.abort()
+  }
+  set.clear()
+  controllers.delete(id)
+  return stopped
+}
+
 export function resolveTurnEndpoint(sources: {
   readonly requested?: string
   readonly recorded?: string
@@ -1325,6 +1460,15 @@ export function resolveTurnEndpoint(sources: {
    * possible, and a set would clear the mark for a session that is still running.
    */
   state.running.set(handle.id, (state.running.get(handle.id) ?? 0) + 1)
+  /**
+   * The turn's abort handle, registered before the stream opens so a stop arriving immediately after the
+   * request still finds it. The `finally` below removes it either way, which is what keeps a finished
+   * session from accumulating handles a later stop would abort for nothing.
+   */
+  const controller = new AbortController()
+  const handles = state.controllers.get(handle.id) ?? new Set<AbortController>()
+  handles.add(controller)
+  state.controllers.set(handle.id, handles)
   respondSse(response)
   state.clients.add(response)
   /**
@@ -1352,19 +1496,36 @@ export function resolveTurnEndpoint(sources: {
   // same emit the server already listens on for other clients.
   const unsubscribe = subscribeSessionEvent(ctx, forward)
   try {
-    const result = await runTurn(ctx, { session: handle, endpoint, prompt: body.prompt, ...(model !== undefined ? { model } : {}) })
+    const result = await runTurn(ctx, {
+      session: handle,
+      endpoint,
+      prompt: body.prompt,
+      signal: controller.signal,
+      ...(model !== undefined ? { model } : {}),
+    })
     safeWrite(
       `event: done\ndata: ${JSON.stringify({ session: handle.id, text: result.text, finishReason: result.finishReason, rounds: result.rounds, denials: result.denials })}\n\n`,
     )
   } catch (error) {
     /**
-     * The failure is logged as well as streamed. Measured: an error that only reached the
-     * client left the server's own output silent, so diagnosing it meant guessing from an empty
-     * stream instead of reading one line.
+     * A stopped turn is an answer, not a failure: the abort reaches the provider connection and the loop
+     * unwinds through this `catch`. Reporting it as an error would put a red sentence in the transcript for
+     * something the reader asked for, so it is its own event and the page settles the row with it.
      */
-    ctx.logger.warn('web: the turn failed — %s', (error as Error).message)
-    safeWrite(`event: error\ndata: ${JSON.stringify({ message: (error as Error).message })}\n\n`)
+    if (controller.signal.aborted) {
+      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+    } else {
+      /**
+       * The failure is logged as well as streamed. Measured: an error that only reached the
+       * client left the server's own output silent, so diagnosing it meant guessing from an empty
+       * stream instead of reading one line.
+       */
+      ctx.logger.warn('web: the turn failed — %s', (error as Error).message)
+      safeWrite(`event: error\ndata: ${JSON.stringify({ message: (error as Error).message })}\n\n`)
+    }
   } finally {
+    handles.delete(controller)
+    if (handles.size === 0) state.controllers.delete(handle.id)
     unsubscribe()
     const left = (state.running.get(handle.id) ?? 1) - 1
     if (left > 0) state.running.set(handle.id, left)

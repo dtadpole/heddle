@@ -1811,3 +1811,136 @@ test('a session is renamed from its own menu, and the row and its definition fol
     removeDir(h.work)
   }
 })
+
+test('a session is pinned and archived in the store, and the tree follows both', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-flags')
+  let live
+  try {
+    await conventionsFixture(h)
+    const created = []
+    for (let index = 0; index < 2; index += 1) {
+      const one = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+      created.push(parseJson(one.stdout))
+    }
+    const [newer, older] = created
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    /** The launch token becomes a cookie on a redirect; an authenticated caller is the cookie, not the token. */
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const commit = (id, patch) =>
+      fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      })
+    const branch = new URL(`/api/tree?path=${encodeURIComponent(join(h.work, '_tools_', 'some-tool'))}`, live.url)
+    const listed = async (withArchived) => {
+      const url = new URL(branch)
+      if (withArchived) url.searchParams.set('archived', '1')
+      const body = await (await fetch(url, { headers: { cookie } })).json()
+      return (body.children ?? []).filter((node) => node.kind === 'session')
+    }
+
+    /**
+     * **Pin** holds a session at the top of its branch. DSH's session menu has the item, and its list puts a
+     * pinned session above the ones that merely came later.
+     */
+    const pin = await commit(older.session, { pinned: true })
+    assert.equal(pin.status, 200, 'the pin was accepted')
+    const pinned = await listed(false)
+    assert.equal(pinned[0]?.label, older.name, `the pinned session is first\nsaw: ${pinned.map((node) => node.label).join(', ')}`)
+    assert.equal(pinned[0]?.pinned, true, 'and says it is pinned')
+    assert.ok(!pinned.some((node) => node.label === newer.name && node.pinned === true), 'the other one is not pinned')
+
+    /**
+     * **Archive** takes a session out of the tree without touching its log — which is why this is the act the
+     * menu offers and deleting is not — and `?archived=1` is the way back.
+     */
+    const archive = await commit(older.session, { archived: true })
+    assert.equal(archive.status, 200, 'the archive was accepted')
+    const withoutArchived = await listed(false)
+    assert.ok(!withoutArchived.some((node) => node.label === older.name), 'an archived session is not drawn by default')
+    const withArchived = await listed(true)
+    const back = withArchived.find((node) => node.label === older.name)
+    assert.equal(back?.archived, true, 'and is drawn when asked for, marked as archived')
+    assert.equal(back?.pinned, true, 'with its pin intact')
+
+    /** The flags live in the store alone: the definition a reader of the repository sees never claims them. */
+    const definition = JSON.parse(readFileSync(join(String(older.definition).replace('/session.json', ''), 'session.json'), 'utf8'))
+    assert.equal(definition.pinned, undefined, 'the definition does not carry the pin')
+    assert.equal(definition.archived, undefined, 'nor the archive')
+
+    /** And both are reversible, which is what makes them safe items in a menu. */
+    await commit(older.session, { archived: false, pinned: false })
+    const restored = await listed(false)
+    assert.ok(restored.some((node) => node.label === older.name), 'unarchiving brings it back')
+    assert.equal(restored.find((node) => node.label === older.name)?.pinned, undefined, 'and unpinning leaves no mark')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a session forks into a new one named after it, with its conversation and its own definition', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    /** A turn, because a fork copies a conversation and an empty one proves nothing. */
+    await runCli(adminArgs(h, ['--turn', 'a conversation worth continuing']), { env: h.env, cwd: branch })
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const forked = await (
+      await fetch(new URL(`/api/sessions/${made.session}/fork`, live.url), { method: 'POST', headers: { cookie } })
+    ).json()
+
+    assert.notEqual(forked.session, made.session, 'the fork is a session of its own')
+    assert.ok(existsSync(String(forked.definition)), 'and has a definition of its own on disk')
+
+    /**
+     * DSH's naming, observed on 2026-10-17: `<title> (1)`, and the view does not follow it. The folder keeps the
+     * conventions' instance naming rule, which is why the definition's folder name is a clock name while the title
+     * is the name a person reads.
+     */
+    const listed = await sessionsOf(h)
+    const title = listed.find((meta) => meta.id === made.session)?.title ?? ''
+    assert.ok(title.length > 0, 'the source session has a title to fork from')
+    assert.equal(listed.find((meta) => meta.id === forked.session)?.title, `${title} (1)`, 'the fork is named after it, with an ordinal')
+
+    const definition = JSON.parse(readFileSync(String(forked.definition), 'utf8'))
+    assert.equal(definition.cwd, branch, 'bound to the folder its parent worked in')
+    assert.equal(definition.title, `${title} (1)`, 'and the definition says the same name')
+
+    /** The conversation came with it: the same user messages, in the same order. */
+    const source = await runCli(adminArgs(h, ['transcript', made.session]), { env: h.env, cwd: h.work })
+    const copy = await runCli(adminArgs(h, ['transcript', forked.session]), { env: h.env, cwd: h.work })
+    const said = (text) => (text.stdout.match(/a conversation worth continuing/g) ?? []).length
+    assert.ok(said(source) >= 1, 'the source holds the turn')
+    assert.equal(said(copy), said(source), 'and the fork holds the same one')
+
+    const tree = await (await fetch(new URL(`/api/tree?path=${encodeURIComponent(branch)}`, live.url), { headers: { cookie } })).json()
+    const labels = (tree.children ?? []).filter((node) => node.kind === 'session').map((node) => node.label)
+    assert.ok(labels.includes(forked.name), 'the tree draws the fork beside its parent')
+    assert.ok(labels.length >= 2, 'and the parent is still there')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})

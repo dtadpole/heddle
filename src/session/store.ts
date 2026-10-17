@@ -84,6 +84,10 @@ export interface SessionMeta {
   readonly model?: string
   readonly title?: string
   readonly turns: number
+  /** Held at the top of its branch. A reading preference, but one a person sets and expects to persist. */
+  readonly pinned?: boolean
+  /** Out of the tree, and the log untouched: the reversible act, and the only one offered. */
+  readonly archived?: boolean
 }
 
 /** The default root, overridable so a check can use a scratch directory. */
@@ -400,6 +404,58 @@ export class SessionStore {
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
     return next
+  }
+
+  /**
+   * Set or clear a session's **flags** — pinned, archived — and answer with the record as it now is.
+   *
+   * One method rather than one per flag, because the two are the same kind of fact about a session and the same
+   * file holds them: a caller that wanted both would otherwise write the meta twice and could be interrupted
+   * between the writes with half of its intent on disk. The rule is `rename`'s: the meta is a record, the log is
+   * append-only, and a flag that is false is **deleted** rather than stored as false, so a record says only what
+   * is true of the session.
+   */
+  flags(id: SessionId, patch: { readonly pinned?: boolean; readonly archived?: boolean }): SessionMeta | null {
+    const current = this.list().find((meta) => meta.id === id)
+    if (current === undefined) return null
+    const next: SessionMeta = { ...current }
+    if (patch.pinned !== undefined) {
+      if (patch.pinned) (next as { pinned?: boolean }).pinned = true
+      else delete (next as { pinned?: boolean }).pinned
+    }
+    if (patch.archived !== undefined) {
+      if (patch.archived) (next as { archived?: boolean }).archived = true
+      else delete (next as { archived?: boolean }).archived
+    }
+    const meta = this.metaFile(id)
+    if (meta === null) return null
+    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    return next
+  }
+
+  /**
+   * Copy a session's **projected** messages into a new one, and answer with the new session.
+   *
+   * A fork is a new conversation that starts where another one stood, which is why it copies the
+   * projection (`deriveMessages` — what the model would have seen, with compaction already folded) rather
+   * than the raw events: replaying another log's shadowing ranges into a fresh log would mean remapping
+   * sequence numbers, and a fork that replayed them wrongly would be worse than no fork at all. The system
+   * message is **not** copied: the new session assembles its own, and two of them would be one too many.
+   */
+  fork(source: SessionId): SessionHandle | null {
+    const from = this.open(source)
+    if (from === null) return null
+    const meta = this.list().find((one) => one.id === source)
+    const handle = this.create({
+      ...(meta?.cwd !== undefined ? { cwd: meta.cwd } : {}),
+      ...(meta?.endpoint !== undefined ? { endpoint: meta.endpoint } : {}),
+      ...(meta?.model !== undefined ? { model: meta.model } : {}),
+    })
+    for (const message of this.deriveMessages(from)) {
+      if (message.role === 'system') continue
+      this.message(handle, message)
+    }
+    return handle
   }
 
   /**
