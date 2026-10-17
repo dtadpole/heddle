@@ -89,8 +89,20 @@
     - id: turns
       name: ./src/plugins/turns.ts
 
+    # Agent Teams: the durable team service and the nine collaboration tools. Opt-in — a profile that omits
+    # this row runs no teams, and the tools then never appear in the model's list.
+    - id: team
+      name: ./src/plugins/team.ts
+      inject: [session, model, tools, context, sandbox]
+      config:
+        maxMembers: 8
+        maxTasks: 256
+        maxPendingMessagesPerMember: 64
+        maxMessageBytes: 65536
+
     - id: tools
       name: ./src/plugins/tools.ts
       inject: [approvals, sandbox]
       config:
-        allow: [write_file, read_file, list_dir, bash, delegate]
+        allow:
+          [write_file, read_file, list_dir, bash, delegate, spawn_teammate, send_message, list_agents, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update]

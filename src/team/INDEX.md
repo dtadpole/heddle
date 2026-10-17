@@ -25,10 +25,14 @@ which is what makes it restartable under the [goal-reentrancy convention](../../
 | [`state.ts`](state.ts) | the **pure layer**: team events, strict fold, member lifecycle, task board with revision compare-and-set, readiness and advisory write scopes, mailbox ledger. No service, no model, no filesystem — the log is the only input |
 | [`service.ts`](service.ts) | the **service layer** over injected dependencies: `spawn` (provisioning event → own attributed session → first turn → active), `send` (durable queue, target-confirmed delivery, per-target serialization, provisioning queue), task create/update with journaling, `waitForChange` (journal wake + timeout + `noProgress`), Lead-only `interrupt`, and `recover` (settle provisioning from the durable child, redeliver undelivered mail) |
 
+| [`tool.ts`](tool.ts) | the **nine model-facing tools** — `spawn_teammate`, `send_message`, `list_agents`, `wait_agent`, `interrupt_agent`, `team_task_create/list/get/update` — thin wrappers that translate arguments, call the service, surface its refusals as stable codes, and report `noProgress` as an answer rather than an error |
+| [`policy.ts`](policy.ts) | the collaboration policy DSH shares with Lead and teammates, written once per session as a durable `context/note` (`origin: 'team-policy'`) so it survives a restart with the team and is distinguishable from the project's instructions |
+| [`../plugins/team.ts`](../plugins/team.ts) | the **plugin**: builds the service with `runTurn` and the live-turn registry, registers the tools, makes the policy durable on every journal write, emits `team/changed`, and exposes `recoverAll` for the server's boot |
+
 Live status and interruption come from [`../agent/turns.ts`](../agent/turns.ts): the process-local registry the
-loop registers each turn in, provided by the `turns` profile row (optional — a minimal profile runs turns
-without interruption). Planned next: `tools.ts` (the nine model-facing tools and the collaboration policy), the
-team plugin that wires this service to `runTurn` and `ctx.turns`, and the Web UI view.
+loop registers each turn in, provided by the `turns` profile row (optional — a minimal profile runs teams
+without interruption). The profile row `team` is **opt-in**: a profile that omits it runs no teams and the nine
+tools never appear in the model's list. Planned next: the Web UI view.
 
 ## Decisions, and why
 
