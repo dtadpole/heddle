@@ -10,6 +10,9 @@ grounded_in:
 
 # Reentrant components
 
+The first Heddle convention. It is an instance of `_conventions_` (one folder per convention); see the
+[folder's entry point](../INDEX.md) for what a convention must carry.
+
 **The rule.** Every major component must be **reentrant**: it can be re-entered, re-evaluated, restarted,
 replaced or degraded at any moment, and it derives its state and its progress from **durable records** —
 never from the delivery of a point event, and never only from memory that one process lifetime owns.
