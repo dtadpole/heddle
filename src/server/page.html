@@ -62,15 +62,24 @@
    * written for a dark surface; on a light system the same rules would have put pale text on white. Naming the two
    * values makes the page's appearance the page's own decision, whichever appearance the reader prefers.
    */
+  /**
+   * The panes **fill the window**: no outer frame, no gap between them.
+   *
+   * Measured before this: the body carried a 12px padding and a 12px gap, so the navigation pane started
+   * 12px in from every edge and stopped 12px short of the bottom — a floating card look on a layout that is
+   * not a card. The divider is an overlay now (zero layout width, 3px of overlap on each side), so the
+   * panes can meet without the split bar pushing them apart.
+   */
   body {
     margin: 0;
-    padding: 12px;
+    padding: 0;
     font: 14px/1.5 var(--font);
     display: flex;
-    gap: 12px;
+    gap: 0;
     height: 100vh;
     background: var(--bg);
     color: var(--text);
+    overflow: hidden;
   }
   /**
    * The sidebar's width is one custom property, read by the panel and by nothing else.
@@ -147,7 +156,8 @@
     z-index: 5;
     flex: none;
     width: 6px;
-    margin-left: -3px;
+    /* Zero layout width: 6px minus 3px on each side, so the panes meet and the bar still has a 6px target. */
+    margin: 0 -3px;
     cursor: col-resize;
     background: transparent;
     border: none;
@@ -218,7 +228,12 @@
      * variables stay, because the markdown block and the composer's own text read from them.
      */
     --chat-size: 14px;
-    --chat-leading: 24px;
+    /**
+     * the reference's leading, measured on its live page: its answer paragraphs compute to **14px / 22.75px** (a
+     * 1.625 ratio) while its lists are 14/21 and its table cells 14/20. DSH's 24px was the previous reference, and
+     * the owner asked for the reference's denser reading instead — the size is the same, the text simply sits tighter.
+     */
+    --chat-leading: 22.75px;
     --chat-text: #f9fafb;
     --chat-secondary: #cfd3d6;
     --chat-muted: #adb2b8;
@@ -307,13 +322,22 @@
     font-size: 14px; line-height: 22px; white-space: pre-wrap;
   }
   /** The answer: no border, no bubble, roomier leading — DSH's `AssistantMarkdown` root (14px on 24px). */
-  .turn.assistant { margin-top: 6px; font-size: 14px; line-height: 24px; color: var(--chat-text); }
+  /** The answer follows the chat's leading variable (the reference's 22.75), not a local 24. */
+  .turn.assistant { margin-top: 6px; font-size: 14px; line-height: var(--chat-leading); color: var(--chat-text); }
   /**
    * The document's own rhythm and its code blocks, from DSH's markdown renderer: a paragraph is
    * `margin: 16px 0`, and a block of code is its own surface rather than a quoted aside.
    */
-  .turn.assistant.markdown p { margin: 16px 0; }
-  .turn.assistant.markdown ul, .turn.assistant.markdown ol { margin: 16px 0; padding-left: 1.4em; }
+  /**
+   * the reference's own rhythm, measured: a paragraph's margin is `0 0 12px` (no top margin), a list item leads at
+   * 1.5 (21px) and carries `margin-top: 4px`, and a table cell leads at 20px. DSH's 16px paragraph spacing was the
+   * previous reference; 12px is what makes the answer read at the density the owner asked to match.
+   */
+  .turn.assistant.markdown p { margin: 0 0 12px; }
+  .turn.assistant.markdown ul, .turn.assistant.markdown ol { margin: 0 0 12px; padding-left: 1.4em; line-height: 1.5; }
+  .turn.assistant.markdown li { margin-top: 4px; }
+  .turn.assistant.markdown li:first-child { margin-top: 0; }
+  .turn.assistant.markdown td, .turn.assistant.markdown th { font-size: 14px; line-height: 20px; }
   .turn.assistant.markdown pre { margin: 16px 0; padding: 10px 12px; background: var(--chat-code); border-radius: 8px; overflow-x: auto; }
   .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: 12.5px; line-height: 19px; background: none; padding: 0; }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
@@ -746,6 +770,8 @@
    * one, and it makes a list of names read unevenly.
    */
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
+  /** DSH's state word: the muted body type, before the name, smaller than it. */
+  #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
   /** A section name inside a menu, as DSH's View options has for its `WorkSpace` group. */
   .menu .menu-heading { padding: .3rem .5rem .1rem; font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; opacity: .55; }
   #session-head .menu-wrap { position: relative; display: inline-flex; margin-left: auto; }
@@ -819,7 +845,8 @@
   #prompt textarea {
     display: block; width: 100%; box-sizing: border-box;
     border: 0; outline: none; background: transparent; color: var(--text);
-    font: 14px/24px var(--font);
+    /** the reference's composer measures 14px on a 21px line. */
+    font: 14px/21px var(--font);
     padding: 4px 8px 8px 14px;
     min-height: 36px; max-height: 336px; resize: none; overflow-y: auto;
   }
@@ -3069,9 +3096,13 @@ events.addEventListener('session', (message) => {
    * page did not start becomes visible — another window's, or the CLI's. `model/request` is appended once
    * per round and `turn/completed` once per turn, so the pair is a start and an end rather than a guess.
    */
-  if (event.type === 'model/request') runningSessions.add(payload.session)
+  if (event.type === 'model/request') {
+    runningSessions.add(payload.session)
+    paintRunningMarks()
+  }
   else if (event.type === 'turn/completed') {
     runningSessions.delete(payload.session)
+    paintRunningMarks()
     /**
      * A turn just ended, which is exactly when a queued message becomes sendable — including one that was
      * waiting on a turn this page never started. The pump refuses to run twice for one queue, so this can
@@ -4024,7 +4055,10 @@ async function runTurn(text, key) {
         stopRequested = false
         settleChat()
         void renderSettledAnswers()
-        if (typeof payload.session === 'string') runningSessions.delete(payload.session)
+        if (typeof payload.session === 'string') {
+          runningSessions.delete(payload.session)
+          paintRunningMarks()
+        }
         renderComposerState()
       } else if (name === 'error') {
         add('denied', payload.message)
@@ -4502,6 +4536,31 @@ const EXPANDED_KEY = 'heddle.tree.expanded.v1'
 /** Where each drawn node is, so a remembered path can be opened without walking the DOM by label. */
 const rowIndex = new Map()
 
+/**
+ * Paint the running marks from the set the stream fills.
+ *
+ * Called on every add and delete rather than redrawing the tree: the tree's rows are the same rows, and only one span
+ * per session changes. A re-fetch per event would also be a request per event.
+ */
+function paintRunningMarks() {
+  for (const entry of rowIndex.values()) {
+    const { node, li } = entry
+    if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
+    const row = li.querySelector(':scope > .row')
+    if (row === null) continue
+    const existing = row.querySelector(':scope > .status')
+    const running = runningSessions.has(node.session.id)
+    if (running && existing === null) {
+      const status = document.createElement('span')
+      status.className = 'status'
+      status.textContent = 'Running'
+      row.querySelector(':scope > .icon')?.after(status)
+    } else if (!running && existing !== null) {
+      existing.remove()
+    }
+  }
+}
+
 /** The folder the prompt box belongs to, so a run continues the folder a person selected. */
 let activeFolder = null
 
@@ -4690,6 +4749,15 @@ function kindIcon(kind, open = false) {
   svg.setAttribute('aria-hidden', 'true')
   svg.setAttribute('data-state', kind === 'file' ? 'file' : open ? 'open' : 'closed')
   if (kind === 'generated') svg.setAttribute('stroke-dasharray', '2 1.5')
+  if (kind === 'plus') {
+    /** A plus: the one control that makes something rather than acting on a row. */
+    const vertical = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    vertical.setAttribute('d', 'M8 3.5v9')
+    const horizontal = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    horizontal.setAttribute('d', 'M3.5 8h9')
+    svg.append(vertical, horizontal)
+    return svg
+  }
   if (kind === 'file') {
     /**
      * A page rather than a folder: the same body with the corner turned down, which is the one mark
@@ -5428,7 +5496,7 @@ document.addEventListener('click', closeMenus)
  * instead of the panel. So the two actions are exposed here, deliberately, in one place, and named for what they
  * are: a seam rather than a public API.
  */
-Object.assign(globalThis, { showSession, showFile })
+Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
 
 function nodeRow(node) {
   const li = document.createElement('li')
@@ -5458,6 +5526,17 @@ function nodeRow(node) {
   icon.className = 'icon'
   icon.append(kindIcon(node.kind, false))
   row.append(icon)
+  /**
+   * DSH prints a session's state before its name — `Running` in the muted body type — and the live half of it is a fact
+   * this page already tracks (`runningSessions`, fed by `model/request` and `turn/completed` on the stream). The word
+   * is painted from that set and repainted when it changes, so a row says "still working" without a re-fetch.
+   */
+  if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
+    const status = document.createElement('span')
+    status.className = 'status'
+    status.textContent = 'Running'
+    row.append(status)
+  }
   if (node.badge) {
     const badge = document.createElement('span')
     badge.className = 'badge'
@@ -5532,24 +5611,44 @@ function nodeRow(node) {
    * three controls at x=192, 218 and 244 of its row. This UI had `Pin`, `Archive`, `…`, which is the same three
    * gestures under a reading order a person who knows DSH has to translate.
    */
+  /**
+   * One quick control, shared by both kinds of row.
+   *
+   * Hoisted out of the session branch, and that is a fix rather than a tidy-up: the workspace branch below calls it
+   * too, and while it was declared inside the session branch the workspace row threw `quickButton is not defined` —
+   * which took the **whole tree** down, because one row's exception aborts the loop that draws them. Measured in a
+   * fresh workspace: no rows, no note, and nothing on screen to say why.
+   */
+  const quickButton = (label, glyph, run) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'untwisty'
+    button.title = label
+    button.setAttribute('aria-label', label)
+    button.append(kindIcon(glyph))
+    button.onclick = async (event) => {
+      event.stopPropagation()
+      await run()
+    }
+    return button
+  }
   if (node.kind === 'session' && node.session) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
-    const quickButton = (label, glyph, run) => {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'untwisty'
-      button.title = label
-      button.setAttribute('aria-label', label)
-      button.append(kindIcon(glyph))
-      button.onclick = async (event) => {
-        event.stopPropagation()
-        await run()
-      }
-      return button
-    }
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
     quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
+    quick.dataset.slot = 'after-menu'
+    rowTools.append(quick)
+  }
+  /**
+   * A workspace row offers one act on hover, which is the act its name is for. Measured on DSH's own row: its two
+   * buttons are `Workspace actions for <name>` (the `…`) and `New session in <name>`, in that order — the menu first,
+   * then the one common action, which is the same arrangement the session rows use.
+   */
+  if (node.kind === 'workspace') {
+    const quick = document.createElement('span')
+    quick.className = 'session-actions'
+    quick.append(quickButton(`New session in ${node.label}`, 'plus', () => startSessionAt(node)))
     quick.dataset.slot = 'after-menu'
     rowTools.append(quick)
   }
