@@ -655,13 +655,13 @@
    * The selected row, and it has to be visible *while* the pointer is elsewhere: a tint alone is what
    * hover already draws, so the selection carries a left accent bar and a bolder name as well.
    */
-  #tree .row[aria-current='true'] { background: color-mix(in oklab, currentColor 8%, transparent); }
+  #tree li[aria-selected='true'] > .row { background: color-mix(in oklab, currentColor 8%, transparent); }
   /**
    * The selected row's name keeps its normal weight, which is DSH's own reading: measured, its selected row is
    * weight 400 with the same 8% surface as a hovered one. Bold text is a second signal for a state that already has
    * one, and it makes a list of names read unevenly.
    */
-  #tree .row[aria-current='true'] .label { opacity: 1; }
+  #tree li[aria-selected='true'] > .row .label { opacity: 1; }
   #view-options { display: inline-flex; }
   #view-options .menu-wrap { position: relative; display: inline-flex; }
   #view-options .menu { position: absolute; right: 0; top: 1.4rem; z-index: 6; display: flex; flex-direction: column; min-width: 14rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); text-transform: none; letter-spacing: normal; }
@@ -4399,11 +4399,18 @@ async function selectSession(node) {
  */
 let selectedPath = null
 
-/** Paint the selection, and only the selection: called after every change that redraws or adds rows. */
+/**
+ * Paint the selection, and only the selection: called after every change that redraws or adds rows.
+ *
+ * `aria-selected` is DSH's attribute for a chosen tree item — its session rows carry `aria-selected` and this UI used
+ * `aria-current` on the row instead, which is the attribute for "the current item in a set" on a link or a page, and
+ * not what a treeitem means. The stylesheet reads the attribute, so the style and the ARIA name cannot disagree.
+ */
 function markSelection() {
-  for (const row of treeList.querySelectorAll('.row')) {
-    if (row.dataset.path === selectedPath) row.setAttribute('aria-current', 'true')
-    else row.removeAttribute('aria-current')
+  for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
+    if (!li.hasAttribute('aria-selected')) continue
+    const row = li.querySelector(':scope > .row')
+    li.setAttribute('aria-selected', row !== null && row.dataset.path === selectedPath ? 'true' : 'false')
   }
 }
 
@@ -4775,16 +4782,23 @@ function nodeRow(node) {
   li.setAttribute('role', 'treeitem')
   li.dataset.kind = node.kind
   li.dataset.open = 'false'
-  if (node.kind !== 'file') {
-    // The state lives on the tree item, where a reader is told about it, and on the control's label.
-    li.setAttribute('aria-expanded', 'false')
+  /**
+   * Which ARIA state a row carries is a property of the row, and DSH's tree draws the line where this one should:
+   * a row that can open carries `aria-expanded`, and a row that can be **chosen** carries `aria-selected` and no
+   * `aria-expanded` at all. This UI put `aria-expanded="false"` on session rows too, which told a screen reader
+   * that a leaf has something under it — measured on DSH: its session rows carry `aria-selected` only.
+   */
+  const expandable = node.kind === 'workspace' || node.kind === 'type' || node.kind === 'instance' || node.kind === 'folder'
+  if (expandable) li.setAttribute('aria-expanded', 'false')
+  if (node.kind === 'session' || node.kind === 'file') {
+    li.setAttribute('aria-selected', node.path === selectedPath ? 'true' : 'false')
   }
 
   const row = document.createElement('div')
   row.className = 'row'
   row.dataset.path = node.path
   row.tabIndex = 0
-  if (node.path === selectedPath) row.setAttribute('aria-current', 'true')
+  /** The chosen row is marked on the tree item, where a screen reader reads it; the row keeps no second attribute. */
 
   /** The left of the row is what it **is**: its kind, a type's badge, and its name. */
   const icon = document.createElement('span')
@@ -4981,7 +4995,7 @@ async function toggle(node, li) {
    */
   const paint = (isOpen) => {
     li.dataset.open = isOpen ? 'true' : 'false'
-    li.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
+    if (li.hasAttribute('aria-expanded')) li.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
     if (entry !== undefined && entry.icon !== undefined) entry.icon.replaceChildren(kindIcon(node.kind, isOpen))
   }
   if (open) {
