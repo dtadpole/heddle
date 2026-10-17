@@ -82,6 +82,26 @@ The feature half was matched first; this half was matched by **measuring both UI
 screenshots of the same view, rather than by eye. Every number below was read from `getComputedStyle` on
 2026-10-17, on DSH's session view at 127.0.0.1:8080 and on Heddle's at 8082.
 
+### The three row states
+
+The owner's observation — "the `1min`/`1d` is at the right-most in DSH but not in Heddle, and hover and selected behave
+differently" — was measured on both sides, and this is the whole of it:
+
+| State | DSH, measured | Heddle, measured after the change |
+|---|---|---|
+| **quiet** | transparent; the age sits at the row's right edge (age ends 8px inside a row that ends at 268); the action buttons are in the DOM but measure **0 wide**, so they take no space | transparent; `ageRight` 278 of a row ending at 286 — the same 8px; `.row-tools` is `position: absolute` and `opacity: 0`, so it also takes no space |
+| **hovered** | one `rgba(255,255,255,0.08)` tint; the age becomes **0 wide** and the three controls appear **in its slot** (`…`, archive, pin) | the same 8% tint; the age's `opacity` goes to **0** and `.row-tools` to **1**, both in the same right-hand slot |
+| **selected** | the **same 8% tint**, name at weight **400**, **no left bar** and no shadow — selection is the tint that stays after the pointer leaves | the same 8% tint, weight **400**, `box-shadow: none`; the left accent bar and the bold name that this UI used for selection are gone |
+
+Two rules follow from it, and both are now structural rather than incidental:
+
+- **The right-hand slot is one slot.** The age and the controls are not two things side by side — the controls replace
+  the age while the pointer or the keyboard is on the row, which is why DSH's age is the rightmost thing a reader sees
+  and the controls never push it inward.
+- **Hover and selection differ by persistence, not by strength.** DSH gives them the same surface; what tells them
+  apart is that a selection's tint remains when the pointer leaves. A stronger tint plus a bar plus bold text was three
+  signals for a state that needs one.
+
 | Thing | DSH | Heddle before | Heddle now |
 |---|---|---|---|
 | Page surface | one dark ground `#151517`, both columns are **inset 12px and rounded 28px** | flat columns, flush edges | inset 12px, both panels `border-radius: 28px` |

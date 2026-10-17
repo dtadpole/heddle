@@ -599,16 +599,44 @@
   #tree, #tree ul, #tree ol { list-style: none; margin: 0; padding: 0; }
   #tree li { display: block; padding: 0; }
   #tree ul[role='group'] { padding-left: .85rem; border-left: 1px solid var(--line); }
-  #tree .row { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border-radius: var(--radius-md); cursor: pointer; }
-  /** DSH's age sits in the muted small type, and its rows are quieter than their names. */
-  #tree .age { font-size: 11px; color: var(--text-3); }
+  #tree .row { position: relative; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border-radius: var(--radius-md); cursor: pointer; }
+  /**
+   * The row's three states, read from DSH's own rows on 2026-10-17 and copied rather than invented:
+   *
+   * - **quiet**: transparent, and the **age sits at the row's right edge** (DSH: age at x=237 of a row ending at
+   *   268, i.e. 8px of padding);
+   * - **hovered**: one 8% white tint, and the controls appear **in the age's slot** — DSH's age measures 0 wide
+   *   while hovered, and its three buttons take that space;
+   * - **selected**: the **same 8% tint** as hover, with the name at its normal weight and no marker: measured,
+   *   DSH's selected row is `rgba(255,255,255,0.08)`, weight 400, no left bar. Selection is the tint that stays
+   *   after the pointer leaves, which is the whole difference between the two states.
+   */
+  #tree .age { margin-left: auto; font-size: 11px; color: var(--text-3); transition: opacity .12s ease; }
+  #tree li:hover > .row > .age, #tree li:focus-within > .row > .age { opacity: 0; }
+  #tree .row-tools {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    display: inline-flex; align-items: center; gap: 2px;
+    opacity: 0; pointer-events: none; transition: opacity .12s ease;
+  }
+  #tree li:hover > .row > .row-tools,
+  #tree li:focus-within > .row > .row-tools,
+  #tree .row-tools:has(.menu:not([hidden])) { opacity: 1; pointer-events: auto; }
+  @media (hover: none) {
+    #tree .age { opacity: 0; }
+    #tree .row-tools { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: auto; }
+  }
   #tree .row:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
   /**
    * The selected row, and it has to be visible *while* the pointer is elsewhere: a tint alone is what
    * hover already draws, so the selection carries a left accent bar and a bolder name as well.
    */
-  #tree .row[aria-current='true'] { background: color-mix(in oklab, currentColor 16%, transparent); box-shadow: inset 2px 0 0 currentColor; }
-  #tree .row[aria-current='true'] .label { font-weight: 600; opacity: 1; }
+  #tree .row[aria-current='true'] { background: color-mix(in oklab, currentColor 8%, transparent); }
+  /**
+   * The selected row's name keeps its normal weight, which is DSH's own reading: measured, its selected row is
+   * weight 400 with the same 8% surface as a hovered one. Bold text is a second signal for a state that already has
+   * one, and it makes a list of names read unevenly.
+   */
+  #tree .row[aria-current='true'] .label { opacity: 1; }
   #view-options { display: inline-flex; }
   #view-options .menu-wrap { position: relative; display: inline-flex; }
   #view-options .menu { position: absolute; right: 0; top: 1.4rem; z-index: 6; display: flex; flex-direction: column; min-width: 14rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); text-transform: none; letter-spacing: normal; }
@@ -872,13 +900,7 @@
    * DSH's own behaviour, and the reason the row reads as a name rather than as a strip of buttons. A touch device
    * has no hover, so there they are simply shown.
    */
-  #tree .session-actions, #tree .menu-wrap { opacity: 0; transition: opacity .12s ease; }
   #tree .session-actions { display: inline-flex; align-items: center; gap: .1rem; }
-  #tree li:hover > .row .session-actions, #tree li:hover > .row .menu-wrap,
-  #tree li:focus-within > .row .session-actions, #tree li:focus-within > .row .menu-wrap { opacity: 1; }
-  /** A menu that has been opened must stay visible after the pointer leaves the row. */
-  #tree li > .row .menu-wrap:has(.menu:not([hidden])) { opacity: 1; }
-  @media (hover: none) { #tree .session-actions, #tree .menu-wrap { opacity: 1; } }
   .untwisty { font: inherit; padding: 0 .3rem; opacity: .55; background: none; border: 0; color: inherit; line-height: 1; }
   .untwisty:hover { opacity: 1; }
 
@@ -1453,11 +1475,25 @@ function settleChat() {
  * the same separator DSH puts between a title and its summary (`lcKema_separator`) — because this is a
  * transcript of the harness's own calls, and the person reading is the one who configured those tools.
  */
-const TOOL_PHRASES = { bash: 'Ran commands', read_file: 'Read files', list_dir: 'Read files', write_file: 'Wrote files' }
-
-function toolTitle(name) {
-  if (!name) return 'Ran a tool'
-  return TOOL_PHRASES[name] ?? name.replace(/_/g, ' ')
+/**
+ * What a tool call was aimed at: the arguments' most telling string.
+ *
+ * DSH's per-call row reads `<tool> · <what it acted on>` — measured in its session view: `Bash · See what other
+ * sessions have committed`, `Read · ~/.dsh/AGENTS.md`. So the title is the tool's own name and the hint is the
+ * command, the path, the pattern — whichever the arguments carry first.
+ */
+function toolHint(argsText) {
+  try {
+    const args = JSON.parse(argsText || '{}')
+    for (const key of ['command', 'cmd', 'path', 'file_path', 'file', 'pattern', 'query', 'url']) {
+      if (typeof args[key] === 'string' && args[key].length > 0) return args[key]
+    }
+    const first = Object.values(args ?? {}).find((value) => typeof value === 'string' && value.length > 0)
+    if (typeof first === 'string') return first
+  } catch {
+    // Not JSON: the arguments are their own summary.
+  }
+  return firstLine(argsText)
 }
 
 /** The first line of a body, stripped of the markdown emphasis DSH's reasoning summary strips too. */
@@ -1501,9 +1537,9 @@ function summaryLine(kind, text, tool, label) {
   const name = tool && tool.name ? tool.name : label ? label.replace(/^→\s*/, '') : ''
   const title = document.createElement('span')
   title.className = 'title'
-  title.textContent = kind === 'reasoning' ? 'Think' : toolTitle(name)
+  title.textContent = kind === 'reasoning' ? 'Think' : name || 'tool'
   line.append(title)
-  const hintText = kind === 'reasoning' ? firstLine(text) : name
+  const hintText = kind === 'reasoning' ? firstLine(text) : toolHint(text)
   if (hintText) {
     const sep = document.createElement('span')
     sep.className = 'sep'
@@ -4283,10 +4319,11 @@ function menuItemsFor(node) {
       },
     })
   }
-  if (node.kind === 'session') {
+  if (node.kind === 'session' && node.session) {
     /**
      * A session's row offers what DSH's own session menu offers — pin, rename, fork, archive — because that is the
-     * set a person expects from this control. Two are missing on purpose: **delete**, because this store's log is
+     * set a person expects from this control. The `node.session` guard is load-bearing: a `_sessions_` folder written
+     * by hand names no session, and a menu on it would offer four actions that could only fail. Two are missing on purpose: **delete**, because this store's log is
      * append-only and archiving is the reversible act, and **duplicate**, because a session is a record of a run
      * rather than a document.
      *
@@ -4577,6 +4614,8 @@ function nodeRow(node) {
    * the pointer or the keyboard arrives rather than always. The two direct ones are the acts frequent enough to
    * skip the menu — pin and archive — and the `…` holds the rest. A row with nothing to do still draws nothing.
    */
+  const rowTools = document.createElement('span')
+  rowTools.className = 'row-tools'
   if (node.kind === 'session' && node.session) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
@@ -4595,10 +4634,12 @@ function nodeRow(node) {
     }
     quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
-    row.append(quick)
+    rowTools.append(quick)
   }
   const actions = menuItemsFor(node)
-  if (actions.length > 0) row.append(menuButton(node, actions))
+  if (actions.length > 0) rowTools.append(menuButton(node, actions))
+  /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
+  if (rowTools.children.length > 0) row.append(rowTools)
 
   row.onclick = async () => {
     /**
