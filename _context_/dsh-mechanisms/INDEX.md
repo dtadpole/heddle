@@ -36,6 +36,10 @@ the frontmatter every authored artifact carries.
   events of a compaction transaction and the pruner's own surface rewrite beside them, and the
   instruction files. Corrected against DSH 0.2.0-rc.2; what the first version got wrong is listed in
   its own last section.
+- [`dsh-input-area.md`](dsh-input-area.md) — the composer card and its measured geometry (712×98 card,
+  radius 28, #2c2c2e), the editor's 4/8/0/14 inset and 336px cap, the control row's order and sizes, the
+  status pills, and the resizable conversation column the text and the input share; with the values Heddle
+  implements and the ones it deliberately does not.
 - [`dsh-hooks.md`](dsh-hooks.md) — the event points around a model and a tool call, their dispatch
   modes, and the rule that a listener is an effect of the fiber that registered it.
 - [`dsh-webui.md`](dsh-webui.md) — the raw `node:http` server, the default port, the launch token
