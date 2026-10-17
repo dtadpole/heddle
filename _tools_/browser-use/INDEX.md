@@ -49,7 +49,7 @@ repository in [`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/IND
 | [`client.mjs`](client.mjs) | the command side — is a host alive, start one, call a tool, stop it |
 | [`lib.mjs`](lib.mjs) | the library face, including the one-page API the repository's checks use |
 | [`cli.mjs`](cli.mjs) | the command line |
-| [`_tests_/browser-use/`](../../_tests_/browser-use/INDEX.md) | the **component tests** — frame codec, keys, viewport syntax, snapshot text, pagination, the tool table |
+| [`_tests_/component-rules/`](_tests_/component-rules/INDEX.md) | the **component tests** — frame codec, keys, viewport syntax, snapshot text, pagination, the tool table |
 | [`_verifiers_/`](_verifiers_/INDEX.md) | the claims this tool must keep, one folder each, checked against real browsers |
 
 ## Run it
@@ -162,7 +162,7 @@ being true.
 
 The two kinds of check are kept apart, and the split is a rule rather than a filing decision.
 
-- **`_tests_/browser-use/` is the component suite.** It runs with no browser and no session: the frame codec,
+- **`_tests_/component-rules/` is the component suite.** It runs with no browser and no session: the frame codec,
   the key names, the viewport syntax, the snapshot's text form, pagination, and the table of tools. A
   rule that can be stated about one function belongs here, because it is fast, deterministic, and can be
   read next to the function it judges.
@@ -182,7 +182,7 @@ The verifiers live beside the tool, in [`_verifiers_/`](_verifiers_/INDEX.md), b
 tool rather than heddle's ultimate goal:
 
 ```bash
-node --test _tests_/browser-use/unit.test.mjs                                  # no browser
+node --test _tools_/browser-use/_tests_/component-rules/unit.test.mjs          # no browser
 _tools_/browser-use/_verifiers/browser-surface/verify.sh                      # headless
 _tools_/browser-use/_verifiers/browser-session/verify.sh                      # headless
 HEDDLE_BROWSER_HEADED=1 _tools_/browser-use/_verifiers/browser-surface/verify.sh   # watch it

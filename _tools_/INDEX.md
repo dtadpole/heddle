@@ -31,8 +31,8 @@ harness belongs to the harness; the runner that scores it belongs to the project
 
 ## Where the tests live
 
-A tool's component tests live in [`_tests_/<tool>/`](../_tests_/INDEX.md), one suite named for its
-subject, because a test of a tool is itself part of this repository rather than of the package. The
+A tool's component tests live **inside the tool**, in its own `_tests_/<suite>/` folder, one suite named
+for what it judges — next to the code, so a change and its claim are one folder's worth of diff. The
 framework's shipped source has its own suite in [`test/`](../test/INDEX.md), and a delivered capability
 is judged by [`_verifiers_/`](../_verifiers_/INDEX.md) — three homes for three different questions.
 

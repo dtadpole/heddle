@@ -32,7 +32,7 @@ that used a second implementation would be judging the wrong code.
   `session.jsonl` written before it — and `readTranscript` accepts either a directory or a path and
   decodes both. Measured while this changed: fifteen checks named `session.jsonl` directly, and
   every one of them would have been judging a file that no longer exists. These rules are now
-  component-tested in [`_tests_/check-helpers/`](../../_tests_/check-helpers/INDEX.md), because a helper that reads the wrong file
+  component-tested in [`_tests_/helper-rules/`](_tests_/helper-rules/INDEX.md), because a helper that reads the wrong file
   turns a check into a claim about nothing.
 
 ## What belongs in it
