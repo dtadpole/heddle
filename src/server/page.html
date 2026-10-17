@@ -133,22 +133,61 @@
   /** The conversation column, DSH's measured `max-width: 680px`. */
   main { --chat-column: 680px; position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); overflow: hidden; }
   /**
-   * The divider borrows the sidebar's border so the drag target is where the line already is, and widens its
-   * hit area into the content with a transparent border rather than by pushing the layout around.
+   * The divider, in the reference's feel: a **6px hit band** that is invisible until you are near it, then a
+   * 10% vertical band with a 2.5px rounded grip in the border colour at its middle. The grip brightens to
+   * 55% of the text colour on hover, focus-visible and while dragging, and both fade with the same short
+   * transition the rest of the UI uses.
+   *
+   * Measured from the reference's own splitter: a 6px absolutely-positioned hit element with
+   * `cursor: col-resize`; a `::before` band at 10% text opacity and a `::after` grip of
+   * `--panel-resize-grip-width: 2.5px`, both `pointer-events: none`, opacity 0 until hovered.
    */
   #gutter-left {
+    position: relative;
+    z-index: 5;
     flex: none;
-    width: 5px;
+    width: 6px;
     margin-left: -3px;
     cursor: col-resize;
     background: transparent;
     border: none;
     padding: 0;
     touch-action: none;
-  }
-  #gutter-left:hover, #gutter-left:focus-visible, #gutter-left[data-dragging='true'] {
-    background: color-mix(in oklab, currentColor 25%, transparent);
     outline: none;
+  }
+  #gutter-left::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: color-mix(in oklab, currentColor 10%, transparent);
+    opacity: 0;
+    transition: opacity .12s var(--ds-ease-in-out, ease);
+  }
+  #gutter-left::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2.5px;
+    height: 40px;
+    border-radius: 9999px;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    background: var(--border);
+    opacity: 0;
+    transition: opacity .12s var(--ds-ease-in-out, ease), background-color .12s var(--ds-ease-in-out, ease);
+  }
+  #gutter-left:hover::before,
+  #gutter-left:focus-visible::before,
+  #gutter-left[data-dragging='true']::before {
+    opacity: 1;
+  }
+  #gutter-left:hover::after,
+  #gutter-left:focus-visible::after,
+  #gutter-left[data-dragging='true']::after {
+    opacity: 1;
+    background: color-mix(in oklab, var(--text) 55%, transparent);
   }
   h1 { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); margin: .25rem 0 .5rem; }
   ol { list-style: none; margin: 0; padding: 0; }
@@ -764,6 +803,12 @@
    * between "what you read" and "what you type", not to one view's padding.
    */
   #composer { flex: none; padding: 8px 4px .5rem; position: relative; }
+  /**
+   * When a queue is waiting, the composer gives up its top padding: what is waiting is part of the same
+   * stack as the thing it waits for, so the dock's bottom edge meets the card's top edge. Measured after a
+   * later edit added the 8px unconditionally: the dock floated 7px above the card, which the check caught.
+   */
+  main:has(#queue:not([hidden])) #composer { padding-top: 0; }
   form { display: flex; flex-direction: column; gap: .4rem; padding: 0; border-top: none; background: none; }
   #composer-card {
     width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
@@ -1489,10 +1534,21 @@ let followTail = true
 /** How close to the bottom still counts as following. A few pixels, because a scrollbar is not exact. */
 const FOLLOW_SLACK_PX = 24
 
-ledger.addEventListener('scroll', () => {
-  const distance = ledger.scrollHeight - ledger.scrollTop - ledger.clientHeight
-  followTail = distance <= FOLLOW_SLACK_PX
-})
+/**
+ * Captured, not bubbled: the pane that scrolls is `.tr-pane` (the table's own box), and a scroll event
+ * does not bubble — measured, a listener on `#ledger` never fired for a reader scrolling up, so the
+ * view kept pulling itself to the tail while they were reading.
+ */
+ledger.addEventListener(
+  'scroll',
+  (scrollEvent) => {
+    const target = scrollEvent.target
+    const scroller = target instanceof Element && target.classList.contains('tr-pane') ? target : ledger
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+    followTail = distance <= FOLLOW_SLACK_PX
+  },
+  true,
+)
 
 /**
  * Put the newest record in view, when the reader has not scrolled away from it.
@@ -3170,6 +3226,14 @@ gutterLeft.addEventListener('pointerdown', (downEvent) => {
   gutterLeft.addEventListener('pointercancel', stop)
 })
 
+/** The width a double-click returns to: the layout's own default, not whatever was last dragged. */
+const DEFAULT_SIDEBAR_REM = 22
+
+/** A double-click on the divider restores the default width, a conventional escape from a bad drag. */
+gutterLeft.addEventListener('dblclick', () => {
+  setSidebarWidth(DEFAULT_SIDEBAR_REM)
+})
+
 /** Keyboard: a separator with focus is a control, and a control responds to the arrow keys. */
 gutterLeft.addEventListener('keydown', (keyEvent) => {
   const step = keyEvent.shiftKey ? 4 : 1
@@ -4227,6 +4291,8 @@ async function loadStatus() {
     if (typeof mode !== 'string') return
     accessButton.textContent = accessTitle(mode)
     accessButton.title = `the sandbox mode this server runs under: ${mode}`
+    /** DSH names this control `Access mode, current <value>`; a name of only "Access mode" hides the value it shows. */
+    accessButton.setAttribute('aria-label', `Access mode, current: ${accessTitle(mode)}`)
   } catch {
     // A status the page cannot read must not stop the composer from being one.
   }
@@ -4300,8 +4366,14 @@ function renderModelSeat() {
   const names = endpointOptions.map((option) => option.name)
   const wanted = chosenEndpoint ?? endpointDefault ?? names[0] ?? null
   chosenEndpoint = wanted
-  modelLabel.textContent =
-    wanted === null ? 'no model' : chosenModel !== null ? `${wanted} · ${chosenModel}` : endpointTitle(wanted)
+  const modelName = wanted === null ? 'no model' : chosenModel !== null ? `${wanted} · ${chosenModel}` : endpointTitle(wanted)
+  modelLabel.textContent = modelName
+  /**
+   * DSH's seat is named `Select model, current <model>` — the control's kind **and** its value, because a name that is
+   * only the value does not say it is a control, and a name that is only the kind does not say what is chosen. Measured
+   * from its own button on 2026-10-17.
+   */
+  modelTrigger.setAttribute('aria-label', `Select model, current ${modelName}`)
   modelTrigger.disabled = names.length === 0
   const offered = wanted !== null && !names.includes(wanted) ? [wanted, ...names] : names
   modelMenu.replaceChildren()
