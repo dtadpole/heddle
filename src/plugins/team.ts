@@ -88,6 +88,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ensurePolicy(ctx, [lead])
       ctx.emit('team/changed', lead)
     },
+    warn: (message) => ctx.logger.warn('team: %s', message),
     run: async (child, prompt, source, signal) => {
       const meta = store.list().find((one) => one.id === child.id)
       const endpoint = meta?.endpoint ?? ctx.model.defaultEndpoint()
