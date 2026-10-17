@@ -49,7 +49,7 @@
     --shadow-menu: 0 2px 8px -2px #0003;
     /** DSH's own stack (`-apple-system` first, with PingFang SC for Chinese), read from its body. */
     --font: -apple-system, system-ui, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
-    --mono: "Optimistic Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --mono: "SF Mono", "Optimistic Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --code-bg: #232127;
     --line: var(--border);
   }
@@ -1498,11 +1498,12 @@
   .tr-d-section { margin: 12px 0 4px; color: var(--text-2); font-size: 13px; font-weight: 600; }
   .tr-d-body pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 4px; background: var(--code-bg); color: var(--text); font: 12px/19px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
   .tr-d-acc { margin: 0 0 6px; }
-  .tr-d-acc > summary { cursor: pointer; padding: 2px 0; color: var(--text-2); font-size: 13px; font-weight: 600; list-style: none; }
+  .tr-d-acc > summary { cursor: pointer; padding: 2px 0; color: var(--text-2); font: 500 13px/20px var(--font); list-style: none; }
   .tr-d-acc > summary::-webkit-details-marker { display: none; }
   .tr-d-acc > summary::before { content: '▸'; display: inline-block; width: 12px; color: var(--text-3); }
   .tr-d-acc[open] > summary::before { content: '▾'; }
-  .tr-html pre { margin: 6px 0 0; }
+  .tr-html pre { margin: 6px 0 0; font: 12px/19px var(--mono); }
+  .tr-html code { font: inherit; }
   .tr-error-text { color: #d14343; }
   .tr-d-body details { margin: 2px 0; }
   .tr-d-body details > summary { color: var(--text-2); cursor: pointer; font-size: 13px; }
