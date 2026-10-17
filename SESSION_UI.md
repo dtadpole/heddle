@@ -104,11 +104,11 @@ Two rules follow from it, and both are now structural rather than incidental:
 
 | Thing | DSH | Heddle before | Heddle now |
 |---|---|---|---|
-| Page surface | one dark ground `#151517`, both columns are **inset 12px and rounded 28px** | flat columns, flush edges | inset 12px, both panels `border-radius: 28px` |
+| Page surface | one dark ground `#151517`; the panes themselves measure **`border-radius: 0`** — only the composer card is rounded (28px) | flat columns, flush edges | inset 12px, **square panes**, the composer card alone at 28px (corrected in `18ec0e2`) |
 | List row | **34px** tall, `border-radius: 12px`, `padding: 0 8px`, `gap: 6px`, 14px text | 26px tall, radius 4.8px, padding 2.6/4.8 | 34px, radius 12px, `0 8px`, gap 6px |
 | Row age | 11px, muted `#adb2b8`, right-aligned | 11-12px mixed | 11px `--text-3` |
 | Row controls | nothing until hover; then `…`, archive, pin | `…` always visible | all three hidden until hover **or keyboard focus** (`:focus-within`), always shown where hover is impossible |
-| Reading text | **13px on 20px**, secondary `#cfd3d6` | 15px on 24px | 13px on 20px, gap 8px |
+| Reading text (the message body) | **14px on 24px**, `#f9fafb`, with `--dsh-content-font-size: 14px` on the paragraph itself | 15px on 24px | **14px on 24px** (corrected in `18ec0e2`; my earlier 13/20 reading came from a tool-description block in the inspector, not from the reading column) |
 | Code | 12px on 19px, mono stack starting `SF Mono` | 13.2px | 12px family token, 19px leading |
 | User turn | **full width, left-aligned**, quiet surface, radius 12px | right-aligned bubble, radius 20px | stretched, left-aligned, radius 12px, surface `#2c2c2e` |
 | Panel header | session name + chips above the tabs | *absent* — the name was only in the sidebar | `#session-head` with the name (15px/600) and its folder in muted 11px |
@@ -173,6 +173,41 @@ Ordered so that each phase is useful alone and testable alone. Every phase ends 
    says so instead of doing nothing silently. Verified by dispatching the four events in a browser and reading the
    effects: the search chord focuses the field, the rename chord renames the row, the fork chord adds `<name> (1)`,
    and the archive chord puts the selected row away with the same flag the menu writes.
+
+### The step rows
+
+Measured on 2026-10-17, DSH's per-step summary row and Heddle's `details.turn > summary`:
+
+| Thing | DSH | Heddle |
+|---|---|---|
+| size | 14px | 14px for a tool row, 13px for reasoning |
+| colour | muted `rgb(173,178,184)` = `#adb2b8` | `var(--chat-muted)` = `#adb2b8` — the same value |
+| weight | 400 | 400 |
+| row height | 33px with `padding: 0 0 8px` (25px of content) | `min-height: 24px` |
+| hover | the icon swaps to a chevron | the icon swaps to a chevron (same idea) |
+
+So the **styling** already matches, and nothing was changed for it. What differs is the **structure**: DSH groups
+the steps of one turn under a collapsible header that reads `Completed in 6m 17s` and summarises the turn
+(`Ran commands and updated the plan`); Heddle lists every step flat in Chat and gives the per-step projection to its
+**Trajectory** view instead. Grouping the chat by turn is a second way to read one log, and this UI already has that
+reading in a place built for it — so it is recorded as a deliberate difference rather than half-built, and the
+suggestion to revisit it belongs with whoever asks for a per-turn chat, not with a styling pass.
+
+### Two corrections this comparison needed
+
+Both were mine, and both were found by measuring again rather than by arguing:
+
+- **The panes are square.** DSH's `--dsw-radius-panel: 28px` token exists, and I applied it as a default — but DSH's
+  panes themselves measure `border-radius: 0`, and only the composer card is rounded. The other session working in
+  this checkout had already corrected that (`18ec0e2`), and the document now states the measured fact instead of the
+  token.
+- **The message body is 14/24, not 13/20.** My 13/20 reading came from a paragraph in DSH's **tool inspector**, which
+  is a different surface with its own smaller type; the reading column's own paragraphs measure 14px on 24px with
+  `--dsh-content-font-size: 14px` on the element. So the 14/24 that was in this UI all along was right, and my
+  "correction" to it was measuring the wrong thing.
+
+The lesson is the one this document is built on: a computed style belongs to the element it was read from, and a
+number without its element is a rumour.
 
 ## Deliberate differences, kept
 
