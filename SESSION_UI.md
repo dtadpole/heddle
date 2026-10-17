@@ -103,7 +103,7 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Header's actions menu | `More actions` holding `Download session log` and `Feedback` | **added this round**: `More actions` holding `Download session log`; `Feedback` is DSH's product feedback, not a mechanism this repository has | **fixed** for the one item that is a session action; the route serves the log **decoded** as newline-delimited JSON — the disk's zstd frames would be a file nobody can open |
 | Header's hierarchy nav | `role="navigation"` named "Session hierarchy", holding the tagged session name | the header's `<h2>` with the name and its folder | match in content; the nav element is DSH's own structure and this header is not a nav |
 | Composer's controls | in one row: `+` / `Access mode, current: Full access` / `Select model, current <model>, reasoning effort High` / voice input / `Send message` | `+` / `Access mode, current: Workspace write` / `Select model, current <model>` / `Send message` | **fixed this round** for the two names (they now carry their value, as DSH's do); voice input has no mechanism here and is recorded as not built |
-| View tabs | `role=tablist` with `role=tab` buttons, `aria-selected`, roving tabindex, arrow keys; **plain text** tabs — no background, border or radius, 13px/500, and the selected one told apart by colour alone (`rgb(122,170,255)` vs `rgb(173,178,184)`) | the pattern, but drawn as a bordered, tinted, rounded box | **fixed 2026-10-17**: transparent, no border, no radius, 13px/500, selected `rgb(122,170,255)`; measured after: 29px and 63px wide — the same two widths as DSH's, and the same colours |
+| View tabs | `role=tablist` with `role=tab` buttons, `aria-selected`, roving tabindex, arrow keys; **plain text** tabs — no background, border or radius, 13px/500, a **36px** gap between them, the selected one coloured `rgb(122,170,255)` with a **2px `::after` underline** in that colour, hover turning the label white | the pattern, but drawn as a bordered, tinted, rounded box | **fixed over cycles 1–2**: plain tabs, 13px/500, 36px gap, colour-only selection plus the 2px underline; measured after: widths 29px and 63px, the same as DSH's, underline 2px `rgb(122,170,255)` at `bottom: -1px`, hover `rgb(249,250,251)` |
 | Status line | three **buttons** (`aria-haspopup="dialog"`) that open breakdowns: `N turns M steps · K tok/s`, `T tok · Cache hit X%`, `P% of context used` | the same facts as static text in `#composer-status` | **difference kept**: the numbers are the same; the dialog behind each is DSH's own detail view and would be a feature to build rather than a name to fix |
 | Chat's turn strip | a `Turn navigation` nav of `Load and jump to turn N` buttons along the chat's right edge | none in Chat; the Trajectory view is where heddle reads a session step by step | **difference kept** |
 | Row's leading content | `Running` / `Completed` in the muted body type, then the tagged name | an icon, and now **`Running`** for a session a turn is streaming into (from the same `model/request` / `turn/completed` pair the composer uses), then the name | **fixed for the live half**: `Running` is painted and removed as the stream says so; `Completed` is DSH's stored status, and a session's finished state is its `turns` count here rather than a word |
@@ -129,15 +129,17 @@ the same way: a 7% tinted box with a 5.6px top radius, a 1px border, 13.12px at 
 roving tabindex and the same keys.
 
 **Plan.** Re-draw the ring as DSH's plain tabs (rejected: keeping the tinted box — a segmented control is a different
-control, and the tint plus border plus radius was three signals where DSH uses one). While checking the screenshot that
-verified the ring, a **second** real difference surfaced: the user turn had gone back to a right-hand bubble, because a
-later whole-file pass replaced the rule that had aligned it to DSH's full-width left-aligned block. Re-applied it and
-pinned it.
+control, and the tint plus border plus radius was three signals where DSH uses one). The screenshot that verified the ring
+also seemed to show the user turn back in a right-hand bubble, which this record first called a second difference and a
+reverted alignment. **That was wrong, and cycle 2 corrected it**: DSH's user message *is* a right-aligned bubble, and the
+box measurement below settled it.
 
 **Verify.** After the change, measured in the running UI: tabs transparent, `border-radius: 0`, `13px`, weight `500`,
 padding `0 0 9px`, selected `rgb(122,170,255)` and unselected `rgb(173,178,184)`, widths 29px and 63px — DSH's own
-widths. User turn: `align-self: stretch`, radius 12px. Both pinned by assertions in part 7 (the ring's five properties
-per tab, and the user turn's alignment and radius), and a screenshot records the ring.
+widths. The user turn was pinned as `align-self: stretch` with a 12px radius on that wrong reading; cycle 2 replaced
+the assertion with the measured bubble (`flex-end`, radius 20px, `rgb(44,44,46)`, width below the column's, flush with
+its content edge). The ring's five properties per tab and the user turn's shape are asserted in part 7, and a screenshot
+records the ring.
 
 **Fix.** The first run of the new assertion failed because the two probes had been written inside the `cursors` object
 instead of beside it — that was the check's shape, not the UI's, and it was corrected before the round closed.
@@ -145,6 +147,32 @@ instead of beside it — that was the check's shape, not the UI's, and it was co
 **Not measured this cycle** (an explicit unknown list, per the comparison procedure): DSH's tablist `gap` between tabs
 (the two tabs sit 36px apart at their measured positions, but the gap property itself was not read), the tab's line
 height, and the hover colour of a tab. None of them is claimed.
+
+### Cycle 2 — the ring's underline, the gap, and the two row heights (2026-10-17)
+
+**Research.** Read DSH's **own stylesheet rules** (`cssRules`) instead of only its computed element values, and this
+resolved the three unknowns cycle 1 had left: `.tab:hover, .tab[data-active=true] { color: label-primary }`, the
+tablist's `gap: 36px`, tabs at 13px/500 on a 16px line, and — the part a computed-style pass on the element itself
+cannot see — `.tab[data-active=true]::after` draws a **2px underline** in the accent colour, `bottom: -1px`, radius
+`2px 2px 0 0`. A second rule pair gave two row heights: `.projectRow { height: 34px }` and `.sessionRow { height: 32px }`,
+with `user-select: none` on both.
+
+**Understand.** Values and arrangement, not a missing mechanism: this UI has the same tablist and the same rows.
+
+**Plan.** Three measured values, one commit: the selected tab's 2px underline, the 36px gap, and 32px session rows (34px
+workspace rows kept). Rejected: adding an underline only to the tablist's bottom border, which is a different element and
+would run the full width rather than under the selected tab.
+
+**Verify.** After the change, measured in the running UI: `#views` gap `36px`; the selected tab's `::after` `content: ""`,
+`height: 2px`, `background: rgb(122,170,255)`, `bottom: -1px`, radius `2px 2px 0 0`; a session row 32px and a workspace
+row 34px; tab widths 29px and 63px; and, with a **trusted pointer** on the unselected tab, its colour turned
+`rgb(249,250,251)` — DSH's `label-primary` hover. All asserted in part 7; a screenshot records the underline.
+
+**Fix.** Nothing failed after the change; the first assertion run was the check catching its own probe shape in cycle 1,
+and that is why the lesson went into the skill: a probe is code and can be wrong about where it puts a value.
+
+**Not measured this cycle:** the twin on the sidebar's scroller and DSH's own session row's inner `gap: 0` arrangement
+(its children carry the spacing instead) — neither is claimed.
 
 ## Presentation, measured
 
@@ -175,12 +203,12 @@ Two rules follow from it, and both are now structural rather than incidental:
 | Thing | DSH | Heddle before | Heddle now |
 |---|---|---|---|
 | Page surface | one dark ground `#151517`; the panes themselves measure **`border-radius: 0`** — only the composer card is rounded (28px) | flat columns, flush edges | inset 12px, **square panes**, the composer card alone at 28px (corrected in `18ec0e2`) |
-| List row | **34px** tall, `border-radius: 12px`, `padding: 0 8px`, `gap: 6px`, 14px text | 26px tall, radius 4.8px, padding 2.6/4.8 | 34px, radius 12px, `0 8px`, gap 6px |
+| List row | **a workspace row 34px, a session row 32px** (two rules in DSH's own sheet), `border-radius: 12px`, `padding: 0 8px`, `gap: 6px`, 14px text | 26px tall, radius 4.8px, padding 2.6/4.8 | the two heights, measured: **34px for a workspace row, 32px for a session row** (fixed 2026-10-17, cycle 2) |
 | Row age | 11px, muted `#adb2b8`, right-aligned | 11-12px mixed | 11px `--text-3` |
 | Row controls | nothing until hover; then `…`, archive, pin | `…` always visible | all three hidden until hover **or keyboard focus** (`:focus-within`), always shown where hover is impossible |
 | Reading text (the message body) | **14px on 24px**, `#f9fafb`, with `--dsh-content-font-size: 14px` on the paragraph itself | 15px on 24px | **14px on 22.75px** — the size matches; the leading is this checkout's 1.625 rhythm, 5% tighter than DSH's, and it belongs to the concurrent typography pass, so the audit records it rather than overruling it |
 | Code | 12px on 19px, mono stack starting `SF Mono` | 13.2px | 12px family token, 19px leading |
-| User turn | **full width, left-aligned**, quiet surface, radius 12px | right-aligned bubble, radius 20px | stretched, left-aligned, radius 12px — and **pinned by a check**, because a later whole-file pass had silently put the bubble back |
+| User turn | a **right-aligned bubble that hugs its text**: measured box 484px inside a 689px column, flush with the column's content edge, radius **20px**, surface `rgb(44,44,46)` | right-aligned bubble, radius 20px, `--chat-bubble` | **match** — an earlier row here said the opposite ("full width, left-aligned, 12px"), which was my error: I had read a screenshot instead of the element's box. The check now pins the measured bubble |
 | Panel header | session name + chips above the tabs | *absent* — the name was only in the sidebar | `#session-head` with the name (15px/600) and its folder in muted 11px |
 | Composer card | 28px radius, `#2c2c2e` | already matched | unchanged |
 | Status line | 11-12px muted: turns, steps, tok/s, cache, context % | turns/steps/tok-s/context, 12px | unchanged (the features were already there) |
