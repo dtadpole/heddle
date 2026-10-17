@@ -65,6 +65,9 @@ and these are the articles that bind here.
   — one fact in one place, and a document found wrong is fixed on the spot.
 - **[Durable work](../reflection/shared/_conventions_/core-conventions/durable-work.md)**
   — anything worth citing goes in the instance it belongs to, never in `/tmp`.
+- **[Browser modes](../reflection/shared/_conventions_/core-conventions/browser-modes.md)**
+  — headed is for exploration and human-assisted debugging, headless for automation, and every artifact
+  that needs a browser states in its `INDEX.md` whether it runs headless, headed or needs none.
 
 ## The rules that are local to this repository
 

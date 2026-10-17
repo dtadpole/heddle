@@ -126,7 +126,8 @@ whether it runs headless or headed.
 
 ## Read next
 
-[`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/INDEX.md) for the reading of the surface
+[Browser modes](../../../reflection/shared/_conventions_/core-conventions/browser-modes.md) for when this
+tool runs headed and when headless, [`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/INDEX.md) for the reading of the surface
 this mirrors, [`_verifiers_/INDEX.md`](_verifiers_/INDEX.md) for the claims it must keep,
 [`../check-helpers/INDEX.md`](../check-helpers/INDEX.md) for the one-page wrapper the heddle verifiers
 import, and [`../../_verifiers_/INDEX.md`](../../_verifiers_/INDEX.md) for those heddle claims.
