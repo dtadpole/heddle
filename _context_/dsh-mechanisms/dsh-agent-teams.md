@@ -1,7 +1,7 @@
 ---
 title: DSH agents, subagents and agent teams
-version: 1.0.0
-description: How DSH models an agent, how a parent delegates to a child subagent, and what its experimental agent team adds, verified against the installed build.
+version: 2.0.0
+description: How DSH models an agent, how a parent delegates to a child subagent, and how the experimental Agent Teams layer coordinates several durable teammates through a journal, a mailbox and a shared task board, read against the installed 0.2.0-rc.2 build.
 grounded_in:
   - source: human-authored
   - source: dsh-0.2.0-rc.2
@@ -9,14 +9,14 @@ grounded_in:
 
 # DSH agents, subagents and agent teams
 
-Read against the installed DSH 0.2.0-rc.2 (`~/.volta/.../@deepseek-ai/dsh/node_modules/@deepseek-ai/`).
-Three layers, increasingly ambitious:
+Read against the installed build: `~/.volta/tools/image/packages/@deepseek-ai/dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`,
+all packages at `0.2.0-rc.2`. Three layers, each built on the one above:
 
 | Layer | Packages | What it is |
 |---|---|---|
-| **agent** | `dsh-agent` | one agent owns one session and drives it; `ctx.agents` is the registry |
-| **subagent** | `dsh-subagent`, `-in-process-driver`, `-spawn-in-process`, `-fork-in-process`, `dsh-tool-subagent` | a parent agent spawns a **child run** and receives its result |
-| **agent team** | `dsh-experimental-agent-team`, `-profile`, `-tool-agent-team`, `-client-ui-agent-team` | several agents in one session with a roster, a mailbox, a shared task board and a journal |
+| **agent** | `dsh-agent` | one agent drives one session; `ctx.agents` is the registry, `agent.status` is the live availability |
+| **subagent** | `dsh-subagent`, `-in-process-driver`, `-spawn-in-process`, `-fork-in-process`, `dsh-tool-subagent` | a parent delegates to a child **run** in its own session; one-shot or **continuable** |
+| **agent team** | `dsh-experimental-agent-team`, `-tool-agent-team`, `-agent-team-profile`, `-client-ui-agent-team` | a Lead and named durable **teammates** coordinate through a journal, a mailbox and a shared task board |
 
 ## 1. An agent is a session's driver
 
@@ -29,114 +29,198 @@ CreateAgentOptions {
   inheritedEventCount?; seed?: readonly SessionEvent[];
   agentOptions?; signal?; setup?;
 }
-AgentFactory { createAgent(ownerCtx, options): Promise<AgentHandle>; resume(ownerCtx, options): Promise<AgentHandle> }
+AgentFactory { createAgent(ownerCtx, options); resume(ownerCtx, options) }
 AgentHandle { agent; dispose(): Promise<void> }
 ```
 
-Two facts matter for the delegation model. An agent is **created for a session** (or resumed for one), and a
-child may be created with a **parentAgent**, `origin:'subagent'`, a `parentSession`, a `delegationDepth`, and
-optionally `seed` + `inheritedEventCount` — i.e. a child can run in the **same session with inherited history**,
-or in a session of its own. The registry (`ctx.agents`) owns dispatch and the initiator/queue machinery.
+An agent is created **for a session** (or resumed for one). A child may be created with a `parentAgent`, a
+`parentSession`, `origin:'subagent'`, a `delegationDepth`, and optionally `seed` + `inheritedEventCount` — so a
+child can run in the parent's session **with inherited history**, or in a session of its own. Availability is
+live, not durable: `availability(agent) = agent.status === 'running' ? 'running' : 'inactive'`
+(`dsh-experimental-agent-team/lib/index.js:728`).
 
-## 2. A subagent is a child run, not a second name for an agent
+## 2. Subagents: child runs, one-shot or continuable
 
-`dsh-subagent/lib/types/index.d.ts` exports the run vocabulary (`SubagentRun`, `SubagentRunId`,
-`SubagentResult`, `SubagentStopReason`, `SubagentStartRequest`, continuable starts) and a runtime
-`ctx.subagents: SubagentRuntime` with **providers** registered by packages:
-
-- `dsh-subagent-in-process-driver` — `startInProcessRun(request, {seed?})`: runs the child **in this process**;
-- `dsh-subagent-spawn-in-process` / `dsh-subagent-fork-in-process` — two providers (spawn a fresh child,
-  or fork one seeded from the parent's history);
-- `dsh-tool-subagent` — the **model-facing tool**; its config chooses the `provider`, an optional `toolName`,
-  `enableRunInBackground` with `backgroundMode: 'one-shot' | 'continuable'`, `agentOptions`, `persona`, a
-  `toolFilter {allow, deny}`, and `maxDepth`.
-
-Limits are part of the runtime, not the tool: `Config {maxActiveSubagents, maxDepth}`, and
-`assertSubagentMaxDepth` throws `SubagentDepthError("subagent depth N exceeds maxDepth M")`
-(`lib/index.js:382-384`). The child's session metadata is built by `childSessionMeta(parent, childDepth,
-isSeeded)` (`lib/index.js:470-481`):
-
-```js
-{ cwd, agentPreset, parentSession: parent.session.header.id, isSeeded, origin: 'subagent', delegationDepth }
-```
-
-The result is **not** a shared conversation: the child's own events are folded with `finalAssistantOutput(events)`
-(`lib/index.js:184`), and `settleRun`/`settleRunResult` publish the settled run with its stop reason. A run can
-be cancelled (`SubagentInterruptAuthority`, `interrupt`), and policy/composition overrides are delegated to the
-child explicitly (`appendDelegatedPolicyOverrides`, `applyChildComposition`). Descriptors are **versioned**
-(`SUBAGENT_DESCRIPTOR_VERSION`), so a changed shape fails loudly rather than being guessed.
-
-## 3. The team layer: several agents in one session
-
-`dsh-experimental-agent-team/lib/types/index.d.ts` — `ctx.agentTeams: TeamService`:
+`dsh-subagent` vocabulary (`lib/types/types.d.ts`):
 
 ```ts
-membership(agent); listMembers(agent);
-spawnTeammate(caller, request); sendMessage(caller, request);
-createTask(caller, request); getTask(caller, id); listTasks(caller);
-updateTask(caller, request);
-waitForChange(caller, timeoutMs, signal);
-interrupt(caller, targetName);
+ContinuableStartSpec { provider; label; childId?; request; signal }
+ContinuableStart     { childId; messageId; kind: 'user' }
+SubagentStartRequest { label?; prompt; parent; signal; agentOptions?; outputSchema?; ... }
+SubagentRunInfo      { runId; provider; id; local }
+SubagentRunEndInfo   { ...; stopReason; lastAssistantMessage? }
+SubagentCapabilities { agentOptions; outputSchema; depthLimit; toolFilter; persona }
 ```
 
-Backed by files of its own: `roster` (who is on the team), `mailbox` (messages between agents, steered at step
-boundaries), `task-board` + `task-graph` (shared tasks with ids and revisions), `journal` + `persisted` (durable
-team state), `projection`/`activity`/`lifecycle`, `validation` and `TeamError`. The model-facing tool
-(`dsh-experimental-tool-agent-team/lib/index.js`) exposes `spawn_teammate` (`:243`) and `send_message` (`:296`)
-alongside the list/wait/interrupt/task tools. Its descriptions carry the semantics: a delivered message is
-durable even when reported queued; `wait` only observes changes after the call starts and never wakes a member;
-tasks are claimed with the current revision and completed, never "made ready"; a Lead must wait for required
-teammates before answering.
+Runtime surface (`dsh-subagent/lib/index.js`): `startContinuable(spec):1671`, `sendMessage(sender, targetId,
+content, options):1762`, `interrupt(targetSessionId, authority):1853`, `drainContinuableChildren(parent,
+childIds):2957`, `prompt(request, signal):3010`. Providers are pluggable: `dsh-subagent-in-process-driver`
+(`startInProcessRun(request, {seed?})`), `-spawn-in-process` (a fresh child) and `-fork-in-process` (a child
+forked from the parent's history). `dsh-tool-subagent` is the model-facing tool; its config chooses the
+provider, an optional name, `enableRunInBackground` with `backgroundMode: 'one-shot' | 'continuable'`,
+`agentOptions`, `persona`, a `toolFilter {allow, deny}` and `maxDepth`.
 
-So "agent team" = **one session, several long-lived agents, a roster, a mailbox, and a shared task board,
-persisted so the team survives a restart**. It is explicitly experimental; the subagent layer is the stable
-primitives beneath it.
+Limits and attribution: `Config {maxActiveSubagents, maxDepth}`, `assertSubagentMaxDepth` →
+`SubagentDepthError("subagent depth N exceeds maxDepth M")` (`lib/index.js:382-384`), and the child's metadata
+`childSessionMeta(parent, depth, isSeeded)` (`:470-481`) is `{cwd, agentPreset, parentSession, isSeeded,
+origin:'subagent', delegationDepth}`. The answer is folded from the **child's own events** by
+`finalAssistantOutput(events)` (`:184`) and published by `settleRun`/`settleRunResult` with a stop reason.
+Descriptors are versioned, policy/composition overrides are delegated explicitly, and cancellation flows through
+abort signals and `SubagentInterruptAuthority`.
 
-## 4. What heddle had, and what this reading produced
+**Continuable is the bridge to teams**: a run that stays addressable can receive more prompts
+(`sendMessage`), be interrupted, and be drained at shutdown — which is exactly what a durable teammate needs.
 
-Heddle before this reading: **no agent abstraction at all** — `src/agent/loop.ts` is a function `runTurn`,
-a session is one append-only log, and context/goals/tools are keyed by the session. So the first honest slice
-is the **subagent layer**, not the team layer:
+## 3. Agent Teams: the Lead, durable teammates, and three shared domains
 
-- an **agent identity in the log's metadata**: a child session records `parentSession`, `origin:'subagent'` and
-  `delegationDepth`, exactly the fields `childSessionMeta` writes;
-- a **delegation tool** the parent's model calls, which creates a child session, runs one bounded child turn
-  (its own context, its own tool scope, its own model/endpoint), and returns the child's **final assistant
-  text** into the parent's turn — the shape `finalAssistantOutput` + `settleRun` implement;
-- **depth and active limits** enforced by the runtime, refusing beyond them with a stable code;
-- **cancellation** through the parent's abort signal, so a stopped parent does not leave a child running.
+### 3.1 Identity and membership
 
-The team layer is recorded as the next slice and is **not** claimed by this reading: heddle has no roster,
-mailbox or task board, and a same-session child (the `seed`/`inheritedEventCount` path) is not implemented.
-The comparison at the end of the implementation says what remains and why.
+- `TeamId` is a **SessionId** (`TeamId(id: SessionId | string)`) — the team belongs to the Lead's session.
+- `TeamMembership { root: Agent; id: TeamId; role: 'lead' | 'teammate'; name }`; `TeamRoster.membership(agent)`
+  answers the Lead for the root agent and a teammate for a member's own session.
+- A member **is a session of its own**: `TeamMemberSnapshot { id: SessionId; name; description; provider;
+  context: 'fresh' | 'fork'; phase: 'provisioning' | 'active' | 'failed'; error? }`. Teammates are therefore
+  continuable subagent children — each with its own log — coordinated by the Lead's session journal.
+- `TeamMemberView` adds live state: `status: 'running' | 'inactive' | 'provisioning' | 'failed'`, `model`, and
+  `diagnostics`.
 
-## 5. After implementation: the comparison
+### 3.2 The journal: team state is a projection of the Lead's session log
 
-Heddle now has the **subagent layer**, not the team layer. Mapped against the reading:
+`dsh-experimental-agent-team/lib/types/journal.d.ts` + `projection.d.ts`:
 
-| DSH | Heddle | Verdict |
-|---|---|---|
-| `childSessionMeta`: `parentSession`, `origin:'subagent'`, `delegationDepth`, inherited cwd | the same four fields in `SessionMeta`, written when the delegate creates the child | matched |
-| `dsh-tool-subagent`: a model-facing tool whose config chooses provider, tool filter, persona, background mode | `delegate{prompt}` with no configuration beyond the limits | **narrower** — no provider choice, tool filter, persona or background runs |
-| `finalAssistantOutput` + `settleRun`: the child's own events folded to an answer, published with a stop reason | `finalAssistantText`: the last round's assistant output in the child's log; the tool result carries the session id and depth | matched in shape; heddle has no continuable run and no structured result |
-| `maxDepth` + `assertSubagentMaxDepth` / `SubagentDepthError` | `maxDepth` limit in `delegateSubagent`, `SUBAGENT_DEPTH_EXCEEDED` | matched |
-| `maxActiveSubagents` | `maxActive` in-flight cap, `SUBAGENT_BUSY` | matched, though per process rather than per parent |
-| child interruption and parent abort | the parent's abort signal is passed to the child's `runTurn` | matched in the simple case |
-| same-session child (`seed`, `inheritedEventCount`) | not implemented: every child gets a session of its own | **divergence** — attribution is by session, so a shared session would need event-level agent identity first |
-| out-of-process driver, continuable runs, descriptors/versioning | not implemented | divergence, deliberately deferred |
-| team layer: roster, mailbox, task board, journal, `spawn_teammate`/`send_message`/`waitForChange`/`interrupt` | not implemented | **the next slice** |
+- mutating event types: **`team/member`**, **`team/task`**, **`team/message/queued`**,
+  **`team/message/delivered`**;
+- `TeamJournal.transact(rootId, operation)` serializes per Lead session (`:140-147`, tails), with
+  `appendAndFlush` and an `onCommit` notification; every write is flushed before the operation is acknowledged;
+- `TeamState { id; members; tasks; messages; delivered; nextTaskNumber }` is folded from those events
+  (`emptyTeamState(rootId)`), and the whole state is exposed through the session projection mechanism as
+  `agentTeam: TeamProjection { members; tasks; failure? }` — so the UI and tools read one derived truth;
+- a projection `failure` records containment: a broken member/team is visible as state, not as a crash.
 
-The team layer is a next slice rather than an omission because it needs the subagent layer's primitives first:
-an agent identity (this change), a way to message a running agent (heddle has mid-turn steering but no agent
-addressing), a durable task board with revisions (the goal model is the nearest thing), and a journal so the
-team survives a restart. The subagent boundary — a child is a session, the parent sees a tool result — is the
-line that makes each of those implementable without a second log format.
+### 3.3 Roster: spawning a teammate
 
-A measured defect this slice found in heddle's own boot is recorded where it belongs: `settle` did not wait for
-a row in `loading`, which is judged by `test/boot.test.ts`. The delegation itself is judged by
-`test/subagent.test.ts` and `_verifiers_/50-agentic-loop/check-subagents.mjs`.
+`TeamRoster` (`lib/index.js:341-700`): `spawn(caller, request)` is **Lead-only** (`TEAM_LEAD_REQUIRED`), guarded
+by `maxMembers`, and:
 
-## Read next
+1. journals `team/member` with `phase: 'provisioning'` before the child exists;
+2. starts a **continuable** child through the configured provider (`fresh` → `spawn`, `fork` → `fork`), with the
+   prompt as its first user message, and the member's session id recorded;
+3. settles to `phase: 'active'` (or `failed` with `error`) once the child session is durable;
+4. on startup, `recoverFor(agent, signal)` reconciles provisioning when a member session starts
+   (`:488-500`), and `settleProvisioning` resolves provisioning-only members from their **durable child
+   sessions** (`:651-660`) — the failure path says it plainly: "provisioning did not leave a resumable child
+   Session". A provisioning conflict is cleaned up with an `AggregateError`.
 
-[`dsh-context.md`](dsh-context.md) for how the request is composed from a session, and
-[`dsh-goal.md`](dsh-goal.md) for the round driver that keeps a goal running.
+The Lead may `interrupt(caller, targetName)` one teammate (`TEAM_LEAD_REQUIRED`, `TEAM_INVALID_TARGET` for
+itself) through `ctx.subagents.interrupt` (`:505-515`), and disposal drains continuable children with
+`disposalTimeoutMs`.
+
+### 3.4 Mailbox: durable messages, delivered at the target and confirmed there
+
+`TeamMailbox` (`lib/index.js:732-1100`):
+
+- `send` transacts on the Lead session: resolve the target by name (`resolveActiveMember`), refuse self-messages
+  (`TEAM_SELF_MESSAGE`), enforce `maxPendingMessagesPerMember` (`TEAM_MAILBOX_FULL`) and `maxMessageBytes`
+  (`TEAM_MESSAGE_TOO_LARGE`), then append **`team/message/queued`** and *then* attempt dispatch
+  (`sendAdmitted:815-849`); the result is `{messageId, status: 'accepted' | 'queued'}` — queued is durable
+  already, and the tool says so ("a successful send is already durable even when its result says queued").
+- dispatch is **serialized per target** (`dispatchTails:877-890`, `inFlightMessages` dedupe) and delivers the
+  pending messages in queue order (`dispatchThrough:892`, `dispatchOnce:915`);
+- delivery to a teammate is a **steer prompt through the continuable child** with source
+  `{kind:'team-message', teamId, messageId, senderId, senderName}` (`:938-946`); delivery to the Lead is
+  `root.steer(input)` with the same source;
+- **acceptance is confirmed at the target**, not by transport: `targetRecorded(target.session, messageId)` reads
+  the target's own log (`messageAccepted:282`), `ctx.sessions.flush(target)` makes it durable, and only then is
+  `team/message/delivered` journaled (`checkpointDelivered`/`markDelivered:955-970`);
+- recovery when the target has no live agent: `readPersistedSession(persistence, id, signal)` (see
+  `persisted.d.ts`) reads the child's durable session and marks the message delivered if it was already
+  accepted, or leaves it queued;
+- `messageAccepted` is also used for the initial teammate prompt (`:663`), so "the teammate started" is a fact
+  read from the child's log.
+
+### 3.5 Task board: shared work with compare-and-set
+
+`TeamTaskBoard` (`task-board.d.ts`) over the same journal: tasks have `id`, `revision`, `subject`,
+`description`, `status: 'pending' | 'in_progress' | 'completed' | 'deleted'`, `ownerId?`, `blockedBy[]`,
+`writeScopes[]`. `TeamTaskView` adds `ownerName?`, `ready` and `writeScopeWarnings`. Actions are exactly the
+tool's transitions: **claim, release, edit, set_dependencies, complete, reopen, reassign, delete**, each a
+compare-and-set on the caller's `revision` (`team_task_update` requires `task_id`, `revision`, `action`, plus
+action-specific fields). `assertTaskGraphCandidate` refuses `missing`, `duplicate` and **`cycle`** blockers.
+`writeScopes` are **advisory** by design: the profile guidance says overlap is a warning, "not a lock".
+
+### 3.6 Waiting and collaboration policy
+
+- `TeamService.waitForChange(caller, timeoutMs, signal)` delegates to `activity.wait(teamId, timeoutMs,
+  signal)` — it resolves on the next **journal commit or member-status change**, never wakes a member, and the
+  tool returns `noProgress` when no member is `running | provisioning` (`ACTIVE_WAIT_STATUSES`).
+- The tool plugin's `POLICY` (`dsh-experimental-tool-agent-team/lib/index.js:19-27`) is the collaboration
+  contract, shared by Lead and teammates: create teammates only when asked; all members share one FS and edits
+  are immediately visible; split writes into disjoint scopes and record them on shared tasks; use the member
+  target from spawn/list; a send is durable even when reported queued; the task workflow is list → get → claim
+  with the current revision → perform → complete; readiness never starts an owner; before `wait_agent` check
+  that another required member is running or provisioning; re-list after a wakeup or timeout; the Lead must wait
+  for required teammates before answering.
+
+### 3.7 The tool surface
+
+Nine tools (`dsh-experimental-tool-agent-team/lib/index.js`): `spawn_teammate{name, description, prompt,
+context='fresh'|'fork'}`, `send_message{target, message}`, `list_agents`, `wait_agent{timeout_ms}`,
+`interrupt_agent{target}`, `team_task_create`, `team_task_list`, `team_task_get`, `team_task_update`. The
+runtime config is `maxMembers`, `maxTasks`, `maxPendingMessagesPerMember`, `maxMessageBytes`,
+`disposalTimeoutMs`; the tool config is `freshProvider` / `forkProvider`.
+
+### 3.8 The profile bundle and the UI
+
+`dsh-experimental-agent-team-profile/cordis.patch.yml` is the opt-in layer: it **disables the direct subagent
+tools** (`tool-subagent-control`, `tool-subagent-list-agents`, `tool-subagent`, `tool-subagent-fork`) so
+delegation goes through the Team, then inserts the service (`maxMembers: 8`, `maxTasks: 256`,
+`maxPendingMessagesPerMember: 64`, `maxMessageBytes: 65536`, `disposalTimeoutMs: 5000`), the tool plugin
+(`freshProvider: spawn`, `forkProvider: fork`) and the `ui-agent-team` client plugin; locale files describe it
+as "Enable team collaboration, team tools, the member roster, and the shared task board". The client UI package
+is `dsh-experimental-client-ui-agent-team` (`lib/index.js` + `client.js`), separate from
+`dsh-client-ui-subagent`.
+
+## 4. How the Team layer meets the reentrancy standard
+
+| Property | DSH's mechanism |
+|---|---|
+| durable state is the only truth | team state is a projection of `team/*` events in the Lead's session log |
+| actions are idempotent or confirmed | delivery is confirmed by reading the target's log and flushing, then journaling `delivered`; a re-dispatch of a recorded message is a no-op (`targetRecorded`) |
+| edges are hints | mailbox dispatch is triggered by a queue append, recovery and by member status; correctness does not depend on one edge |
+| one action in flight per subject | `transact` serializes per Lead session; `dispatchTails` serializes per target; `inFlightMessages` dedupes |
+| startup is a resync | `recoverFor` / `settleProvisioning` reconcile provisioning from durable child sessions; persisted-target reads recover undelivered messages |
+| waiting is level-triggered | `activity.wait` observes commits/status changes, returns `noProgress` when nothing can progress, and the tool requires re-listing rather than trusting a wakeup |
+| stopping is a state | member `phase`/`status`, task `status`, and a projection `failure` — not inferred from silence |
+| records are versioned | team event payloads carry `version: 2`; subagent descriptors have `SUBAGENT_DESCRIPTOR_VERSION` |
+| absent collaborator is a condition | a member with no live agent is `inactive`/`provisioning`; the mailbox recovers through the durable session instead of failing |
+
+## 5. What heddle does not have yet (the gap this reading exposes)
+
+Heddle today: a session is one append-only log; the loop is a function `runTurn`; context, goals and tools are
+keyed by the session; **no agent registry, no live agent status, no continuable child runs, no session
+projection service, no system-prompt policy slot, no team UI**. Its only multi-agent piece is one-shot
+delegation (`delegate{prompt}` → child session → answer back, `src/agent/subagent.ts`).
+
+The mapping questions the implementation goal has to answer:
+
+1. **Do teammates get their own sessions (as DSH does), or share the Lead's?** DSH's own answer is own
+   sessions — which is what makes attribution trivial and the Lead's log small.
+2. **Where does team state live?** The DSH shape maps cleanly onto heddle's event log: `team/member`,
+   `team/task`, `team/message/queued`, `team/message/delivered` events in the Lead's session, folded to a
+   projection (heddle already folds `goal/change` this way).
+3. **What is "running" without an agent registry?** Heddle derives busy/idle from events today (`turn/completed`,
+   `model/request`); a team needs a reliable answer per member, which may mean a process-local registry of live
+   turns (the Web server already counts running turns per session).
+4. **Continuable teammate**: heddle's `runTurn` is one-shot. A mailbox delivery can simply be another turn in
+   the member's session (serialized per member), which is simpler than a persistent agent and still meets the
+   durability properties — but then "running" means "a turn is in flight", and steering at a step boundary is
+   the loop's existing inbox behaviour.
+5. **Wait/interrupt**: a wait needs a commit signal (Cordis event) plus a timeout; interrupt needs an abort per
+   session (the Web server has controllers; a CLI/server-wide registry would be needed).
+6. **UI and policy**: a member roster and task board view, plus the collaboration guidance somewhere heddle can
+   inject into the system prompt (the context service's notes are the nearest slot).
+
+## 6. Read next
+
+[`dsh-context.md`](dsh-context.md) for how a request is composed from a session, and
+[`dsh-goal.md`](dsh-goal.md) for the round driver whose event-sourced shape the team journal should copy.
