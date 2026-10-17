@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, writeJson } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 4 — pluggable tools.

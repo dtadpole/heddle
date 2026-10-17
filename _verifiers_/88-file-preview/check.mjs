@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { writeFileSync } from 'node:fs'
 
-import { fixtureDir, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — one preview surface.
@@ -31,7 +31,7 @@ function startCli(args, env) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const { repoRoot } = await import('../../_tools_/check-helpers/lib.mjs')
+      const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const { join: joinPath } = await import('node:path')
       const child = spawn(process.execPath, [joinPath(repoRoot, 'dist', 'cli.js'), ...args], {
         cwd: repoRoot,

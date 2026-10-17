@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 10 — the Web UI's token.
@@ -99,7 +99,7 @@ function startCli(args, env) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const { repoRoot } = await import('../../_tools_/check-helpers/lib.mjs')
+      const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },

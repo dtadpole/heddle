@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Agent Teams end to end: a Lead's real turn spawns a teammate through the tools, creates and completes a task

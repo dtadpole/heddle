@@ -4,7 +4,7 @@ import http from 'node:http'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 
-import { fixtureDir, removeDir, skipUnless } from '../../../check-helpers/lib.mjs'
+import { fixtureDir, removeDir, skipUnless } from '../../../verify-runner/lib.mjs'
 import { browserAvailable, createTools, openBrowser } from '../../lib.mjs'
 
 /**

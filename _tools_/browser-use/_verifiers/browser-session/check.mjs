@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, before, test } from 'node:test'
 
-import { fixtureDir, removeDir, skipUnless } from '../../../check-helpers/lib.mjs'
+import { fixtureDir, removeDir, skipUnless } from '../../../verify-runner/lib.mjs'
 import { browserAvailable } from '../../lib.mjs'
 
 /**

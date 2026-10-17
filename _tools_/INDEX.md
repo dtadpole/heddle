@@ -19,8 +19,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 
 | Tool | What it is |
 |---|---|
-| [`verify-runner/`](verify-runner/INDEX.md) | turns a check file into the project's verdict |
-| [`check-helpers/`](check-helpers/INDEX.md) | the shared library the checks import, including the one-page browser wrapper |
+| [`verify-runner/`](verify-runner/INDEX.md) | turns a check file into the project's verdict, and holds the library its checks import — fixtures, model doubles, the one-page browser wrapper |
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 
@@ -38,7 +37,6 @@ is judged by [`_verifiers_/`](../_verifiers_/INDEX.md) — three homes for three
 
 ## Read next
 
-[`verify-runner/INDEX.md`](verify-runner/INDEX.md) for the exit contract every verifier keeps,
-[`check-helpers/INDEX.md`](check-helpers/INDEX.md) for the shared helpers,
+[`verify-runner/INDEX.md`](verify-runner/INDEX.md) for the exit contract every verifier keeps and the library its checks import,
 [`browser-use/INDEX.md`](browser-use/INDEX.md) for the browser the page checks drive, and
 [`_verifiers_/INDEX.md`](../_verifiers_/INDEX.md) for the verifications that use them.

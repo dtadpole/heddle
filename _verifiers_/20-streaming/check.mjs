@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, parseJson, removeDir, runCli, runCliTimed, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { chatDouble, fixtureDir, httpConfig, isolatedHome, parseJson, removeDir, runCli, runCliTimed, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 2 — streaming.

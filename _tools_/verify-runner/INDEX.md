@@ -1,17 +1,25 @@
 ---
-title: Runner
-version: 1.1.0
-description: Turns one check file into the project's verdict, because node --test alone cannot.
+title: Verify Runner
+version: 2.0.0
+description: Turns one check file into the project's verdict, and holds the fixtures, doubles and browser wrapper the checks are written with.
 grounded_in:
   - source: human-authored
 ---
 
 # `verify-runner`
 
-Holds [`run.mjs`](run.mjs), the only thing that decides a verifier's verdict; its component tests live
-in [`_tests_/verdict-rules/`](_tests_/verdict-rules/INDEX.md). It runs
-a check file under Node's test runner, reads the TAP stream, and exits with the
-project's three-valued contract:
+Holds the two halves of one job — making a verifier's result **honest** and making a verifier's check
+**writable**:
+
+| File | Half |
+|---|---|
+| [`run.mjs`](run.mjs) | the judge: runs a check under Node's test runner, reads the TAP stream, and exits with the project's verdict |
+| [`lib.mjs`](lib.mjs) | the library every check imports: the CLI runners, the scripted config and model doubles, isolated fixtures, transcript and session finding, `skipUnless` |
+| [`browser.mjs`](browser.mjs) | the one-page wrapper over [`browser-use/`](../browser-use/INDEX.md) that the checks needing a page import |
+| [`lib.d.mts`](lib.d.mts) | the names a TypeScript test may import from the library |
+| [`_tests_/`](_tests_/INDEX.md) | both component suites — the verdict mapping and the library's rules |
+
+## The verdict contract
 
 | Exit | Meaning |
 |---|---|
@@ -19,12 +27,11 @@ project's three-valued contract:
 | `1` | at least one check failed |
 | `3` | nothing could be judged — a skip, or no checks at all |
 
-## Why it exists rather than plain `node --test`
+## Why the judge exists rather than plain `node --test`
 
-Measured on Node v24.19.0: a suite whose checks all skip exits `0`. That is the one
-answer that must never be given for "nothing was judged", and it is the whole reason
-this wrapper exists. A part of the goal that is not built yet must read as unjudged,
-never as holding.
+Measured on Node v24.19.0: a suite whose checks all skip exits `0`. That is the one answer that must
+never be given for "nothing was judged", and it is the whole reason this wrapper exists. A part of the
+goal that is not built yet must read as unjudged, never as holding.
 
 ## Run it
 
@@ -34,55 +41,62 @@ node _tools_/verify-runner/run.mjs <check> --list    # the check names, and why 
 node _tools_/verify-runner/run.mjs <check> --json    # one parseable object
 ```
 
-`--list` and `--json` return the same verdict as a plain run, because the verdict is
-the result rather than a side effect of printing.
+`--list` and `--json` return the same verdict as a plain run, because the verdict is the result rather
+than a side effect of printing.
 
-The rules themselves are component-tested without running a check:
+The mapping itself is component-tested without running a check:
 
 ```bash
 node --test _tools_/verify-runner/_tests_/verdict-rules/unit.test.mjs
 ```
 
-## Component tests
+## The library a check imports
 
-`classify`, `tapCounts` and `collectNames` carry the rules every verdict depends on, so they are
-tested directly in [`_tests_/verdict-rules/`](_tests_/verdict-rules/INDEX.md) — no check file, no
-child process, no browser. The
-tests are the delivery claim's floor rather than a duplicate of it: a verifier proves a capability, and
-these prove that the mapping which reads its result counts a skip as unjudged, puts a failure above a
-skip, and never turns "nothing was judged" into a pass.
+`lib.mjs` is what a check file reaches for so that a fixture, a fake model or a transcript read is
+written once instead of in every check. Four rules it carries are worth naming:
 
-## Why the check helpers are not part of this tool
+- **Nothing spends anything.** `scriptedConfig` points an endpoint at a JSON file of steps, and
+  `chatDouble` / `responsesDouble` are local HTTP servers that speak the provider's real wire shape.
+  The one check that spends quota says so in its own name.
+- **Fixtures live under `.heddle-tmp/` inside this checkout.** Measured: the Cordis loader imports a
+  plugin by absolute path, so a fixture in `/tmp` cannot resolve `@deepseek-ai/cordis`, and Node strips
+  TypeScript types by extension, so a generated plugin fixture is `.ts` while a check file is `.mjs`.
+- **A check that cannot judge says so.** `skipUnless` turns a missing mechanism into a labelled skip,
+  which the runner counts as unjudged rather than as a pass.
+- **A check asks for a session, not for a file format.** `transcriptFile(dir)` finds the transcript a
+  session actually has in either store layout, and `readTranscript` decodes both the zstd and plain
+  formats.
 
-The fixtures, model doubles and CLI runners live next door in
-[`check-helpers/`](../check-helpers/INDEX.md) rather than here, and the reason is the trust boundary
-rather than taste.
+Alongside it, `browser.mjs` is the one-page wrapper over `browser-use`: `goto`, `evaluate`, `waitFor`,
+`screenshot`, `close`, headless by default, with a temporary profile per call. It is not a second
+driver — it imports the tool and adds only the API the checks were written against.
 
-- **This tool is only ever invoked as a process.** Every `verify.sh` runs
-  `node _tools_/verify-runner/run.mjs <check>`; no check imports it. The judge reads a TAP stream and
-  decides `0`/`1`/`3`, and a check cannot reach into that decision. `classify` is exported only for
-  this tool's own component tests.
-- **The arrow points one way.** A check imports the helpers in-process; the runner spawns the check.
-  Merging would let a check import the module that also decides its verdict, and would give the judge
-  a dependency on the harness's transcript decoder and on `browser-use` — every bug in a fixture would
-  become a bug in verdict computation.
-- **The consumers differ.** The helpers have 27 importing check files; the runner has the 15
-  `verify.sh` scripts and nothing else. One is a library, the other a command with an exit contract.
-- **They are tested apart.** This tool's mapping has nine component tests that spawn nothing; the
-  helpers have their own suite. A change to a model double should not make anyone re-argue the verdict
-  mapping.
+## Why the judge and the library share an instance
 
-Keeping them separate is what lets the runner stay small enough to read in one sitting — which is the
-property a judge should have.
+They are one job with two audiences: the judge is a command, the library is a library, and a reader
+looking for either starts at the same place. The boundary that matters is still the process, not the
+folder:
+
+- `run.mjs` is invoked by every `verify.sh` (`node _tools_/verify-runner/run.mjs <check>`) and is
+  **never imported by a check**, so a check cannot reach into the decision about its own score.
+  `classify` is exported only for the component tests.
+- `run.mjs` stays dependency-free — no browser, no harness modules — while `lib.mjs` and `browser.mjs`
+  carry the transcript decoder and the tool. The judge's dependencies are the judge's own.
 
 ## The mapping it implements
 
-`classify` is exported and documented because the mapping is the claim: no checks at
-all is `3`, any failure is `1`, any skip is `3`, and only a run where every check
-passed is `0`.
+`classify` is exported and documented because the mapping is the claim: no checks at all is `3`, any
+failure is `1`, any skip is `3`, and only a run where every check passed is `0`.
+
+## Component tests
+
+Two suites, one per half: [`_tests_/verdict-rules/`](_tests_/verdict-rules/INDEX.md) pins
+`classify`/`tapCounts`/`collectNames` with nine tests that spawn nothing, and
+[`_tests_/helper-rules/`](_tests_/helper-rules/INDEX.md) pins the library's rules — transcript finding
+and decoding, session listing, JSON extraction, fingerprints and `skipUnless`.
 
 ## Read next
 
-[`_verifiers_/INDEX.md`](../../_verifiers_/INDEX.md) for the ten verifications and the
-contract they keep, and [`../check-helpers/INDEX.md`](../check-helpers/INDEX.md) for the helpers a
-check file imports.
+[`_verifiers_/INDEX.md`](../../_verifiers_/INDEX.md) for the verifications and the contract they keep,
+[`browser-use/INDEX.md`](../browser-use/INDEX.md) for the browser the page checks drive, and
+[`_tests_/INDEX.md`](_tests_/INDEX.md) for both suites.

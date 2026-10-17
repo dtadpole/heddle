@@ -3,7 +3,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, readTranscript, removeDir, repoRoot, runCli, sessionsUnder, skipUnless, tempDir } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, readTranscript, removeDir, repoRoot, runCli, sessionsUnder, skipUnless, tempDir } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 8 — the permission sandbox.

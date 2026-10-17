@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { repoRoot } from '../_tools_/check-helpers/lib.mjs'
+import { repoRoot } from '../_tools_/verify-runner/lib.mjs'
 
 /**
  * Contract tests for the page's own wiring.
