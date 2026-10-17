@@ -35,6 +35,7 @@ loads `AGENTS.md` and nothing else.
 | [`_verifiers_/`](_verifiers_/INDEX.md) | the verifications that decide those parts, and the owner-requested views beside them |
 | [`_tools_/`](_tools_/INDEX.md) | the runner, the shared check helpers, and the Web UI daemon |
 | [`_tests_/`](_tests_/INDEX.md) | the tools' component test suites, one per subject |
+| [`_skills_/`](_skills_/INDEX.md) | the procedures a repeated job follows, one per procedure |
 | [`src/`](src/INDEX.md) | the harness itself |
 | [`test/`](test/INDEX.md) | the framework's own unit suite |
 | [`README.md`](README.md) | what the project is, for a reader arriving cold |
