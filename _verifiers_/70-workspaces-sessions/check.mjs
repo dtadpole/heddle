@@ -2118,11 +2118,36 @@ test("a session row's controls appear on hover, and a search replaces the tree w
             const style = getComputedStyle(button)
             return { background: style.backgroundColor, radius: style.borderRadius, size: style.fontSize, weight: style.fontWeight, colour: style.color }
           }),
+          ringGap: document.getElementById('views') === null ? null : getComputedStyle(document.getElementById('views')).gap,
+          ringUnderline: (() => {
+            const tab = [...document.querySelectorAll('#views button')].find((button) => button.getAttribute('aria-selected') === 'true')
+            if (tab === undefined) return { height: null, background: null, bottom: null }
+            const after = getComputedStyle(tab, '::after')
+            return { height: after.height, background: after.backgroundColor, bottom: after.bottom }
+          })(),
+          rowHeights: {
+            session: (() => { const row = document.querySelector('#tree li[data-kind="session"] > .row'); return row === null ? null : Math.round(row.getBoundingClientRect().height) })(),
+            workspace: (() => { const row = document.querySelector('#tree li[data-kind="workspace"] > .row'); return row === null ? null : Math.round(row.getBoundingClientRect().height) })(),
+          },
           userTurn: (() => {
             const turn = document.querySelector('#log .turn.user')
-            if (turn === null) return { alignSelf: null, radius: null }
+            if (turn === null) return { alignSelf: null, radius: null, background: null, maxWidth: null, turnWidth: null, turnRight: null, logWidth: null, logRight: null, contentRight: null }
             const style = getComputedStyle(turn)
-            return { alignSelf: style.alignSelf, radius: style.borderRadius }
+            const log = document.getElementById('log')
+            const logRect = log === null ? null : log.getBoundingClientRect()
+            const logPaddingRight = log === null ? 0 : parseFloat(getComputedStyle(log).paddingRight)
+            const turnRect = turn.getBoundingClientRect()
+            return {
+              alignSelf: style.alignSelf,
+              radius: style.borderRadius,
+              background: style.backgroundColor,
+              maxWidth: style.maxWidth,
+              turnWidth: Math.round(turnRect.width),
+              turnRight: Math.round(turnRect.right),
+              logWidth: logRect === null ? null : Math.round(logRect.width),
+              logRight: logRect === null ? null : Math.round(logRect.right),
+              contentRight: logRect === null ? null : Math.round(logRect.right - logPaddingRight),
+            }
           })(),
         }
 
@@ -2240,9 +2265,35 @@ test("a session row's controls appear on hover, and a search replaces the tree w
       { background: 'rgba(0, 0, 0, 0)', radius: '0px', size: '13px', weight: '500', colour: 'rgb(173, 178, 184)' },
     ], `the ring draws DSH's plain tabs\nsaw: ${JSON.stringify(reading.chrome.ring)}`)
 
-    /** **The user's turn** is the reading column's full width, left-aligned, on a 12px surface. */
-    assert.equal(reading.chrome.userTurn.alignSelf, 'stretch', `a user turn fills the column\nsaw: ${JSON.stringify(reading.chrome.userTurn)}`)
-    assert.equal(reading.chrome.userTurn.radius, '12px', 'with a 12px surface radius')
+    /**
+     * **The ring's measured geometry**: a 36px gap between DSH's tabs, and the selected tab marked by a 2px accent
+     * underline drawn by `::after` — the part a first pass missed because it read only the element's own border.
+     */
+    assert.equal(reading.chrome.ringGap, '36px', `the tabs sit 36px apart\nsaw: ${reading.chrome.ringGap}`)
+    assert.equal(reading.chrome.ringUnderline.height, '2px', `the selected tab is underlined\nsaw: ${JSON.stringify(reading.chrome.ringUnderline)}`)
+    assert.equal(reading.chrome.ringUnderline.background, 'rgb(122, 170, 255)', 'in the accent colour')
+    assert.equal(reading.chrome.ringUnderline.bottom, '-1px', 'one pixel below the padding box, as DSH draws it')
+
+    /** **Two row heights**, measured: DSH's workspace rows are 34px and its session rows 32px. */
+    assert.equal(reading.chrome.rowHeights.session, 32, `a session row is 32px\nsaw: ${JSON.stringify(reading.chrome.rowHeights)}`)
+    assert.equal(reading.chrome.rowHeights.workspace, 34, 'while a workspace row is 34px')
+
+    /**
+     * **The user's turn**, measured from DSH's own chat on 2026-10-17: a right-aligned bubble that hugs its text — its box
+     * measured 484px inside a 689px column, flush with the column's right edge — on a 20px radius over rgb(44,44,46). An
+     * earlier pass of this audit claimed the opposite (full width, left-aligned) from a screenshot; the box measurement
+     * settled it, so this pins the measured shape rather than a memory of one.
+     */
+    assert.equal(reading.chrome.userTurn.alignSelf, 'flex-end', `a user turn sits at the column's right\nsaw: ${JSON.stringify(reading.chrome.userTurn)}`)
+    assert.equal(reading.chrome.userTurn.radius, '20px', 'with a 20px radius')
+    assert.equal(reading.chrome.userTurn.background, 'rgb(44, 44, 46)', "on DSH's bubble surface")
+    /** `width: fit-content` resolves to a used pixel width, so the hug is judged by box against box. */
+    assert.ok(reading.chrome.userTurn.turnWidth < reading.chrome.userTurn.logWidth, `and hugs its text rather than filling the column\nsaw: ${JSON.stringify(reading.chrome.userTurn)}`)
+    /** The column carries padding, so "flush right" means flush with its **content** edge, which is what DSH's box was. */
+    assert.ok(
+      Math.abs(reading.chrome.userTurn.turnRight - reading.chrome.userTurn.contentRight) <= 2,
+      `flush with the column's content edge\nsaw: ${JSON.stringify(reading.chrome.userTurn)}`,
+    )
 
     /**
      * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.

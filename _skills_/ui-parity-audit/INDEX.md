@@ -25,6 +25,7 @@ grounded_in:
 | the browser MCP (`mcp__browser__*`) | driving both UIs: `evaluate_script` for computed styles, `hover` for real pointer states, `press_key` for chords, `take_screenshot` for a visual record |
 | `getComputedStyle` on **both** sides | the only honest source of a number: a screenshot is a picture of a value, a computed style *is* the value |
 | the same measurement script on both pages | one function, run twice, so the two columns are read the same way |
+| the reference's own **`cssRules`** | the values a computed-style read cannot see: a `gap` between items, a `::after` underline, a hover rule, a pseudo-class colour — read the rule, then confirm with a trusted pointer |
 | the running UI, not a fixture alone | fixtures prove a flow; the owner's UI proves the feel |
 | a new assertion in `_verifiers_/70-workspaces-sessions` | the difference cannot come back unnoticed once a check names it |
 
@@ -109,7 +110,8 @@ grounded_in:
 | `--dsw-radius-panel` applied to the panes | DSH's panes measure 0; the token is only for the composer | measure, do not infer from tokens |
 | A backtick inside a page-script template literal, five times | a syntax error and a debugging round each time | the check file's header states it; none of those comments use backticks |
 | The view ring was a bordered, tinted, rounded box | DSH's tabs are plain text with colour-only selection — the box made one control read as a segmented control | a control's **shape** is part of parity, not just its colour; measured `background`/`border`/`radius`/`padding` as properties |
-| A whole-file pass replaced an already-aligned user turn and a fixed header | the fixes silently reverted, and only a screenshot caught it | an alignment fix ships with an assertion; a shared file can be replaced wholesale by concurrent work, and the check is what survives it |
+| I claimed DSH's user turn was full-width and left-aligned, from a screenshot | the assertion built on that claim went red against the correct implementation; DSH's box is a **right-aligned bubble 484px inside a 689px column**, radius 20px | a screenshot is not a measurement. Measure the **box** — x, width, right edge against the column's *content* edge — and when two sessions disagree about the reference, settle it with that box before asserting anything |
+| The selected tab's 2px underline was missed for a whole cycle | a computed-style pass on the element cannot see a `::after`; the reference had it all along in its sheet | measure **pseudo-elements** too (`getComputedStyle(element, '::after')`), and read the reference's own `cssRules` to resolve gaps, line heights and hover rules |
 
 ## The report
 
