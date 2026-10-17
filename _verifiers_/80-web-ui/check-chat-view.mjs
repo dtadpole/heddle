@@ -555,6 +555,20 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
     )
     assert.equal(remembered, 640, 'and the chosen width survives a reload')
 
+    /**
+     * A remembered width **below the floor** is raised to it, which is DSH's own rule for a persisted preference:
+     * `resolveContentWidth` returns `Math.min(Math.max(preference, CONTENT_MIN), max)`. Measured on DSH's live page:
+     * a stored 500px came back as `--dsh-chat-content-width: 640px` (and its markdown block measured 640). Heddle
+     * shares that floor, and this is the path that would silently differ if someone lowered the clamp later.
+     */
+    await browser.evaluate('localStorage.setItem("heddle.chatColumn", "300")')
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelectorAll(".column-grip").length === 2', 20_000)
+    const raised = await browser.evaluate(
+      'Math.round(Number.parseFloat(getComputedStyle(document.querySelector("main")).getPropertyValue("--chat-column")))',
+    )
+    assert.equal(raised, 640, 'a stored width below the floor is raised to DSH\'s 640')
+
     await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
   } finally {
     browser.close()
