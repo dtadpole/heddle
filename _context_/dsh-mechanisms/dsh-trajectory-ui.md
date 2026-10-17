@@ -181,3 +181,11 @@ lane-based timeline focus, the turn rail and turn labels, and the tool row that 
 5. timeline: lane strip with ticks and drag-to-focus dimming.
 6. verifier: a part 9 check that drives a tool-calling turn and asserts the row shape, the details pane and
    the toggles; screenshots compared with the DSH reference; then fix and verify again.
+
+## Evidence
+
+- [`dsh-trajectory-reference.jpg`](dsh-trajectory-reference.jpg) — DSH's own Trajectory tab with the details
+  pane open on a `TOOL` row (measured in the browser, 2026-10-17).
+- [`heddle-trajectory.png`](heddle-trajectory.png) — heddle after the port: the toolbar, the three lane
+  timeline, the turn rail with `Turn 1`/`Turn 2` labels, kind tags, one row per tool call carrying its
+  result, and the details pane with Summary/Payload/Result/Timing.

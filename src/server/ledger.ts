@@ -138,6 +138,37 @@ export interface LedgerRow {
   readonly stepStart: boolean
   /** True for a record that belongs to no turn: a session that logged before its first prompt. */
   readonly loose: boolean
+  /**
+   * The one line the table shows for the row, decided here rather than in the page.
+   *
+   * It is a claim about the record (the assistant that only called tools has no words; a tool result with
+   * no call still names itself), so it is made beside the projection that has the record, and unit-tested.
+   */
+  readonly preview: string
+}
+
+/** The three lanes of DSH's timeline overview. */
+export type LedgerLane = 'input' | 'model' | 'tools'
+
+/**
+ * Which lane an event belongs to, as DSH's overview groups them.
+ *
+ * Input is what a person or the harness put in, model is what the model produced (its words and its
+ * thinking), and tools is what ran. Exported and tested because the page's lanes are only as right as this.
+ */
+export function laneOf(kind: LedgerKind): LedgerLane {
+  if (kind === 'user' || kind === 'context' || kind === 'system') return 'input'
+  if (kind === 'tool') return 'tools'
+  return 'model'
+}
+
+/** The one line a row shows: its first line, or what the row is when it has none. */
+export function previewOf(record: LedgerRecord): string {
+  const text = String(record.text ?? '').split('\n')[0] ?? ''
+  if (text !== '') return text
+  if (record.kind === 'assistant') return '(tool call only)'
+  if (record.kind === 'tool') return record.name ?? record.label ?? 'tool'
+  return record.label ?? record.kind
 }
 
 /**
@@ -161,6 +192,7 @@ export function projectRows(ledger: Ledger): readonly LedgerRow[] {
           turnStart: rows.length === 0 || rows[rows.length - 1]?.turn !== turn.index,
           stepStart: index === 0,
           loose: false,
+          preview: previewOf(record),
         })
       })
     }
@@ -170,7 +202,7 @@ export function projectRows(ledger: Ledger): readonly LedgerRow[] {
    * that recorded context before its first prompt has no turn to belong to.
    */
   for (const record of ledger.loose) {
-    rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true })
+    rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true, preview: previewOf(record) })
   }
   return rows
 }
@@ -577,6 +609,8 @@ export interface TimelineSpan {
   readonly end: number
   /** Which kinds of record the span covers, most frequent first, so a band can be coloured by its content. */
   readonly kinds: readonly LedgerKind[]
+  /** The overview lanes this span touched, so the page draws lanes and does not decide them. */
+  readonly lanes: readonly LedgerLane[]
   readonly records: number
   /** Whether anything in this span was still running when the events ended. */
   readonly running: boolean
@@ -662,6 +696,7 @@ export function projectTimeline(ledger: Ledger): Timeline {
       start,
       end: Math.max(measuredEnd, start + 0.02),
       kinds,
+      lanes: [...new Set(kinds.map((kind) => laneOf(kind)))],
       records: span.kinds.length,
       running: span.running,
     })

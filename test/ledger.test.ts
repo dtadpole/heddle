@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { projectLedger, projectRows, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
+import { laneOf, previewOf, projectLedger, projectRows, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
 
 /**
  * Unit tests for the Trajectory ledger.
@@ -358,4 +358,47 @@ test('rows carry where they sit, so a table can draw boundaries without a tree',
     'the first row of each turn is marked, and so is the first row of each step',
   )
   assert.equal(rows.filter((row) => row.turnStart).length, 2, 'one boundary per turn')
+})
+
+test('a row carries its own one-line preview, so the page does not decide it', () => {
+  /**
+   * The preview is a claim about the record — an assistant that only called tools has no words, a tool
+   * result with no call still names itself — so it is made beside the projection and judged here rather
+   * than inside a page no unit test can reach.
+   */
+  assert.equal(previewOf({ kind: 'user', label: 'user', text: 'two\nlines' }), 'two', 'the first line is the preview')
+  assert.equal(previewOf({ kind: 'tool', label: '→ list_dir', name: 'list_dir', text: '{"path":"/tmp"}' }), '{"path":"/tmp"}')
+  assert.equal(previewOf({ kind: 'assistant', label: 'assistant', text: '' }), '(tool call only)', 'an answer that only called tools says so')
+  assert.equal(previewOf({ kind: 'tool', label: 'tool result', text: '', result: 'a.txt' }), 'tool result', 'a result with no call still names itself')
+  assert.equal(previewOf({ kind: 'system', label: 'request', text: '' }), 'request')
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ask' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  assert.equal(projectRows(ledger)[0]!.preview, 'ask', 'and the projection puts it on the row')
+})
+
+test('every kind belongs to one of the three overview lanes', () => {
+  /**
+   * The browser check judges that three lanes are drawn; this judges that a record lands in the right one,
+   * which is the half a wrong mapping would silently break.
+   */
+  assert.equal(laneOf('user'), 'input')
+  assert.equal(laneOf('context'), 'input')
+  assert.equal(laneOf('system'), 'input')
+  assert.equal(laneOf('assistant'), 'model')
+  assert.equal(laneOf('reasoning'), 'model')
+  assert.equal(laneOf('compaction'), 'model')
+  assert.equal(laneOf('tool'), 'tools')
+  const ledger = projectLedger([
+    event(1, '2026-10-17T10:00:00.000Z', { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ask' }] } }),
+    event(2, '2026-10-17T10:00:00.100Z', { type: 'model/request', messages: 1 }),
+    event(3, '2026-10-17T10:00:00.200Z', { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' } }),
+    event(4, '2026-10-17T10:00:00.300Z', { type: 'message', message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] } }),
+    event(5, '2026-10-17T10:00:00.400Z', { type: 'turn/completed', rounds: 1 }),
+  ])
+  const spans = projectTimeline(ledger).spans
+  assert.ok(spans.length > 0, 'a turn with a tool call has a span')
+  assert.ok(spans[0]!.lanes.includes('tools'), 'and the span says it touched the tools lane')
 })
