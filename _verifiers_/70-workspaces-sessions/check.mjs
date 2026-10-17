@@ -1944,3 +1944,123 @@ test('a session forks into a new one named after it, with its conversation and i
     removeDir(h.work)
   }
 })
+
+test("a session row's controls appear on hover, and a search replaces the tree with named hits", async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-hover-search')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    /** Two sessions with the same first message, which is what makes a search result ambiguous without its age. */
+    for (let index = 0; index < 2; index += 1) {
+      const one = await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(one.code, 0, one.stderr)
+      await runCli(adminArgs(h, ['--turn', 'the same opening line']), { env: h.env, cwd: branch })
+    }
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
+        ;[...document.querySelectorAll('#tree .row')][0].click(); await wait(700)
+        rowFor('_tools_').click(); await wait(700)
+        rowFor('some-tool').click(); await wait(900)
+        const sessions = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+        const controls = sessions.map((li) => ({
+          label: li.querySelector(':scope > .row > .label')?.textContent,
+          buttons: [...li.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
+          /** Not hovered yet: DSH keeps the row quiet until the pointer arrives. */
+          quiet: li.querySelector(':scope > .row .session-actions') === null ? null : getComputedStyle(li.querySelector(':scope > .row .session-actions')).opacity,
+        }))
+        /**
+         * A pointer cannot be moved from script, so the rule is read through its **other half**: the same selector
+         * also answers the focus-within selector, and focusing a control in the row is what a keyboard user does.
+         */
+        const target = sessions.find((li) => li.querySelector(':scope > .row .session-actions button') !== null) ?? sessions[0]
+        target.querySelector(':scope > .row .session-actions button')?.focus()
+        await wait(200)
+        const focused = {
+          opacity: getComputedStyle(target.querySelector(':scope > .row .session-actions')).opacity,
+          buttons: [...target.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
+        }
+
+        const input = document.getElementById('session-search')
+        input.value = 'the same opening'
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        await wait(900)
+        const search = {
+          treeHidden: document.getElementById('tree').hidden,
+          resultsHidden: document.getElementById('search-results').hidden,
+          hits: [...document.querySelectorAll('#search-results .hit')].map((hit) => ({
+            title: hit.querySelector('.hit-title')?.textContent,
+            where: hit.querySelector('.hit-workspace')?.textContent,
+          })),
+        }
+        input.value = ''
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        await wait(400)
+        const cleared = {
+          treeHidden: document.getElementById('tree').hidden,
+          resultsHidden: document.getElementById('search-results').hidden,
+        }
+        return { controls, focused, search, cleared }
+      })().then((value) => JSON.stringify(value))`),
+    )
+
+    /**
+     * DSH's arrangement: a session row carries `Pin` and `Archive` beside its `…`, and they are **invisible until
+     * the row is hovered or holds focus** — the row reads as a name rather than a strip of buttons.
+     */
+    /**
+     * Two halves of one rule. A row that stands for a **session** offers its two quick controls; a `_sessions_`
+     * folder the fixture wrote by hand holds no session record, so it offers nothing at all — a row with nothing to
+     * do draws nothing rather than drawing dead buttons. (Measured: the first version of this check demanded the
+     * controls on every row and failed on exactly those two.)
+     */
+    const withControls = reading.controls.filter((row) => row.buttons.length > 0)
+    const withoutControls = reading.controls.filter((row) => row.buttons.length === 0)
+    assert.equal(withControls.length, 2, `the two sessions carry controls\nsaw: ${JSON.stringify(reading.controls)}`)
+    for (const row of withControls) {
+      assert.deepEqual(row.buttons, ['Pin session', 'Archive session'], `a session row offers its two quick controls\nsaw: ${JSON.stringify(row.buttons)}`)
+      assert.equal(row.quiet, '0', 'and they are invisible while the row is quiet')
+    }
+    for (const row of withoutControls) {
+      assert.equal(row.quiet, null, `a row that stands for no session draws no controls (${row.label})`)
+    }
+    assert.ok(
+      reading.focused.opacity === '1',
+      `focusing the row reveals them, which is the same rule the pointer gets\nsaw opacity ${reading.focused.opacity}`,
+    )
+
+    /**
+     * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.
+     * The age is there because two sessions can share a first message, which is exactly this fixture.
+     */
+    assert.equal(reading.search.treeHidden, true, 'a query puts the tree away')
+    assert.equal(reading.search.resultsHidden, false, 'and shows the results')
+    assert.equal(reading.search.hits.length, 2, `both matching sessions are hits\nsaw: ${JSON.stringify(reading.search.hits)}`)
+    for (const hit of reading.search.hits) {
+      assert.equal(hit.title, 'the same opening line', 'a hit is named by its title')
+      assert.match(String(hit.where), /·/, 'and says where it lives, beside its age')
+    }
+    assert.equal(reading.cleared.treeHidden, false, 'clearing the query restores the tree')
+    assert.equal(reading.cleared.resultsHidden, true, 'and puts the results away')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})

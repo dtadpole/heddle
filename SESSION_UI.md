@@ -99,11 +99,15 @@ Ordered so that each phase is useful alone and testable alone. Every phase ends 
    Verified in the browser: the menu reads `Pin · Rename… · Fork · Archive` and forking produced
    `… (1)` with age `now` above its parent. The definition's folder keeps the instance naming rule, so the
    identity is a clock name while the title carries the readable name.
-2. **Hover affordances.** The row's `…` becomes one of three controls, the other two revealed on
-   hover or keyboard focus: `Archive` and `Pin`/`Unpin`. A row with nothing to offer draws nothing.
-3. **Search as its own result list.** Typing in the search box switches the tree to a flat results
-   list whose rows read `title workspace`; clearing restores the tree. Keep the in-place filter only
-   if it is still wanted after that — one of the two, not both.
+2. **Hover affordances — done 2026-10-17.** A session row now carries `Pin`/`Unpin` and `Archive`/`Unarchive`
+   beside its `…`, invisible until the row is hovered or holds focus (and always shown where hovering is
+   impossible). A row that stands for no session draws nothing rather than dead buttons. Verified live: the
+   hovered row computes `opacity: 1` with `["Pin session","Archive session"]` while its neighbours compute `0`.
+3. **Search as its own result list — done 2026-10-17.** A query hides the tree and shows a flat result list;
+   each hit reads `title · workspace · age`, and clearing (or Escape) restores the tree. The age is added to
+   DSH's two fields because a store can hold many sessions with the same first message — measured: a search for
+   `ready` returned 34 rows with one title between them. The earlier in-place filter is gone: it could not find
+   a session whose branch was closed, and it never said where a hit lived.
 4. **View options.** A `View options` control holding: archive visibility (`Hide archived` /
    `Show archived` / `Archived only`), ordering (`Last updated` / `Manual`), and — if it earns its
    keep — grouping (`By workspace` / `One list`).

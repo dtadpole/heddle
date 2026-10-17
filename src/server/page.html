@@ -93,6 +93,16 @@
     --code-size: 12px;
     --code-leading: 19px;
   }
+  /**
+   * The search results, as DSH draws them: a flat list, each row a **session name and the workspace it is in**,
+   * because a hit somebody cannot place is a hit they have to open to understand. The tree is replaced while the
+   * query stands, rather than filtered, so the answer is about names rather than about where they happen to live.
+   */
+  #search-results { display: flex; flex-direction: column; gap: .12rem; }
+  #search-results .hit { display: flex; align-items: baseline; gap: .4rem; width: 100%; text-align: left; padding: .3rem .4rem; font: inherit; color: inherit; background: none; border: 0; border-radius: .3rem; cursor: pointer; }
+  #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 10%, transparent); outline: none; }
+  #search-results .hit-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
   #session-search { width: 100%; margin: 0 0 .5rem; padding: .3rem .45rem; font: inherit; font-size: .8rem; color: inherit; background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: .3rem; }
   #session-search::placeholder { opacity: .6; }
   aside { width: var(--sidebar-width); flex: none; border-right: 1px solid var(--border); overflow-y: auto; padding: .75rem; color: var(--text-2); background: var(--sidebar); }
@@ -133,6 +143,21 @@
   #log { flex: 1; overflow-y: auto; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 6px; font-size: 15px; line-height: 24px; }
   #log > * { min-width: 0; }
   .turn { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /**
+   * The goal bar. The phase is a colour and a word; the objective takes the room. The buttons are the
+   * person's verbs, and they are only the ones the transition table allows right now.
+   */
+  #goal-bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; padding: .4rem .75rem; border-bottom: 1px solid var(--line); font-size: 13px; }
+  #goal-bar[hidden] { display: none; }
+  #goal-phase { font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+  #goal-bar[data-phase='active'] #goal-phase { color: #2fa36b; }
+  #goal-bar[data-phase='paused'] #goal-phase { color: #b7791f; }
+  #goal-bar[data-phase='blocked'] #goal-phase { color: #d14343; }
+  #goal-bar[data-phase='complete'] #goal-phase { color: color-mix(in oklab, currentColor 55%, transparent); }
+  #goal-objective { flex: 1; min-width: 8rem; }
+  #goal-rounds { opacity: .7; }
+  #goal-actions { display: flex; gap: .25rem; }
+  #goal-actions button { font: inherit; font-size: 12px; padding: .1rem .45rem; }
   /**
    * The person's own message: a bubble against the right edge, capped at 82% of the column — DSH's
    * `MessageItem` bubble, which is `padding: 10px 16px` at `radius-xl` on the specific-bubble surface.
@@ -713,6 +738,14 @@
   #tree .pin svg { width: 11px; height: 11px; }
   /** An archived row is drawn only when asked for, and then quietly: it is not part of the live list. */
   #tree li[data-archived='true'] { opacity: .55; }
+  /**
+   * The row's quick controls: present for a reader, invisible to the eye until the row is hovered or focused —
+   * DSH's own behaviour, and the reason the row reads as a name rather than as a strip of buttons. A touch device
+   * has no hover, so there they are simply shown.
+   */
+  #tree .session-actions { display: inline-flex; align-items: center; gap: .1rem; opacity: 0; transition: opacity .12s ease; }
+  #tree li:hover > .row .session-actions, #tree li:focus-within > .row .session-actions { opacity: 1; }
+  @media (hover: none) { #tree .session-actions { opacity: 1; } }
   .untwisty { font: inherit; padding: 0 .3rem; opacity: .55; background: none; border: 0; color: inherit; line-height: 1; }
   .untwisty:hover { opacity: 1; }
 </style>
@@ -738,6 +771,8 @@
   <input id="session-search" type="search" placeholder="Search sessions" aria-label="search session names" autocomplete="off">
   <p class="meta" id="search-note" hidden></p>
   <ul id="tree" role="tree" aria-label="workspace folders"></ul>
+  <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
+  <div id="search-results" role="tree" aria-label="search results" hidden></div>
   <p id="tree-note" class="meta" hidden></p>
   <details id="history">
     <summary>ad hoc</summary>
@@ -759,6 +794,18 @@
     <button type="button" data-view="chat" aria-current="true">Chat</button>
     <button type="button" data-view="trajectory">Trajectory</button>
   </nav>
+  <!--
+    The goal bar: what the session is working toward, above the conversation rather than inside it.
+    It shows the **durable phase** and the **process-local activation** as two facts, because "active but
+    disarmed" is a real and confusing state — the goal is alive, but this process will not continue it
+    by itself until a person resumes it.
+  -->
+  <div id="goal-bar" hidden>
+    <span id="goal-phase"></span>
+    <span id="goal-objective"></span>
+    <span id="goal-rounds"></span>
+    <span id="goal-actions"></span>
+  </div>
   <div id="log" data-view="chat"></div>
   <!--
     The timeline is a sibling of the ledger, not a child of it.
@@ -1408,6 +1455,76 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   }
 }
 
+/**
+ * The goal bar's state, refreshed whenever the selected session changes or a verb is applied.
+ *
+ * The bar renders **the service's own fields** — phase, activation, rounds, blocked reason — and computes
+ * nothing about the lifecycle itself. Which buttons appear is the one decision made here, and it follows
+ * the transition table: pause an active goal, resume a stopped one, complete anything unfinished, edit or
+ * clear whenever a goal is current.
+ */
+let goalView = null
+
+async function refreshGoal() {
+  const bar = document.getElementById('goal-bar')
+  if (bar === null) return
+  if (current === null) {
+    bar.hidden = true
+    goalView = null
+    return
+  }
+  try {
+    const response = await fetch('/api/goal?session=' + encodeURIComponent(current))
+    const body = await response.json()
+    goalView = response.ok ? (body.goal ?? null) : null
+  } catch {
+    goalView = null
+  }
+  if (goalView === null) {
+    bar.hidden = true
+    return
+  }
+  bar.hidden = false
+  bar.dataset.phase = goalView.phase
+  bar.dataset.activation = goalView.activation
+  document.getElementById('goal-phase').textContent = goalView.phase + (goalView.phase === 'active' && goalView.activation === 'disarmed' ? ' (disarmed)' : '')
+  document.getElementById('goal-objective').textContent = goalView.objective
+  document.getElementById('goal-rounds').textContent = 'round ' + goalView.roundsStarted + '/' + goalView.maxGoalRounds
+  const actions = document.getElementById('goal-actions')
+  actions.replaceChildren()
+  const verbs = []
+  if (goalView.phase === 'active') verbs.push(['pause', 'pause'])
+  if (goalView.phase === 'paused' || goalView.phase === 'blocked' || (goalView.phase === 'active' && goalView.activation === 'disarmed')) verbs.push(['resume', 'resume'])
+  if (goalView.phase !== 'complete') verbs.push(['complete', 'complete'])
+  if (goalView.phase !== 'complete') verbs.push(['edit', 'edit'])
+  verbs.push(['clear', 'clear'])
+  for (const [action, label] of verbs) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.dataset.goalAction = action
+    button.textContent = label
+    button.onclick = async () => {
+      let body = { session: current, action, goal_id: goalView.id, revision: goalView.revision }
+      if (action === 'edit') {
+        const objective = prompt('The goal objective', goalView.objective)
+        if (objective === null || objective.trim() === '') return
+        body = { ...body, objective: objective.trim() }
+      }
+      const response = await fetch('/api/goal', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) {
+        const answer = await response.json().catch(() => ({}))
+        setNote(answer.error ?? 'could not update the goal')
+      }
+      await refreshGoal()
+    }
+    actions.append(button)
+  }
+}
+
 async function showSession(id) {
   current = id
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
@@ -1456,9 +1573,12 @@ async function showSession(id) {
     note.textContent = 'could not read this session: ' + (error && error.message)
     log.append(note)
   }
+  await refreshGoal()
 }
 
 async function refreshSessions() {
+  /** The search index is a cache of this answer, so this is where it goes stale. */
+  searchIndex = null
   const response = await fetch('/api/sessions')
   if (!response.ok) return
   const sessions = await response.json()
@@ -2747,6 +2867,11 @@ function kindIcon(kind, open = false) {
     svg.append(svgPath('M4 2h5l3 3v9H4z'), svgPath('M9 2v3h3'))
     return svg
   }
+  if (kind === 'archive') {
+    /** A box with its lid off — the mark a list uses for "put away", drawn here for the same reason as the pin. */
+    svg.append(svgPath('M2.6 2.8h10.8v2.4H2.6z'), svgPath('M3.8 5.2v7.6h8.4V5.2'), svgPath('M6.4 7.6h3.2'))
+    return svg
+  }
   if (kind === 'pin') {
     /** A pin, drawn rather than borrowed from the emoji font, which renders in a different style on every machine. */
     svg.append(svgPath('M6 2.2h4v1.1l-.9.5v3l1.4 1.3H3.5l1.4-1.3v-3L4 3.3z'), svgPath('M8 8.2v4.4'))
@@ -3155,60 +3280,19 @@ function menuItemsFor(node) {
   }
   if (node.kind === 'session') {
     /**
-     * A session's row offers what DSH's own session menu offers — pin, rename, archive — because that is the set a
-     * person expects from this control. Two of them are missing on purpose: **delete**, because this store's log is
+     * A session's row offers what DSH's own session menu offers — pin, rename, fork, archive — because that is the
+     * set a person expects from this control. Two are missing on purpose: **delete**, because this store's log is
      * append-only and archiving is the reversible act, and **duplicate**, because a session is a record of a run
      * rather than a document.
      *
-     * The name is the **title**, not the folder — the folder is the identity the conventions require, while the
-     * title is what a person reads — so renaming writes the title and the row shows it.
+     * The same four actions are also drawn **on the row**, revealed on hover, which is DSH's own arrangement: the
+     * two acts frequent enough to skip the menu (pin and archive) sit beside the `…`, and everything else is
+     * inside it. One implementation feeds both places — a second copy would be a second set of behaviours.
      */
-    items.push({
-      label: node.pinned ? 'Unpin' : 'Pin',
-      run: () => setSessionFlags(node, { pinned: !node.pinned }),
-    })
-    items.push({
-      label: 'Rename…',
-      run: async () => {
-        const title = window.prompt('Rename this session', node.session?.title ?? '')
-        if (title === null) return
-        const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ title, folder: node.path }),
-        })
-        const body = await response.json().catch(() => ({}))
-        if (!response.ok) {
-          setNote(body.error ?? 'could not rename that session')
-          return
-        }
-        setNote('')
-        await renderTree()
-        await refreshSessions()
-      },
-    })
-    items.push({
-      /**
-       * DSH's item and DSH's naming: the fork is `<title> (1)`, it appears beside its parent, and the view does
-       * not move — a fork is a branch, not a departure.
-       */
-      label: 'Fork',
-      run: async () => {
-        const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
-        const body = await response.json().catch(() => ({}))
-        if (!response.ok) {
-          setNote(body.error ?? 'could not fork that session')
-          return
-        }
-        setNote('')
-        await renderTree()
-        await refreshSessions()
-      },
-    })
-    items.push({
-      label: node.archived ? 'Unarchive' : 'Archive',
-      run: () => setSessionFlags(node, { archived: !node.archived }),
-    })
+    items.push({ label: node.pinned ? 'Unpin' : 'Pin', run: () => pinSession(node) })
+    items.push({ label: 'Rename…', run: () => renameSession(node) })
+    items.push({ label: 'Fork', run: () => forkSession(node) })
+    items.push({ label: node.archived ? 'Unarchive' : 'Archive', run: () => archiveSession(node) })
   }
   if (node.kind === 'instance') {
     /**
@@ -3246,6 +3330,55 @@ function menuItemsFor(node) {
     }
   }
   return items
+}
+
+/**
+ * Rename a session: its **title**, which the row shows, while the folder stays the identity.
+ *
+ * One function for the menu and (in future) a shortcut, because the two must not drift: a rename that one of them
+ * wrote differently would be two behaviours wearing one label.
+ */
+async function renameSession(node) {
+  const title = window.prompt('Rename this session', node.session?.title ?? '')
+  if (title === null) return
+  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title, folder: node.path }),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    setNote(body.error ?? 'could not rename that session')
+    return
+  }
+  setNote('')
+  await renderTree()
+  await refreshSessions()
+}
+
+/**
+ * Fork a session: DSH's item and DSH's naming — `<title> (1)` — appearing beside its parent, with the view left
+ * where it was, because a fork is a branch rather than a departure.
+ */
+async function forkSession(node) {
+  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    setNote(body.error ?? 'could not fork that session')
+    return
+  }
+  setNote('')
+  await renderTree()
+  await refreshSessions()
+}
+
+/** Pin or unpin, and archive or unarchive — the two states a row can carry. */
+function pinSession(node) {
+  return setSessionFlags(node, { pinned: !node.pinned })
+}
+
+function archiveSession(node) {
+  return setSessionFlags(node, { archived: !node.archived })
 }
 
 /**
@@ -3422,6 +3555,31 @@ function nodeRow(node) {
    * the left already reports the state, and clicking the row performs the act, so the box was a second way to
    * do one thing and the eye had to find it before it could be used.
    */
+  /**
+   * DSH's arrangement, adopted on 2026-10-17: the row carries **three** controls, not one, and they appear when
+   * the pointer or the keyboard arrives rather than always. The two direct ones are the acts frequent enough to
+   * skip the menu — pin and archive — and the `…` holds the rest. A row with nothing to do still draws nothing.
+   */
+  if (node.kind === 'session' && node.session) {
+    const quick = document.createElement('span')
+    quick.className = 'session-actions'
+    const quickButton = (label, glyph, run) => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'untwisty'
+      button.title = label
+      button.setAttribute('aria-label', label)
+      button.append(kindIcon(glyph))
+      button.onclick = async (event) => {
+        event.stopPropagation()
+        await run()
+      }
+      return button
+    }
+    quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
+    quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
+    row.append(quick)
+  }
   const actions = menuItemsFor(node)
   if (actions.length > 0) row.append(menuButton(node, actions))
 
@@ -3531,23 +3689,95 @@ async function toggle(node, li) {
  * request — which is also why it can run on every keystroke. Only rows are put away: the branches stay, so the
  * answer still shows *where* the matching sessions are.
  */
-function applySearch() {
-  const query = document.getElementById('session-search').value.trim().toLowerCase()
-  const note = document.getElementById('search-note')
-  let hidden = 0
-  let shown = 0
-  for (const li of treeList.querySelectorAll('li')) {
-    const label = li.querySelector(':scope > .row > .label')?.textContent ?? ''
-    const isSession = li.dataset.kind === 'session'
-    if (!isSession) continue
-    const matches = query.length === 0 || label.toLowerCase().includes(query)
-    li.hidden = !matches
-    if (matches) shown += 1
-    else hidden += 1
+/**
+ * What a search runs over: every session, and the roots that place it.
+ *
+ * Held until `refreshSessions` says the set changed, because a keystroke should not refetch two endpoints, and
+ * rebuilt rather than patched when it does change — a stale index would answer a search with sessions that no
+ * longer exist and miss the ones that do.
+ */
+let searchIndex = null
+
+async function loadSearchIndex() {
+  if (searchIndex !== null) return searchIndex
+  const [sessions, treeBody] = await Promise.all([
+    fetch('/api/sessions').then((response) => (response.ok ? response.json() : [])).catch(() => []),
+    fetch('/api/tree').then((response) => (response.ok ? response.json() : { children: [] })).catch(() => ({ children: [] })),
+  ])
+  searchIndex = {
+    sessions: Array.isArray(sessions) ? sessions : [],
+    roots: (treeBody.children ?? []).map((node) => ({ path: node.path, title: node.label })),
   }
-  note.hidden = query.length === 0
-  note.textContent = query.length === 0 ? '' : shown === 0 ? `no session matches “${query}”` : `${shown} session${shown === 1 ? '' : 's'} match${shown === 1 ? 'es' : ''}`
+  return searchIndex
 }
+
+/** The workspace a folder belongs to: the longest root path that contains it. */
+function workspaceOf(cwd, roots) {
+  let best = null
+  for (const root of roots) {
+    if (cwd === root.path || cwd.startsWith(root.path + '/')) {
+      if (best === null || root.path.length > best.path.length) best = root
+    }
+  }
+  return best === null ? null : best.title
+}
+
+/**
+ * The search box, as DSH has it: a query **replaces** the tree with a flat result list whose rows say which
+ * workspace each hit is in, and an empty query restores the tree.
+ *
+ * Measured against the earlier version, which only hid session rows: that kept the tree's shape but could not
+ * find a session whose branch was closed, and it never said where a hit lived. A search is about names.
+ */
+async function applySearch() {
+  const query = document.getElementById('session-search').value.trim()
+  const results = document.getElementById('search-results')
+  const note = document.getElementById('search-note')
+  if (query.length === 0) {
+    results.hidden = true
+    results.replaceChildren()
+    treeList.hidden = false
+    note.hidden = true
+    note.textContent = ''
+    return
+  }
+  const index = await loadSearchIndex()
+  const needle = query.toLowerCase()
+  const hits = index.sessions.filter((meta) => `${meta.title ?? ''} ${meta.id}`.toLowerCase().includes(needle))
+  treeList.hidden = true
+  results.hidden = false
+  results.replaceChildren(
+    ...hits.map((meta) => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'hit'
+      button.setAttribute('role', 'treeitem')
+      const title = document.createElement('span')
+      title.className = 'hit-title'
+      title.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
+      const place = document.createElement('span')
+      place.className = 'hit-workspace'
+      /**
+       * The workspace, and the **age**. DSH's results read `title workspace`; the age is added because a store
+       * can hold several sessions with the same first message — measured: a search for `ready` returned 34 rows
+       * with one title between them — and a result a reader cannot tell apart is a result they cannot choose.
+       */
+      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      button.append(title, place)
+      button.onclick = () => showSession(meta.id)
+      return button
+    }),
+  )
+  note.hidden = hits.length > 0
+  note.textContent = hits.length > 0 ? '' : `no session matches “${query}”`
+}
+
+/** Escape is the second way out of a search, because the first is a small × most browsers draw. */
+document.getElementById('session-search').addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return
+  document.getElementById('session-search').value = ''
+  applySearch()
+})
 
 async function renderTree() {
   rowIndex.clear()
