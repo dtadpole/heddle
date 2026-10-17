@@ -208,13 +208,14 @@ function unescapeEntities(text: string): string {
  * the number is presentation, so selecting the panel and copying it gets the source and not the
  * numbers.
  */
-export function renderCode(source: string, language: string): string {
+export function renderCode(source: string, language: string, options: { readonly gutter?: boolean } = {}): string {
   const pieces = piecesFrom(highlightCode(source.replace(/\r\n?/g, '\n'), language))
   const out: string[] = ['<code class="code">']
   let line = 1
   let open = false
+  const gutter = options.gutter !== false
   const startLine = (): void => {
-    out.push(`<span class="line"><span class="ln">${line}</span>`)
+    out.push(gutter ? `<span class="line"><span class="ln">${line}</span>` : '<span class="line">')
     open = true
   }
   startLine()

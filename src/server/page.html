@@ -1117,6 +1117,13 @@
   .tr-d-rows dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
   .tr-d-section { margin: 12px 0 4px; color: var(--text-2); font-size: 13px; font-weight: 600; }
   .tr-d-body pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 4px; background: var(--code-bg); color: var(--text); font: 12px/19px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tr-d-acc { margin: 0 0 6px; }
+  .tr-d-acc > summary { cursor: pointer; padding: 2px 0; color: var(--text-2); font-size: 13px; font-weight: 600; list-style: none; }
+  .tr-d-acc > summary::-webkit-details-marker { display: none; }
+  .tr-d-acc > summary::before { content: '▸'; display: inline-block; width: 12px; color: var(--text-3); }
+  .tr-d-acc[open] > summary::before { content: '▾'; }
+  .tr-html pre { margin: 6px 0 0; }
+  .tr-error-text { color: #d14343; }
   .tr-d-body details { margin: 2px 0; }
   .tr-d-body details > summary { color: var(--text-2); cursor: pointer; font-size: 13px; }
   .tr-d-empty { color: var(--text-3); font-size: 13px; }
@@ -1908,7 +1915,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
    * render idempotent whoever called it.
    */
   turnAnchors.clear()
-  trajectory.rows = rowsOf(data.ledger ?? data)
+  trajectory.rows = rowsOf(data)
   trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
   trajectory.timeline = timeline_
   trajectory.data = data
@@ -2194,9 +2201,9 @@ function renderDetails(row) {
    */
   const sections = [
     ['Summary', () => summarySection(row, record, step)],
-    ['Payload', () => (String(record.text ?? '') === '' ? trEmpty('nothing was recorded as a payload') : trPre(String(record.text)))],
-    ['Result', () => (String(record.result ?? '') === '' ? trEmpty('no result recorded') : trPre(String(record.result)))],
-    ...(row.kind === 'tool' ? [['Schema', () => schemaSection(record)]] : []),
+    ['Payload', () => (row.inspection?.payload !== undefined ? htmlBlock(row.inspection.payload) : String(record.text ?? '') === '' ? trEmpty('nothing was recorded as a payload') : trPre(String(record.text)))],
+    ['Result', () => (row.inspection?.result !== undefined ? htmlBlock(row.inspection.result) : String(record.result ?? '') === '' ? trEmpty('no result recorded') : trPre(String(record.result)))],
+    ...(row.kind === 'tool' ? [['Schema', () => schemaSection(row, record)]] : []),
     ['Timing', () => timingSection(record, turn, step)],
   ]
   const show = (index) => {
@@ -2217,33 +2224,62 @@ function renderDetails(row) {
 }
 
 function summarySection(row, record, step) {
+  /**
+   * DSH's Summary is an **accordion**: Hierarchy, Status, Payload, Result, Schema and Timing, each an
+   * `h3`-and-chevron heading that collapses, open by default. A `<details open>` is the native version of
+   * that control: it collapses without script and keeps its keyboard behaviour.
+   */
   const box = document.createElement('div')
   box.append(
-    trRows([
-      ['Kind', KIND_LABEL[row.kind] ?? row.kind],
-      ['Status', record.inFlight === true ? 'Running' : record.state === 'error' ? 'Failed' : 'Completed'],
-      ['Model', step?.model],
-      ['Started', clock(record.startedAt)],
-      ['Duration', human(record.durationMs)],
-      ['TTFT', human(record.ttftMs)],
-      ['Turn', row.loose ? 'none' : row.turn],
-      ['Step', row.step],
-    ]),
+    accOpen('Hierarchy', trRows([['Turn', row.loose ? 'none' : row.turn], ['Step', row.step], ['Model', step?.model]])),
+    accOpen('Status', trRows([['Status', record.inFlight === true ? 'Running' : record.state === 'error' ? 'Failed' : 'Completed']])),
   )
   if (row.kind === 'tool') {
-    box.append(trSection('Payload'), trPre(String(record.text ?? '')))
-    box.append(trSection('Result'), trPre(String(record.result ?? '(no result recorded)')))
+    box.append(
+      accOpen('Payload', row.inspection?.payload !== undefined ? htmlBlock(row.inspection.payload) : trPre(String(record.text ?? ''))),
+      accOpen('Result', row.inspection?.result !== undefined ? htmlBlock(row.inspection.result) : trPre(String(record.result ?? '(no result recorded)'))),
+      accOpen('Schema', schemaSection(row, record)),
+    )
   } else if (record.text !== undefined && String(record.text) !== '') {
-    box.append(trSection('Content'), trPre(String(record.text)))
+    box.append(accOpen('Content', trPre(String(record.text))))
   }
+  box.append(accOpen('Timing', timingSection(record, trajectory.turns.get(row.turn), step)))
   if (record.note !== undefined) box.append(trEmpty(String(record.note)))
   return box
 }
 
-/** The tool's own definition, as the profile declared it. */
-function schemaSection(record) {
+/** A Summary section: a native disclosure, open by default, with a chevron in its summary. */
+function accOpen(title, content) {
+  const details = document.createElement('details')
+  details.className = 'tr-d-acc'
+  details.open = true
+  const summary = document.createElement('summary')
+  summary.textContent = title
+  details.append(summary, content)
+  return details
+}
+
+/** Markup the **server** rendered with the tested, escaping renderer. */
+function htmlBlock(html) {
   const box = document.createElement('div')
+  box.className = 'tr-html'
+  box.innerHTML = html
+  return box
+}
+
+/** The tool's own definition, as the profile declared it. */
+function schemaSection(row, record) {
+  const box = document.createElement('div')
+  const rendered = row.inspection?.schema
   const name = record.name ?? String(record.label ?? '').replace(/^→ /, '')
+  if (rendered !== undefined) {
+    const heading = document.createElement('div')
+    heading.className = 'tr-d-where'
+    heading.textContent = rendered.name
+    box.append(heading, trPre(rendered.description ?? ''))
+    box.append(trSection('Parameters'), htmlBlock(rendered.parameters))
+    return box
+  }
   const tool = (trajectory.tools ?? []).find((entry) => entry.name === name)
   if (tool === undefined) {
     box.append(trEmpty('this profile does not describe that tool'))
@@ -2791,8 +2827,15 @@ const chatMain = document.querySelector('main')
 const columnGrips = [...document.querySelectorAll('.column-grip')]
 /** DSH's `CONTENT_MIN`, the floor of a dragged width. */
 const COLUMN_MIN = 640
-/** DSH's `CONTENT_EDGE_BUDGET`: the room its two handles and their safe edges need beside the column. */
-const COLUMN_EDGE_BUDGET = 176
+/**
+ * The room the two grips and their safe edges need beside the column.
+ *
+ * DSH uses **176px** for the same purpose, but its centre region is ~1018px wide at a 1280 window; heddle's is
+ * ~878px because its sidebar is wider, and 176 there would leave a 680px default only 22px of headroom — a grip
+ * that cannot move is not a grip. 48px is the same rule measured against this layout: two 10px grips, a 4px
+ * inset each, and a 10px margin, which is what the CSS width above also assumes.
+ */
+const COLUMN_EDGE_BUDGET = 48
 const COLUMN_STORAGE = 'heddle.chatColumn'
 
 /** The widest column the view area can hold: everything but the two grips' edge budget. */

@@ -10,6 +10,7 @@ import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { projectLedger, projectRows, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
+import { inspectTool } from './tool-inspector.ts'
 import { PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
@@ -1169,12 +1170,29 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
        * The **tool catalog** travels with the ledger: DSH's tool inspector has a Schema section beside the
        * payload and the result, and the page needs the definition the model was offered to show it.
        */
-      respond(
-        response,
-        200,
-        'application/json',
-        `${JSON.stringify({ id, ledger, rows: projectRows(ledger), timeline: projectTimeline(ledger), tools: catalogOf(ctx.tools.describe()) }, null, 2)}\n`,
+      const tools = catalogOf(ctx.tools.describe())
+      /**
+       * A tool row travels with its inspector content already rendered: the payload and the schema
+       * parameters are highlighted JSON, and every byte of them is escaped by the renderer the unit suite
+       * judges. The page therefore never builds markup from a model's strings.
+       */
+      const rows = projectRows(ledger).map((row) =>
+        row.kind === 'tool'
+          ? {
+              ...row,
+              inspection: inspectTool(
+                {
+                  payload: row.record.text,
+                  result: row.record.result ?? '',
+                  ...(row.record.name !== undefined ? { name: row.record.name } : {}),
+                  ...(row.record.state === 'error' ? { error: true } : {}),
+                },
+                tools,
+              ),
+            }
+          : row,
       )
+      respond(response, 200, 'application/json', `${JSON.stringify({ id, ledger, rows, timeline: projectTimeline(ledger), tools }, null, 2)}\n`)
       return
     }
     /** The session's own record, which is where a switch from the panel was written. */

@@ -186,6 +186,21 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     // Clicking the call examines it: the details pane with DSH's tabs, and the full result on Result.
     await browser.evaluate(`([...document.querySelectorAll('#tr-table tbody tr')].find((row) => row.dataset.kind === 'tool')).click()`)
     assert.ok(await browser.waitFor('document.getElementById("tr-details") !== null && !document.getElementById("tr-details").hidden', 10_000), 'the details pane opened')
+    // DSH's Summary is a six-section accordion, open by default, and JSON is rendered as JSON.
+    const accordion = JSON.parse(
+      await browser.evaluate(`(() => {
+        const sections = [...document.querySelectorAll('#tr-details .tr-d-acc')]
+        return JSON.stringify({
+          titles: sections.map((section) => section.querySelector('summary')?.textContent),
+          allOpen: sections.every((section) => section.open === true),
+          highlighted: document.querySelectorAll('#tr-details .tr-html span[class^="hljs-"]').length,
+        })
+      })()`),
+    )
+    assert.deepEqual(accordion.titles, ['Hierarchy', 'Status', 'Payload', 'Result', 'Schema', 'Timing'], 'the Summary is DSH’s six-section accordion')
+    assert.ok(accordion.allOpen, 'every section is open by default, as DSH shows it')
+    assert.ok(accordion.highlighted > 0, 'and the payload is highlighted JSON, not a text dump')
+
     const examined = JSON.parse(
       await browser.evaluate(`(() => {
         const tabs = [...document.querySelectorAll('#tr-details .tr-d-tab')]

@@ -282,3 +282,10 @@ test('a link this server cannot resolve is left alone, and a refused one is text
   const raw = String(renderSource('/x/a.md', '<a href="README.md">raw</a>').html)
   assert.match(raw, /href="\/api\/raw\?path=%2Fx%2FREADME\.md"/, 'a raw HTML link is resolved to the served address')
 })
+
+test('a JSON block can be rendered without the line-number gutter', () => {
+  const html = renderCode('{"a": 1}', 'json', { gutter: false })
+  assert.ok(!html.includes('class="ln"'), 'no gutter spans')
+  assert.match(html, /hljs-/, 'but the JSON is still highlighted')
+  assert.equal(textOf(html), '{"a": 1}')
+})
