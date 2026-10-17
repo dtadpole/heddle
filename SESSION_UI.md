@@ -127,7 +127,7 @@ projection and already exists).
 |---|---|---|---|
 | Row content | title (or the clock folder name) + age, with the turn count on hover | state prefix + title + age | no state prefix; a session with no title still reads as an id |
 | Row controls | one `…`, always visible | `…` + `Archive` + `Pin/Unpin`, revealed on hover | actions are all behind the menu; nothing appears on hover |
-| Menu | `Pin/Unpin`, `Rename…`, `Archive/Unarchive` | same plus **Fork**, with shortcuts | **no fork**, no shortcuts |
+| Menu | `Pin session`, `Rename`, `Fork session`, `Archive session` (and the reversed labels when pinned or archived) | `Pin`, `Rename…`, `Archive`, no `Fork` | the same four names DSH uses, plus fork; shortcuts bound but not printed beside the items |
 | Search | in-place filter of session rows; branches stay | separate flat results tree with the workspace on each row | ours loses the "where is it" answer; theirs loses the shape |
 | View options | one `Show archived` / `Hide archived` item | grouping, ordering, three archive states | no grouping/ordering choice, binary archive |
 | Panel | `Chat` + `Trajectory` (and `Docs` while a document is open) | `Chat` + `Trajectory` | close |

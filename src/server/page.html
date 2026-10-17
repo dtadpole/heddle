@@ -668,6 +668,9 @@
   #view-options .menu[hidden] { display: none; }
   #view-options .menu button { text-align: left; font: inherit; font-size: .82rem; padding: .3rem .5rem; background: none; border: 0; border-radius: .25rem; color: inherit; cursor: pointer; }
   #view-options .menu button:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
+  /** The chosen state's tick: drawn by the sheet so the item's name stays the action. */
+  #view-options .menu button[data-current='true'] { font-weight: 500; }
+  #view-options .menu button[data-current='true']::before { content: '✓'; display: inline-block; width: 1rem; opacity: .8; }
   #tree .menu-wrap { position: relative; display: inline-flex; }
   #tree .menu { position: absolute; right: 0; top: 1.35rem; z-index: 5; display: flex; flex-direction: column; min-width: 10rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); }
   #tree .menu[hidden] { display: none; }
@@ -2828,14 +2831,15 @@ const columnGrips = [...document.querySelectorAll('.column-grip')]
 /** DSH's `CONTENT_MIN`, the floor of a dragged width. */
 const COLUMN_MIN = 640
 /**
- * The room the two grips and their safe edges need beside the column.
+ * The room the two grips and their safe edges need beside the column: **116px**.
  *
- * DSH uses **176px** for the same purpose, but its centre region is ~1018px wide at a 1280 window; heddle's is
- * ~878px because its sidebar is wider, and 176 there would leave a 680px default only 22px of headroom — a grip
- * that cannot move is not a grip. 48px is the same rule measured against this layout: two 10px grips, a 4px
- * inset each, and a 10px margin, which is what the CSS width above also assumes.
+ * It is DSH's own sum, not a guess: on each side a 24px offset outside the column, a 10px grip, and a 24px safe
+ * edge — 58px a side, 116 for the pair. DSH's number is 176 because its centre region is ~1018px wide; heddle's
+ * is ~878px, and this is the same rule measured against it. The budget also has to be ≥116 or the grips narrow
+ * (the CSS width is `min(10px, (area − column)/2 − 48px)`), and a grip that shrinks as the column grows is a grip
+ * that cannot be caught.
  */
-const COLUMN_EDGE_BUDGET = 48
+const COLUMN_EDGE_BUDGET = 116
 const COLUMN_STORAGE = 'heddle.chatColumn'
 
 /** The widest column the view area can hold: everything but the two grips' edge budget. */
@@ -2843,13 +2847,15 @@ function columnMax() {
   return Math.max(COLUMN_MIN, chatMain.clientWidth - COLUMN_EDGE_BUDGET)
 }
 /**
- * The width the column has when nobody has chosen one: **DSH's own formula**, `clamp(area × .64, 680, 920)`.
+ * The width the column has when nobody has chosen one: **80–85% of the window**, its midpoint 82.5%.
  *
- * Measured in `ConversationWidthControls.resolveContentWidth`: the default is 64% of the view area clamped to
- * the 680–920 band, not the whole area — that is what keeps the reading line the typography was chosen for.
+ * The owner asked for this after using the DSH default: `DSH's clamp(area × .64, 680, 920)` reads as narrow on
+ * this layout once the sidebar has taken its share. 82.5% of `window.innerWidth` is the middle of the asked-for
+ * band, and it is still clamped to what the view area can hold (`columnMax`), so a narrow window shows the widest
+ * column that fits instead of one that overflows. A stored preference always wins over this.
  */
 function columnDefault() {
-  return Math.min(columnMax(), Math.max(680, Math.min(chatMain.clientWidth * 0.64, 920)))
+  return Math.min(columnMax(), Math.max(COLUMN_MIN, Math.round(window.innerWidth * 0.825)))
 }
 /** Write the column, clamped, and report what was actually written. The grips follow it. */
 function setColumn(width) {
@@ -3986,13 +3992,19 @@ function archiveQuery(separator) {
 
 /** DSH's `View options`: the archive filter in one control, with the state it is in marked. */
 function viewOptionItems() {
+  /**
+   * DSH's three labels, verbatim. The current one is marked with aria-checked and a tick drawn by CSS rather than by a
+   * character in the label: the name of the item has to be the action, and a name that changes with the state is two
+   * names for one thing.
+   */
   const modes = [
     ['hide', 'Hide archived'],
     ['show', 'All conversations (show archived)'],
     ['only', 'Archived only'],
   ]
   return modes.map(([mode, label]) => ({
-    label: `${archiveMode === mode ? '✓ ' : '\u2003'}${label}`,
+    label,
+    current: archiveMode === mode,
     run: async () => {
       archiveMode = mode
       rememberArchived()
@@ -4481,10 +4493,16 @@ function menuItemsFor(node) {
      * two acts frequent enough to skip the menu (pin and archive) sit beside the `…`, and everything else is
      * inside it. One implementation feeds both places — a second copy would be a second set of behaviours.
      */
-    items.push({ label: node.pinned ? 'Unpin' : 'Pin', run: () => pinSession(node) })
-    items.push({ label: 'Rename…', run: () => renameSession(node) })
-    items.push({ label: 'Fork', run: () => forkSession(node) })
-    items.push({ label: node.archived ? 'Unarchive' : 'Archive', run: () => archiveSession(node) })
+    /**
+     * DSH's names, verbatim, because that is what the owner asked for and what a person recognises: `Pin session`,
+     * `Rename`, `Fork session`, `Archive session` — and `Unpin session` / `Unarchive session` when the state is the
+     * other way round. The shortcut the other menu shows beside each item is not printed here; the keys work, and
+     * duplicating them into the label would make the name something other than the action.
+     */
+    items.push({ label: node.pinned ? 'Unpin session' : 'Pin session', run: () => pinSession(node) })
+    items.push({ label: 'Rename', run: () => renameSession(node) })
+    items.push({ label: 'Fork session', run: () => forkSession(node) })
+    items.push({ label: node.archived ? 'Unarchive session' : 'Archive session', run: () => archiveSession(node) })
   }
   if (node.kind === 'instance') {
     /**
@@ -4708,7 +4726,11 @@ function menuButton(node, items) {
   for (const item of items) {
     const entry = document.createElement('button')
     entry.type = 'button'
-    entry.setAttribute('role', 'menuitem')
+    entry.setAttribute('role', item.current === true ? 'menuitemradio' : 'menuitem')
+    if (item.current === true) {
+      entry.setAttribute('aria-checked', 'true')
+      entry.dataset.current = 'true'
+    }
     entry.textContent = item.label
     entry.onclick = async (event) => {
       event.stopPropagation()
