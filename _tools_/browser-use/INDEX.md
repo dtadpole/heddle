@@ -77,14 +77,14 @@ There are three ways this tool is used, and they share the one driver:
 
 | Who | How | Why that way |
 |---|---|---|
-| a **check or verifier** | import the one-page wrapper, [`_tools_/check-helpers/browser.mjs`](../check-helpers/browser.mjs): `openBrowser()` returns `goto`, `evaluate`, `waitFor`, `screenshot`, `close` | the wrapper opens a browser and a temporary profile per call, headless by default, so a check that opens a window steals no focus and leaves no login behind |
+| a **check or verifier** | import the one-page wrapper, [`_tools_/verify-runner/browser.mjs`](../verify-runner/browser.mjs): `openBrowser()` returns `goto`, `evaluate`, `waitFor`, `screenshot`, `close` | the wrapper opens a browser and a temporary profile per call, headless by default, so a check that opens a window steals no focus and leaves no login behind |
 | a **person** | the command line, `node _tools_/browser-use/cli.mjs …` | headed by default, one browser kept between commands, a snapshot's uids drive the next click |
 | an **agent in a heddle session** | the same command line, through the shell (`bash`), or the library imported from a script | the tool is **not registered as a heddle tool**: it is repository tooling, not part of the shipped harness. An agent that needs it runs it, and `cli.mjs tools` is how it discovers the surface |
 
 A check that needs a page looks like this — the pattern every browser check in `_verifiers_/` follows:
 
 ```js
-import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 const browser = await openBrowser({ width: 1400, height: 900 })
 try {
@@ -200,5 +200,5 @@ whether it runs headless or headed.
 [Browser modes](../../../reflection/shared/_conventions_/core-conventions/browser-modes.md) for when this
 tool runs headed and when headless, [`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/INDEX.md) for the reading of the surface
 this mirrors, [`_verifiers_/INDEX.md`](_verifiers_/INDEX.md) for the claims it must keep,
-[`../check-helpers/INDEX.md`](../check-helpers/INDEX.md) for the one-page wrapper the heddle verifiers
+[`../verify-runner/INDEX.md`](../verify-runner/INDEX.md) for the one-page wrapper the heddle verifiers
 import, and [`../../_verifiers_/INDEX.md`](../../_verifiers_/INDEX.md) for those heddle claims.

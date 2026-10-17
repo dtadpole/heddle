@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 
-import { repoRoot, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 9 — the Web UI daemon.

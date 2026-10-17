@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, parseJson, removeDir, runCli, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, parseJson, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 0 — the configuration system.

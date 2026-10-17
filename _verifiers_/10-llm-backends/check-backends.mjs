@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { chatDouble, httpConfig, isolatedHome, parseJson, removeDir, responsesDouble, runCli, skipUnless, writeJson } from '../../_tools_/check-helpers/lib.mjs'
+import { chatDouble, httpConfig, isolatedHome, parseJson, removeDir, responsesDouble, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 1 — LLM backends.

@@ -25,7 +25,7 @@ import {
  * either store layout, and `readTranscript` must decode either format. A check that reads a path it
  * guessed is a check that can pass while judging nothing.
  *
- *     node --test _tools_/check-helpers/_tests_/<suite>/unit.test.mjs
+ *     node --test _tools_/verify-runner/_tests_/<suite>/unit.test.mjs
  */
 
 /** A scratch directory, removed by the caller. */

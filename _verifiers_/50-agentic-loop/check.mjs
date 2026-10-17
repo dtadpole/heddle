@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, parseJson, readTranscript, removeDir, runCli, scriptedConfig, sessionsUnder, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, parseJson, readTranscript, removeDir, runCli, scriptedConfig, sessionsUnder, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 5 — the agentic loop.

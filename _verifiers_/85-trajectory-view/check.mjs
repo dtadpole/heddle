@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
+import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — the Trajectory view.
@@ -29,7 +29,7 @@ function startCli(args, env) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const { repoRoot } = await import('../../_tools_/check-helpers/lib.mjs')
+      const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
@@ -58,7 +58,7 @@ function startCli(args, env) {
 async function startServer(label) {
   const home = isolatedHome(`trajectory-${label}`)
   const work = fixtureDir(`trajectory-${label}`)
-  const { config } = (await import('../../_tools_/check-helpers/lib.mjs')).scriptedConfig({
+  const { config } = (await import('../../_tools_/verify-runner/lib.mjs')).scriptedConfig({
     home,
     steps: [
       { toolCall: { name: 'bash', arguments: { command: 'pwd' } } },

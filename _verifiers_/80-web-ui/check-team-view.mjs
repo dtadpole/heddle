@@ -3,8 +3,8 @@ import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, repoRoot, scriptedConfig, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
+import { fixtureDir, isolatedHome, removeDir, repoRoot, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The team view: a Lead's session shows its roster, the shared board and the mailbox ledger.

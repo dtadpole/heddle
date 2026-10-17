@@ -1,5 +1,5 @@
 ---
-title: Check Helpers Rules
+title: Check Library Rules
 version: 1.0.0
 description: The rules the verifier checks stand on, judged without a browser or a CLI.
 grounded_in:
@@ -9,7 +9,7 @@ grounded_in:
 # `helper-rules`
 
 Instance of [`_tests_`](../INDEX.md). Holds [`unit.test.mjs`](unit.test.mjs) for
-[`_tools_/check-helpers/`](../../INDEX.md): how a transcript is found and decoded in either store
+[`lib.mjs`](../../lib.mjs), the library every check imports: how a transcript is found and decoded in either store
 layout, how sessions are listed, how a JSON document is taken from a noisy stream, how a directory is
 fingerprinted, and what `skipUnless` reports.
 
@@ -19,5 +19,5 @@ nothing.
 ## Run it
 
 ```bash
-node --test _tools_/check-helpers/_tests_/helper-rules/unit.test.mjs
+node --test _tools_/verify-runner/_tests_/helper-rules/unit.test.mjs
 ```

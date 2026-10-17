@@ -160,7 +160,7 @@ goal's table still reads as a completed part, and the goal file's prose mentions
 | P1 | split `80-web-ui`: keep `check.mjs` there, move the view checks into a `82-web-ui-views` instance, and move the trajectory, file and workspace duplications to their owning parts | one part, one claim; today the UI part is a layer and the layer parts are parts |
 | P2 | add `77-approvals-policy`, `83-goal-objective`, `99-published-package` | three mechanisms are delivered and unjudged, one of them named by the goal itself |
 | P3 | split `70-workspaces-sessions` into the mechanism and the session-management UI, or move its drawing claims to the UI instance | 36 tests in one instance hide which claim failed |
-| P4 | extract the server-plus-double-plus-browser setup the `80-web-ui` checks each repeat into `_tools_/check-helpers` | nine copies of one teardown is nine places a leak can hide |
+| P4 | extract the server-plus-double-plus-browser setup the `80-web-ui` checks each repeat into `_tools_/verify-runner` | nine copies of one teardown is nine places a leak can hide |
 
 Each proposal is a separate pass; none should be made while another session is editing the same checks,
 and each is a change to this contract rather than to a check.

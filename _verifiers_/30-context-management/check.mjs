@@ -16,7 +16,7 @@ import {
   skipUnless,
   tempDir,
   writeJson,
-} from '../../_tools_/check-helpers/lib.mjs'
+} from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 3 — context management.

@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The check behind [`dsh-context.md`](dsh-context.md).

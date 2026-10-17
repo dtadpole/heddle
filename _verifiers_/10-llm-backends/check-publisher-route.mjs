@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { isolatedHome, parseJson, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/check-helpers/lib.mjs'
+import { isolatedHome, parseJson, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The Anthropic publisher route, offline against a double and then — if the machine has one — against the
