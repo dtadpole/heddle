@@ -101,6 +101,10 @@ export type TeamErrorCode =
   | 'TEAM_MESSAGE_DELIVERED'
   | 'TEAM_LIMIT'
   | 'TEAM_LEAD_REQUIRED'
+  | 'TEAM_UNAVAILABLE'
+  | 'TEAM_MAILBOX_FULL'
+  | 'TEAM_MESSAGE_TOO_LARGE'
+  | 'TEAM_SELF_MESSAGE'
 
 export class TeamError extends Error {
   readonly code: TeamErrorCode
@@ -222,9 +226,14 @@ export function queueMessage(state: TeamState, message: TeamMessageSnapshot): Te
   if (message.senderId !== state.id && (sender === undefined || sender.phase !== 'active')) {
     throw new TeamError(`message '${message.id}' has an unknown or inactive sender`, 'TEAM_MESSAGE_INVALID')
   }
+  /**
+   * The target may still be provisioning: mail to it waits in the durable queue and is delivered once
+   * `recover` (or the spawn's own activation) settles the member. A failed target is refused, because nothing
+   * will ever take that mail.
+   */
   const target = message.targetId === state.id ? undefined : memberById(state, message.targetId)
-  if (message.targetId !== state.id && (target === undefined || target.phase !== 'active')) {
-    throw new TeamError(`message '${message.id}' has an unknown or inactive target`, 'TEAM_MESSAGE_INVALID')
+  if (message.targetId !== state.id && (target === undefined || target.phase === 'failed')) {
+    throw new TeamError(`message '${message.id}' has an unknown or failed target`, 'TEAM_MESSAGE_INVALID')
   }
   if (!Array.isArray(message.content) || message.content.length === 0) {
     throw new TeamError(`message '${message.id}' has no content`, 'TEAM_MESSAGE_INVALID')
@@ -465,6 +474,8 @@ export function applyTaskAction(
 /** The task as a reader sees it, with readiness and advisory write-scope overlaps. */
 export function taskView(state: TeamState, task: TeamTaskSnapshot): TeamTaskView {
   const owner = task.ownerId === undefined ? undefined : state.members.find((one) => one.id === task.ownerId)
+  /** The Lead owns work as 'lead' rather than as a member snapshot. */
+  const ownerName = owner?.name ?? (task.ownerId === state.id ? 'lead' : undefined)
   const warnings = task.writeScopes.flatMap((scope) =>
     state.tasks
       .filter((other) => other.id !== task.id && other.status !== 'deleted' && other.status !== 'completed' && other.writeScopes.includes(scope))
@@ -476,7 +487,7 @@ export function taskView(state: TeamState, task: TeamTaskSnapshot): TeamTaskView
     subject: task.subject,
     description: task.description,
     status: task.status,
-    ...(owner !== undefined ? { ownerName: owner.name } : {}),
+    ...(ownerName !== undefined ? { ownerName } : {}),
     blockedBy: task.blockedBy,
     writeScopes: task.writeScopes,
     ready: isReady(state, task),

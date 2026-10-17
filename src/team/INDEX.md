@@ -23,10 +23,12 @@ which is what makes it restartable under the [goal-reentrancy convention](../../
 | File | What it is |
 |---|---|
 | [`state.ts`](state.ts) | the **pure layer**: team events, strict fold, member lifecycle, task board with revision compare-and-set, readiness and advisory write scopes, mailbox ledger. No service, no model, no filesystem — the log is the only input |
+| [`service.ts`](service.ts) | the **service layer** over injected dependencies: `spawn` (provisioning event → own attributed session → first turn → active), `send` (durable queue, target-confirmed delivery, per-target serialization, provisioning queue), task create/update with journaling, `waitForChange` (journal wake + timeout + `noProgress`), Lead-only `interrupt`, and `recover` (settle provisioning from the durable child, redeliver undelivered mail) |
 
-Planned files, in the order the implementation goal takes them: `service.ts` (the Cordis service: spawn,
-send, task actions, wait, interrupt, recovery), `tools.ts` (the nine model-facing tools and the collaboration
-policy), a live-turn registry for status/interrupt, the opt-in profile rows, and the Web UI view.
+Live status and interruption come from [`../agent/turns.ts`](../agent/turns.ts): the process-local registry the
+loop registers each turn in, provided by the `turns` profile row (optional — a minimal profile runs turns
+without interruption). Planned next: `tools.ts` (the nine model-facing tools and the collaboration policy), the
+team plugin that wires this service to `runTurn` and `ctx.turns`, and the Web UI view.
 
 ## Decisions, and why
 

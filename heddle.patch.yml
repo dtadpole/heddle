@@ -84,6 +84,11 @@
       name: ./src/plugins/goal-tool.ts
       inject: [goal, tools]
 
+    # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
+    # the loop checks for it — so a minimal profile can run turns without interruption.
+    - id: turns
+      name: ./src/plugins/turns.ts
+
     - id: tools
       name: ./src/plugins/tools.ts
       inject: [approvals, sandbox]
