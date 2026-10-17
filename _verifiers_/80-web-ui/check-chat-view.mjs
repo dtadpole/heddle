@@ -240,13 +240,17 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
    * The claim is **parity with the reference**, so the numbers in it were read out of DSH's own running GUI
-   * through the browser rather than chosen: the 680px column, 14px text on a 24px line, the 20px-radius
+   * through the browser rather than chosen: the column, the text size and leading, the 20px-radius
    * bubble on `#2c2c2e` with 10px/16px padding, a reasoning row exactly 24px tall whose **kind icon gives way
    * to a chevron on hover** (`O_Ebla_activityIcon` → `O_Ebla_chevron` by opacity), and a summary that goes
    * **sticky** over its own body once open.
    *
    * Judged by computed style rather than by screenshots: a screenshot shows that today looks right, while the
    * computed value is the thing a later stylesheet can break without anyone noticing.
+   *
+   * The reading scale is agentcloud's, not DSH's: its answer paragraphs measure 14px / **22.75px** (a 1.625 ratio),
+   * its list items 14/21 with a 4px top margin, its paragraphs `0 0 12px`, and its composer 14/21. The owner asked
+   * for it after finding DSH's 24px leading looser than agentcloud's.
    */
   const server = await startServer('style', (work) => [
     /**
@@ -254,7 +258,8 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
      * and no text to continue with. Measured here first, as two turns instead of four.
      */
     { reasoning: 'I should look at the folder before answering.', toolCall: { name: 'list_dir', arguments: { path: work } } },
-    { text: 'it listed the folder' },
+    /** A list and a fence, because agentcloud's own rhythm is part of the claim being judged. */
+    { text: 'A **bold** answer.\n\n- first item\n- second item\n\n```js\nconst x = 1\n```\n' },
   ])
   const browser = await openBrowser()
   try {
@@ -322,6 +327,13 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
           toolClosed: tool.open === false,
           toolSummary: toolLine.textContent,
           toolGlyphs: toolLine.querySelectorAll('svg').length,
+          paragraphMargin: (() => { const p = document.querySelector('#log .turn.assistant.markdown p'); return p ? getComputedStyle(p).margin : null })(),
+          listLine: (() => { const li = document.querySelector('#log .turn.assistant.markdown li'); return li ? getComputedStyle(li).lineHeight : null })(),
+          listFont: (() => { const li = document.querySelector('#log .turn.assistant.markdown li'); return li ? getComputedStyle(li).fontSize : null })(),
+          codeFont: (() => { const code = document.querySelector('#log .turn.assistant.markdown pre code'); return code ? getComputedStyle(code).fontSize : null })(),
+          codeLine: (() => { const code = document.querySelector('#log .turn.assistant.markdown pre code'); return code ? getComputedStyle(code).lineHeight : null })(),
+          composerFont: getComputedStyle(document.querySelector('#prompt textarea')).fontSize,
+          composerLine: getComputedStyle(document.querySelector('#prompt textarea')).lineHeight,
         }
       })())`),
     )
@@ -329,10 +341,17 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     // Typography and the column, against DSH's measured values.
     assert.ok(Number.parseFloat(measured.column) >= 640, 'the conversation column is at least its 640 floor')
     assert.equal(measured.logFont, '14px', `the chat is 14px, as DSH\\'s content font is — MEASURED ${JSON.stringify(measured)}`)
-    assert.equal(measured.logLine, '24px', 'on a 24px line')
+    assert.equal(measured.logLine, '22.75px', 'on the 22.75px line agentcloud measures')
     assert.equal(measured.logGap, '6px', 'with DSH\'s 6px flow gap')
     assert.equal(measured.assistantFont, '14px', 'the answer is 14px')
-    assert.equal(measured.assistantLine, '24px', 'on 24px')
+    assert.equal(measured.assistantLine, '22.75px', 'the answer leads at the same 22.75px')
+    assert.match(measured.paragraphMargin, /^0px 0px 12px/, `paragraphs carry agentcloud's bottom-only 12px (${measured.paragraphMargin})`)
+    assert.equal(measured.listFont, '14px', 'a list item is 14px')
+    assert.equal(measured.listLine, '21px', 'leading at agentcloud 21px, not the paragraph leading')
+    assert.equal(measured.codeFont, '12.5px', 'a code block keeps its code size')
+    assert.equal(measured.codeLine, '19px', 'and its code leading')
+    assert.equal(measured.composerFont, '14px', 'the composer is 14px, as agentcloud composer is')
+    assert.equal(measured.composerLine, '21px', 'on its 21px line')
     assert.equal(measured.userFont, '14px', 'the person\'s message is 14px')
     assert.equal(measured.userLine, '22px', 'on DSH\'s 22px bubble line')
     assert.equal(measured.userRadius, '20px', 'its bubble radius is DSH\'s 20px')
