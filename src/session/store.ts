@@ -73,6 +73,14 @@ export interface RecordedMessage {
   readonly content: readonly ContentPart[]
   /** Present on a `tool` message: which call this answers. */
   readonly toolCallId?: string
+  /**
+   * Who wrote this message, when it was not a person.
+   *
+   * An automatic goal round is a user message whose `source` is `{ kind: 'goal', goalId, revision, round }`,
+   * which is how the goal fold knows a round was **admitted** rather than merely attempted — the count is
+   * read from the log, not kept in a counter that can drift.
+   */
+  readonly source?: unknown
 }
 
 /** One session's metadata, written once and corrected rarely. */

@@ -147,8 +147,8 @@ export class SessionService extends Service {
    * identity, and a list of identities is a list nobody can scan. A title the person typed afterwards wins,
    * because this only fills a blank.
    */
-  user(handle: SessionHandle, text: string): void {
-    this.store.message(handle, { role: 'user', content: [{ type: 'text', text }] })
+  user(handle: SessionHandle, text: string, source?: unknown): void {
+    this.store.message(handle, { role: 'user', content: [{ type: 'text', text }], ...(source !== undefined ? { source } : {}) })
     const meta = this.store.list().find((one) => one.id === handle.id)
     if (meta !== undefined && (meta.title === undefined || meta.title.trim().length === 0)) {
       const title = titleFrom(text)
