@@ -2298,3 +2298,63 @@ test('the four session shortcuts act on the selected session, and say so when th
     removeDir(h.work)
   }
 })
+
+test('a session log downloads as decoded JSONL, named after the session', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  const h = harness('session-log-download')
+  let live
+  try {
+    await conventionsFixture(h)
+    const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, made.stderr)
+    const created = parseJson(made.stdout)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+
+    /** A title, through the route the page's rename uses, so the filename is derived from a person's text. */
+    const titled = await fetch(new URL(`/api/sessions/${created.session}/title`, live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'a log worth downloading', folder: dirname(created.definition) }),
+    })
+    assert.equal(titled.status, 200, 'the session was given a title')
+
+    /**
+     * DSH's header menu offers `Download session log`, and this is its route: the bytes a person gets must be the log
+     * **decoded** — one JSON object per line — because the log on disk is a sequence of zstd frames nobody can read.
+     */
+    const response = await fetch(new URL(`/api/sessions/${created.session}/log`, live.url), { headers: { cookie } })
+    assert.equal(response.status, 200, 'the log is served')
+    assert.match(String(response.headers.get('content-type')), /application\/x-ndjson/, 'as newline-delimited JSON')
+    const disposition = String(response.headers.get('content-disposition'))
+    assert.match(disposition, /attachment/, 'as a download rather than a page')
+    assert.match(disposition, new RegExp(`filename="${created.session}\\.jsonl"`), `with the id as the ASCII fallback\nsaw: ${disposition}`)
+    assert.match(disposition, /filename\*=UTF-8''a%20log%20worth%20downloading\.jsonl/, `and the title in the encoded parameter\nsaw: ${disposition}`)
+
+    const body = await response.text()
+    /** Decoded, not the disk's zstd frames: a frame begins with the magic bytes 0x28 0xb5 0x2f 0xfd, JSON does not. */
+    assert.ok(body.startsWith('{"seq":'), `the file is decoded JSON, not compressed frames\nsaw: ${JSON.stringify(body.slice(0, 24))}`)
+    const lines = body.trimEnd().split('\n')
+    assert.ok(lines.length >= 1, `the log has its events\nsaw ${lines.length} line(s)`)
+    const events = lines.map((line) => JSON.parse(line))
+    assert.ok(events.every((event) => typeof event.type === 'string'), 'every line is an event with a type')
+    assert.ok(events.some((event) => event.type === 'session/created'), 'including the event that started it')
+    assert.ok(!body.includes('\u0000'), 'and none of the compressed frames leaked into the file')
+
+    /** A session that does not exist is refused rather than answered with an empty file. */
+    const missing = await fetch(new URL('/api/sessions/session-00000000-0000-4000-8000-000000000000/log', live.url), { headers: { cookie } })
+    assert.equal(missing.status, 404, 'a missing session is a 404')
+    const malformed = await fetch(new URL('/api/sessions/not-an-id/log', live.url), { headers: { cookie } })
+    assert.equal(malformed.status, 400, 'and a name that is not a session id is a 400')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})

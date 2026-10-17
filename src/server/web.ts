@@ -6,6 +6,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import { logFileName } from './log-download.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { projectLedger, projectRows, projectTimeline } from './ledger.ts'
@@ -912,6 +913,42 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * deliberately **not** sent there, which is what DSH does and what keeps a fork an act of branching rather
    * than of navigating away from the conversation a person was reading.
    */
+  /**
+   * The session's log as a file — DSH's `Download session log`, which is the one item in its header's `More actions`
+   * menu that this UI can honestly offer (the other is product feedback for DSH itself).
+   *
+   * The log on disk is a sequence of zstd frames, so it is served **decoded**: one JSON object per line, which is what
+   * a person can read and what a script can feed back in. A download whose bytes are compressed frames would be a file
+   * nobody can open, which is not what the menu item promises.
+   */
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/log') && request.method === 'GET') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/log'.length))
+    if (!/^session-[0-9a-f-]{36}$/i.test(id)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
+      return
+    }
+    const handle = ctx.session.store.open(id)
+    if (handle === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    const events = ctx.session.events(handle)
+    const body = events.map((event) => JSON.stringify(event)).join('\n') + '\n'
+    const meta = ctx.session.list().find((entry) => entry.id === id)
+    const name = logFileName(meta?.title, id)
+    response.writeHead(200, {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      /**
+       * A header is not a place for a person's typed title: the ASCII fallback is the id, and the title travels in the
+       * RFC 6266 `filename*` parameter, encoded — so a Chinese title or a quote cannot break the header.
+       */
+      'content-disposition': `attachment; filename="${id}.jsonl"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'content-length': Buffer.byteLength(body),
+    })
+    response.end(body)
+    return
+  }
+
   if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/fork') && request.method === 'POST') {
     const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/fork'.length))
     if (!/^session-[0-9a-f-]{36}$/i.test(id)) {
