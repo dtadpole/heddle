@@ -185,13 +185,15 @@ export function readSessionDefinition(dir: string): SessionDefinitionFields | nu
  * a reader of the repository, so a rename that stopped at the store would leave a committed record calling the
  * session something else.
  */
-export function updateSessionDefinitionTitle(dir: string, title: string | undefined): boolean {
+export function updateSessionDefinition(dir: string, patch: { readonly title?: string | undefined }): boolean {
   const current = readSessionDefinition(dir)
   if (current === null) return false
   const next: SessionDefinitionFields = { ...current }
-  const trimmed = (title ?? '').trim()
-  if (trimmed.length === 0) delete (next as { title?: string }).title
-  else (next as { title?: string }).title = trimmed
+  if (patch.title !== undefined) {
+    const trimmed = patch.title.trim()
+    if (trimmed.length === 0) delete (next as { title?: string }).title
+    else (next as { title?: string }).title = trimmed
+  }
   writeFileSync(join(dir, DEFINITION_FILE), `${JSON.stringify(next, null, 2)}\n`)
   return true
 }
