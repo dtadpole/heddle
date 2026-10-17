@@ -435,3 +435,114 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     await server.close()
   }
 })
+
+test('the column resizes like DSH: two grips, its default rule, a line that follows the pointer, and its floor', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's resize is read from `ConversationWidthControls` and its CSS, not guessed: **two** 10px `col-resize`
+   * handles, one 24px outside each edge of the text column; a 2px line that appears on hover, drawn around the
+   * **pointer's Y**; `outward = side === "right" ? dx : -dx; width = base + outward * 2`; a floor of **640**; and
+   * a default of `clamp(area × .64, 680, 920)`. The composer is the same column plus 32px, which part 9's
+   * composer check already owns, so this test judges the grips themselves.
+   */
+  const server = await startServer('resize', (work) => [{ text: 'a wide answer so the column has a measurable row' }])
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a question', folder: server.work, session: opened.session?.id ?? opened.id }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelectorAll(".column-grip").length === 2', 20_000)
+
+    const grips = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const area = document.querySelector('main')
+        const column = Math.round(Number.parseFloat(getComputedStyle(area).getPropertyValue('--chat-column')))
+        return {
+          column,
+          area: area.clientWidth,
+          expectedDefault: Math.min(area.clientWidth - 48, Math.max(680, Math.min(area.clientWidth * 0.64, 920))),
+          grips: [...document.querySelectorAll('.column-grip')].map((grip) => ({
+            side: grip.dataset.side, cursor: getComputedStyle(grip).cursor,
+            width: Math.round(grip.getBoundingClientRect().width),
+            line: getComputedStyle(grip, '::after').opacity,
+            lineWidth: getComputedStyle(grip, '::after').width,
+            aria: grip.getAttribute('role'), now: grip.getAttribute('aria-valuenow'),
+          })),
+        }
+      })())`),
+    )
+
+    // DSH's pair: one grip on each side, both col-resize, both 10px-ish, both a separator.
+    assert.deepEqual(grips.grips.map((grip) => grip.side).sort(), ['left', 'right'], 'there is a grip on each side of the column')
+    for (const grip of grips.grips) {
+      assert.equal(grip.cursor, 'col-resize', `the ${grip.side} grip is a column-resize grip`)
+      assert.ok(grip.width >= 4 && grip.width <= 10, `it is a thin strip (${grip.width}px)`)
+      assert.equal(grip.lineWidth, '2px', 'and its line is DSH\'s 2px')
+      assert.equal(grip.line, '0', 'hidden at rest')
+      assert.equal(grip.aria, 'separator', 'announced as a separator')
+      assert.equal(grip.now, String(grips.column), 'and it reports the width in force')
+    }
+    assert.equal(grips.column, grips.expectedDefault, 'the default follows DSH\'s `clamp(area × .64, 680, 920)`')
+
+    // The line appears under the pointer: DSH sets `--dsh-width-handle-pointer-y` while the pointer is on it.
+    const point = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const grip = document.querySelector('.column-grip[data-side="right"]')
+        const box = grip.getBoundingClientRect()
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + 120) }
+      })())`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const hovered = await browser.evaluate(`getComputedStyle(document.querySelector('.column-grip[data-side="right"]'), '::after').opacity`)
+    assert.equal(hovered, '1', 'hovering the grip shows its line')
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' })
+
+    /**
+     * The left grip drags **outward**: pulling it left widens the column, which is DSH's `-dx` branch. A drag
+     * that grew when pulled left would be the sign the side was not read.
+     */
+    const drag = async (side, dx) =>
+      JSON.parse(
+        await browser.evaluate(`JSON.stringify((() => {
+          const grip = document.querySelector('.column-grip[data-side="${side}"]')
+          const box = grip.getBoundingClientRect()
+          const startX = box.x + box.width / 2
+          grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: startX, clientY: 400, button: 0, pointerId: 3 }))
+          window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: startX + ${dx}, clientY: 400, pointerId: 3 }))
+          const during = { gripY: grip.style.getPropertyValue('--grip-y'), dragging: grip.dataset.dragging }
+          window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: startX + ${dx}, clientY: 400, pointerId: 3 }))
+          const area = document.querySelector('main')
+          return {
+            during,
+            column: Math.round(Number.parseFloat(getComputedStyle(area).getPropertyValue('--chat-column'))),
+            stored: Number.parseInt(localStorage.getItem('heddle.chatColumn') ?? '0', 10),
+          }
+        })())`),
+      )
+    const widened = await drag('left', -30)
+    assert.equal(widened.column, grips.column + 60, 'pulling the left grip left widens by twice the travel, as DSH does')
+    assert.match(widened.during.gripY, /^\d+px$/, 'and the grip line follows the pointer while dragging')
+    assert.equal(widened.during.dragging, 'true', 'the grip says it is being dragged')
+    assert.equal(widened.stored, widened.column, 'the width is committed on release')
+
+    const floored = await drag('right', -400)
+    assert.equal(floored.column, 640, 'and the floor is DSH\'s 640')
+
+    await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

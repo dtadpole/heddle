@@ -494,31 +494,39 @@ test('the composer is the text column plus 32px, and the handle widens both', as
     assert.equal(before.card - before.text, 32, `the composer hangs 16px over each side of the text (${before.card} vs ${before.text})`)
     assert.equal(before.cursor, 'col-resize', 'the handle is a column-resize grip')
 
-    /** Dragging the handle left by 60px narrows the column by 120, both sides moving together. */
-    await browser.evaluate(`(() => {
-      const gutter = document.getElementById('gutter-column')
-      const box = gutter.getBoundingClientRect()
-      const startX = box.x + box.width / 2
-      try { gutter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: startX, clientY: 400, button: 0, pointerId: 1 })) } catch {}
-      window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: startX - 60, clientY: 400, pointerId: 1 }))
-      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: startX - 60, clientY: 400, pointerId: 1 }))
-      return true
-    })()`)
+    /**
+     * DSH's maths, and DSH's floor. Its `WidthHandle` computes
+     * `outward = side === "right" ? dx : -dx; width = base + outward * 2` on a `min` of **640**
+     * (`ConversationWidthControls`: `CONTENT_MIN = 640`, `CONTENT_EDGE_BUDGET = 176`). So an outward drag of
+     * 50px widens the column by 100, and an inward drag clamps at 640 rather than collapsing the text.
+     */
+    const drag = async (dx) => {
+      await browser.evaluate(`(() => {
+        const gutter = document.getElementById('gutter-column')
+        const box = gutter.getBoundingClientRect()
+        const startX = box.x + box.width / 2
+        try { gutter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: startX, clientY: 400, button: 0, pointerId: 1 })) } catch {}
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: startX + ${dx}, clientY: 400, pointerId: 1 }))
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: startX + ${dx}, clientY: 400, pointerId: 1 }))
+        return true
+      })()`)
+    }
+    await drag(50)
     const dragged = JSON.parse(await widths())
-    assert.equal(dragged.column, before.column - 120, 'one pointer pixel widens each side, so 60px narrows the column by 120')
+    assert.equal(dragged.column, before.column + 100, 'one pointer pixel widens each side, so 50px widens the column by 100')
     assert.equal(dragged.card - dragged.text, 32, 'and the card follows the text column exactly')
+
+    await drag(-200)
+    const floored = JSON.parse(await widths())
+    assert.equal(floored.column, 640, 'the floor is DSH\'s 640, not a collapse')
 
     /** The chosen width is a preference, so a reload keeps it. */
     await browser.goto(server.url)
     await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
-    /**
-     * Only the column is read here: a fresh page has no selected session, so there is no transcript row to
-     * measure — the width itself is the fact that has to survive.
-     */
     const reloaded = await browser.evaluate(
       'Math.round(Number.parseFloat(getComputedStyle(document.querySelector("main")).getPropertyValue("--chat-column")))',
     )
-    assert.equal(reloaded, dragged.column, 'the width survives a reload')
+    assert.equal(reloaded, floored.column, 'the width survives a reload')
     await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
   } finally {
     browser.close()
