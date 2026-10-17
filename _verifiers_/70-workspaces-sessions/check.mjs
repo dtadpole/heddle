@@ -2478,3 +2478,120 @@ test('View options groups the sessions the two ways DSH offers: the tree, or one
     removeDir(h.work)
   }
 })
+
+test('a running session says so before its name, and a workspace row offers the one act its name is for', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-running-mark')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, made.stderr)
+    const created = parseJson(made.stdout)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const rowFor = (label) => rows().find((row) => row.querySelector('.label')?.textContent === label)
+        /** The root's children arrive after a fetch, so each level is awaited rather than assumed. */
+        const rowWhen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const found = rowFor(label)
+            if (found !== undefined) return found
+            await wait(200)
+          }
+          return null
+        }
+        /** The tree can be mid-repaint when the script starts, so the root itself is awaited too. */
+        for (let attempt = 0; attempt < 40 && rows().length === 0; attempt += 1) await wait(200)
+        const rootRow = rows()[0]
+        if (rootRow === undefined) return JSON.stringify({
+          error: 'no tree rows',
+          note: document.getElementById('tree-note')?.textContent ?? null,
+          treeLength: document.getElementById('tree')?.innerHTML.length ?? null,
+          ready: document.readyState,
+          url: location.href,
+          rowsHtml: document.getElementById('tree')?.innerHTML.slice(0, 300) ?? null,
+        })
+        rootRow.click(); await wait(800)
+        const toolsRow = await rowWhen('_tools_')
+        if (toolsRow !== null) { toolsRow.click(); await wait(700) }
+        const toolRow = await rowWhen('some-tool')
+        if (toolRow !== null) { toolRow.click(); await wait(900) }
+
+        /**
+         * A workspace row's controls: the menu first, then the one act its name is for. Read from DSH's own rows, whose
+         * pair is "Workspace actions for <name>" and "New session in <name>".
+         */
+        const workspaceRow = [...document.querySelectorAll('#tree li[data-kind="workspace"]')].map((li) => li.querySelector(':scope > .row')).find((row) => row !== null)
+        const workspaceControls = workspaceRow === null ? [] : [...workspaceRow.querySelectorAll('.row-tools button')].map((button) => button.getAttribute('aria-label'))
+        const workspaceSlots = workspaceRow === null ? [] : [...workspaceRow.querySelectorAll('.row-tools > *')].map((child) => child.className)
+
+        /**
+         * The running mark. The stream is what sets it in a live UI (model/request adds, turn/completed removes); the
+         * paint function is called here directly with the same set, because a scripted turn can finish faster than a
+         * check can look for the word.
+         */
+        const sessionLi = [...document.querySelectorAll('#tree li[data-kind="session"]')][0]
+        const sessionRow = sessionLi.querySelector(':scope > .row')
+        const before = sessionRow.querySelector(':scope > .status')?.textContent ?? null
+        runningSessions.add(${JSON.stringify(created.session)})
+        paintRunningMarks(); await wait(200)
+        const painted = sessionRow.querySelector(':scope > .status')
+        const whileRunning = {
+          text: painted === null ? null : painted.textContent,
+          beforeLabel: painted !== null && painted.nextElementSibling !== null && painted.nextElementSibling.classList.contains('label'),
+          colour: painted === null ? null : getComputedStyle(painted).color,
+        }
+        runningSessions.delete(${JSON.stringify(created.session)})
+        paintRunningMarks(); await wait(200)
+        const after = sessionRow.querySelector(':scope > .status') === null ? null : 'still there'
+        return JSON.stringify({
+          workspaceControls,
+          workspaceSlots,
+          before,
+          whileRunning,
+          after,
+          debug: {
+            rows: rows().length,
+            kinds: [...document.querySelectorAll('#tree li')].map((li) => li.dataset.kind),
+            sessionLi: sessionLi === undefined ? null : 'ok',
+            seam: typeof runningSessions,
+            workspaceRowFound: workspaceRow !== null,
+          },
+        })
+      })().then((value) => JSON.stringify(value))`),
+    )
+    const result = JSON.parse(reading)
+
+    /** The workspace row's two controls, in DSH's order: the menu, then `New session in <name>`. */
+    assert.deepEqual(result.workspaceSlots, ['menu-wrap', 'session-actions'], `the menu leads the workspace row's controls\nsaw: ${JSON.stringify(result)}`)
+    assert.ok(
+      result.workspaceControls.some((label) => /^New session in /.test(String(label))),
+      `and the one act is to start a session there\nsaw: ${JSON.stringify(result.workspaceControls)}`,
+    )
+
+    /** The running mark: absent while quiet, `Running` before the name while the set says so, gone again after. */
+    assert.equal(result.before, null, 'a quiet row carries no state word')
+    assert.equal(result.whileRunning.text, 'Running', 'a running session says so')
+    assert.equal(result.whileRunning.beforeLabel, true, 'and says it before its name')
+    assert.match(String(result.whileRunning.colour), /173, 178, 184/, `in DSH's muted body colour\nsaw: ${result.whileRunning.colour}`)
+    assert.equal(result.after, null, 'and the word leaves when the session stops')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
