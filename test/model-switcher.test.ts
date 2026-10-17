@@ -143,3 +143,11 @@ test('switching a session records the endpoint and drops a model override the en
   assert.equal(withModel?.model, 'deepseek-chat', 'a model that is named is recorded with the endpoint')
   assert.equal(sessions.setModel('session-00000000-0000-0000-0000-000000000000', { endpoint: 'x' }), null, 'an unknown session answers null rather than writing a file')
 })
+
+test('an endpoint summary carries the context window when it declares one', () => {
+  /** The status line's context share needs a denominator the endpoint itself states; inventing one is worse. */
+  const described = describeEndpoints([{ name: 'big', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:1', contextWindow: 128000 }])
+  assert.equal(described.endpoints[0]?.contextWindow, 128000)
+  const quiet = describeEndpoints([{ name: 'unstated', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:1' }])
+  assert.equal('contextWindow' in (quiet.endpoints[0] ?? {}), false, 'and says nothing when the endpoint does not')
+})

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { pageAccess, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
+import { pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
  * Unit tests for the Web UI's two pure pieces.
@@ -232,4 +233,23 @@ test('a stop aborts every running turn of one session, and finds none the second
   assert.equal(other.signal.aborted, false, 'another session is untouched')
   assert.equal(abortSession(controllers, 'session-a'), 0, 'a second stop finds nothing')
   assert.equal(controllers.has('session-a'), false, 'and the session holds no handles')
+})
+
+test('a turn\'s usage adds up across rounds, and stays absent where no provider reported it', () => {
+  /**
+   * The composer's token rate needs one number for the whole turn, and a turn with tools is several model
+   * calls. A field a provider never sent must stay absent rather than become a zero that looks measured.
+   */
+  assert.equal(mergeUsage(undefined, undefined), undefined, 'nothing reported, nothing claimed')
+  assert.deepEqual(mergeUsage(undefined, { inputTokens: 10, outputTokens: 4 }), { inputTokens: 10, outputTokens: 4 })
+  assert.deepEqual(
+    mergeUsage({ inputTokens: 10, outputTokens: 4 }, { inputTokens: 30, outputTokens: 6 }),
+    { inputTokens: 40, outputTokens: 10 },
+    'rounds add up',
+  )
+  assert.deepEqual(
+    mergeUsage({ inputTokens: 10 }, { outputTokens: 6 }),
+    { inputTokens: 10, outputTokens: 6 },
+    'a field only one round reported is kept without inventing the other',
+  )
 })

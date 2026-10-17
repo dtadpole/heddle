@@ -81,6 +81,36 @@ export interface TurnResult {
   readonly rounds: number
   /** What the last context preparation was, so a caller can report the budget. */
   readonly context?: { readonly estimatedTokens: number; readonly thresholdTokens: number; readonly pruned: number; readonly compacted: boolean }
+  /**
+   * Tokens the provider said this turn used, when it said.
+   *
+   * Providers report usage per round, and a turn has several rounds when tools are involved, so this is the
+   * sum. Absent when no round reported any — the status line under the composer prints a rate only from a
+   * number the provider actually sent.
+   */
+  readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number }
+}
+
+/**
+ * Add one round's reported usage to the turn's running total.
+ *
+ * Kept as a function so the rule can be judged without a provider: a field stays absent until a round reports
+ * it, and rounds add up rather than overwrite, because a turn with tools is several model calls.
+ */
+export function mergeUsage(
+  previous: { readonly inputTokens?: number; readonly outputTokens?: number } | undefined,
+  next: { readonly inputTokens?: number; readonly outputTokens?: number } | undefined,
+): { readonly inputTokens?: number; readonly outputTokens?: number } | undefined {
+  if (next === undefined) return previous
+  if (previous === undefined) return next
+  return {
+    ...(previous.inputTokens !== undefined || next.inputTokens !== undefined
+      ? { inputTokens: (previous.inputTokens ?? 0) + (next.inputTokens ?? 0) }
+      : {}),
+    ...(previous.outputTokens !== undefined || next.outputTokens !== undefined
+      ? { outputTokens: (previous.outputTokens ?? 0) + (next.outputTokens ?? 0) }
+      : {}),
+  }
 }
 
 export interface RunTurnOptions {
@@ -90,6 +120,8 @@ export interface RunTurnOptions {
   readonly endpoint: string
   /** The user's message for this turn. */
   readonly prompt: string
+  /** Who wrote the prompt, when it was not a person — an automatic goal round sets this. */
+  readonly source?: unknown
   /** A system prompt, written to the surface as its first node when the session has none. */
   readonly system?: string
   /** The model id, overriding the endpoint's default. */
@@ -134,7 +166,7 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
   const maximumTokens = options.maxOutputTokens
   const cwd = ctx.sandbox.workspaceRoot
 
-  ctx.session.user(options.session, options.prompt)
+  ctx.session.user(options.session, options.prompt, options.source)
 
   const tools = specsOf(ctx.tools)
   const denials: { tool: string; code: string; message: string }[] = []
@@ -142,6 +174,8 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
   let text = ''
   let reasoning = ''
   let finishReason = 'unknown'
+  /** What the provider said each round cost, added up — see `mergeUsage`. */
+  let usage: { inputTokens?: number; outputTokens?: number } | undefined
   let rounds = 0
   let lastContext: { estimatedTokens: number; thresholdTokens: number; pruned: number; compacted: boolean } | undefined
   const ended: string[] = []
@@ -248,6 +282,7 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
           else if (chunk.type === 'tool-call') calls.push({ id: chunk.id, name: chunk.name, arguments: chunk.arguments })
           else if (chunk.type === 'done') {
             finishReason = chunk.finishReason
+            usage = mergeUsage(usage, chunk.usage)
             ended.push(`round ${round + 1}: ${chunk.finishReason}`)
           }
         }
@@ -374,6 +409,7 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
     events: ctx.session.store.count(options.session) - started,
     rounds,
     context: lastContext,
+    ...(usage !== undefined ? { usage } : {}),
   }
 }
 
