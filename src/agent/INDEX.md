@@ -1,7 +1,16 @@
 ---
 title: Agent
 version: 1.0.0
-description: The agent loop, which turns a prompt into model rounds and tool calls.
+description: The agent loop, which turns a prompt into model rounds and tool calls, and the **subagent delegation** that lets
+a running turn hand a scoped task to a child agent and receive its final answer.
+
+| File | What it is |
+|---|---|
+| [`loop.ts`](loop.ts) | one turn: record the prompt, ask the model, run the tools it asks for, repeat until it stops |
+| [`subagent.ts`](subagent.ts) | a child agent as its own session, attributed by `parentSession`/`origin`/`delegationDepth`, with depth and active limits and its answer folded from its own log |
+
+The DSH reading that grounds the delegation model is
+[`_context_/dsh-mechanisms/dsh-agent-teams.md`](../../_context_/dsh-mechanisms/dsh-agent-teams.md).
 grounded_in:
   - source: human-authored
 ---

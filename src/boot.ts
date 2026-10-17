@@ -143,8 +143,17 @@ export function failedEntries(ctx: Context): readonly { readonly id: string; rea
 export async function settle(ctx: Context, timeoutMs = 5_000): Promise<readonly string[]> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
+    /**
+     * Pending **and loading** are both unsettled.
+     *
+     * `pending` (0) is a plugin waiting for an injected service; `loading` (1) is one whose `apply` is
+     * running. Waiting only for 0 returned while a row's `apply` had not finished, so a `--turn` could
+     * start before that row had registered its tool — measured: the subagent tool's `apply` logged after
+     * the turn, and the model's `delegate` call was refused as `UNKNOWN_TOOL` in a profile that names the
+     * row. The states are declared in cordis `src/fiber.ts`.
+     */
     const pending = [...ctx.loader.entries()]
-      .filter((entry) => entry.fiber !== undefined && entry.fiber.state === 0)
+      .filter((entry) => entry.fiber !== undefined && (entry.fiber.state === 0 || entry.fiber.state === 1))
       .map((entry) => entry.options.id)
     if (pending.length === 0 || Date.now() > deadline) return pending
     await new Promise((done) => setTimeout(done, 20))

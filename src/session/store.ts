@@ -96,6 +96,16 @@ export interface SessionMeta {
   readonly pinned?: boolean
   /** Out of the tree, and the log untouched: the reversible act, and the only one offered. */
   readonly archived?: boolean
+  /**
+   * The session that delegated this one, when this session is a subagent's.
+   *
+   * The same three fields DSH's `childSessionMeta` writes: the parent's id, the origin, and how deep the
+   * delegation chain is. Attribution lives in the session record rather than in the transcript because a
+   * child runs in its **own** log — the parent's transcript sees the delegation only as a tool call.
+   */
+  readonly parentSession?: SessionId
+  readonly origin?: 'subagent'
+  readonly delegationDepth?: number
 }
 
 /** The default root, overridable so a check can use a scratch directory. */
@@ -365,7 +375,17 @@ export class SessionStore {
    * The owner's layout of 2026-10-11: one folder per workspace and one file per session inside it, so the
    * store reads as a list of the folders a person worked in rather than as a list of opaque directories.
    */
-  create(options: { readonly cwd?: string; readonly endpoint?: string; readonly model?: string; readonly title?: string } = {}): SessionHandle {
+  create(
+    options: {
+      readonly cwd?: string
+      readonly endpoint?: string
+      readonly model?: string
+      readonly title?: string
+      readonly parentSession?: SessionId
+      readonly origin?: 'subagent'
+      readonly delegationDepth?: number
+    } = {},
+  ): SessionHandle {
     const id = `session-${randomUUID()}`
     const cwd = options.cwd ?? process.cwd()
     const dir = join(this.root, workspaceKey(cwd))
@@ -381,6 +401,9 @@ export class SessionStore {
           ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
           ...(options.model !== undefined ? { model: options.model } : {}),
           ...(options.title !== undefined ? { title: options.title } : {}),
+          ...(options.parentSession !== undefined ? { parentSession: options.parentSession } : {}),
+          ...(options.origin !== undefined ? { origin: options.origin } : {}),
+          ...(options.delegationDepth !== undefined ? { delegationDepth: options.delegationDepth } : {}),
           turns: 0,
         },
         null,

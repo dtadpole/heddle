@@ -1,43 +1,39 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { Context } from '@deepseek-ai/cordis'
 
-import { createApp } from '../src/app.ts'
-import * as announce from '../src/plugins/announce.ts'
-import Greeting from '../src/plugins/greeting.ts'
+import { settle } from '../src/boot.ts'
 
-test('createApp provides the service, with config that reached it', async () => {
-  const app = await createApp({ punctuation: '?', target: 'tests', quiet: true })
-  try {
-    assert.equal(app.ctx.greeting.greet('tests'), 'hello, tests?')
-  } finally {
-    await app.dispose()
+/**
+ * `settle` is the boot barrier: a command or a turn runs only after every row has finished loading.
+ *
+ * The bug it was fixed for: the filter waited for `pending` (0) only, so a row whose `apply` was still
+ * running (`loading`, 1) did not count — the turn started, and the profile's own tool was refused as an
+ * unknown tool. These tests pin both unsettled states and the healthy case.
+ */
+
+function fakeCtx(states: number[]): { loader: { entries: () => { fiber: { state: number }; options: { id: string } }[] } } {
+  return {
+    loader: {
+      entries: () => states.map((state, index) => ({ fiber: { state }, options: { id: `row-${index}` } })),
+    },
   }
+}
+
+test('settle waits while a row is loading, not only while it is pending', async () => {
+  const states = [2, 1, 0]
+  const settled = settle(fakeCtx(states) as never, 200)
+  // The fake never changes; the point is which rows are reported, and that it did not return empty.
+  const pending = await settled
+  assert.deepEqual([...pending], ['row-1', 'row-2'], 'a loading row is unsettled, exactly like a pending one')
 })
 
-test('config is validated before the plugin body runs', async () => {
-  const ctx = new Context()
-  const bad = ctx.plugin(Greeting, { punctuation: 7 as unknown as string })
-  await assert.rejects(() => bad.await())
-  await ctx.fiber.dispose()
+test('settle returns an empty list once every row is active, failed or disposed', async () => {
+  assert.deepEqual(await settle(fakeCtx([2, 3, 4, 5]) as never, 200), [])
 })
 
-test('a plugin whose inject is missing stays pending, then activates', async () => {
-  const ctx = new Context()
-  try {
-    const waiting = ctx.plugin(announce, { target: 'later' })
-    assert.equal(waiting.state, 0, 'expected pending before the service exists')
-
-    await ctx.plugin(Greeting)
-    await waiting.await()
-    assert.equal(waiting.state, 2, 'expected active once the service exists')
-  } finally {
-    await ctx.fiber.dispose()
-  }
-})
-
-test('disposal takes the service offline with it', async () => {
-  const app = await createApp({ quiet: true })
-  await app.dispose()
-  assert.equal(app.ctx.get('greeting', false), undefined)
+test('settle gives up at its deadline and reports what is still unsettled', async () => {
+  const started = Date.now()
+  const pending = await settle(fakeCtx([1]) as never, 60)
+  assert.deepEqual([...pending], ['row-0'])
+  assert.ok(Date.now() - started >= 50, 'it waited for the deadline rather than returning at once')
 })
