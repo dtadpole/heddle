@@ -189,3 +189,58 @@ lane-based timeline focus, the turn rail and turn labels, and the tool row that 
 - [`heddle-trajectory.png`](heddle-trajectory.png) — heddle after the port: the toolbar, the three lane
   timeline, the turn rail with `Turn 1`/`Turn 2` labels, kind tags, one row per tool call carrying its
   result, and the details pane with Summary/Payload/Result/Timing.
+
+## The tool inspector, element by element (measured 2026-10-17)
+
+Opened by clicking a `TOOL` row in DSH's Trajectory. Evidence: [`dsh-tool-inspector.jpg`](dsh-tool-inspector.jpg).
+
+DSH's details pane for a tool call is a header, five tabs, and — inside Summary — an **accordion of
+sections**, each an `h3` whose title is a button with a rotating chevron:
+
+| Element | DSH's rendering |
+|---|---|
+| header | kind tag `TOOL`, `Turn 23 · Step 1`, close `×` |
+| tabs | Summary · Payload · Result · Schema · Timing |
+| Summary | **Hierarchy** (`Assistant Message ‹ ›` links), **Status** (`Completed`), **Payload**, **Result**, **Schema**, **Timing** — all stacked, each collapsible |
+| Payload section | JSON in a `json-tree` component (syntax-coloured keys/strings), a truncated preview with an `…Expand` control, scroll fade when more remains |
+| Result section | plain monospace text block |
+| Schema section | `schemaName` (the tool's name, mono bold), `schemaDescription` (the tool's full description), then `schemaParameters` → a **`schemaTree`** JSON tree |
+| Timing section | Started (local time, clickable to unix), Duration; TTFT/generation/throughput and usage live in the same section family |
+| Status | `Completed` / `Failed` / `Pending` |
+| Hierarchy | a link back to the assistant message that made the call |
+
+**The tabs are focused views of the same content**: the Summary stack shows every section, and each tab
+shows one of them alone. A section's heading is its collapse control; sections are open by default.
+
+## DSH vs heddle: verdict per element
+
+| Element | DSH | heddle (measured) | Verdict |
+|---|---|---|---|
+| tool row in the table | name + payload, `→`, result preview, one row | same | **parity** |
+| details header | kind tag, turn · step, close | same | **parity** |
+| five tabs | Summary/Payload/Result/Schema/Timing | same (Schema added 2026-10-17) | **parity** |
+| Schema content | name, full description, parameters as a JSON tree | name, full description, parameters as raw JSON text | **partial** — text, not tree/highlighted |
+| Schema inside Summary | yes, a section | only as its own tab | **gap** |
+| Summary accordion | Payload/Result/Schema/Timing are collapsible sections with chevrons | static blocks, not collapsible | **gap** |
+| Payload rendering | JSON tree, syntax-coloured, preview + Expand, scroll fade | raw text in `<pre>` | **gap** |
+| Result rendering | mono text block | mono `<pre>` | **parity** |
+| Status | Completed/Failed/Pending | Status row from `inFlight`/`state` | **parity** |
+| Hierarchy | `Assistant Message ‹ ›` links | Turn/Step numbers as text, no links | **gap** — but heddle's rows are the same step; low value, note it |
+| Timing | started, duration, TTFT, throughput, usage | started, duration, TTFT, usage, turn/step durations | **parity** (heddle shows more) |
+| Error styling | error tint | `data-state` error colour on the row; Result text plain | **partial** — error text is not tinted in the pane |
+| Defaults | sections open, collapsed only by the reader | everything open, no collapse control | **gap** in the control, parity in the default |
+
+## The gap list this round will close
+
+1. **Summary becomes DSH's accordion**: Hierarchy/Status/Payload/Result/Schema/Timing sections, each an
+   `h3` + title button with a rotating chevron, open by default. (The tabs stay as focused views.)
+2. **Schema appears in Summary** as well as its own tab.
+3. **JSON is shown as JSON**: reuse heddle's **already tested** code renderer (`src/server/code.ts`,
+   `renderCode(text, 'json')`) on the server for the payload and the schema parameters, so the pane gets
+   escaped, syntax-coloured JSON without a second renderer — the AGENTS rule prefers a library, and this
+   is the project's existing one. DSH uses a collapsible `json-tree`; heddle will show a highlighted block,
+   which is the honest subset: a payload here is small, and a tree would be a new renderer to maintain.
+4. **Error text is tinted** in the pane as well as on the row.
+5. Hierarchy links are **not** ported; heddle's table already shows the turn and step, and its rows are not
+   nested, so a link would point at a row the reader is already looking at. Recorded as a deliberate
+   difference rather than an oversight.
