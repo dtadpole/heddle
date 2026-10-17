@@ -1,6 +1,6 @@
 ---
 title: Check Helpers
-version: 1.0.0
+version: 1.1.0
 description: The fixtures and doubles every verifier check shares, so no check invents its own.
 grounded_in:
   - source: human-authored
@@ -13,6 +13,21 @@ Holds [`lib.mjs`](lib.mjs), the library every check file imports, and
 [`../browser-use/`](../browser-use/INDEX.md) that the checks which need a real page import. The
 wrapper is deliberately thin: the driver, the snapshot and the session belong to the tool, and a check
 that used a second implementation would be judging the wrong code.
+
+## Why `browser-use` does not replace it
+
+`browser-use` drives a browser; everything else a check needs lives here, and that is what makes a
+check a check rather than a browser demo. Measured on 2026-10-17:
+
+| | What it is | Who imports it |
+|---|---|---|
+| [`lib.mjs`](lib.mjs) (482 lines, 25 exports) | the CLI runner and its timed variant, the scripted config and the two model doubles, isolated homes and fixture directories, transcript and session finding, JSON extraction and `skipUnless` | **27** verifier check files |
+| [`browser.mjs`](browser.mjs) (95 lines) | the one-page wrapper **over** `browser-use` — headless by default, a temporary profile per call, a synchronous kill on close | 13 verifier check files |
+
+Deleting it would not shrink the repository: the same 577 lines would move into 27 check files, each
+free to invent its own fixture path, its own model double and its own way of reading a transcript. And
+`browser.mjs` is not a second browser implementation — it imports the tool and adds only the API the
+checks were written against, so a check exercises the same driver the command line runs.
 
 `lib.mjs` exists so that three rules are stated once instead of ten times.
 
