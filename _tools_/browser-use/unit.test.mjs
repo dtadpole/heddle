@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { decodeFrame, encodeFrame } from './cdp.mjs'
-import { browserPath } from './chrome.mjs'
+import { browserPath, stateDir } from './chrome.mjs'
 import { keyDescription, parseKey } from './actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from './emulate.mjs'
 import {
@@ -241,6 +241,28 @@ test('the tool table carries the harness browser surface', () => {
   const surface = ['list_pages', 'new_page', 'select_page', 'close_page', 'navigate_page', 'take_snapshot', 'click', 'fill', 'fill_form', 'hover', 'drag', 'press_key', 'type_text', 'upload_file', 'handle_dialog', 'take_screenshot', 'evaluate_script', 'wait_for', 'list_console_messages', 'get_console_message', 'list_network_requests', 'get_network_request', 'emulate', 'resize_page']
   for (const name of surface) assert.ok(TOOL_NAMES.includes(name), `the tool table carries ${name}`)
   assert.equal(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'and names each tool once')
+})
+
+/**
+ * A named session gets its own state directory, with a name safe to be a path.
+ *
+ * This is the rule that keeps two agents driving a browser at once apart: each session's socket,
+ * profile and page ids live under its own directory, so no `list_pages` can name the other's page.
+ */
+test('a named session maps to a directory of its own, and an unnamed one to the shared directory', () => {
+  const saved = { home: process.env.HEDDLE_BROWSER_HOME, session: process.env.HEDDLE_BROWSER_SESSION }
+  try {
+    process.env.HEDDLE_BROWSER_HOME = '/tmp/heddle-browser-test'
+    delete process.env.HEDDLE_BROWSER_SESSION
+    assert.equal(stateDir(), '/tmp/heddle-browser-test', 'without a session name, the shared directory is used')
+    process.env.HEDDLE_BROWSER_SESSION = 'Agent Two/../work'
+    assert.equal(stateDir(), '/tmp/heddle-browser-test/sessions/agent-two-work', 'a session name becomes one safe path segment')
+  } finally {
+    if (saved.home === undefined) delete process.env.HEDDLE_BROWSER_HOME
+    else process.env.HEDDLE_BROWSER_HOME = saved.home
+    if (saved.session === undefined) delete process.env.HEDDLE_BROWSER_SESSION
+    else process.env.HEDDLE_BROWSER_SESSION = saved.session
+  }
 })
 
 /** The browser binary can be named explicitly, which is what a machine without the default path needs. */

@@ -31,7 +31,9 @@ that used a second implementation would be judging the wrong code.
   a session actually has — `session.v2.jsonl.zstd` (one zstd frame per event) or the plain
   `session.jsonl` written before it — and `readTranscript` accepts either a directory or a path and
   decodes both. Measured while this changed: fifteen checks named `session.jsonl` directly, and
-  every one of them would have been judging a file that no longer exists.
+  every one of them would have been judging a file that no longer exists. These rules are now
+  component-tested in [`unit.test.mjs`](unit.test.mjs), because a helper that reads the wrong file
+  turns a check into a claim about nothing.
 
 ## What belongs in it
 
