@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/check-helpers/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
+import { fixtureDir, isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/check-helpers/lib.mjs'
 
 /**
  * Goal management, judged where a person and a model each touch it.
@@ -22,16 +22,28 @@ import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, 
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, steps, options = {}) {
   const home = isolatedHome(`goal-${label}`)
   const work = fixtureDir(`goal-${label}-work`)
   mkdirSync(work, { recursive: true })
   const { config } = scriptedConfig({
     home,
-    steps: [{ toolCall: { name: 'create_goal', arguments: { objective: 'ship goal management', max_goal_rounds: 3 } } }, { text: 'the goal is created' }],
+    steps: steps ?? [{ toolCall: { name: 'create_goal', arguments: { objective: 'ship goal management', max_goal_rounds: 3 } } }, { text: 'the goal is created' }],
   })
+  /**
+   * The bar test judges the **verbs**, so its server leaves the round driver out: with the driver loaded,
+   * the goal the model creates would start continuing on its own and the test would be judging the bar
+   * against a moving target. The rounds test is the one that wants the driver, and it uses the default
+   * profile.
+   */
+  let patch = []
+  if (options.withoutDriver === true) {
+    const file = join(home, 'no-driver.yml')
+    writeFileSync(file, '- remove:\n    - goal-driver\n')
+    patch = ['--patch', file]
+  }
   const child = await startCli(
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), ...patch, '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config }, cwd: work },
   )
   return {
@@ -102,7 +114,20 @@ async function api(url, cookie, path, init = {}) {
 test('the model starts a goal through its tool, and a person drives it from the bar', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  const server = await startServer('bar')
+  /**
+   * Two goals, because they judge two different things.
+   *
+   * The first is the model's: its tool creates it, the round driver (live in this profile) spends its single
+   * allowed round and blocks it at the cap — which lets the bar's *blocked* state and the refusal to resume
+   * an exhausted goal be judged. The second is created by the person with a cap the driver cannot reach before
+   * the test is done, and since the driver only triggers on a completed turn and no turn runs after it, its
+   * verbs can be judged without a moving target.
+   */
+  const server = await startServer('bar', [
+    { toolCall: { name: 'create_goal', arguments: { objective: 'ship goal management', max_goal_rounds: 1 } } },
+    { text: 'round one work' },
+    { text: 'extra' },
+  ])
   const browser = await openBrowser()
   try {
     const cookie = await cookieFor(server.url)
@@ -119,15 +144,18 @@ test('the model starts a goal through its tool, and a person drives it from the 
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
 
-    const read = await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)
-    assert.equal(read.status, 200, 'the goal API answers')
-    const goal = read.body.goal
-    assert.ok(goal !== null && typeof goal === 'object', `the model's tool created a goal\nsaw: ${JSON.stringify(read.body).slice(0, 200)}`)
-    assert.equal(goal.phase, 'active')
-    assert.equal(goal.activation, 'armed')
-    assert.equal(goal.objective, 'ship goal management')
-    assert.equal(goal.maxGoalRounds, 3)
-    assert.equal(goal.roundsStarted, 0)
+    // The driver continues the goal after the turn; wait for the cap to turn that into a block.
+    let first
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      first = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      if (first?.phase === 'blocked') break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    assert.ok(first !== null && typeof first === 'object', `the model's tool created a goal\nsaw: ${JSON.stringify(first).slice(0, 200)}`)
+    assert.equal(first.phase, 'blocked', 'the driver spent the only round and blocked at the cap')
+    assert.equal(first.objective, 'ship goal management')
+    assert.equal(first.roundsStarted, 1)
+    assert.equal(first.blockedReason?.code, 'round-limit')
 
     await browser.goto(server.url)
     await browser.waitFor('document.getElementById("goal-bar") !== null && document.getElementById("goal-bar").hidden === false', 20_000)
@@ -139,20 +167,42 @@ test('the model starts a goal through its tool, and a person drives it from the 
         verbs: [...document.querySelectorAll('#goal-actions button')].map((button) => button.dataset.goalAction),
       })`),
     )
-    assert.match(shown.phase, /active/i, 'the bar states the durable phase')
+    assert.match(shown.phase, /blocked/i, 'the bar states the durable phase')
     assert.equal(shown.objective, 'ship goal management', 'and the objective')
-    assert.match(shown.rounds, /0\/3/, 'and the round it has reached')
-    assert.deepEqual(shown.verbs, ['pause', 'complete', 'edit', 'clear'], 'offering only the verbs the table allows on an active goal')
+    assert.match(shown.rounds, /1\/1/, 'and the round it reached')
+    assert.deepEqual(shown.verbs, ['resume', 'complete', 'edit', 'clear'], 'a blocked goal offers resume, not pause')
 
-    // Pause: a person's verb, then read the service rather than trusting the DOM.
+    // Resuming an exhausted goal is the one refusal the bar must show rather than swallow.
+    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="resume"]\').click()')
+    await browser.waitFor('document.getElementById("tree-note").textContent.length > 0', 10_000)
+    assert.match(await browser.evaluate('document.getElementById("tree-note").textContent'), /exhausted/, 'the bar says the goal has no rounds left')
+    assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.phase, 'blocked')
+
+    // Complete then clear: a blocked goal can still be finished and removed.
+    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="complete"]\').click()')
+    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "complete"', 10_000)
+    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="clear"]\').click()')
+    await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
+    const afterClear = await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)
+    assert.equal(afterClear.body.goal, null, `the cleared goal is gone (status ${afterClear.status}, body ${JSON.stringify(afterClear.body).slice(0, 200)})`)
+
+    /**
+     * The second goal is the person's, with rounds to spare. No turn runs after it is created, so the driver
+     * has had no trigger and the bar's pause/resume can be judged directly.
+     */
+    const second = await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'create', objective: 'a goal with room to run', max_goal_rounds: 5 }),
+    })
+    assert.equal(second.status, 200, 'the person started a second goal')
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "active"', 20_000)
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="pause"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "paused"', 10_000)
     const paused = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
     assert.equal(paused.phase, 'paused')
     assert.equal(paused.activation, 'disarmed', 'pausing stops automatic continuation')
-    assert.equal(paused.revision, 2)
 
-    // Resume — the verb the model is refused — is offered here because this is a person.
     await browser.waitFor('document.querySelector(\'#goal-actions button[data-goal-action="resume"]\') !== null', 10_000)
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="resume"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "active"', 10_000)
@@ -160,15 +210,10 @@ test('the model starts a goal through its tool, and a person drives it from the 
     assert.equal(resumed.phase, 'active')
     assert.equal(resumed.activation, 'armed')
 
-    // Complete ends the goal, and the bar says so rather than disappearing.
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="complete"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "complete"', 10_000)
-    assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.phase, 'complete')
-
-    // Clear removes it, and the bar goes away with it.
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="clear"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
-    assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal, null)
 
     // A stale revision is refused with a code, so a client can tell "it moved" from "it is gone".
     const stale = await api(server.url, cookie, '/api/goal', {
@@ -179,6 +224,71 @@ test('the model starts a goal through its tool, and a person drives it from the 
     assert.equal(stale.body.code, 'GOAL_NOT_FOUND')
   } finally {
     browser.close()
+    await server.close()
+  }
+})
+
+test('an armed goal continues by itself, round by round, and blocks at its cap', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * The round driver, judged end to end. A person creates a goal with a two-round cap; one turn is sent;
+   * the driver continues the goal on its own until the cap turns "continue" into "this goal is exhausted",
+   * which is DSH's `round-limit` block.
+   *
+   * The claim is about **attribution**, not only about turns: each automatic round must be a user message
+   * the harness wrote, carrying the goal id, its revision and its round number, because that is what the
+   * goal fold counts. A driver that ran three anonymous turns would satisfy "it kept going" and violate
+   * the thing that makes the cap and the history trustworthy.
+   */
+  const server = await startServer('rounds', [{ text: 'round one work' }, { text: 'round two work' }, { text: 'round three work' }, { text: 'extra' }])
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+
+    const created = await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'create', objective: 'walk two rounds and stop', max_goal_rounds: 2 }),
+    })
+    assert.equal(created.status, 200, 'the person started a capped goal')
+
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'begin', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the first turn ran (${turn.status})`)
+    await turn.text()
+
+    // The driver runs in the server process after the turn; wait for the cap to turn into a block.
+    let goal
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      goal = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      if (goal?.phase === 'blocked') break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    assert.equal(goal.phase, 'blocked', `the goal stopped by itself at its cap\nsaw: ${JSON.stringify(goal)}`.slice(0, 400))
+    assert.equal(goal.roundsStarted, 2, 'two rounds were admitted, not one and not three')
+    assert.equal(goal.blockedReason?.code, 'round-limit', 'and it says why it stopped')
+    assert.equal(goal.activation, 'disarmed', 'a blocked goal does not continue')
+
+    // The rounds are attributable in the transcript: goal-sourced user messages, numbered 1 and 2.
+    const events = readTranscript(join(server.home, 'sessions', session))
+    const rounds = events
+      .filter((event) => event.type === 'message' && event.message?.role === 'user' && event.message?.source?.kind === 'goal')
+      .map((event) => ({
+        round: event.message.source.round,
+        goalId: event.message.source.goalId,
+        revision: event.message.source.revision,
+        text: (event.message.content ?? []).map((part) => part.text ?? '').join(''),
+      }))
+    assert.deepEqual(rounds.map((round) => round.round), [1, 2], `exactly the two rounds the cap allowed\nsaw: ${JSON.stringify(rounds).slice(0, 300)}`)
+    assert.ok(rounds.every((round) => round.goalId === goal.id), 'each round names the goal it serves')
+    assert.match(rounds[0].text, /Round: 1\/2/, 'and carries its round number')
+    assert.match(rounds[1].text, /Round: 2\/2/)
+    assert.match(rounds[0].text, /Objective: "walk two rounds and stop"/)
+  } finally {
     await server.close()
   }
 })

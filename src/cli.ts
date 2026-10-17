@@ -1024,6 +1024,17 @@ async function main(): Promise<void> {
       ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
     })
 
+    /**
+     * A goal continues itself. The driver started on this turn's own `turn/completed` event, so this call
+     * **joins** the running chain rather than starting a second one — and joining it here is what keeps a
+     * one-shot process alive until its rounds are done.
+     */
+    if (app.ctx.goalDriver !== undefined) {
+      const driven = await app.ctx.goalDriver.advance(handle)
+      if (!args.json && driven.rounds > 0) {
+        process.stdout.write(`heddle: the goal continued for ${driven.rounds} round(s); ${driven.stopped}\n`)
+      }
+    }
     printer?.dispose()
     const streamed = printer?.summary()
     if (args.json) {

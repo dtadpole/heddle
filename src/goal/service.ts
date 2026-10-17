@@ -439,9 +439,19 @@ export class GoalService extends Service {
 
   /** Commit one snapshot change, keeping the goal's own derived counters and times. */
   private commit(handle: SessionHandle, folded: FoldedGoal, operation: string, goal: GoalSnapshot): void {
+    /**
+     * A reason exists **exactly while** the phase is `blocked`, and the fold enforces that.
+     *
+     * Leaving `blocked` must therefore drop it, not carry it: a `complete` or `resume` built by spreading
+     * the blocked snapshot would otherwise write a phase that disagrees with its own reason, and the next
+     * read would refuse the log it had just written. Found by the round-driver check, which completes a
+     * goal that reached its cap.
+     */
+    const snapshot: GoalSnapshot =
+      goal.phase === 'blocked' ? goal : (({ blockedReason: _dropped, ...rest }) => rest)(goal)
     this.append(handle, {
       operation,
-      goal,
+      goal: snapshot,
       roundsStarted: folded.roundsStarted,
       createdAt: folded.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),

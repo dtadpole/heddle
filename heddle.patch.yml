@@ -64,6 +64,12 @@
       config:
         defaultMaxGoalRounds: 256
 
+    # The round driver: when a session goes idle with an armed goal, it continues the goal one round at a
+    # time, attributed in the log. It needs a turn's whole machinery, which it declares.
+    - id: goal-driver
+      name: ./src/plugins/goal-driver.ts
+      inject: [goal, session, model, tools, sandbox, context]
+
     # The model-facing goal tools, as their own row so a profile can keep the state without the verbs.
     - id: goal-tool
       name: ./src/plugins/goal-tool.ts
