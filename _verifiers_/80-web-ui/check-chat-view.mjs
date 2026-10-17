@@ -719,6 +719,33 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     assert.ok(bottomLit.slice(0, 3).some((value) => value < 0.4), 'and the start has gone quiet')
 
     /**
+     * No hover means **no fat bars**. This is the regression the owner caught: the no-hover sentinel used to be
+     * `MM_HOVER_SPAN + 1`, which the painter could not tell from a hover at that row, so a fresh page drew a
+     * permanent fat band around the rail's middle and it never moved with the scroll. The reference behaves the
+     * other way — reloaded, with no pointer on the rail, its scrolled states at 0/25/50/75/100% all keep every
+     * bar's `scaleX` at 1 (measured 2026-10-17).
+     */
+    const barScales = async () =>
+      JSON.parse(
+        await browser.evaluate(
+          `JSON.stringify([...document.querySelectorAll('#minimap .mm-bar')].map((bar) => { const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform); return m ? Number(Number(m[1]).toFixed(2)) : 1 }))`,
+        ),
+      )
+    for (const fraction of [0, 0.5, 1]) {
+      await browser.evaluate(
+        `document.getElementById('log').scrollTop = (document.getElementById('log').scrollHeight - document.getElementById('log').clientHeight) * ${fraction}`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const scales = await barScales()
+      assert.ok(
+        scales.every((sx) => sx === 1),
+        `no fat band without a hover, at scroll ${fraction} (${scales.map((sx) => sx.toFixed(1)).join(',')})`,
+      )
+    }
+    await browser.evaluate('document.getElementById("log").scrollTop = 0')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    /**
      * Synced scroll, the owner's new request: scrolling the **main chat** must move the rail's bright window too,
      * the same way the reference's does (measured there by setting its scroller to 0 / 35% / 70% / 100% and reading the
      * opacity window move each time). Programmatic `scrollTop` is not enough to judge it — the report was about the
@@ -781,6 +808,51 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     assert.equal(hovered.previewWidth, 300, 'at the reference width of 300px')
     assert.equal(hovered.previewBg, 'rgb(36, 36, 36)', 'on the reference surface')
     assert.equal(hovered.previewRadius, '8px', 'at the reference radius')
+    /**
+     * The fat band's driver is the **pointer**, not the scroll position; the bright window's driver is the scroll.
+     * Measured on the reference: hovering row 6 swells rows 2-10 and a programmatic scroll leaves that swelling
+     * where the pointer is, while the opacity window moves. Heddle now has to show the same split — the owner's
+     * report was precisely "the highlight follows, the fat does not", which is correct when a pointer holds it.
+     */
+    const rail = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => { const box = document.getElementById('minimap-rows').getBoundingClientRect(); return { x: Math.round(box.left + 15), top: Math.round(box.top), height: Math.round(box.height) } })())`),
+    )
+    const yOfRow = (index) => rail.top + 4 + index * 12 + 6
+    const farIndex = Math.max(0, 16 - 1)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rail.x, y: yOfRow(farIndex), button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    const movedFat = await browser.evaluate(
+      `JSON.stringify((() => { const bars = [...document.querySelectorAll('#minimap .mm-bar')]; const scale = (bar) => { const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform); return m ? Number(Number(m[1]).toFixed(2)) : 1 }; return { old: scale(bars[3]), far: scale(bars[${farIndex}]) } })())`,
+    )
+    assert.equal(JSON.parse(movedFat).old, 1, 'the row the pointer left is no longer fat')
+    assert.ok(JSON.parse(movedFat).far > 1.5, `the row the pointer moved to swells (${JSON.parse(movedFat).far})`)
+
+    /** Leaving the rail puts every bar back: the band is the pointer's, and it goes away with the pointer. */
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rail.x - 200, y: 300, button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    const afterLeave = await barScales()
+    assert.ok(afterLeave.every((sx) => sx === 1), `and leaving the rail clears the band (${afterLeave.map((sx) => sx.toFixed(1)).join(',')})`)
+
+    /** A hover held while the transcript scrolls: the band stays where the pointer is, the window moves. */
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rail.x, y: yOfRow(3), button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    const heldBefore = JSON.parse(
+      await browser.evaluate(`JSON.stringify({ fat: (() => { const bar = document.querySelectorAll('#minimap .mm-bar')[3]; const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform); return m ? Number(Number(m[1]).toFixed(2)) : 1 })(), lit: [...document.querySelectorAll('#minimap .mm-bar')].map((bar) => Number.parseFloat(getComputedStyle(bar).opacity)) })`),
+    )
+    await browser.evaluate('document.getElementById("log").scrollTop = (document.getElementById("log").scrollHeight - document.getElementById("log").clientHeight) * 0.6')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const heldAfter = JSON.parse(
+      await browser.evaluate(`JSON.stringify({ fat: (() => { const bar = document.querySelectorAll('#minimap .mm-bar')[3]; const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform); return m ? Number(Number(m[1]).toFixed(2)) : 1 })(), lit: [...document.querySelectorAll('#minimap .mm-bar')].map((bar) => Number.parseFloat(getComputedStyle(bar).opacity)) })`),
+    )
+    assert.equal(heldAfter.fat, heldBefore.fat, 'a held pointer keeps its swelling while the transcript scrolls')
+    assert.ok(
+      heldAfter.lit.some((value, index) => value > 0.9 && heldBefore.lit[index] <= 0.35),
+      'and the bright window still moved with the scroll',
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rail.x - 200, y: 300, button: 'none' })
+    await browser.evaluate('document.getElementById("log").scrollTop = 0')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+
 
     /**
      * Scrubbing, which is the difference the owner spotted: on the reference, moving the pointer over the rail
