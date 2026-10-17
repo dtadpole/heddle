@@ -49,7 +49,7 @@ repository in [`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/IND
 | [`client.mjs`](client.mjs) | the command side — is a host alive, start one, call a tool, stop it |
 | [`lib.mjs`](lib.mjs) | the library face, including the one-page API the repository's checks use |
 | [`cli.mjs`](cli.mjs) | the command line |
-| [`unit.test.mjs`](unit.test.mjs) | the helpers' own unit tests — frame codec, keys, viewport syntax, snapshot text, pagination |
+| [`unit.test.mjs`](unit.test.mjs) | the **component tests** — frame codec, keys, viewport syntax, snapshot text, pagination, the tool table |
 | [`_verifiers_/`](_verifiers_/INDEX.md) | the claims this tool must keep, one folder each, checked against real browsers |
 
 ## Run it
@@ -104,6 +104,24 @@ trace model, and `get_css_styles` needs its style model; none of that is a proto
 dependency-free driver can make. `screencast_start`/`screencast_stop`, `take_heapsnapshot` and the
 extension/PWA/third-party groups are left out for the same reason — a declared tool that does not work
 is worse than a named absence. Everything else in the advertised surface is implemented.
+
+## Component tests and delivery verifiers
+
+The two kinds of check are kept apart, and the split is a rule rather than a filing decision.
+
+- **`unit.test.mjs` is the component suite.** It runs with no browser and no session: the frame codec,
+  the key names, the viewport syntax, the snapshot's text form, pagination, and the table of tools. A
+  rule that can be stated about one function belongs here, because it is fast, deterministic, and can be
+  read next to the function it judges.
+- **`_verifiers/` holds the delivery claims.** They open a real browser or drive the command line, they
+  are judged with the project's `0`/`1`/`3` contract, and each states the surface it needs. A verifier
+  answers "does the delivered tool do what it promises when someone uses it", not "is this helper
+  right".
+
+The boundary is: **a static fact about the code (a list of names, a parser's output) is a component
+test; a fact about a browser, a page, or a command boundary is a delivery claim.** Keeping the two
+apart is what stops a verifier from certifying a delivery on the strength of a table lookup, and stops
+a component suite from being mistaken for evidence that the tool works.
 
 ## How it is checked
 

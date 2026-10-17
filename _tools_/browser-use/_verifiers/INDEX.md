@@ -24,6 +24,13 @@ its checks through [`_tools_/verify-runner/`](../../../verify-runner/INDEX.md).
 | 1 | [`browser-surface/`](browser-surface/INDEX.md) | every page tool acts on the element a snapshot named, and a dialog or a navigation does not silently change what that means | **headless by default**; `HEDDLE_BROWSER_HEADED=1` runs it headed and then also judges the window |
 | 2 | [`browser-session/`](browser-session/INDEX.md) | one session survives between commands, and `status` and `stop` tell the truth about it | **headless** |
 
+## Verifiers and the tool's tests are different things
+
+These are **delivery claims**: they drive a real browser or the command line and are judged with the
+project's `0`/`1`/`3` contract. A rule about one component — the tool table, the frame codec, the key
+names — belongs in the tool's `unit.test.mjs` instead, where it runs without a browser. A verifier that
+could pass on a table lookup is judging a component, not a delivery.
+
 ## Why the surface is stated
 
 A verifier that needs a window cannot run unattended, and one that does not need it should not take the

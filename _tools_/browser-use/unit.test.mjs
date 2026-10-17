@@ -16,6 +16,7 @@ import {
   networkStatus,
 } from './format.mjs'
 import { attributesOf, formatSnapshot } from './snapshot.mjs'
+import { TOOL_NAMES } from './tools.mjs'
 
 /**
  * The browser tool's **unit** tests: the rules its helpers implement, judged without a browser.
@@ -228,6 +229,18 @@ test('a response body is decoded, truncated, or described as binary', () => {
   assert.equal(responseBodyText(Buffer.from([0xff, 0xfe, 0x00]).toString('base64'), true), '<binary data>')
   assert.equal(responseBodyText('', false), '')
   assert.equal(responseBodyText('x'.repeat(20_000), false).length, 10_000 + '... <truncated>'.length)
+})
+
+/**
+ * The surface a caller can name, as a **component rule**: the table of tools carries the harness
+ * browser's names, so a tool the driver implements is not silently absent from the command line or the
+ * session host. What each of them *does* is a delivery claim and is judged by the verifiers beside the
+ * tool; this one only says the table lists them.
+ */
+test('the tool table carries the harness browser surface', () => {
+  const surface = ['list_pages', 'new_page', 'select_page', 'close_page', 'navigate_page', 'take_snapshot', 'click', 'fill', 'fill_form', 'hover', 'drag', 'press_key', 'type_text', 'upload_file', 'handle_dialog', 'take_screenshot', 'evaluate_script', 'wait_for', 'list_console_messages', 'get_console_message', 'list_network_requests', 'get_network_request', 'emulate', 'resize_page']
+  for (const name of surface) assert.ok(TOOL_NAMES.includes(name), `the tool table carries ${name}`)
+  assert.equal(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'and names each tool once')
 })
 
 /** The browser binary can be named explicitly, which is what a machine without the default path needs. */

@@ -28,7 +28,13 @@ async function startServer(label, steps) {
     steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
   })
   const child = await startCli(
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    /**
+     * `HEDDLE_CHECK_PATCH` names a patch layer to use **instead of** the project's, so this check can run while
+     * `heddle.patch.yml` itself is being edited by someone else: the committed profile is a stable reference, and a
+     * check that fails because the tree is mid-write says nothing about the page. Unset, the project's own patch is
+     * used, which is what a normal run wants.
+     */
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config }, cwd: work },
   )
   return {
@@ -588,6 +594,37 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
     )
     assert.equal(raised, 640, 'a stored width below the floor is raised to DSH\'s 640')
 
+    /**
+     * The owner asked for the rail to have room rather than the conversation crowding against it on a wide chat.
+     * At the column's **maximum** the transcript's margin from the log's right edge must exceed what the rail
+     * occupies (its 30px width plus its 4px inset) by the reserved gutter — that is what `columnMax` subtracts in
+     * addition to the grips' budget. Measured arithmetically rather than from the rail's box, because the rule holds
+     * whether or not the rail is currently shown, and a hidden rail would measure as an empty box.
+     */
+    await browser.evaluate('localStorage.setItem("heddle.chatColumn", "9999")')
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector("#log .turn") !== null', 20_000)
+    const gutter = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const log = document.getElementById('log')
+        const area = document.querySelector('main')
+        const railStyle = getComputedStyle(document.getElementById('minimap'))
+        const column = Math.round(Number.parseFloat(getComputedStyle(area).getPropertyValue('--chat-column')))
+        const max = Number(document.querySelector('.column-grip').getAttribute('aria-valuemax'))
+        const railOccupy = Number.parseFloat(railStyle.width) + Number.parseFloat(railStyle.right)
+        return {
+          column,
+          max,
+          reservedGap: Math.round((log.clientWidth - column) / 2 - railOccupy),
+          railOccupy: Math.round(railOccupy),
+        }
+      })())`),
+    )
+    assert.equal(gutter.column, gutter.max, 'the stored width above the maximum lands at it')
+    assert.ok(
+      gutter.reservedGap >= 40,
+      `at the maximum the transcript keeps a gap before the rail (${gutter.reservedGap}px beyond the rail's ${gutter.railOccupy}px)`,
+    )
     await browser.evaluate('localStorage.removeItem("heddle.chatColumn")')
   } finally {
     browser.close()
@@ -718,6 +755,74 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
     assert.equal(hovered.previewWidth, 300, 'at the reference width of 300px')
     assert.equal(hovered.previewBg, 'rgb(36, 36, 36)', 'on the reference surface')
     assert.equal(hovered.previewRadius, '8px', 'at the reference radius')
+
+    /**
+     * Scrubbing, which is the difference the owner spotted: on agentcloud, moving the pointer over the rail
+     * **scrolls the transcript**, continuously rather than snapped to messages. Measured there: two points inside
+     * one 12px row (y 506 / 510 / 515) landed on 3443 / 3552 / 3689 — about 27.3 scroll pixels per rail pixel — and
+     * `maxScroll / railHeight` is 9072 / 332 = 27.3, so the mapping is
+     * `scrollTop = ((y − railTop) / railHeight) × maxScroll`. It applies on pointermove only, is final in the same
+     * tick (no easing), and the transcript stays where the pointer left it.
+     *
+     * The check reads `scrollTop` in the same task as the event, which is what makes "instant" falsifiable — an
+     * animated scrub would still be at the old offset here.
+     */
+    const scrubTo = async (fraction) =>
+      JSON.parse(
+        await browser.evaluate(`JSON.stringify((() => {
+          const rail = document.getElementById('minimap-rows')
+          const box = rail.getBoundingClientRect()
+          const log = document.getElementById('log')
+          const max = log.scrollHeight - log.clientHeight
+          const y = box.top + box.height * ${fraction}
+          const before = Math.round(log.scrollTop)
+          document.getElementById('minimap-hit').dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: box.left + 6, clientY: Math.round(y), pointerId: 7, pointerType: 'mouse', isPrimary: true }))
+          const immediate = Math.round(log.scrollTop)
+          return { before, immediate, max, railHeight: Math.round(box.height), expected: Math.round(((Math.round(y) - box.top) / box.height) * max) }
+        })())`),
+      )
+    const scrubLow = await scrubTo(0.15)
+    const scrubHigh = await scrubTo(0.85)
+    assert.ok(scrubHigh.immediate > scrubLow.immediate + 100, `moving down the rail scrolls the transcript down (${scrubLow.immediate} -> ${scrubHigh.immediate})`)
+    /**
+     * Proportional to the pointer, with the expectation computed from the **rounded** Y the handler received —
+     * comparing against the intended fraction was off by a few pixels, which is the test being wrong, not the scrub.
+     */
+    assert.ok(
+      Math.abs(scrubLow.immediate - scrubLow.expected) <= 1 && Math.abs(scrubHigh.immediate - scrubHigh.expected) <= 1,
+      `the scroll is proportional to the pointer (15% -> ${scrubLow.immediate}, expected ${scrubLow.expected}; 85% -> ${scrubHigh.immediate}, expected ${scrubHigh.expected})`,
+    )
+
+    /** Continuous, not row-snapped: two points 4px apart **inside one row** must move the transcript. */
+    const withinRow = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const rail = document.getElementById('minimap-rows')
+        const box = rail.getBoundingClientRect()
+        const log = document.getElementById('log')
+        const hit = document.getElementById('minimap-hit')
+        const fire = (y) => hit.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: box.left + 6, clientY: Math.round(y), pointerId: 7, pointerType: 'mouse', isPrimary: true }))
+        const y0 = box.top + box.height * 0.5
+        fire(y0)
+        const first = Math.round(log.scrollTop)
+        fire(y0 + 4)
+        const second = Math.round(log.scrollTop)
+        const max = log.scrollHeight - log.clientHeight
+        return { first, second, max, railHeight: Math.round(box.height) }
+      })())`),
+    )
+    assert.ok(withinRow.second > withinRow.first, `4px inside the same row moves the scroll (${withinRow.first} -> ${withinRow.second}), so it is continuous not snapped`)
+    const ratio = (withinRow.second - withinRow.first) / 4
+    const expectedRatio = withinRow.max / withinRow.railHeight
+    assert.ok(
+      Math.abs(ratio - expectedRatio) <= expectedRatio * 0.25,
+      `and by the rail-to-scroll ratio (${ratio.toFixed(1)} vs ${expectedRatio.toFixed(1)} pixels per rail pixel)`,
+    )
+
+    /** It stays where the pointer left it, as the reference does. */
+    await browser.evaluate(`document.getElementById('minimap-hit').dispatchEvent(new PointerEvent('pointerleave', { bubbles: true, pointerId: 7, pointerType: 'mouse' }))`)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const afterScrubLeave = await browser.evaluate('Math.round(document.getElementById("log").scrollTop)')
+    assert.equal(afterScrubLeave, withinRow.second, 'and the transcript stays where the pointer left it')
 
     /** A click jumps: the first row takes the transcript to the top, the last row takes it down. */
     await browser.evaluate('document.getElementById("log").scrollTop = 0')

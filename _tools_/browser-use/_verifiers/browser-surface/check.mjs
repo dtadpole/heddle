@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 
 import { fixtureDir, removeDir, skipUnless } from '../../../check-helpers/lib.mjs'
-import { browserAvailable, createTools, openBrowser, TOOL_NAMES } from '../../lib.mjs'
+import { browserAvailable, createTools, openBrowser } from '../../lib.mjs'
 
 /**
  * The browser tool's page surface, judged against a local page.
@@ -185,13 +185,6 @@ after(async () => {
   if (running !== undefined) await running.close()
   if (fixture !== undefined) await fixture.close()
   if (work !== undefined) removeDir(work)
-})
-
-test('the tool offers the harness browser surface', (t) => {
-  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
-  for (const name of ['list_pages', 'new_page', 'select_page', 'close_page', 'navigate_page', 'take_snapshot', 'click', 'fill', 'fill_form', 'hover', 'drag', 'press_key', 'type_text', 'upload_file', 'handle_dialog', 'take_screenshot', 'evaluate_script', 'wait_for', 'list_console_messages', 'get_console_message', 'list_network_requests', 'get_network_request', 'emulate', 'resize_page']) {
-    assert.ok(TOOL_NAMES.includes(name), `the tool offers ${name}`)
-  }
 })
 
 test('a page opens, is listed, and is selected', async (t) => {
