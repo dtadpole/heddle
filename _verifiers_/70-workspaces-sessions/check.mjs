@@ -2103,6 +2103,16 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           })),
           access: document.querySelector('#access')?.getAttribute('aria-label') ?? null,
           model: document.querySelector('#model-trigger')?.getAttribute('aria-label') ?? null,
+          /** How each clickable thing announces itself to a mouse. */
+          cursors: {
+            row: (() => { const row = document.querySelector('#tree li[data-kind="session"] > .row'); return row === null ? null : getComputedStyle(row).cursor })(),
+            rowControls: [...document.querySelectorAll('#tree li[data-kind="session"] .row-tools button')].slice(0, 2).map((button) => getComputedStyle(button).cursor),
+            headerMenus: ['#session-more button', '#view-options button'].map((selector) => {
+              const button = document.querySelector(selector)
+              return button === null ? null : getComputedStyle(button).cursor
+            }),
+            tabs: [...document.querySelectorAll('#views button')].map((button) => getComputedStyle(button).cursor),
+          },
         }
 
         const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) > *')].map((b) => ({
@@ -2200,6 +2210,15 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.chrome.tabs.filter((tab) => tab.tabindex === 0).length, 1, 'and one reachable by Tab')
     assert.match(String(reading.chrome.access), /^Access mode, current: /, `the access control names its value\nsaw: ${reading.chrome.access}`)
     assert.match(String(reading.chrome.model), /^Select model, current /, `and so does the model seat\nsaw: ${reading.chrome.model}`)
+
+    /**
+     * **Cursor affordance**, the difference the owner felt with a mouse: a row was a hand while every control inside it
+     * kept the platform arrow. Each of these is a thing a person clicks, so each must say so.
+     */
+    assert.equal(reading.chrome.cursors.row, 'pointer', 'a row is a hand')
+    assert.deepEqual(reading.chrome.cursors.rowControls, ['pointer', 'pointer'], `so are the controls inside it\nsaw: ${JSON.stringify(reading.chrome.cursors.rowControls)}`)
+    assert.deepEqual(reading.chrome.cursors.headerMenus, ['pointer', 'pointer'], `and both header menus\nsaw: ${JSON.stringify(reading.chrome.cursors.headerMenus)}`)
+    assert.deepEqual(reading.chrome.cursors.tabs, ['pointer', 'pointer'], 'and the tabs')
 
     /**
      * And a search **replaces** the tree with a flat list, as DSH does: each hit reads its name and where it lives.
