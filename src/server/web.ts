@@ -14,7 +14,7 @@ import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints } from '../endpoints.ts'
 import { canonicalPath } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinitionTitle } from '../session/definition.ts'
+import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import {
@@ -1002,7 +1002,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
-    if (folder !== undefined) updateSessionDefinitionTitle(folder, body.title)
+    if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
