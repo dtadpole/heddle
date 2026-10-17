@@ -183,6 +183,21 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(state.toolRowHeight, '30px', 'including the tool row — one line, as DSH draws it')
     assert.equal(state.tableFont, '12px', 'at DSH’s 12px table font')
 
+    // A small buffer separates the content from the input card, in every view (the composer is shared).
+    const buffer = JSON.parse(
+      await browser.evaluate(`(() => {
+        const pane = document.querySelector('#tr-pane') ?? document.getElementById('ledger')
+        const card = document.getElementById('composer-card')
+        const composer = document.getElementById('composer')
+        return JSON.stringify({
+          gap: Math.round(card.getBoundingClientRect().top - pane.getBoundingClientRect().bottom),
+          padding: getComputedStyle(composer).paddingTop,
+        })
+      })()`),
+    )
+    assert.ok(buffer.gap >= 6, `the content keeps a buffer above the input card (${buffer.gap}px)`)
+    assert.equal(buffer.padding, '8px', 'and the buffer is the composer’s own padding, not a per-view offset')
+
     // Clicking the call examines it: the details pane with DSH's tabs, and the full result on Result.
     await browser.evaluate(`([...document.querySelectorAll('#tr-table tbody tr')].find((row) => row.dataset.kind === 'tool')).click()`)
     assert.ok(await browser.waitFor('document.getElementById("tr-details") !== null && !document.getElementById("tr-details").hidden', 10_000), 'the details pane opened')

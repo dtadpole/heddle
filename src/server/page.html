@@ -705,7 +705,13 @@
    * growing to 336px; and the controls *inside* the card — `+`, access mode, model, send. These are those
    * measurements rather than taste, which is the point of copying a renderer instead of describing one.
    */
-  #composer { flex: none; padding: 0 4px .5rem; position: relative; }
+  /**
+   * A small buffer above the card, so the conversation or the trajectory never touches the input.
+   *
+   * It lives on the composer because the composer is shared by every view: the gap belongs to the boundary
+   * between "what you read" and "what you type", not to one view's padding.
+   */
+  #composer { flex: none; padding: 8px 4px .5rem; position: relative; }
   form { display: flex; flex-direction: column; gap: .4rem; padding: 0; border-top: none; background: none; }
   #composer-card {
     width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
@@ -4854,6 +4860,11 @@ function nodeRow(node) {
    */
   const rowTools = document.createElement('span')
   rowTools.className = 'row-tools'
+  /**
+   * DSH's order, read from its own DOM: the `…` comes **first**, then `Archive session`, then `Pin session` — the
+   * three controls at x=192, 218 and 244 of its row. This UI had `Pin`, `Archive`, `…`, which is the same three
+   * gestures under a reading order a person who knows DSH has to translate.
+   */
   if (node.kind === 'session' && node.session) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
@@ -4870,12 +4881,21 @@ function nodeRow(node) {
       }
       return button
     }
-    quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
+    quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
+    quick.dataset.slot = 'after-menu'
     rowTools.append(quick)
   }
   const actions = menuItemsFor(node)
   if (actions.length > 0) rowTools.append(menuButton(node, actions))
+  /**
+   * The menu goes **before** the quick controls, which is DSH's order. Done by moving the node rather than by
+   * building in a different order, because the menu is appended by the shared builder and the quick controls are
+   * built above it: `insertBefore` states the arrangement in one line instead of in two call sites.
+   */
+  const menuSlot = rowTools.querySelector(':scope > .menu-wrap')
+  const quickSlot = rowTools.querySelector(':scope > .session-actions')
+  if (menuSlot !== null && quickSlot !== null) rowTools.insertBefore(menuSlot, quickSlot)
   /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
   if (rowTools.children.length > 0) row.append(rowTools)
 
