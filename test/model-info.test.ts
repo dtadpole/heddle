@@ -3,7 +3,8 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { test } from 'node:test'
 
-import { contextWindowFromModelList, resetModelInfoCache } from '../src/llm/model-info.ts'
+import { contextWindowFromModelList, inputModalitiesFromModelList, inputModalitiesOfRow, resetModelInfoCache } from '../src/llm/model-info.ts'
+import { withDiscoveredModalities } from '../src/llm/service.ts'
 
 /**
  * A context window is a property of the model, and providers that list their models already say what it is.
@@ -108,4 +109,61 @@ test('a kind with no model-list route is left to the configuration', async () =>
   resetModelInfoCache()
   const answer = await contextWindowFromModelList({ name: 'a', kind: 'anthropic-vertex', baseUrl: 'http://127.0.0.1:1', model: 'claude' })
   assert.equal(answer, undefined, 'no request is made for a wire that has no list route')
+})
+
+test('a chat model list reports its input modalities, and the read is cached', async () => {
+  resetModelInfoCache()
+  const server = await modelListServer({
+    object: 'list',
+    data: [{ id: 'vision', input_modalities: ['text', 'image'], context_window: 1000 }],
+  })
+  try {
+    const endpoint = { name: 'probe-chat', kind: 'openai-chat' as const, baseUrl: server.baseUrl, model: 'vision' }
+    assert.deepEqual(await inputModalitiesFromModelList(endpoint), ['text', 'image'])
+    assert.deepEqual(await inputModalitiesFromModelList(endpoint), ['text', 'image'], 'the cached answer is reused')
+    assert.equal(server.hits.count, 1, 'one model-list read for both answers')
+  } finally {
+    await server.close()
+  }
+})
+
+test('a responses model list reports modalities under models[].slug', async () => {
+  resetModelInfoCache()
+  const server = await modelListServer({ models: [{ slug: 'text-only', input_modalities: ['text'] }] })
+  try {
+    const endpoint = { name: 'probe-responses', kind: 'openai-responses' as const, baseUrl: server.baseUrl, model: 'text-only' }
+    assert.deepEqual(await inputModalitiesFromModelList(endpoint), ['text'])
+  } finally {
+    await server.close()
+  }
+})
+
+test('the modality parser accepts the field spellings providers use, and refuses guesses', () => {
+  assert.deepEqual(inputModalitiesOfRow({ input_modalities: ['text', 'image'] }), ['text', 'image'])
+  assert.deepEqual(inputModalitiesOfRow({ inputModalities: ['image'] }), ['image'])
+  assert.deepEqual(inputModalitiesOfRow({ architecture: { input_modalities: ['text', 'image'] } }), ['text', 'image'])
+  assert.deepEqual(inputModalitiesOfRow({ modalities: ['text'] }), ['text'])
+  assert.deepEqual(inputModalitiesOfRow({ modalities: { input: ['text', 'image'] } }), ['text', 'image'])
+  assert.equal(inputModalitiesOfRow({ modalities: ['audio'] }), undefined, 'an unknown modality is not text or image')
+  assert.equal(inputModalitiesOfRow({}), undefined, 'a row that says nothing yields nothing')
+  assert.equal(inputModalitiesOfRow('not a row'), undefined)
+})
+
+test('a failing model list yields no modalities rather than failing the caller', async () => {
+  resetModelInfoCache()
+  const server = await modelListServer({ data: [] }, 500)
+  try {
+    const endpoint = { name: 'probe-failure', kind: 'openai-chat' as const, baseUrl: server.baseUrl, model: 'm' }
+    assert.equal(await inputModalitiesFromModelList(endpoint), undefined)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a declared configuration wins over what the provider publishes', async () => {
+  const declared = { name: 'declared', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:1', model: 'm', inputModalities: ['text'] as const }
+  assert.equal(withDiscoveredModalities(declared, ['text', 'image']), declared, 'the declared endpoint is returned unchanged')
+  const discovered = { name: 'undeclared', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:1', model: 'm' }
+  assert.deepEqual(withDiscoveredModalities(discovered, ['text', 'image']).inputModalities, ['text', 'image'], 'discovery fills a blank declaration')
+  assert.equal(withDiscoveredModalities(discovered, undefined), discovered, 'no answer leaves the endpoint as it was')
 })

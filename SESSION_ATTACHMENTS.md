@@ -215,13 +215,70 @@ Cycle 1 — make the model receive the attachment as typed content, not a path
               from it.
 ```
 
+## Cycle 2 — capability discovery and the request image budget
+
+```
+Cycle 2 — a vision route is found by what it publishes, and a request's images are bounded the way DSH bounds them
+  measured:   DSH declares input modalities per model in its provider catalog and defaults an undeclared model to
+              text (dsh-llm-deepseek/lib/index.js:46,274,303,349-371; dsh-llm-pi-ai/lib/index.js:1806,1825), and
+              bounds one request's images instead of failing it: `requiredImageOffload`/`offloadedImagePrefixCount`
+              remove the oldest occurrences until the encoded bytes and count fit (dsh-llm/lib/index.js:692-745),
+              replacing each with `offloadedImageText` — `[image omitted to fit request image limits; <identity>. ...]`
+              where identity is `"name" (sha256:<hex>)` (dsh-llm/lib/index.js:538-548,571-584).
+              The owner's providers publish the fact heddle was not reading: on 2026-10-18, plugboard-d's model list
+              says deepseek-flash `input_modalities:["text","image"]` and deepseek-v4-pro `["text"]`; plugboard-x says
+              gpt-6.1-sol `["text","image"]`; anthropic-vertex publishes no model list at all. heddle already carries a
+              declared `inputModalities` per endpoint (cycle 1) but nothing discovers it, and a request has no image
+              budget. Measured at the owner's address before the change: a solid-red PNG attached through (+) File
+              produced the answer `NO IMAGE` — the provider had received DSH's text placeholder — while the same
+              provider answers `red` when the same image is sent as image content (direct wire probe, 2026-10-18).
+  brainstorm: (a) discover modalities from the provider's own model list, cached per endpoint+model, with the declared
+                  configuration winning — chosen: it is a declaration the provider publishes, not a guess;
+              (b) declare `inputModalities` in the machine's ~/.heddle/heddle.json for these three routes — kept only as
+                  the explicit override it is; on its own it fixes one machine and leaves the mechanism missing;
+              (c) infer vision from the model's name (deepseek-flash is vision-capable, deepseek-v4-pro is not) —
+                  discarded: a name is not a declaration, and the same rule would send images to a text-only model;
+              (d) copy DSH's per-provider catalog table into heddle — discarded for now: the table would drift from
+                  the provider that already publishes the fact in its model list;
+              (e) declare every Anthropic route vision-capable because Claude models accept images — discarded: the
+                  publisher route publishes no per-model fact, so the honest path there is configuration.
+              Budget: (a) DSH's oldest-first offload with deterministic placeholders — chosen; (b) refuse a turn that
+              exceeds the budget — discarded: DSH offloads rather than failing a person's message; (c) no budget —
+              discarded: a conversation that keeps attaching images would grow the request without bound.
+  step back:  still a mechanism, not a value: the capability source is a learned fact, and the budget is a rule about
+              a whole request rather than one message. The objective is unchanged; cycle 2 adds these two rows and
+              leaves the transcript card, several-image UX and queue edits for cycle 3.
+  plan:       src/llm/model-info.ts — one cached model-list read shared by the context-window and modality readers,
+              with a parser for the field spellings providers use (`input_modalities`, `inputModalities`,
+              `modalities` array/object, `architecture.input_modalities`);
+              src/llm/service.ts — resolve the endpoint lazily, only when a request carries an image and the endpoint
+              declares nothing; the declared configuration always wins;
+              src/llm/attachments.ts — the request budget: count and encoded-byte ceilings, oldest-first offload with
+              DSH's placeholder;
+              tests written first for the parser, the discovery, the configured-override rule and the budget;
+              _verifiers_/80-web-ui/check-composer.mjs — a vision route that only *publishes* its modalities and a
+              text-only one that publishes `["text"]`, both without configuration;
+              the deployed address — the same red-square probe answers a colour after the change.
+  changed:    pending — the cycle is at its plan.
+  delivered:  pending.
+  evidence:   pending.
+  reds:       none yet.
+  coverage:   to visit: discovery for chat and responses rows, missing/failed model list, configured override, parser
+              variants, count budget, byte budget, oldest-first order, the deployed address.
+  invariants: a text-only route never receives image content; the declared configuration wins over discovery; a
+              provider failure during discovery degrades to text, never fails the turn; the budget is deterministic for
+              the same request; no image's bytes are altered by offloading — the reference and placeholder are stable.
+  landed:     pending.
+  lessons:    pending.
+```
+
 ## Cycle status
 
 | Cycle | Aim | Phase | Evidence committed | Landed |
 |---|---|---|---|---|
 | 1 | delivery mechanism: typed user content + DSH projection + provider mapping + pending cards | completed | test/attachments.test.ts, test/server-attachments.test.ts, check-composer (5 attachment checks) | e50b257, deployed at 9eef059 |
-| 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload; transcript cards; several images; queue-edit attachments | pending | — | — |
-| 3 | full matrix re-measure at the owner's address; stop when no fix row remains | pending | — | — |
+| 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload | implement in progress | — | — |
+| 3 | transcript cards, several images, queue-edit attachments; full matrix re-measure at the owner's address | pending | — | — |
 
 ## Read next
 

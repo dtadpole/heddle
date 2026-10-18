@@ -3,9 +3,24 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { adapterFor } from './adapters.ts'
 import { projectAttachments } from './attachments.ts'
+import { inputModalitiesFromModelList, type InputModality } from './model-info.ts'
 import { ModelError, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
+
+/**
+ * Apply the modalities a provider published to an endpoint that declared none.
+ *
+ * The configuration wins because the declared list is the operator's statement; discovery only fills a blank.
+ * A provider answer of `undefined` leaves the endpoint untouched, which reads as text only downstream.
+ */
+export function withDiscoveredModalities(
+  endpoint: EndpointConfig,
+  discovered: readonly InputModality[] | undefined,
+): EndpointConfig {
+  if (endpoint.inputModalities !== undefined || discovered === undefined) return endpoint
+  return { ...endpoint, inputModalities: discovered }
+}
 export { ModelError } from './types.ts'
 export { adapterFor } from './adapters.ts'
 
@@ -27,6 +42,8 @@ export class ModelService extends Service {
   static readonly provide = 'model'
 
   private readonly endpoints = new Map<string, Adapter>()
+  /** One provider modality read per endpoint, shared by every request that carries an image. */
+  private readonly modalityLookups = new Map<string, Promise<EndpointConfig>>()
   /** The endpoint the configuration nominated, if any. */
   private nominated: string | undefined
 
@@ -38,6 +55,27 @@ export class ModelService extends Service {
   /** Add an endpoint, replacing one of the same name. */
   register(endpoint: EndpointConfig): void {
     this.endpoints.set(endpoint.name, adapterFor(endpoint))
+    /** A replaced endpoint's discovered modalities described the old route, so they are dropped with it. */
+    this.modalityLookups.delete(endpoint.name)
+  }
+
+  /**
+   * The endpoint with whatever input modalities the provider publishes, when the configuration declared none.
+   *
+   * Read lazily and only for a request that actually carries an image: a text turn must not pay a model-list
+   * round trip, and a provider that publishes nothing leaves the endpoint exactly as configured (text only).
+   * The promise is cached per endpoint name, and a failed read resolves to the configured endpoint, so a
+   * provider outage degrades an image to the text placeholder rather than failing the turn.
+   */
+  private endpointWithModalities(endpoint: EndpointConfig): Promise<EndpointConfig> {
+    if (endpoint.inputModalities !== undefined || endpoint.kind === 'scripted') return Promise.resolve(endpoint)
+    const cached = this.modalityLookups.get(endpoint.name)
+    if (cached !== undefined) return cached
+    const pending = inputModalitiesFromModelList(endpoint)
+      .then((modalities) => withDiscoveredModalities(endpoint, modalities))
+      .catch(() => endpoint)
+    this.modalityLookups.set(endpoint.name, pending)
+    return pending
   }
 
   /** Every endpoint, in declaration order. Surfaced so a caller can configure. */
@@ -111,18 +149,26 @@ export class ModelService extends Service {
      * replayed and a provider rejects an assistant message with neither content nor tool calls.
      * Applied after the request hook, so a policy listener sees the request as it was recorded.
      */
-    /**
-     * The attachment projection sits between the recorded request and the adapter: files become
-     * handles, images become bytes only on a route that declared image input, and every other route
-     * sees deterministically-labelled text. It is applied after the `model/request` waterfall, so a
-     * listener that rewrites the request still sees the content as the session recorded it.
-     */
-    const sendable = {
-      ...effective,
-      messages: requestMessages(projectAttachments(effective.messages, resolved.endpoint)),
-    }
-    const next = () => resolved.stream(sendable, signal)
-    return this.ctx.waterfall('model/stream', sendable, next)
+    const base = { ...effective, messages: requestMessages(effective.messages) }
+    const self = this
+    return (async function* (): AsyncIterable<Chunk> {
+      /**
+       * Capability discovery sits between the request hook and the attachment projection: an image may be
+       * sent only to a route that accepts one, and that declaration may come from the provider rather than
+       * the configuration. Both steps are inside the stream, so a caller that never iterates never fetches,
+       * and a turn without an image never reads the model list for one.
+       */
+      const carriesImage = base.messages.some((message) => message.content.some((part) => part.type === 'image'))
+      const endpoint = carriesImage ? await self.endpointWithModalities(resolved.endpoint) : resolved.endpoint
+      /**
+       * The attachment projection sits between the recorded request and the adapter: files become handles,
+       * images become bytes only on a route that accepts image input, and every other route sees
+       * deterministically-labelled text. It is applied after the `model/request` waterfall, so a listener
+       * that rewrites the request still sees the content as the session recorded it.
+       */
+      const sendable = { ...base, messages: projectAttachments(base.messages, endpoint) }
+      yield* self.ctx.waterfall('model/stream', sendable, () => resolved.stream(sendable, signal))
+    })()
   }
 
   /**

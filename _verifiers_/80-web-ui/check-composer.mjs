@@ -1402,3 +1402,63 @@ test('a pending document reaches the provider as DSH\'s file handle', async (con
     await server.close()
   }
 })
+
+/**
+ * A route that only *publishes* its modalities still receives the image.
+ *
+ * The owner's providers work this way: the machine's endpoint configuration says nothing about vision, and
+ * the provider's model list says `input_modalities: ["text","image"]`. Discovery is what turns that published
+ * fact into image content — without it the same attachment reaches the model as DSH's text placeholder.
+ */
+test('a published image modality is discovered, and the image reaches the provider', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-discovered', {
+    modelList: [{ id: 'held-model', input_modalities: ['text', 'image'], context_window: 2000 }],
+  })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'published.png')
+    writeFileSync(chosen, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03]))
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the image is a pending card')
+    await type(browser, 'what is in this image?')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the provider was asked once')
+
+    const user = promptMessage(server, 'what is in this image?')
+    assert.ok(Array.isArray(user.content), `the discovered vision route receives typed parts (${JSON.stringify(user.content).slice(0, 300)})`)
+    const image = user.content.find((part) => part.type === 'image_url')
+    assert.ok(image !== undefined, 'the image is sent as image content without any configuration')
+    assert.match(String(image.image_url.url), /^data:image\/png;base64,/)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/** A published text-only modality is believed: the route gets the placeholder, never image bytes. */
+test('a published text-only modality keeps the deterministic placeholder', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-published-text', {
+    modelList: [{ id: 'held-model', input_modalities: ['text'], context_window: 2000 }],
+  })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'published.png')
+    writeFileSync(chosen, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x04, 0x05, 0x06]))
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the image is a pending card')
+    await type(browser, 'what is in this image?')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the provider was asked once')
+
+    const request = server.double.requests[0].body
+    assert.ok(!request.includes('image_url'), 'no image content reaches a route that published text only')
+    assert.match(request, /\[image omitted because this model accepts text only; attachment sha256:[0-9a-f]{8}\]/, 'the placeholder names the attachment')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

@@ -23,6 +23,25 @@ import type { ContentPart, EndpointConfig, FilePart, ImagePart, Message } from '
 /** The media types the projection can send as image content. */
 export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
 
+/**
+ * The request's image budget.
+ *
+ * DSH bounds one request's images instead of failing the turn: the oldest occurrences are replaced with a
+ * deterministic placeholder until the request fits, so a long conversation that keeps attaching images still
+ * sends. The ceilings are this project's own — the same order as a provider's encoded-byte allowance, and far
+ * above what a person attaches in one message — and they are constants rather than configuration because a
+ * route-specific declaration (DSH's per-model `ImageAttachmentLimits`) is the right shape for a later cycle.
+ */
+export interface ImageRequestLimits {
+  readonly maxImages: number
+  readonly maxBytes: number
+}
+
+export const IMAGE_REQUEST_LIMITS: ImageRequestLimits = {
+  maxImages: 20,
+  maxBytes: 20 * 1024 * 1024,
+}
+
 /** The stable identifier DSH gives an attachment: the `sha256:`-prefixed digest of its bytes. */
 export function attachmentId(sha256: string): string {
   return `sha256:${sha256}`
@@ -51,6 +70,29 @@ export function fileHandleText(part: FilePart): string {
 /** DSH's model-facing placeholder for an image a text-only route cannot accept. */
 export function textOnlyImageText(part: ImagePart): string {
   return `[image omitted because this model accepts text only; attachment sha256:${shortDigest(part.sha256)}]`
+}
+
+/** DSH's identity for an attachment: its display name and full `sha256:` digest. */
+export function imageIdentity(part: ImagePart): string {
+  return `${JSON.stringify(part.name)} (${attachmentId(part.sha256)})`
+}
+
+/**
+ * The model-facing placeholder for an image this request had to leave behind for its budget.
+ *
+ * DSH's sentence, with this project's difference: the stored copy is not a normalized request image, so the
+ * placeholder names the verbatim saved path the file tools can read instead of a normalized one.
+ */
+export function offloadedImageText(part: ImagePart): string {
+  return (
+    `[image omitted to fit request image limits; ${imageIdentity(part)}. ` +
+    `The stored copy at ${JSON.stringify(part.path)} was not sent; read it with your file tools if its contents are needed.]`
+  )
+}
+
+/** The wire length of an image's base64 payload, which is what a provider's byte budget counts. */
+function base64Length(bytes: number): number {
+  return Math.ceil(bytes / 3) * 4
 }
 
 /** What a route is told when an image's saved bytes can no longer be read. */
@@ -87,7 +129,11 @@ function projectPart(part: ContentPart, endpoint: EndpointConfig): ContentPart {
  * Applied after the `model/request` waterfall (so a listener sees the message as it was recorded) and
  * before the adapter (so no adapter sees a `file` part or gets image bytes a route cannot take).
  */
-export function projectAttachments(messages: readonly Message[], endpoint: EndpointConfig): readonly Message[] {
+export function projectAttachments(
+  messages: readonly Message[],
+  endpoint: EndpointConfig,
+  limits: ImageRequestLimits = IMAGE_REQUEST_LIMITS,
+): readonly Message[] {
   let changed = false
   const projected = messages.map((message) => {
     const content = message.content.map((part) => {
@@ -97,5 +143,41 @@ export function projectAttachments(messages: readonly Message[], endpoint: Endpo
     })
     return content.some((part, index) => part !== message.content[index]) ? { ...message, content } : message
   })
-  return changed ? projected : messages
+  const withCapabilities = changed ? projected : messages
+
+  /**
+   * Only a route that accepts images has a budget to enforce. For a text-only route every image has already
+   * become the capability placeholder, and nothing was sent to fit.
+   */
+  if (!acceptsImages(endpoint)) return withCapabilities
+
+  /** Every retained image in request order, with the encoded size the budget counts. */
+  const occurrences: { readonly message: number; readonly part: number; bytes: number }[] = []
+  withCapabilities.forEach((message, messageIndex) => {
+    message.content.forEach((part, partIndex) => {
+      if (part.type === 'image' && part.data !== undefined) {
+        occurrences.push({ message: messageIndex, part: partIndex, bytes: base64Length(part.bytes) })
+      }
+    })
+  })
+  let total = occurrences.reduce((sum, occurrence) => sum + occurrence.bytes, 0)
+  let remove = 0
+  let removedBytes = 0
+  while (remove < occurrences.length && (occurrences.length - remove > limits.maxImages || total - removedBytes > limits.maxBytes)) {
+    removedBytes += occurrences[remove]?.bytes ?? 0
+    remove += 1
+  }
+  if (remove === 0) return withCapabilities
+
+  const bounded = withCapabilities.map((message) => ({
+    ...message,
+    content: [...message.content],
+  }))
+  for (const occurrence of occurrences.slice(0, remove)) {
+    const target = bounded[occurrence.message]
+    const part = target?.content[occurrence.part]
+    if (target === undefined || part === undefined || part.type !== 'image') continue
+    target.content[occurrence.part] = { type: 'text', text: offloadedImageText(part) }
+  }
+  return bounded
 }

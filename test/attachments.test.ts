@@ -142,3 +142,45 @@ test('image capability is declared per endpoint, and defaults to text', () => {
   const described = describeEndpoint(endpoint(['text', 'image']))
   assert.deepEqual(described.inputModalities, ['text', 'image'], 'the page can read what a route accepts')
 })
+
+test('an image budget offloads the oldest image first, with the DSH placeholder naming it', () => {
+  withImage((path) => {
+    const messages: Message[] = [
+      { role: 'user', content: [{ ...imagePart(path), name: 'first.png' } as ContentPart] },
+      { role: 'user', content: [{ ...imagePart(path), name: 'second.png' } as ContentPart] },
+      { role: 'user', content: [{ ...imagePart(path), name: 'third.png' } as ContentPart] },
+    ]
+    const projected = projectAttachments(messages, endpoint(['text', 'image']), { maxImages: 2, maxBytes: 64 * 1024 * 1024 })
+    const first = projected[0]?.content[0]
+    assert.equal(first?.type, 'text', 'the oldest image is offloaded')
+    const text = first?.type === 'text' ? first.text : ''
+    assert.match(text, new RegExp(`^\\[image omitted to fit request image limits; "first\\.png" \\(sha256:${sha256}\\)\\. `), 'the placeholder uses DSH identity and wording')
+    assert.match(text, /was not sent/, 'and says the stored copy was not sent')
+    assert.equal(projected[1]?.content[0]?.type, 'image', 'the newer images are kept')
+    assert.equal(projected[2]?.content[0]?.type, 'image')
+  })
+})
+
+test('an image byte budget offloads as many oldest images as the encoded bytes require', () => {
+  withImage((path) => {
+    const one = { ...imagePart(path), bytes: 900 } as ContentPart
+    const messages: Message[] = [one, one, one].map((part, index) => ({ role: 'user', content: [{ ...part, name: `${index}.png` } as ContentPart] }))
+    // Each image is Math.ceil(900/3)*4 = 1200 encoded bytes; two fit 2500, three do not.
+    const projected = projectAttachments(messages, endpoint(['text', 'image']), { maxImages: 10, maxBytes: 2500 })
+    assert.equal(projected[0]?.content[0]?.type, 'text', 'the oldest is offloaded to fit the byte ceiling')
+    assert.equal(projected[1]?.content[0]?.type, 'image')
+    assert.equal(projected[2]?.content[0]?.type, 'image')
+  })
+})
+
+test('the budget never turns a text-only route into an offload, and never touches a file', () => {
+  withImage((path) => {
+    const messages: Message[] = [
+      { role: 'user', content: [filePart(), imagePart(path)] },
+    ]
+    const projected = projectAttachments(messages, endpoint(), { maxImages: 0, maxBytes: 0 })
+    assert.match(projected[0]?.content[0]?.type === 'text' ? projected[0].content[0].text : '', /verbatim read-only copy saved at/, 'the file keeps its handle')
+    assert.equal(projected[0]?.content[1]?.type, 'text', 'the image is a text-only placeholder, not an offload')
+    assert.match(projected[0]?.content[1]?.type === 'text' ? projected[0].content[1].text : '', /accepts text only/, 'for the capability reason rather than the budget')
+  })
+})
