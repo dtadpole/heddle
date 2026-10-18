@@ -497,3 +497,16 @@ token grouping, percentages) and that it closes; live-check at 8082; then land o
 checkout and run `96-deployment`.
 
 **Stop note:** this cycle is measurement and planning only — the implementation cycles follow.
+
+### Footer-dialog loop — cycle 2, backend half: the three timing folds
+
+`projectSessionStats` now folds what the reference's "Session statistics" surface prints, from event pairs that
+actually measured it: `llmMs` (round request → done), `toolMs` (tool call → its result, matched by call id; an
+unmatched result contributes nothing), and `ttftMs`/`ttftSteps` (round request → its first streamed chunk,
+counted once per round). Each field is absent until at least one pair exists — a row with a missing end is not
+invented. The failing-first tests failed on `undefined` against the expected totals and then pinned the doubles:
+LLM 500+600ms, TTFT 100+250ms over two steps, tool 600ms, and an unmatched result that must not move the total;
+a log with only a request keeps every row absent. The usage dialog's rows need no new fold — the four buckets are
+already in the stats — and the context panel's breakdown is still not exposed by the context service, so those
+rows will be omitted rather than guessed. The shared popover and its three content renderers are the frontend
+half of this cycle.

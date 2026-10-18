@@ -528,3 +528,39 @@ test('decode time stays absent when no round reported tokens', () => {
   assert.equal(stats.generationMs, undefined, 'no tokens means no generation time to divide by')
   assert.equal(stats.decodeTokens, undefined)
 })
+
+test('session stats fold llm time, tool time and average TTFT from the event pairs that measured them', () => {
+  /**
+   * The reference's "Session statistics" surface prints LLM time, tool time and an average time-to-first-token.
+   * Each is a pair of events in this log: request → done for LLM time, call → result for tool time, request →
+   * first streamed chunk for TTFT. A pair missing either end is not measured and contributes nothing.
+   */
+  const t0 = Date.parse('2026-10-17T00:00:00.000Z')
+  const at = (ms: number) => new Date(t0 + ms).toISOString()
+  const events: LedgerEvent[] = [
+    { type: 'model/request', at: at(0) },
+    { type: 'assistant/chunk', at: at(100), chunk: { type: 'text-delta', text: 'a' } },
+    { type: 'assistant/chunk', at: at(200), chunk: { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{}' } },
+    { type: 'assistant/chunk', at: at(500), chunk: { type: 'done', finishReason: 'tool_calls', usage: { outputTokens: 10 } } },
+    { type: 'message', at: at(800), message: { role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'ok' }] } },
+    { type: 'model/request', at: at(900) },
+    { type: 'assistant/chunk', at: at(1150), chunk: { type: 'text-delta', text: 'b' } },
+    { type: 'assistant/chunk', at: at(1500), chunk: { type: 'done', finishReason: 'stop', usage: { outputTokens: 5 } } },
+    /** A result for a call this log never saw dispatched: no span, so it must not move the total. */
+    { type: 'message', at: at(1600), message: { role: 'tool', toolCallId: 'call-unknown', content: [{ type: 'text', text: 'x' }] } },
+  ]
+  const stats = projectSessionStats(events)
+  assert.equal(stats.llmMs, 500 + 600, 'two rounds: 500ms and 600ms from request to done')
+  assert.equal(stats.ttftMs, 100 + 250, 'their first tokens arrived 100ms and 250ms after the request')
+  assert.equal(stats.ttftSteps, 2)
+  assert.equal(stats.toolMs, 600, 'the one matched call spent 600ms between dispatch and result')
+})
+
+test('the timing rows stay absent when no event pair measured them', () => {
+  const events: LedgerEvent[] = [{ type: 'model/request', at: '2026-10-17T00:00:00.000Z' }]
+  const stats = projectSessionStats(events)
+  assert.equal(stats.llmMs, undefined)
+  assert.equal(stats.toolMs, undefined)
+  assert.equal(stats.ttftMs, undefined)
+  assert.equal(stats.ttftSteps, undefined)
+})

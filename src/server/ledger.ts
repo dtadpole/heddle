@@ -162,6 +162,15 @@ export interface SessionStats {
   readonly generationMs?: number
   readonly decodeTokens?: number
   /**
+   * The time the model spent answering, the time tools spent running, and the average wait for a round's
+   * first token — the rows DSH's "Session statistics" surface prints. Each is absent until an event pair
+   * actually measured it: a request without a closing frame, or a call without a result, contributes nothing.
+   */
+  readonly llmMs?: number
+  readonly toolMs?: number
+  readonly ttftMs?: number
+  readonly ttftSteps?: number
+  /**
    * The prompt-side total of the **most recent** reported round, which is what the context share divides by
    * the window (DSH's context pressure is the same fact). Absent when no frame reported a prompt side.
    */
@@ -177,6 +186,15 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
   let roundStartedAt: number | undefined
   let generationMs = 0
   let decodeTokens = 0
+  /** Timings for the reference's session-statistics rows, and the rounds/calls that produced them. */
+  let llmMs = 0
+  let llmRounds = 0
+  let ttftMs = 0
+  let ttftSteps = 0
+  let ttftSeen = false
+  let toolMs = 0
+  let toolCalls = 0
+  const pendingCalls = new Map<string, number>()
   const timeOf = (value: string | undefined): number | undefined => {
     if (value === undefined) return undefined
     const time = Date.parse(value)
@@ -194,10 +212,31 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
     if (event.type === 'model/request') {
       /** A new round opens its own clock; a round that never reported tokens contributes nothing. */
       roundStartedAt = timeOf(event.at)
+      ttftSeen = false
+      continue
+    }
+    if (event.type === 'message' && event.message?.role === 'tool') {
+      /** A result closes the call it answers; an unmatched result measured nothing and contributes nothing. */
+      const callId = event.message.toolCallId
+      const dispatched = callId === undefined ? undefined : pendingCalls.get(callId)
+      const at = timeOf(event.at)
+      if (callId !== undefined && dispatched !== undefined && at !== undefined) {
+        toolMs += Math.max(0, at - dispatched)
+        toolCalls += 1
+        pendingCalls.delete(callId)
+      }
       continue
     }
     if (event.type === 'assistant/chunk') {
       const at = timeOf(event.at)
+      if (event.chunk?.type === 'tool-call' && event.chunk.id !== undefined && at !== undefined) {
+        pendingCalls.set(event.chunk.id, at)
+      }
+      if (!ttftSeen && roundStartedAt !== undefined && at !== undefined && event.chunk?.type !== 'done') {
+        ttftMs += Math.max(0, at - roundStartedAt)
+        ttftSteps += 1
+        ttftSeen = true
+      }
       if (event.chunk?.usage !== undefined) {
         usage = mergeTokenUsage(usage, event.chunk.usage)
         const billed = billedInputTokens(event.chunk.usage)
@@ -213,6 +252,10 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
           generationMs += Math.max(0, at - roundStartedAt)
           decodeTokens += outputTokens
         }
+        if (roundStartedAt !== undefined && at !== undefined) {
+          llmMs += Math.max(0, at - roundStartedAt)
+          llmRounds += 1
+        }
         roundStartedAt = undefined
         continue
       }
@@ -224,6 +267,9 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
     ...(usage !== undefined ? { usage } : {}),
     ...(lastPromptTokens !== undefined ? { lastPromptTokens } : {}),
     ...(decodeTokens > 0 ? { generationMs, decodeTokens } : {}),
+    ...(llmRounds > 0 ? { llmMs } : {}),
+    ...(toolCalls > 0 ? { toolMs } : {}),
+    ...(ttftSteps > 0 ? { ttftMs, ttftSteps } : {}),
   }
 }
 
