@@ -44,7 +44,8 @@
     "test": "node --test test/*.test.ts",
     "prepublishOnly": "npm run build",
     "verify:ui": "node _tools_/verify-runner/all.mjs",
-    "verify:fast": "npm test && HEDDLE_VERIFY_UI=0 node _tools_/verify-runner/all.mjs"
+    "verify:fast": "npm test && HEDDLE_VERIFY_UI=0 node _tools_/verify-runner/all.mjs",
+    "validate:endpoints": "node _tools_/model-validation/validate.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.4",

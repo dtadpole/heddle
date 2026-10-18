@@ -22,6 +22,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`verify-runner/`](verify-runner/INDEX.md) | turns a check file into the project's verdict, and holds the library its checks import — fixtures, model doubles, the one-page browser wrapper |
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
+| [`model-validation/`](model-validation/INDEX.md) | drives every configured model through the real adapter and records streaming, declared reasoning levels and tool calls, beside a fingerprint of the configuration it validated |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
 rather than the harness. The test is the one the conventions give: if the package

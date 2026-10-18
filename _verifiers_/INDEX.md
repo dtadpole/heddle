@@ -32,6 +32,7 @@ deliberately does not.
 | 13 | [`88-file-preview/`](88-file-preview/INDEX.md) | one preview surface: a file clicked in the left panel, rendered by the library its type calls for | headless |
 | 14 | [`95-web-daemon/`](95-web-daemon/INDEX.md) | a launchd agent keeps the Web UI running at the documented port | — |
 | 15 | [`96-deployment/`](96-deployment/INDEX.md) | the page the owner sees is the main checkout's build, served by a process running that checkout | — |
+| 16 | [`98-model-endpoints/`](98-model-endpoints/INDEX.md) | every configured model endpoint, in each of the three wire formats, streams, honours its declared reasoning levels and emits tool calls — validated by real calls and gated on the configuration it names | — |
 
 ### The surface each one runs on
 
