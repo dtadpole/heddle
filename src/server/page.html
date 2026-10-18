@@ -1394,6 +1394,30 @@
   }
   #prompt textarea::placeholder { color: var(--text-3); }
   #prompt textarea:focus-visible { outline: none; }
+  /**
+   * The pending-file cards, measured from DSH's own composer on 2026-10-17: one card per file, in a row above
+   * the editor, each a type mark, the name, the type/size meta and a ✕ that removes it. They live inside the
+   * card because they belong to the draft, and the editor keeps its height until they are sent or removed.
+   */
+  #attach-cards { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 6px; }
+  #attach-cards[hidden] { display: none; }
+  .attach-card {
+    display: inline-flex; align-items: center; gap: .4rem; max-width: 17rem; height: 2.25rem;
+    padding: 0 .5rem 0 .35rem; background: var(--surface); border: 1px solid var(--border);
+    border-radius: .6rem; font-size: .75rem; color: var(--text-2);
+  }
+  .attach-type {
+    flex: none; display: grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: .4rem;
+    background: var(--hover); color: var(--text-2); font-size: .5rem; letter-spacing: .02em;
+  }
+  .attach-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attach-meta { flex: none; color: var(--text-3); white-space: nowrap; }
+  .attach-remove {
+    flex: none; display: grid; place-items: center; width: 1.1rem; height: 1.1rem; padding: 0;
+    background: none; border: 0; border-radius: .3rem; color: var(--text-3); font-size: .8rem; line-height: 1;
+    cursor: pointer;
+  }
+  .attach-remove:hover, .attach-remove:focus-visible { background: var(--hover); color: var(--text); outline: none; }
   button { font: inherit; padding: .5rem 1rem; }
   /**
    * The tool row under the draft, in DSH's order: the model seat on the right, the submit action at the end.
@@ -2492,6 +2516,12 @@
   </div>
   <form id="prompt">
     <div id="composer-card">
+      <!--
+        Pending files, DSH's order: the cards sit **above the editor inside the card** and the draft stays
+        clean — a path typed into the prompt is not an attachment, and a message with a file reads as one
+        message, not as a file plus some text.
+      -->
+      <div id="attach-cards" aria-label="Pending files" hidden></div>
       <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
       <!--
         The control row, inside the card and in DSH's order: `+` and the access mode on the left, the model
@@ -4718,7 +4748,7 @@ events.addEventListener('session', (message) => {
       toolCallId: event.chunk.id,
       state: 'running',
     })
-  } else if (event.type === 'message' && event.message.role === 'user') add('user', event.message.content.map((part) => part.text ?? '').join(''), false, undefined, { time: new Date().toISOString() })
+  } else if (event.type === 'message' && event.message.role === 'user') add('user', messageContentText(event.message.content), false, undefined, { time: new Date().toISOString() })
   else if (event.type === 'message' && event.message.role === 'tool') {
     const text = event.message.content.map((part) => part.text ?? '').join('')
     const failed = event.message.content.some((part) => part.text?.startsWith('error'))
@@ -4977,6 +5007,7 @@ const stopButton = document.getElementById('stop')
 const attachButton = document.getElementById('attach')
 const attachMenu = document.getElementById('attach-menu')
 const attachFileInput = document.getElementById('attach-file')
+const attachCards = document.getElementById('attach-cards')
 const accessButton = document.getElementById('access')
 const statusBar = document.getElementById('composer-status')
 
@@ -5235,17 +5266,18 @@ function submitDraft(gesture) {
   field.value = ''
   growComposer()
   updateSendDisabled()
+  const attachments = takeAttachments()
   const mode = resolveSubmitMode(BUSY_ENTER, anyRunning(), gesture)
   if (mode === 'steer') {
-    void deliverSteered(text)
+    void deliverSteered(text, attachments)
     return
   }
-  enqueue(text, 'queue')
+  enqueue(text, 'queue', attachments)
 }
 
 /** Add one message to the wait: at the end for an ordinary submit, at the front for a steer that could not land. */
-function enqueue(text, where) {
-  const item = { id: `queued-${++queueSeq}`, text, status: 'pending' }
+function enqueue(text, where, attachments = []) {
+  const item = { id: `queued-${++queueSeq}`, text, attachments, status: 'pending' }
   const queue = queueOf()
   if (where === 'steer') queue.unshift(item)
   else queue.push(item)
@@ -5260,19 +5292,19 @@ function enqueue(text, where) {
  * that refusal is a **queue** — the same thing DSH's own loop does with a submission that arrives after the
  * window closed. So a refusal falls back rather than failing: the message is not lost, it is next in the wait.
  */
-async function deliverSteered(text) {
-  if (await steerNow(text)) return
-  enqueue(text, 'steer')
+async function deliverSteered(text, attachments = []) {
+  if (await steerNow(text, attachments)) return
+  enqueue(text, 'steer', attachments)
 }
 
 /** One steer attempt. `true` means the message is in the running turn; `false` means it was refused. */
-async function steerNow(text) {
+async function steerNow(text, attachments = []) {
   if (composerKey === QUEUE_KEY_NONE) return false
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(composerKey)}/steer`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: text }),
+      body: JSON.stringify({ prompt: text, ...(attachments.length > 0 ? { attachments } : {}) }),
     })
     if (response.ok) return true
     if (response.status === 409) return false
@@ -5297,7 +5329,7 @@ async function steerItem(id) {
   const at = queue.findIndex((item) => item.id === id)
   if (at === -1) return
   const item = queue[at]
-  if (item !== undefined && item.status !== 'sending' && (await steerNow(item.text))) {
+  if (item !== undefined && item.status !== 'sending' && (await steerNow(item.text, item.attachments ?? []))) {
     const landed = queue.findIndex((entry) => entry.id === id)
     if (landed !== -1) queue.splice(landed, 1)
     renderQueue()
@@ -5325,7 +5357,7 @@ async function steerQueue() {
   renderQueue()
   for (const item of [...queue]) {
     if (item.status === 'sending') continue
-    if (!(await steerNow(item.text))) break
+    if (!(await steerNow(item.text, item.attachments ?? []))) break
     const at = queue.findIndex((entry) => entry.id === item.id)
     if (at !== -1) queue.splice(at, 1)
     renderQueue()
@@ -5401,7 +5433,8 @@ function queueRow(item) {
   }
   const preview = document.createElement('span')
   preview.className = 'preview'
-  preview.textContent = queuePreview(item.text)
+  const fileCount = item.attachments?.length ?? 0
+  preview.textContent = `${queuePreview(item.text)}${fileCount > 0 ? ` · ${fileCount} file${fileCount === 1 ? '' : 's'}` : ''}`
   preview.title = item.text
   row.append(preview)
   if (item.status === 'sending' || item.status === 'failed') {
@@ -5487,7 +5520,7 @@ async function pumpQueue(key = composerKey) {
        */
       const forKey = key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE ? composerKey : key
       try {
-        await runTurn(item.text, forKey)
+        await runTurn(item.text, forKey, item.attachments ?? [])
         const at = queue.findIndex((entry) => entry.id === item.id)
         if (at !== -1) queue.splice(at, 1)
       } catch (error) {
@@ -5563,7 +5596,7 @@ async function sendTurn(body) {
   }
 }
 
-async function runTurn(text, key) {
+async function runTurn(text, key, attachments = []) {
   liveTurns += 1
   updateStatusBar()
   const startedAt = performance.now()
@@ -5579,6 +5612,7 @@ async function runTurn(text, key) {
      * so a reload comes back to it.
      */
     prompt: text,
+    ...(attachments.length > 0 ? { attachments } : {}),
     session: target,
     folder: activeFolder,
     ...selectionForTurn(),
@@ -6357,15 +6391,94 @@ document.addEventListener('keydown', (keyEvent) => {
 })
 
 /**
- * Put files chosen with the picker into the draft, as the stored paths the agent can read.
+ * Files waiting to be sent, one entry per attached file.
+ *
+ * They are composer state, as DSH keeps them: the draft stays clean, the queue entry and the turn body carry
+ * the stored paths, and sending or removing the draft's message takes the cards with it.
+ */
+let pendingAttachments = []
+
+/** A byte count as a person reads it — DSH's own meta line, e.g. `MD 34 B`, `PNG 1.2 MB`. */
+function formatAttachBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10} ${units[unit]}`
+}
+
+/** The short type mark a card shows, from the file's extension: `PNG`, `MD`, `TXT`. */
+function attachTypeLabel(name) {
+  const extension = String(name).split('.').pop() ?? ''
+  return extension.length > 0 && extension.length <= 5 ? extension.toUpperCase() : 'FILE'
+}
+
+/** The text a message shows, with attachment parts named rather than dropped. */
+function messageContentText(content) {
+  return (content ?? [])
+    .map((part) => {
+      if (part.type === 'image' || part.type === 'file') return `[${part.type} ${part.name ?? ''}]`
+      return part.text ?? ''
+    })
+    .join('')
+}
+
+/** Draw the pending cards; hidden entirely when nothing is waiting. */
+function renderPendingAttachments() {
+  attachCards.replaceChildren()
+  attachCards.hidden = pendingAttachments.length === 0
+  for (const item of pendingAttachments) {
+    const card = document.createElement('div')
+    card.className = 'attach-card'
+    card.title = item.name
+    card.dataset.path = item.path
+    const type = document.createElement('span')
+    type.className = 'attach-type'
+    type.setAttribute('aria-hidden', 'true')
+    type.textContent = attachTypeLabel(item.name)
+    const name = document.createElement('span')
+    name.className = 'attach-name'
+    name.textContent = item.name
+    const meta = document.createElement('span')
+    meta.className = 'attach-meta'
+    meta.textContent = `${attachTypeLabel(item.name)} ${formatAttachBytes(item.bytes)}`
+    const remove = document.createElement('button')
+    remove.type = 'button'
+    remove.className = 'attach-remove'
+    remove.setAttribute('aria-label', `Remove file ${item.name}`)
+    remove.textContent = '✕'
+    remove.addEventListener('click', () => {
+      pendingAttachments = pendingAttachments.filter((entry) => entry !== item)
+      renderPendingAttachments()
+    })
+    card.append(type, name, meta, remove)
+    attachCards.append(card)
+  }
+}
+
+/** Take the pending paths for one submission, and clear the cards. */
+function takeAttachments() {
+  const paths = pendingAttachments.map((item) => item.path)
+  pendingAttachments = []
+  renderPendingAttachments()
+  return paths
+}
+
+/**
+ * Put files chosen with the picker on the composer as pending cards.
  *
  * One request per file rather than one multipart body: the server's route takes the raw bytes of one
  * file and answers with one path, and a failed file names itself in the note instead of failing the
- * batch silently. The draft is touched only after every file has a path, so a partial upload never
- * leaves a conversation pointing at a file that was not stored.
+ * batch silently. Nothing is added to the draft: the cards are the composer's own state and the stored
+ * path travels with the message.
  */
 async function addPickedFiles(files) {
-  const paths = []
+  const added = []
   for (const file of files) {
     try {
       const response = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
@@ -6373,13 +6486,15 @@ async function addPickedFiles(files) {
         const detail = (await response.text()).trim()
         throw new Error(detail.length > 0 ? detail : `the server answered ${response.status}`)
       }
-      paths.push((await response.json()).path)
+      const saved = await response.json()
+      added.push({ path: saved.path, name: file.name, bytes: saved.bytes })
     } catch (error) {
       showAttachFailure(files, error)
       return
     }
   }
-  if (paths.length > 0) insertAtCursor(paths.join('\n'))
+  pendingAttachments = [...pendingAttachments, ...added]
+  renderPendingAttachments()
 }
 
 /** Say why a chosen file could not be added, in the menu the person opened. */

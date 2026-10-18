@@ -20,11 +20,49 @@ import type { TokenUsage } from './usage.ts'
  *   transport detail rather than a second code path.
  */
 
+/** The raster formats an attached image may have, matching what the providers accept. */
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
+/**
+ * One uploaded image, referenced by the durable path the harness stored it at.
+ *
+ * The path is the reference this project's substrate already has — the agent reads it with its file
+ * tools, and the sandbox admits it. The request projection either fills `data` (a route that accepts
+ * image input) or replaces the whole part with DSH's text-only placeholder; the session log keeps the
+ * reference, so a 50 MiB image never enters the JSONL.
+ */
+export interface ImagePart {
+  readonly type: 'image'
+  readonly name: string
+  readonly mimeType: ImageMediaType
+  readonly path: string
+  readonly bytes: number
+  readonly sha256: string
+  /** Base64 bytes, present only on the adapter-facing copy the request projection builds. */
+  readonly data?: string
+}
+
+/**
+ * One uploaded non-image file, referenced by its durable path.
+ *
+ * Files are never sent to a provider natively: DSH's rule, and this project follows it by projecting the
+ * part to a deterministic handle naming the saved read-only copy.
+ */
+export interface FilePart {
+  readonly type: 'file'
+  readonly name: string
+  readonly path: string
+  readonly bytes: number
+  readonly sha256: string
+}
+
 /** One part of a message's content. */
 export type ContentPart =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'reasoning'; readonly text: string }
   | { readonly type: 'tool-call'; readonly id: string; readonly name: string; readonly arguments: string }
+  | ImagePart
+  | FilePart
 
 /** One message in a request. */
 export interface Message {
@@ -198,6 +236,14 @@ export interface EndpointConfig {
   /** What this endpoint can do, for a caller choosing between them. */
   readonly capabilities?: readonly string[]
   /**
+   * What input the endpoint's model accepts.
+   *
+   * Declared rather than guessed: an image attached to a turn is sent as image content only when this
+   * list names `image`, and otherwise becomes DSH's deterministic text placeholder. Absent means text
+   * only, which is the safe reading of every configuration written before images existed.
+   */
+  readonly inputModalities?: readonly ('text' | 'image')[]
+  /**
    * An HTTP forwarding proxy for this endpoint, as a URL.
    *
    * This exists for the shape an enterprise deployment usually has: the gateway is not reachable directly, and
@@ -289,6 +335,23 @@ export function textOf(parts: readonly ContentPart[]): string {
   return parts
     .filter((part): part is Extract<ContentPart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
+    .join('')
+}
+
+/**
+ * A plain-text rendering of content blocks, for a summary a person reads.
+ *
+ * Attachment parts have no text of their own, so they contribute a bracketed name rather than
+ * disappearing: a surface message that silently omitted an image would read as if it were never there.
+ */
+export function describeContent(parts: readonly ContentPart[]): string {
+  return parts
+    .map((part) => {
+      if (part.type === 'tool-call') return `→ ${part.name} ${part.arguments}`
+      if (part.type === 'text' || part.type === 'reasoning') return part.text
+      if (part.type === 'image') return `[image ${part.name}]`
+      return `[file ${part.name}]`
+    })
     .join('')
 }
 

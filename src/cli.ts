@@ -6,6 +6,7 @@ import { createApp } from './app.ts'
 import { boot, failedEntries, settle } from './boot.ts'
 import { runTurn } from './agent/loop.ts'
 import { describeEndpoint } from './endpoints.ts'
+import { describeContent } from './llm/types.ts'
 import { canonicalPath } from './paths.ts'
 import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
@@ -874,7 +875,7 @@ async function runCommand(command: string, target: string | undefined, json: boo
       const messages = report.messages.map((message) => ({
         role: message.role,
         ...(message.toolCallId !== undefined ? { toolCallId: message.toolCallId } : {}),
-        text: message.content.map((part) => (part.type === 'tool-call' ? `→ ${part.name} ${part.arguments}` : part.text)).join(''),
+        text: describeContent(message.content),
       }))
       if (json) {
         process.stdout.write(

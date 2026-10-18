@@ -7,7 +7,8 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
-import { reasoningLevelFor } from '../llm/types.ts'
+import { describeContent, reasoningLevelFor } from '../llm/types.ts'
+import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload } from './uploads.ts'
 import { renderSource } from './code.ts'
@@ -938,9 +939,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
           messages: report.messages.map((message) => ({
             role: message.role,
             ...(message.toolCallId !== undefined ? { toolCallId: message.toolCallId } : {}),
-            text: message.content
-              .map((part) => (part.type === 'tool-call' ? `→ ${part.name} ${part.arguments}` : part.text))
-              .join(''),
+            text: describeContent(message.content),
           })),
         },
         null,
@@ -1671,6 +1670,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a prompt is required' })}\n`)
       return
     }
+    let steerAttachments
+    try {
+      steerAttachments = readAttachments(body.attachments)
+    } catch (error) {
+      if (!(error instanceof AttachmentInputError)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: error.message })}\n`)
+      return
+    }
     if ((state.running.get(id) ?? 0) === 0) {
       respond(
         response,
@@ -1692,7 +1699,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * is measured by the loop's next round and streamed to every reader by the one write path — there is no
      * second channel a steer could travel on without becoming a second truth.
      */
-    ctx.session.user(handle, prompt)
+    ctx.session.userContent(handle, [{ type: 'text', text: prompt }, ...steerAttachments])
     respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id }, null, 2)}\n`)
     return
   }
@@ -1920,6 +1927,7 @@ export function sessionRequestSelection(
   let body: {
     session?: string
     prompt?: string
+    attachments?: unknown
     endpoint?: string
     model?: string
     reasoningEffort?: string
@@ -1934,6 +1942,21 @@ export function sessionRequestSelection(
   }
   if (typeof body.prompt !== 'string' || body.prompt.length === 0) {
     respond(response, 400, 'text/plain', 'a prompt is required\n')
+    return
+  }
+  /**
+   * The attachments the composer chose: paths into the upload directory, read into typed blocks here.
+   *
+   * The browser names files, never their content; the server measures the name, size, digest and media type,
+   * and records the reference with the user message so the request projection can deliver it the way DSH
+   * does. A bad reference refuses the whole turn rather than sending a partial one.
+   */
+  let attachments
+  try {
+    attachments = readAttachments(body.attachments)
+  } catch (error) {
+    if (!(error instanceof AttachmentInputError)) throw error
+    respond(response, 400, 'application/json', `${JSON.stringify({ error: error.message })}\n`)
     return
   }
 
@@ -2091,6 +2114,7 @@ export function sessionRequestSelection(
       session: handle,
       endpoint,
       prompt: body.prompt,
+      ...(attachments.length > 0 ? { attachments } : {}),
       signal: controller.signal,
       /**
        * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
@@ -2285,10 +2309,12 @@ export function transcriptTurns(
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
       const message = event.message as
-        | { role?: string; content?: readonly { type?: string; text?: string }[]; toolCallId?: string }
+        | { role?: string; content?: readonly { type?: string; text?: string; name?: string }[]; toolCallId?: string }
         | undefined
       if (message === undefined) continue
-      const text = (message.content ?? []).map((part) => part.text ?? '').join('')
+      const text = (message.content ?? [])
+        .map((part) => (part.type === 'image' || part.type === 'file' ? `[${part.type} ${part.name ?? ''}]` : part.text ?? ''))
+        .join('')
       if (message.role === 'user') {
         written = []
         sectionStart = turns.length

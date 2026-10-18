@@ -2,7 +2,7 @@ import { mergeTokenUsage } from '../llm/usage.ts'
 import type { TokenUsage } from '../llm/usage.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
-import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
+import type { Chunk, ContentPart, Message, ToolSpec } from '../llm/types.ts'
 import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
@@ -112,6 +112,13 @@ export interface RunTurnOptions {
   readonly endpoint: string
   /** The user's message for this turn. */
   readonly prompt: string
+  /**
+   * Files attached to the message, as typed content blocks.
+   *
+   * They are recorded with the user message beside its text and projected for the provider at request
+   * time: the loop never has to know what an upload is, and the session log keeps the durable reference.
+   */
+  readonly attachments?: readonly ContentPart[]
   /** Who wrote the prompt, when it was not a person — an automatic goal round sets this. */
   readonly source?: unknown
   /** A system prompt, written to the surface as its first node when the session has none. */
@@ -194,7 +201,11 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const maximumTokens = options.maxOutputTokens
   const cwd = ctx.sandbox.workspaceRoot
 
-  ctx.session.user(options.session, options.prompt, options.source)
+  ctx.session.userContent(
+    options.session,
+    [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])],
+    options.source,
+  )
 
   const tools = specsOf(ctx.tools)
   const denials: { tool: string; code: string; message: string }[] = []
