@@ -1,6 +1,6 @@
 ---
 title: Conventions
-version: 1.2.0
+version: 1.4.0
 description: Heddle's own conventions — one instance per subject, a shared reentrancy standard, and per-component applications of it.
 grounded_in:
   - source: human-authored
@@ -62,13 +62,14 @@ subject; a collaborator assumed present and unchanged; a record shape bumped wit
 | Instance | Subject | Status |
 |---|---|---|
 | [`goal-reentrant/`](goal-reentrant/INDEX.md) | the goal subsystem — a persisted goal, its verbs and its round driver | **written** — the worked example, with five defects named |
+| [`landed-and-deployed/`](landed-and-deployed/INDEX.md) | delivery — a green branch is a checkpoint; merged to main and the running deployment verified is "done" | **written** — the instance: a green suite beside a page serving another worktree's build |
 | `ui-reentrant/` | the Web UI: is the page's state re-derived at boot and on a dropped stream, or does it only follow events? | planned — the named gap: the page follows the stream and re-reads on selection, but has no boot resync |
 | `agent-team-reentrant/` | a team of agents: can a member be removed, replaced or added while a team goal runs? | planned — no team subsystem exists yet; the convention is written when the first one does |
 | `context-management-reentrant/` | context assembly: does a re-created context service reproduce the same request from the log? | planned — reentrant by construction today (the surface is folded and re-derived per request); needs a reload check rather than a rewrite |
 | `stats-management-reentrant/` | usage and token accounting: are counts derived from records, and do they survive a component swap and an anchor invalidation? | planned — the projection exists; the usage anchor's invalidation rules are the open question |
 | `monitoring-reentrant/` | the daemon and supervision: does a killed supervisor come back without a person, and without double-starting? | planned — the daemon's part judges kill-and-recover; the convention would state the standard it is held to |
 
-Only the written one exists as a folder. The rest are recorded as questions a convention must answer when its
+The written ones exist as folders. The rest are recorded as questions a convention must answer when its
 subject arrives — a placeholder folder that says "planned" would be a rule nothing judges.
 
 ## Read next

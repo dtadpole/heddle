@@ -1,6 +1,6 @@
 ---
 title: Verifiers
-version: 2.7.0
+version: 2.9.0
 description: The ultimate verifications — one folder each, named after the capability the owner named, every one keeping the project's 0/1/3 verdict contract.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -31,6 +31,7 @@ deliberately does not.
 | 12 | [`87-resizable-panels/`](87-resizable-panels/INDEX.md) | the sidebar's width is the reader's choice, by pointer or keyboard, and is remembered | headless |
 | 13 | [`88-file-preview/`](88-file-preview/INDEX.md) | one preview surface: a file clicked in the left panel, rendered by the library its type calls for | headless |
 | 14 | [`95-web-daemon/`](95-web-daemon/INDEX.md) | a launchd agent keeps the Web UI running at the documented port | — |
+| 15 | [`96-deployment/`](96-deployment/INDEX.md) | the page the owner sees is the main checkout's build, served by a process running that checkout | — |
 
 ### The surface each one runs on
 
