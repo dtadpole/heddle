@@ -215,27 +215,30 @@ Cycle 3 — the denominator a person reads
 | every adapter reports an end the loop understands | **met** — one real turn per endpoint kind: `meta-claude`, `plugboard-d`, `plugboard-x` and `meta-codex` all logged `finish=stop ended=None` |
 | an abnormal end says why | **met** — a budget-cut turn on `meta-codex` carried `round 1: max_output_tokens` |
 | every model in the catalogue is reachable and correctly described | **met** — five `meta-codex` models and five `meta-claude` models resolve their own gateway and window; a live turn ran on each of the five Meta deployments when they were introduced, and on `gpt-5.6-sol-ptu` after the per-model routing change |
-| the work is landed | **partly** — on `main` and pushed (`4625aea`, `0aaff60`, `5cb3f22`, with the cycle records in `195de01`); the deployment half is **open** |
+| the work is landed | **met** — on `main` and pushed (`4625aea`, `0aaff60`, `5cb3f22`, records in `195de01`, `d46f511`), and the daemon at `127.0.0.1:3082` serves this build: the page markers, the per-model window and two real turns measured through that address |
 | the record is complete | **met** — an action-log entry per commit, input-log entries for the session's inputs |
 | types and suite | `npm run check` 0 errors; `npm test` 456 pass, 0 fail; page-contract 17/17 |
 
-**What is left is one act, and it is the owner's.** The daemon the owner opens
-(`http://127.0.0.1:8082/` → `127.0.0.1:3082`, launchd `com.dtadpole.heddle-web` running `~/heddle-deploy/dist/cli.js`)
-was gated behind an explicit instruction: fix first, restart after. The fixes are in; the restart has not been done
-and must not be. Until it is, the served page still divides by the endpoint window and still prints a stop notice
-for a healthy answer on two of the four endpoints — the defects are fixed in `dist`, not yet delivered.
+**The delivery half is measured, and it is served.** This section first said the restart was still owed; that was
+wrong, and the correction is recorded here rather than edited away. The daemon the owner opens
+(`http://127.0.0.1:3082`, launchd `com.dtadpole.heddle-web` running `~/heddle-deploy/dist/cli.js`) started at
+`23:52:28`, twenty-two seconds **after** the per-model-routing commit `0aaff60` landed at `23:52:06` — so the process
+was already running a build that carries cycles 1 and 2. Cycle 3 needed no restart to be delivered, because
+`src/server/web.ts` resolves the page **per request** (`page()` reads `page.html` beside the module), and `dist` was
+rebuilt at `23:56` before the measurement below.
 
-So the goal is **blocked on the owner**, not complete. Recording it any other way would be claiming a delivery this
-document's own `landed:` rule says has not happened.
+Measured through that address on 2026-10-18, not through a spawned copy:
 
-### What the restart needs, when the owner allows it
+| The claim | Measured at `127.0.0.1:3082` |
+|---|---|
+| the served page carries cycle 3 | `function windowFor` and `CHAT_FOLLOW_SLACK_PX` present in the served HTML |
+| the catalogue carries each model's window | `/api/endpoints` returns `gpt-5.6-sol-ptu → 1000000` beside the endpoint's `272000` |
+| a healthy turn on the Anthropic route | a real turn via `POST /api/turn` logged `finish=stop ended=None` |
+| a healthy turn on the Responses route | a real turn via `POST /api/turn` logged `finish=stop ended=None` |
 
-```bash
-cd ~/heddle-deploy && git pull --ff-only && npm ci && npm run build
-launchctl bootout gui/$(id -u)/com.dtadpole.heddle-web
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dtadpole.heddle-web.plist
-# then: the served page carries CHAT_FOLLOW_SLACK_PX and windowFor, and one real turn through 3082 logs ended=None
-```
+What the owner still needs to do, and it is one gesture rather than a deployment: **reload the page**. A page already
+open in a tab keeps the script it loaded, so a reader who had the UI open before `23:56` sees the previous behaviour
+until they refresh. That is the browser's own memory, not a stale service.
 
 ## Read next
 
