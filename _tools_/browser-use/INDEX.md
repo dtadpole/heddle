@@ -1,6 +1,6 @@
 ---
 title: Browser Use
-version: 1.0.0
+version: 1.1.0
 description: A browser this repository drives over the Chrome DevTools protocol, with the harness browser's tool surface, one command per tool and one long-lived session behind them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, asking for a browser tool under _tools_ that replicates the DSH browser MCP
@@ -17,6 +17,11 @@ command line that keeps one browser alive between commands.
 
 The name is the owner's choice (2026-10-17) and is unrelated to the third-party project that happens to
 share it: this is this repository's own driver, and everything here was written against the protocol.
+
+On 2026-10-17 the harness's browser MCP was **removed from the Web profile** (the `mcp-browser` row in
+`~/.dsh/profiles/web/cordis.patch.yml`) and this tool is the replacement: a session that needs a browser
+runs `cli.mjs` from the checkout. The reading it was built and judged against is kept in
+[`_context_/dsh-browser-mcp/`](../../_context_/dsh-browser-mcp/INDEX.md).
 
 ## Why it exists
 
