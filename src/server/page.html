@@ -1143,14 +1143,30 @@
     color: #cfd3d6; border: 0; border-radius: var(--radius); cursor: default;
   }
   #access::before { content: ''; width: 11px; height: 11px; border: 1.3px solid currentColor; border-radius: 50%; opacity: .8; }
-  /** The status line under the card: only what the page can actually know. */
+  /**
+   * The session-statistics dock under the card — DSH's own dock, measured on 2026-10-17.
+   *
+   * One row flush at the card's bottom edge (its own 4px of top padding is the whole gap), centred on the
+   * card: two 12px/20px pills, each an icon plus a label with a `·` separator, then a 13px/20px context item
+   * whose icon is a 14px two-circle ring. DSH's pills are buttons that open dialogs; the dialogs are not built
+   * yet (they need timing facts heddle does not record), so these are spans — the same shape and type, without
+   * a control that would open nothing.
+   */
   #composer-status {
-    display: flex; gap: .9rem; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: .3rem auto 0;
-    padding: 0 14px; font-size: 12px; line-height: 1.4; color: var(--text-3);
+    display: flex; justify-content: center; align-items: center; gap: .75rem;
+    max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
+    padding: 4px 14px 0; font-size: 12px; line-height: 20px; color: var(--text-3);
+    font-variant-numeric: tabular-nums;
   }
-  #composer-status:empty { display: none; }
-  #composer-status span:empty { display: none; }
-  #composer-status span + span::before { content: '·'; margin-right: .9rem; color: var(--text-3); }
+  #composer-status[hidden] { display: none; }
+  #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  #composer-status .stat-icon { flex: none; width: 16px; height: 16px; }
+  #composer-status .stat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #composer-status .stat-sep { margin: 0 6px; color: var(--border-strong); }
+  #composer-status .stat-context { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 8px; font-size: 13px; line-height: 20px; }
+  #composer-status .stat-ring-track { fill: none; stroke: var(--border-strong); stroke-width: 2; }
+  #composer-status .stat-ring-fill { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; }
+  #composer-status [hidden] { display: none; }
   /** The file-path menu opened by `+`, floating above the card on the raised surface. */
   #attach-menu {
     position: absolute; z-index: 6; left: 50%; bottom: calc(100% - .2rem); transform: translateX(-50%);
@@ -1942,7 +1958,20 @@
       </div>
     </div>
   </form>
-  <div id="composer-status" aria-live="polite"><span data-stat="turns"></span><span data-stat="steps"></span><span data-stat="tokens"></span><span data-stat="context"></span></div>
+  <div id="composer-status" aria-live="polite" hidden>
+    <span class="stat-pill" data-stat-pill="time">
+      <svg class="stat-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke-width="1"><path d="M3.4041 13.096C2.49514 12.187 1.87614 11.0288 1.62537 9.76798C1.37459 8.50716 1.50331 7.20028 1.99525 6.01261C2.48719 4.82494 3.32025 3.80981 4.3891 3.09557C5.45795 2.38134 6.71458 2.00008 8.0001 2C9.28563 2.00008 10.5423 2.38134 11.6111 3.09557C12.68 3.80981 13.513 4.82494 14.005 6.01261C14.4969 7.20028 14.6256 8.50716 14.3748 9.76798C14.1241 11.0288 13.5051 12.187 12.5961 13.096" stroke="currentColor"/><path d="M8 8.49994L11.6114 4.88855" stroke="currentColor"/><path d="M8 9.75C8.69036 9.75 9.25 9.19036 9.25 8.5C9.25 7.80964 8.69036 7.25 8 7.25C7.30964 7.25 6.75 7.80964 6.75 8.5C6.75 9.19036 7.30964 9.75 8 9.75Z" fill="currentColor"/></svg>
+      <span class="stat-label"><span data-stat="turns"></span> <span data-stat="steps"></span><span class="stat-sep" data-stat="rate-sep" aria-hidden="true">·</span><span data-stat="tokens"></span></span>
+    </span>
+    <span class="stat-pill" data-stat-pill="usage">
+      <svg class="stat-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke-width="1"><path d="M13.1967 5.1869C13.7232 4.77378 14.0003 4.30517 14.0001 3.82819C14.0003 3.3512 13.7232 2.88259 13.1967 2.46947C12.6702 2.05635 11.9128 1.71328 11.0006 1.47475C10.0885 1.23621 9.05371 1.11062 8.00039 1.1106C6.94707 1.11057 5.9123 1.23612 5.00009 1.47461C4.08742 1.71301 3.32948 2.05604 2.80249 2.46919C2.2755 2.88235 1.99805 3.35106 1.99805 3.82819C1.99805 4.30531 2.2755 4.77402 2.80249 5.18718C3.32948 5.60033 4.08742 5.94336 5.00009 6.18176C5.9123 6.42025 6.94707 6.5458 8.00039 6.54578C9.05371 6.54575 10.0885 6.42016 11.0006 6.18163C11.9128 5.94309 12.6702 5.60002 13.1967 5.1869Z" stroke="currentColor"/><path d="M2 3.80371V11.7848" stroke="currentColor"/><path d="M14 3.80371V11.7848" stroke="currentColor"/><path d="M2 7.81396C2 8.60524 2.63214 9.36411 3.75736 9.92363C4.88258 10.4832 6.4087 10.7975 8 10.7975C9.5913 10.7975 11.1174 10.4832 12.2426 9.92363C13.3679 9.36411 14 8.60524 14 7.81396" stroke="currentColor"/><path d="M2 11.7847C2 12.5759 2.63214 13.3348 3.75736 13.8943C4.88258 14.4539 6.4087 14.7682 8 14.7682C9.5913 14.7682 11.1174 14.4539 12.2426 13.8943C13.3679 13.3348 14 12.5759 14 11.7847" stroke="currentColor"/></svg>
+      <span class="stat-label"><span data-stat="total"></span><span class="stat-sep" data-stat="cache-sep" aria-hidden="true">·</span><span data-stat="cache"></span></span>
+    </span>
+    <span class="stat-context" data-stat-pill="context">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle class="stat-ring-track" cx="7" cy="7" r="5"/><circle class="stat-ring-fill" data-stat="context-ring" cx="7" cy="7" r="5" stroke-dasharray="0 31.416"/></svg>
+      <span data-stat="context"></span>
+    </span>
+  </div>
   <div id="attach-menu" role="menu" aria-label="Insert a file path" hidden></div>
 </div>
 </main>
@@ -3507,6 +3536,10 @@ async function refreshGoal() {
 async function showSession(id) {
   lastTurnUsage = null
   lastTurnSeconds = 0
+  sessionStats = null
+  liveRounds = 0
+  liveUsage = undefined
+  updateStatusBar()
   current = id
   paintEmptyState()
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
@@ -3546,6 +3579,9 @@ async function showSession(id) {
      * session: the choice travels with the request and the server records it on the session it made.
      */
     applySessionModel(body.endpoint ?? null, body.model ?? null)
+    /** The same answer that carries the transcript carries the statistics its dock prints. */
+    sessionStats = body.stats ?? null
+    updateStatusBar()
     /** The header follows the conversation, the way DSH's does. */
     const titleCell = document.getElementById('session-title')
     const branchCell = document.getElementById('session-branch')
@@ -3619,10 +3655,19 @@ events.addEventListener('session', (message) => {
   if (event.type === 'model/request') {
     runningSessions.add(payload.session)
     paintRunningMarks()
+    /** A round is one agent step: DSH's `steps` counts these, so the dock can count the running turn too. */
+    if (payload.session === (current ?? composerKey)) {
+      liveRounds += 1
+      updateStatusBar()
+    }
   }
   else if (event.type === 'turn/completed') {
     runningSessions.delete(payload.session)
     paintRunningMarks()
+    if (payload.session === (current ?? composerKey)) {
+      liveRounds = 0
+      void refreshSessionStats()
+    }
     /**
      * A turn just ended, which is exactly when a queued message becomes sendable — including one that was
      * waiting on a turn this page never started. The pump refuses to run twice for one queue, so this can
@@ -3648,6 +3693,14 @@ events.addEventListener('session', (message) => {
     }
   }
   if (current && payload.session !== current) return
+  /**
+   * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
+   * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.
+   */
+  if (event.type === 'assistant/chunk' && event.chunk.usage !== undefined) {
+    liveUsage = addUsage(liveUsage, event.chunk.usage)
+    updateStatusBar()
+  }
   if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') add('assistant', event.chunk.text)
   else if (event.type === 'assistant/chunk' && event.chunk.type === 'reasoning-delta') add('reasoning', event.chunk.text)
   else if (event.type === 'assistant/chunk' && event.chunk.type === 'tool-call') {
@@ -4566,7 +4619,10 @@ async function runTurn(text, key) {
         stopRequested = false
         lastTurnUsage = payload.usage ?? null
         lastTurnSeconds = (performance.now() - startedAt) / 1000
+        liveRounds = 0
+        liveUsage = undefined
         updateStatusBar()
+        void refreshSessionStats()
         for (const denial of payload.denials ?? []) add('denied', `${denial.tool}: ${denial.message}`)
         /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
         settleChat()
@@ -4684,41 +4740,167 @@ function renderComposerState() {
  * page cannot measure is not printed rather than invented.
  */
 /**
- * The last completed turn's reported usage and duration, when the provider reported both.
+ * The session-statistics dock under the card — DSH's three figures, from reported facts only.
  *
- * DSH prints a token rate and a context share under its composer. Both need numbers a provider sends, so they
- * are kept here rather than invented: no usage means no rate, and no declared `contextWindow` means no
- * percentage — a made-up denominator would be worse than an empty cell.
+ * The reference prints, in one row: `{turns} turns {steps} steps · {tok/s}`, `{total} tok · Cache hit
+ * {percent}%`, and `{percent}%` in a ring. The backend folds turns, steps and the usage buckets from the
+ * session's own events (`GET /api/sessions/<id>` `stats`), and this page adds the in-flight turn's rounds and
+ * usage frames as they arrive. Every formatter here is DSH's own rule, read from its client bundle:
+ *
+ * - tokens: below 1e3 exact, below 1e6 `K`, else `M`, and the scaled value is an integer at 100 or above and
+ *   one decimal below that (`1.1K`, `403M`);
+ * - rate: integer at 10 or above, one decimal below;
+ * - cache hit: `cacheRead / billed input`, integer text, with decimals only when integer rounding would claim
+ *   a full 100%; no billed input at all means the phrase is omitted;
+ * - context: round(prompt used / window × 100), clamped to 100.
+ *
+ * Nothing is estimated: a bucket no provider frame reported leaves its phrase blank, which is what a blank
+ * cell means everywhere else in this page.
  */
 let lastTurnUsage = null
 let lastTurnSeconds = 0
+/** The session's durable totals, from the same answer that carries its transcript. */
+let sessionStats = null
+/** Rounds of the turn running now, counted from `model/request`, and usage frames not yet in a durable fold. */
+let liveRounds = 0
+let liveUsage = undefined
 
+/** Add two usage values bucket by bucket, keeping a bucket no frame reported absent. */
+function addUsage(previous, next) {
+  if (previous === undefined) return next
+  if (next === undefined) return previous
+  const sum = (a, b) => (a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0))
+  return {
+    ...(sum(previous.inputTokens, next.inputTokens) !== undefined ? { inputTokens: sum(previous.inputTokens, next.inputTokens) } : {}),
+    ...(sum(previous.outputTokens, next.outputTokens) !== undefined ? { outputTokens: sum(previous.outputTokens, next.outputTokens) } : {}),
+    ...(sum(previous.cacheReadTokens, next.cacheReadTokens) !== undefined ? { cacheReadTokens: sum(previous.cacheReadTokens, next.cacheReadTokens) } : {}),
+    ...(sum(previous.cacheWriteTokens, next.cacheWriteTokens) !== undefined ? { cacheWriteTokens: sum(previous.cacheWriteTokens, next.cacheWriteTokens) } : {}),
+  }
+}
+
+/** DSH's `formatTokens`: exact below a thousand, K then M, integer at 100 or above, one decimal below. */
+function formatTokenCount(value) {
+  if (value < 1e3) return String(value)
+  const scaled = (candidate) => (candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10))
+  return value < 1e6 ? `${scaled(value / 1e3)}K` : `${scaled(value / 1e6)}M`
+}
+
+/** DSH's `formatTokensPerSecond`: integer at 10 or above, one decimal below. */
+function formatRate(value) {
+  const clamped = Math.max(0, value)
+  return clamped >= 10 ? String(Math.round(clamped)) : String(Math.round(clamped * 10) / 10)
+}
+
+/** DSH's cache-hit share: integer text unless integer rounding would claim a full 100%. */
+function formatCacheHit(cacheRead, billed) {
+  if (billed <= 0) return null
+  if (cacheRead >= billed) return '100'
+  const percent = (cacheRead / billed) * 100
+  if (Math.round(percent) < 100) return String(Math.round(percent))
+  let places = 1
+  while (Math.round(percent * 10 ** places) / 10 ** places >= 100) places += 1
+  return percent.toFixed(places).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/** Show the dock only when at least one figure is printable. */
+function paintDock() {
+  if (statusBar === null) return
+  const text = (name) => (statusBar.querySelector(`[data-stat="${name}"]`) || {}).textContent || ''
+  statusBar.hidden = ['turns', 'steps', 'tokens', 'total', 'cache', 'context'].every((name) => text(name) === '')
+}
+
+/**
+ * Draw the dock from the durable stats plus the live turn.
+ *
+ * Turns come from the transcript (a prompt row exists the moment it is sent, which is what makes the count
+ * live), steps from the durable fold plus the running turn's `model/request` frames, and the three usage
+ * figures from the fold merged with frames the stream has delivered since it was read.
+ */
 function updateStatusBar() {
   if (statusBar === null) return
-  let turns = 0
-  let steps = 0
-  for (const node of log.querySelectorAll('.turn')) {
-    if (node.dataset.kind === 'user') turns += 1
-    else if (node.dataset.kind === 'tool') steps += 1
+  /**
+   * The reference prints no dock on the new-session screen: there is nothing to report yet. The panel's
+   * `current` is what answers "is a session open", so the same rule holds here.
+   */
+  if (current === null) {
+    statusBar.hidden = true
+    return
   }
-  const turnsCell = statusBar.querySelector('[data-stat="turns"]')
-  const stepsCell = statusBar.querySelector('[data-stat="steps"]')
-  if (turnsCell !== null) turnsCell.textContent = `${turns} turn${turns === 1 ? '' : 's'}`
-  if (stepsCell !== null) stepsCell.textContent = `${steps} step${steps === 1 ? '' : 's'}`
-  const tokensCell = statusBar.querySelector('[data-stat="tokens"]')
-  if (tokensCell !== null) {
-    const out = lastTurnUsage?.outputTokens
-    tokensCell.textContent = typeof out === 'number' && lastTurnSeconds > 0 ? `${Math.round(out / lastTurnSeconds)} tok/s` : ''
+  const turns = log.querySelectorAll('.turn[data-kind="user"]').length
+  const steps = (sessionStats?.steps ?? 0) + liveRounds
+  const usage = addUsage(sessionStats?.usage, liveUsage)
+  const cell = (name) => statusBar.querySelector(`[data-stat="${name}"]`)
+
+  const turnsCell = cell('turns')
+  const stepsCell = cell('steps')
+  if (turnsCell !== null) turnsCell.textContent = `${turns} turns`
+  if (stepsCell !== null) stepsCell.textContent = `${steps} steps`
+
+  /** The rate needs the turn's own reported output and duration; DSH divides decode time, this divides wall time. */
+  const out = lastTurnUsage?.outputTokens
+  const rate = typeof out === 'number' && lastTurnSeconds > 0 ? formatRate(out / lastTurnSeconds) : null
+  const tokensCell = cell('tokens')
+  const rateSep = cell('rate-sep')
+  if (tokensCell !== null) tokensCell.textContent = rate === null ? '' : `${rate} tok/s`
+  if (rateSep !== null) rateSep.hidden = rate === null
+
+  /** Billed input is the three prompt-side buckets; the total adds the reported output. */
+  const billed = usage === undefined
+    ? undefined
+    : usage.inputTokens === undefined && usage.cacheReadTokens === undefined && usage.cacheWriteTokens === undefined
+      ? undefined
+      : (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+  const total = billed === undefined ? undefined : usage.outputTokens === undefined ? billed : billed + usage.outputTokens
+  const cacheHit = billed !== undefined && usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0 ? formatCacheHit(usage.cacheReadTokens, billed) : null
+  const totalCell = cell('total')
+  const cacheCell = cell('cache')
+  const cacheSep = cell('cache-sep')
+  const usagePill = statusBar.querySelector('[data-stat-pill="usage"]')
+  if (totalCell !== null) totalCell.textContent = total === undefined ? '' : `${formatTokenCount(total)} tok`
+  if (cacheCell !== null) cacheCell.textContent = cacheHit === null ? '' : `Cache hit ${cacheHit}%`
+  if (cacheSep !== null) cacheSep.hidden = cacheHit === null
+  if (usagePill !== null) usagePill.hidden = total === undefined
+
+  /**
+   * The context share divides the prompt the last completed request carried by the window its endpoint
+   * declares — both are reported facts; no window, no percentage.
+   */
+  const used = sessionStats?.lastPromptTokens
+  const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
+  const window = endpoint?.contextWindow
+  const percent =
+    typeof used === 'number' && typeof window === 'number' && window > 0
+      ? Math.min(100, Math.round((used / window) * 100))
+      : null
+  const contextCell = cell('context')
+  const contextGauge = statusBar.querySelector('[data-stat-pill="context"]')
+  if (contextCell !== null) contextCell.textContent = percent === null ? '' : `${percent}%`
+  if (contextGauge !== null) contextGauge.hidden = percent === null
+  if (percent !== null) {
+    const ring = cell('context-ring')
+    if (ring !== null) {
+      const circumference = 2 * Math.PI * 5
+      ring.setAttribute('stroke-dasharray', `${((percent / 100) * circumference).toFixed(2)} ${circumference.toFixed(2)}`)
+    }
   }
-  const contextCell = statusBar.querySelector('[data-stat="context"]')
-  if (contextCell !== null) {
-    const used = lastTurnUsage?.inputTokens
-    const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
-    const window = endpoint?.contextWindow
-    contextCell.textContent =
-      typeof used === 'number' && typeof window === 'number' && window > 0
-        ? `${Math.round((used / window) * 100)}% context`
-        : ''
+  paintDock()
+}
+
+/** Re-read the session's durable statistics — what a reload, another client's turn, and a turn's end share. */
+async function refreshSessionStats() {
+  const id = current
+  if (id === null) return
+  try {
+    const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    if (!response.ok) return
+    const body = await response.json()
+    if (id !== current) return
+    sessionStats = body.stats ?? null
+    liveUsage = undefined
+    liveRounds = 0
+    updateStatusBar()
+  } catch {
+    // A stats read that fails leaves the last drawn figures rather than blanking the dock.
   }
 }
 

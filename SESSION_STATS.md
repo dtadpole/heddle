@@ -163,3 +163,30 @@ centred on the card (card centre 777, dock centre 776.5 at the measured window).
   failing-first browser contract in `check-composer.mjs`; then the suites and a screenshot.
 - **lessons:** normalising provider usage into DSH's bucket shape is a *mechanism* and belongs in one module
   with its own tests; a consumer-side fix (formatting) would have been three guesses repeated per provider.
+
+### Cycle 2 — the dock, from the fold to the page (complete)
+
+- **changed (frontend):** `src/server/page.html`: the single status line became DSH's dock — two 12px/20px
+  pills (16px gauge and database icons, `·` separators at 6px margins, radius 999, `padding: 1px 8px`) and a
+  13px/20px context item with a 14px two-circle ring, in one 12px-gap row flush at the card's bottom edge (the
+  dock's own 4px top padding) and centred on the card. The page draws it from `GET /api/sessions/<id>`'s
+  `stats` (turns, agent steps, usage buckets, last prompt size) merged with the live stream: `model/request`
+  frames count the running turn's steps, `assistant/chunk` usage frames move the token figures, and a turn's
+  end re-reads the durable fold. The label formats are DSH's own rules (K/M compaction, rate at 10+, cache
+  share as integer unless that would claim 100%, context clamped to 100); the hero prints no dock.
+- **step back:** the dialogs behind DSH's pills stay **deferred**: they need `llmMs`, `toolMs` and `ttft`,
+  which heddle does not record yet, so a dialog would be invented numbers. The rate divides the turn's wall
+  time rather than decode time for the same reason — recorded as a divergence. Steps are counted from
+  `turn/completed.rounds` (agent steps), not tool rows, which is the reference's meaning.
+- **verify:** a failing-first browser contract in `_verifiers_/80-web-ui/check-composer.mjs` — it failed on
+  the hero dock (`hidden` was false) and then on the rate before the page's live wiring was complete, and now
+  passes: one turn prints `1 turns` / `1 steps` / `N tok/s` / `1.1K tok` / `Cache hit 80%` / `50%` with the
+  reference's `12px/20px` pills, `#adb2b8`, `999px` radius, `1px 8px` padding, `12px` dock gap and a dock top
+  flush with the card's bottom edge; a second turn proves the total is cumulative (`2.1K tok`); a provider
+  that reports no usage leaves the rate, total, cache phrase and context share blank and hides their items.
+  The whole composer suite is 12/12 green.
+- **reds / divergences kept:** the dialogs; the wall-time rate; and the reference's `pill` hover affordance
+  (its pills are buttons). Each is recorded rather than half-built.
+- **lessons:** a stats dock is judged by its **blank state** as much as by its numbers — the first contract
+  failure was the hero, not a figure; and a live figure needs both the durable fold and the stream, or a
+  page that watched the turn shows one number and a reload shows another.

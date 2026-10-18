@@ -20,7 +20,7 @@
  * - **A record's timing comes from its own events.** Nothing interpolates a missing timestamp.
  */
 
-import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
+import { billedInputTokens, mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 
 /** One event, as much of it as the projection reads. */
 export interface LedgerEvent {
@@ -146,12 +146,18 @@ export interface SessionStats {
   readonly turns: number
   readonly steps: number
   readonly usage?: TokenUsage
+  /**
+   * The prompt-side total of the **most recent** reported round, which is what the context share divides by
+   * the window (DSH's context pressure is the same fact). Absent when no frame reported a prompt side.
+   */
+  readonly lastPromptTokens?: number
 }
 
 export function projectSessionStats(events: readonly LedgerEvent[]): SessionStats {
   let turns = 0
   let steps = 0
   let usage: TokenUsage | undefined
+  let lastPromptTokens: number | undefined
   for (const event of events) {
     if (event.type === 'message' && event.message?.role === 'user') {
       turns += 1
@@ -163,9 +169,16 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
     }
     if (event.type === 'assistant/chunk' && event.chunk?.usage !== undefined) {
       usage = mergeTokenUsage(usage, event.chunk.usage)
+      const billed = billedInputTokens(event.chunk.usage)
+      if (billed !== undefined) lastPromptTokens = billed
     }
   }
-  return { turns, steps, ...(usage !== undefined ? { usage } : {}) }
+  return {
+    turns,
+    steps,
+    ...(usage !== undefined ? { usage } : {}),
+    ...(lastPromptTokens !== undefined ? { lastPromptTokens } : {}),
+  }
 }
 
 /** One row of the Trajectory table: a record, plus where it sits. */

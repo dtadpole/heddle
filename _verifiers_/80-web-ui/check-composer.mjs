@@ -576,10 +576,19 @@ test('the composer is the text column plus 32px, and the handle widens both', as
  * where it reported none. DSH prints the same two terms under its composer; a numerator here comes from the
  * `usage` frame the double now sends, and a denominator from the endpoint's declared `contextWindow`.
  */
-test('the status line derives a token rate and a context share from reported usage', async (context) => {
+/**
+ * The composer's bottom statistics are **DSH's dock**, from reported facts only.
+ *
+ * The reference prints three figures under the card: `{turns} turns {steps} steps · {rate} tok/s`,
+ * `{total} tok · Cache hit {percent}%`, and `{percent}%` inside a ring. Its formatters were read from its own
+ * client bundle (integer at 100 or above and one decimal below for K/M; integer rate at 10 or above; the cache
+ * share as integer text unless that would claim a full 100%; the context share clamped to 100). A provider that
+ * reports no usage leaves its phrases blank — the dock never invents a token count.
+ */
+test('the session-statistics dock prints DSH\u2019s figures, and blanks what was not reported', async (context) => {
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  const server = await startServer('usage', {
-    usage: { prompt_tokens: 1000, completion_tokens: 50 },
+  const server = await startServer('stats', {
+    usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 800 } },
     contextWindow: 2000,
     holdOpenMs: 50,
   })
@@ -587,28 +596,96 @@ test('the status line derives a token rate and a context share from reported usa
   try {
     await browser.goto(server.url)
     await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
-    const cells = () =>
+    const dock = () =>
       browser.evaluate(`(() => {
+        const status = document.getElementById('composer-status')
         const cell = (name) => (document.querySelector('[data-stat="' + name + '"]') || {}).textContent || ''
-        return JSON.stringify({ tokens: cell('tokens'), context: cell('context'), turns: cell('turns') })
+        const pill = (name) => document.querySelector('[data-stat-pill="' + name + '"]')
+        const box = (node) => { if (!node) return null; const r = node.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), height: Math.round(r.height) } }
+        const style = (node, keys) => node === null ? null : keys.reduce((out, key) => { out[key] = getComputedStyle(node).getPropertyValue(key); return out }, {})
+        const card = document.getElementById('composer-card')
+        return JSON.stringify({
+          hidden: status === null ? null : status.hidden,
+          turns: cell('turns'), steps: cell('steps'), tokens: cell('tokens'),
+          total: cell('total'), cache: cell('cache'), context: cell('context'),
+          usageHidden: pill('usage') === null ? null : pill('usage').hidden,
+          contextHidden: pill('context') === null ? null : pill('context').hidden,
+          rateSepHidden: (document.querySelector('[data-stat="rate-sep"]') || {}).hidden,
+          ring: (document.querySelector('[data-stat="context-ring"]') || {}).getAttribute?.('stroke-dasharray'),
+          dock: box(status), card: box(card),
+          pillStyle: style(pill('time'), ['font-size', 'line-height', 'color', 'border-radius', 'padding', 'gap']),
+          contextStyle: style(pill('context'), ['font-size', 'line-height', 'color', 'border-radius', 'padding']),
+            dockStyle: style(status, ['gap', 'padding-top', 'justify-content']),
+        })
       })()`)
-    const empty = JSON.parse(await cells())
-    assert.equal(empty.tokens, '', 'before any usage is reported there is no rate')
-    assert.equal(empty.context, '', 'and no context share')
+    const empty = JSON.parse(await dock())
+    assert.equal(empty.hidden, true, 'a new session has nothing to report, so the dock is hidden')
 
     await type(browser, 'report the cost')
     await press(browser, { key: 'Enter' })
     assert.ok(
       await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000),
-      'the rate appears once the provider reports usage',
+      'the dock fills once the turn ended and its usage was reported',
     )
-    const filled = JSON.parse(await cells())
-    assert.match(filled.tokens, /^\d+ tok\/s$/, `the rate is output tokens over the turn's duration (${filled.tokens})`)
-    assert.equal(filled.context, '50% context', 'the share is reported input tokens over the declared window')
-    assert.equal(filled.turns, '1 turn', 'and the turn count still follows the transcript')
+    const first = JSON.parse(await dock())
+    assert.equal(first.turns, '1 turns', 'the reference\u2019s label is always plural')
+    assert.equal(first.steps, '1 steps', 'one model round is one agent step')
+    assert.match(first.tokens, /^\d+(\.\d)? tok\/s$/, `the rate is the turn\u2019s reported output over its duration (${first.tokens})`)
+    assert.equal(first.total, '1.1K tok', 'the billed total is uncached + cache read + output, compacted like the reference')
+    assert.equal(first.cache, 'Cache hit 80%', 'the cache share is the cache read over that billed input')
+    assert.equal(first.context, '50%', 'the context share is the last prompt over the window')
+    assert.ok(Number.parseFloat(first.ring) > 0, 'the ring is drawn for the share')
+    assert.equal(first.dock.top, first.card.bottom, 'the dock sits flush at the card\u2019s bottom edge')
+    assert.equal(first.pillStyle['font-size'], '12px', 'the pills are 12px')
+    assert.equal(first.pillStyle['line-height'], '20px', 'on a 20px line')
+    assert.equal(first.pillStyle.color, 'rgb(173, 178, 184)', 'in the reference\u2019s tertiary grey')
+    assert.equal(first.pillStyle['border-radius'], '999px', 'and pill-shaped')
+    assert.equal(first.pillStyle.padding, '1px 8px', 'with the reference\u2019s padding')
+    assert.equal(first.contextStyle['font-size'], '13px', 'the context item is one step larger')
+    assert.equal(first.dockStyle.gap, '12px', 'the dock spaces its items by 12px')
+    assert.equal(first.dockStyle['padding-top'], '4px', 'and its own top padding is the gap to the card')
+
+    /** A second turn accumulates: the numbers are a session total, not the last turn\u2019s. */
+    await type(browser, 'again')
+    await press(browser, { key: 'Enter' })
+    assert.ok(
+      await browser.waitFor('(document.querySelector(\'[data-stat="total"]\') || {}).textContent === "2.1K tok"', 20_000),
+      'the second turn lands in the cumulative total',
+    )
+    const second = JSON.parse(await dock())
+    assert.equal(second.steps, '2 steps')
+    assert.equal(second.total, '2.1K tok', 'the total is cumulative over the session')
+    assert.equal(second.cache, 'Cache hit 80%')
   } finally {
     browser.close()
     await server.close()
+  }
+
+  /** A provider that reports no usage leaves the token phrases blank rather than inventing them. */
+  const bare = await startServer('stats-bare', { holdOpenMs: 50 })
+  const browser2 = await openBrowser()
+  try {
+    await browser2.goto(bare.url)
+    await browser2.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    await type(browser2, 'no usage reported')
+    await press(browser2, { key: 'Enter' })
+    assert.ok(await browser2.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent !== ""', 20_000))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const blank = JSON.parse(await browser2.evaluate(`(() => {
+      const cell = (name) => (document.querySelector('[data-stat="' + name + '"]') || {}).textContent || ''
+      const pill = (name) => document.querySelector('[data-stat-pill="' + name + '"]')
+      return JSON.stringify({ turns: cell('turns'), tokens: cell('tokens'), total: cell('total'), cache: cell('cache'), context: cell('context'), tokensHidden: (document.querySelector('[data-stat="rate-sep"]') || {}).hidden, usageHidden: pill('usage') === null ? null : pill('usage').hidden, contextHidden: pill('context') === null ? null : pill('context').hidden })
+    })()`))
+    assert.equal(blank.turns, '1 turns', 'the counts still follow the transcript')
+    assert.equal(blank.tokens, '', 'no reported output means no rate')
+    assert.equal(blank.tokensHidden, true, 'and its separator is not drawn')
+    assert.equal(blank.total, '', 'no reported usage means no total')
+    assert.equal(blank.usageHidden, true, 'so the whole usage pill is absent')
+    assert.equal(blank.context, '', 'and no prompt means no context share')
+    assert.equal(blank.contextHidden, true)
+  } finally {
+    browser2.close()
+    await bare.close()
   }
 })
 

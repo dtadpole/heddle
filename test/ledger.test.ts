@@ -474,7 +474,8 @@ test('the session stats fold turns, steps and usage buckets from the session\'s 
     turns: 2,
     steps: 5,
     usage: { inputTokens: 15, outputTokens: 10, cacheReadTokens: 30, cacheWriteTokens: 7 },
-  })
+    lastPromptTokens: 12,
+  }, 'the last reported prompt side is the context share\'s numerator (5 + 7)')
 })
 
 test('session stats stay empty rather than zero where nothing was reported', () => {
