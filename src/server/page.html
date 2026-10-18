@@ -8190,25 +8190,24 @@ function kindIcon(kind, open = false) {
       'M9.96976 1.70572L13.1554 3.93629L10.9019 8.12317L11.5158 11.605L10.7192 12.7427L2.52767 7.00693L3.3243 5.86922L6.80612 5.25528L9.96976 1.70572Z',
     )
     /**
-     * The tail is a **thin shaft on the head's own centre line**, not the reference's asymmetric fill shape.
+     * The tail sits in the **middle of the head** and is a thin taper.
      *
-     * The owner's two reports: the tail was too thick, and it did not sit in the **middle** of the head. Measured on the reference
-     * artwork: its needle leaves the head off its centreline by about 1.8 units of the 16-unit box, and its filled taper is about
-     * 0.95 units thick. The head below is still the reference's path exactly; the shaft is drawn from the head's geometric centre
-     * (the bounding box centre of that path, 7.85, 7.22) outward along the same down-left direction, as a **0.9-unit round-capped
-     * stroke**, which is thinner than the fill it replaces and is centred by construction. The head covers the shaft's start, so
-     * the joint needs no seam.
+     * The head's lower edge runs from (10.72, 12.74) to (2.53, 7.01); its midpoint is **(6.625, 9.875)**, and the outward
+     * perpendicular points down-left. The shaft starts exactly there, so it leaves from the middle of the head rather than from a
+     * corner, and is drawn as a fill taper — **0.9 units across at the base, narrowing to 0.12 at the tip** — which is the
+     * reference needle's thinness (about 0.95 at the body, narrowing to a point) without a stroke that would add its own width
+     * around the shape. The head paints over the shaft's base, so the joint needs no seam.
      */
-    const shaft = svgPath('M6.87 8.97L3.95 14.2')
-    shaft.setAttribute('fill', 'none')
-    shaft.setAttribute('stroke', 'currentColor')
-    shaft.setAttribute('stroke-width', '0.9')
-    shaft.setAttribute('stroke-linecap', 'round')
+    const shaft = svgPath('M6.256 9.617L3.366 14.426L3.464 14.494L6.994 10.133Z')
+    shaft.setAttribute('fill', 'currentColor')
+    shaft.setAttribute('stroke', 'none')
+    /** The stated base, so a check can measure the tail against it rather than against a guess. */
+    body.dataset.tailBase = '6.625 9.875'
     if (kind === 'pin-fill') {
       body.setAttribute('fill', 'currentColor')
       body.setAttribute('stroke', 'currentColor')
     }
-    /** Shaft first, head last: the head paints over the shaft's first units and hides the join. */
+    /** Shaft first, head last: the head paints over the shaft's base and hides the join. */
     svg.append(shaft, body)
     return svg
   }

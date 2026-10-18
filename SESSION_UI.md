@@ -150,6 +150,19 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### The tail in the middle of the head, at the reference's thickness (2026-10-17)
+
+The owner asked twice more: the tail must sit **in the middle of the pin head**, and its thinness must match DSH — "not over thin, nor
+over thick". Measured on the reference artwork: its needle is about **0.95 units** across at the body and narrows to a point, but its
+axis runs **off the head's centre**, so copying its shape leaves the tail visibly to one side.
+
+The head's lower edge runs from (10.72, 12.74) to (2.53, 7.01); its **midpoint is (6.625, 9.875)** and the outward normal points
+down-left. The tail now starts exactly at that midpoint and is a **filled taper of 0.9 units at the base narrowing to 0.12** — the
+reference's thinness with the reference's taper, but centred. Measured: the tail's base midpoint is **0.0 units** from the stated
+middle, its base is 0.9 across (reference 0.95), its tip is 0.12 (a point), and it reaches 1.7 units below the head. The path states
+where its base is (`data-tail-base`), so the check measures the drawn quad against the stated position instead of a guess; it asserts
+the base is in the middle, the width band matches the reference, and the shape narrows to a point.
+
 ### A thin tail, centred on the head (2026-10-17)
 
 The owner asked twice more: thinner, and **in the middle of the pin head**. Measured on the reference artwork: its filled needle leaves

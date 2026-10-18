@@ -3901,28 +3901,31 @@ test('a written session moves to the top of its folder, its age follows, and a r
           const box = path.getBBox()
           const style = getComputedStyle(path)
           const round = (value) => Math.round(value * 100) / 100
-          return { w: round(box.width), h: round(box.height), bottom: round(box.y + box.height), painted: style.fill !== 'none', filled: style.fill !== 'none', stroke: style.stroke, strokeWidth: style.strokeWidth }
+          return { w: round(box.width), h: round(box.height), bottom: round(box.y + box.height), filled: style.fill !== 'none', stroke: style.stroke }
         })
-        /** The head is the filled polygon; the tail is the stroked line. Their roles are what the assertions read. */
-        const headPath = markerSvg.querySelector('path[fill]')
-        const tailPath = [...markerSvg.querySelectorAll('path')].find((path) => getComputedStyle(path).fill === 'none')
-        const headBox = headPath === null ? null : headPath.getBBox()
-        const headCenter = headBox === null ? null : { x: headBox.x + headBox.width / 2, y: headBox.y + headBox.height / 2 }
-        const tailLine = (() => {
-          if (tailPath === null || headCenter === null) return null
-          const length = tailPath.getTotalLength()
-          const start = tailPath.getPointAtLength(0)
-          const end = tailPath.getPointAtLength(length)
-          const vx = end.x - start.x
-          const vy = end.y - start.y
-          const distance = Math.abs((headCenter.x - start.x) * vy - (headCenter.y - start.y) * vx) / Math.hypot(vx, vy)
-          return { fromCentre: Math.round(distance * 1000) / 1000 }
+        /** The head is the path that states where the tail starts; the tail is the other one, a tapered quad. */
+        const headPath = markerSvg.querySelector('path[data-tail-base]')
+        const tailPath = [...markerSvg.querySelectorAll('path')].find((path) => path !== headPath)
+        const statedBase = (headPath?.dataset.tailBase ?? '').split(' ').map(Number)
+        const tailQuad = (() => {
+          if (tailPath === null || tailPath === undefined) return null
+          const numbers = (tailPath.getAttribute('d') ?? '').match(/-?[0-9]+(?:[.][0-9]+)?/g)?.map(Number) ?? []
+          if (numbers.length < 8) return null
+          const corner = (index) => ({ x: numbers[index * 2], y: numbers[index * 2 + 1] })
+          const [v0, v1, v2, v3] = [corner(0), corner(1), corner(2), corner(3)]
+          const base = { x: (v0.x + v3.x) / 2, y: (v0.y + v3.y) / 2 }
+          return {
+            base,
+            baseWidth: Math.hypot(v0.x - v3.x, v0.y - v3.y),
+            tipWidth: Math.hypot(v1.x - v2.x, v1.y - v2.y),
+            baseDistance: statedBase.length === 2 ? Math.hypot(base.x - statedBase[0], base.y - statedBase[1]) : null,
+          }
         })()
         const marker = {
           color: getComputedStyle(slot).color,
           weight: getComputedStyle(markerSvg).strokeWidth,
           paths: markerPaths,
-          tailLine,
+          tailQuad,
         }
         pinnedRow.focus()
         await wait(150)
@@ -3940,11 +3943,11 @@ test('a written session moves to the top of its folder, its age follows, and a r
       })()`),
     )
     assert.notEqual(ink.marker.color.toLowerCase(), ink.accent, `the mark is not the accent ink\nsaw: ${JSON.stringify(ink)}`)
-    assert.equal(ink.marker.paths.filter((path) => path.filled).length, 1, `the mark paints a solid head\nsaw: ${JSON.stringify(ink.marker)}`)
+    assert.equal(ink.marker.paths.filter((path) => path.filled).length, 2, `the mark paints both shapes solid\nsaw: ${JSON.stringify(ink.marker)}`)
     assert.equal(ink.marker.weight, '1px', `at the reference's Regular 1px stroke\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.color, ink.marker.color, `the hover pin control keeps the same ink\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.weight, ink.marker.weight, `and the same weight\nsaw: ${JSON.stringify(ink)}`)
-    assert.equal(ink.hovered.filled, 1, `and stays solid (its filled head)\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.hovered.filled, 2, `and stays solid (both shapes filled)\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.markerDisplay, 'none', 'with the marker swapped out, so one icon is drawn')
     /**
      * The artwork has a **head and a tail**: the needle path must paint (a non-zero box) and reach below the body. A cubic path
@@ -3952,23 +3955,22 @@ test('a written session moves to the top of its folder, its age follows, and a r
      * the pin's thin tail was missing while its head showed.
      */
     assert.equal(ink.marker.paths.length, 2, `the mark is the pin artwork's two shapes\nsaw: ${JSON.stringify(ink.marker)}`)
-    const pinHead = ink.marker.paths.find((path) => path.filled === true)
-    const pinTail = ink.marker.paths.find((path) => path.filled === false)
-    assert.ok(pinHead !== undefined, `the pin's head is a filled shape\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    const pinHead = ink.marker.paths.find((path) => path.w > 5)
+    const pinTail = ink.marker.paths.find((path) => path.w <= 5)
+    assert.ok(pinHead !== undefined, `the pin's head is the larger shape\nsaw: ${JSON.stringify(ink.marker.paths)}`)
     assert.ok(pinHead.w > 1 && pinHead.h > 1, `and it paints\nsaw: ${JSON.stringify(pinHead)}`)
-    assert.ok(pinTail !== undefined, `the pin's tail is the stroked shape\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    assert.ok(pinTail !== undefined, `the pin's tail is the smaller shape\nsaw: ${JSON.stringify(ink.marker.paths)}`)
     assert.ok(pinTail.w > 1 && pinTail.h > 1, `and it paints (a broken path paints nothing)\nsaw: ${JSON.stringify(pinTail)}`)
     assert.equal(pinTail.bottom > pinHead.bottom, true, `its tail reaches below the head, so the pin reads as a pin\nsaw: ${JSON.stringify(ink.marker.paths)}`)
-    /** **Thinner**: the tail's own stroke is narrower than the head's outline. */
-    assert.ok(
-      parseFloat(pinTail.strokeWidth) < parseFloat(pinHead.strokeWidth),
-      `the tail is thinner than the head's outline\nsaw: ${JSON.stringify({ tail: pinTail.strokeWidth, head: pinHead.strokeWidth })}`,
-    )
-    /** **Centred**: the tail's line passes through the head's centre within half a unit. */
-    assert.ok(
-      ink.marker.tailLine !== null && ink.marker.tailLine.fromCentre < 0.5,
-      `the tail sits on the head's centre line\nsaw: ${JSON.stringify(ink.marker.tailLine)}`,
-    )
+    assert.equal(pinTail.filled, true, 'the tail is a filled taper, not a stroked line')
+    assert.equal(pinTail.stroke, 'none', 'with no stroke that would add its own width around it')
+    /** **In the middle of the head**: the tail's stated base is the midpoint of the head's lower edge, and the quad starts there. */
+    const tailQuad = ink.marker.tailQuad
+    assert.ok(tailQuad !== null, `the tail is a measurable quad\nsaw: ${JSON.stringify(ink.marker.tailQuad)}`)
+    assert.ok(tailQuad.baseDistance < 0.2, `the tail starts at the middle of the head, where it says it does\nsaw: ${JSON.stringify(tailQuad)}`)
+    /** **Not over thin, not over thick**: the reference needle is about 0.95 across at the body, narrowing to a point. */
+    assert.ok(tailQuad.baseWidth >= 0.7 && tailQuad.baseWidth <= 1.1, `the tail's base matches the reference's thinness\nsaw: ${JSON.stringify(tailQuad)}`)
+    assert.ok(tailQuad.tipWidth > 0 && tailQuad.tipWidth < tailQuad.baseWidth / 3, `and it narrows to a point\nsaw: ${JSON.stringify(tailQuad)}`)
     /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
     const glyphs = JSON.parse(
       await browser.evaluate(`(() => {
@@ -4096,9 +4098,9 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
             const li = document.querySelector('#tree li[data-row-key="' + key + '"]')
             const button = [...li.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
             if (button === undefined) return null
-            /** Solid: a filled head; and the tail is present as the stroked shape. */
+            /** Solid: both artwork shapes (the head and the tapered tail) are filled. */
             const paths = [...button.querySelectorAll('svg path')]
-            return paths.filter((path) => getComputedStyle(path).fill !== 'none').length === 1 && paths.some((path) => getComputedStyle(path).fill === 'none' && getComputedStyle(path).stroke !== 'none')
+            return paths.filter((path) => getComputedStyle(path).fill !== 'none').length === 2
           })(),
         }
         return JSON.stringify({ beforeOrder, key, animations, startFrame, midFrame, settled })
