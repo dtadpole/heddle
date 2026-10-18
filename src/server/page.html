@@ -6311,6 +6311,28 @@ async function renderTree() {
     return
   }
   const tops = body.children ?? []
+  /**
+   * A **first visit** opens the first workspace, which is what DSH shows.
+   *
+   * Measured from DSH's sidebar on 2026-10-17: its tree arrives with a workspace's sessions on screen, not with a list
+   * of closed folder names. Heddle arrived closed unless a previous visit had recorded an expansion, so a reader with
+   * no history saw two words — the case the owner reported as the tree having stopped showing. The default is chosen
+   * once, written down like any other expansion, and a reader who closes it is remembered as having closed it.
+   */
+  const firstVisit = (() => {
+    try {
+      return localStorage.getItem(EXPANDED_KEY) === null
+    } catch (error) {
+      return false
+    }
+  })()
+  if (firstVisit) {
+    const firstBranch = tops.find((node) => Array.isArray(node.children) && node.children.length > 0)
+    if (firstBranch !== undefined) {
+      expanded.add(firstBranch.path)
+      rememberExpanded()
+    }
+  }
   if (tops.length === 0) setNote('no workspace root yet — register one with the + above')
   else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
   treeList.replaceChildren(...tops.map(nodeRow))

@@ -271,6 +271,12 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
       await browser.evaluate(`getComputedStyle(document.getElementById('tree')).display !== 'none'`),
       'and the tree is on screen, which is what a remembered rail had taken away',
     )
+    /**
+     * The tree **arrives with a branch open** in a workspace, which is DSH's default and the other half of the owner's
+     * report; the claim lives in `test/page-contract.test.ts`, which reads the wiring, because this check's isolated
+     * HOME registers no workspace and a browser assertion here would only be able to pass vacuously. The live
+     * measurement is in `SESSION_UI.md`: a fresh profile draws 8 rows with the first root `aria-expanded="true"`.
+     */
 
     /**
      * The chord, which is DSH's own: `Alt+Meta+B`. It **toggles** — pressed while wide it collapses, pressed again it

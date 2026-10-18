@@ -113,6 +113,18 @@ test('crossing the tablist is an arrow-key gesture, and only inside the ring', (
   assert.match(page, /button\.tabIndex = button\.dataset\.view === view \? 0 : -1/, 'with one tab in the Tab order')
 })
 
+test('a first visit opens a workspace, so the tree arrives with its sessions on screen', () => {
+  /**
+   * DSH's tree arrives with a workspace's sessions showing, not with a list of closed folder names — measured on its
+   * sidebar on 2026-10-17. Heddle arrived closed for a reader with no history, and the owner read that as the tree no
+   * longer showing. The default is written down like any other expansion, so closing it is remembered as a choice.
+   */
+  assert.match(page, /const firstVisit = \(\(\) => \{/, 'the page asks whether this is a first visit')
+  assert.match(page, /localStorage\.getItem\(EXPANDED_KEY\) === null/, 'by there being no remembered expansion')
+  assert.match(page, /const firstBranch = tops\.find\(\(node\) => Array\.isArray\(node\.children\) && node\.children\.length > 0\)/, 'and it opens the first branch that has something in it')
+  assert.match(page, /if \(firstBranch !== undefined\) \{\s*expanded\.add\(firstBranch\.path\)\s*rememberExpanded\(\)/, 'writing the choice like any other')
+})
+
 test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
   /**
    * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as
