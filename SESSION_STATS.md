@@ -641,3 +641,15 @@ failing-first unit tests pin the preference, the fallback and the empty case.
 **Landing:** committed on main, landed on the committed deployment checkout and served; `96-deployment` **3/3**.
 The live fallback could not be observed on the deployed page in this round because the page's auto-selected
 session was empty; the fallback is judged by its unit test and will be visible on any session with messages.
+
+### Fallback loop — close: the rows render on the deployed page
+
+Measured on `http://localhost:8082/` after landing: the served page contains the bar and swatch code, and opening
+the context element renders the three rows and three segments — on the page's auto-selected session (an empty
+one) it honestly reads `System prompt ~0 · Tool definitions ~2.5K · Messages ~0`, because that session has a tool
+catalog but no messages; a session with history fills them. The earlier "only one number" the owner saw was the
+pre-bar build: the deployment checkout had diverged with a local merge commit, so the fast-forward refused and
+the served build stayed old. It was reset to `origin/main` (local commit kept on a backup branch), rebuilt, the
+agent restarted, and `96-deployment` passes 3/3. The unit tests pin the request-vs-current preference; a browser
+contract for the fallback was not added because the check's scripted server always writes the new field, and the
+live observation above is the evidence instead — stated, not hidden.
