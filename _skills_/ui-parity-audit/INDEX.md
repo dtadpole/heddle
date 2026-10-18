@@ -1,6 +1,6 @@
 ---
 title: UI parity audit
-version: 2.1.0
+version: 2.2.0
 description: How to compare this UI against a running reference so that nothing is missed twice — a coverage matrix, a DOM-derived inventory instead of a remembered list, adversarial content, occlusion checks, and the ledger of every miss already paid for.
 grounded_in:
   - owner statement 2026-10-17 that a cursor which does not become a hand, a hidden ellipsis under a long name, a clipped menu and icon-less menu items are exactly the misses a thorough comparison must prevent, and that the procedure itself has to be improved rather than each miss fixed alone
@@ -40,6 +40,7 @@ the miss this skill exists to prevent.
 | colour and surface | background, text, border, shadow — measured, not read from tokens |
 | **anatomy** | what the thing is made of: icon, label, shortcut, badge, state mark, count |
 | states | idle, hover, hover-left, focus, selected, disabled, live |
+| **opened surfaces** | everything a click brings into existence: the menu, its items, a dialog, a popover. Measure it **while open**, item by item |
 | **content stress** | long, empty, unicode, many items, deep nesting, zero rows |
 | **occlusion** | is it fully visible? clipped by an ancestor? under another layer? hit-testable at its centre? |
 | **control chrome** | the box of a **control**: its size and hit area, its padding and radius, its background and its hover surface, and the size of the glyph inside it. The reference usually has **more than one class** — a small row-action button and a larger icon button — and each must be matched by its own class |
@@ -117,6 +118,22 @@ near an edge:
 A menu belongs in **viewport coordinates** (`position: fixed`, clamped, flipped when short of room), not inside the
 scroll container that will cut it.
 
+### 5b. Measure what a click brings into existence
+
+A closed menu is a hidden element; the defect lives in its **opened** state. For every surface a click creates:
+
+- open it with **trusted input**, then measure the container's box, `position`, `z-index`, background, and whether it is
+  inside the viewport and outside every clipping ancestor;
+- measure **each item**: its box (a reference item is full width and has a real height — DSH's is min-height 34px, padding
+  6px 8px, radius 12px, 16px glyph), whether its label is clipped (`scrollWidth > clientWidth`), and its glyph;
+- check the item count against the container's height, so a container that collapsed its items shows up as a number;
+- open it **twice in a row** and with a long label, because the state after the second click is a state too;
+- do the same for dialogs, popovers, the model menu and the attach menu.
+
+The squashed menu of 2026-10-17 was invisible to every closed-state assertion: a **descendant selector**
+(`#tree .row-tools button`) had also sized the buttons inside the menu, so each item measured 20x16 with its label
+clipped. The check now measures the open state item by item, and the selector is scoped to the action buttons only.
+
 ### 6. Walk the state matrix
 
 | State | How to enter it | What to record |
@@ -179,6 +196,7 @@ Every miss appends a row. The ledger is the skill's memory, and a new session re
 | A user turn called "full width, left-aligned" from a screenshot | the assertion went red against the correct right-aligned bubble | a screenshot is not a measurement; measure the **box** and settle disagreements with it |
 | The selected tab's 2px underline missed for a cycle | computed-style reads cannot see a `::after` | read pseudo-elements and the reference's own `cssRules` |
 | A `getComputedStyle` declaration read after restoring the state | reported `animation-name: none` on a working rule | snapshot every value before changing the state back |
+| A descendant selector sized the buttons **inside an open menu** | the menu measured 20x16 per item and its labels were clipped; no closed-state assertion could see it | measure opened surfaces item by item (box, label clipping, glyph), and scope a rule to the control it is about with `>` |
 | A `const` declared after its first use (TDZ) | threw for every session row; branches rendered and sessions vanished | declare a wrapper before anything appends to it; capture page errors in probes |
 | A check clicked tree levels blindly | a blind click closes an open level; the fixture "lost" its rows | idempotent navigation and explicit precondition errors |
 | The row's action buttons were "a bit too small" and had a background of their own | I had read DSH's `rowActions` rule in the research and never compared **our control's box** to it; our rule was also overridden by a higher-specificity `#workspaces-row > button` | every reference value noted in research becomes a **measured assertion** or an explicit not-measured row; measure `getBoundingClientRect`, not the rule you wrote |

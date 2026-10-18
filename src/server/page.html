@@ -902,11 +902,15 @@
    * background at all** — hover only lifts the colour from secondary to primary. The 26px centre-to-centre step in its
    * row is a 20px button plus a 6px gap, which the slot keeps.
    */
-  #tree .row-tools button {
+  #tree .row-tools > .menu-wrap > button,
+  #tree .row-tools > .session-actions > button,
+  #tree .row-tools > button {
     width: 20px; height: 16px; padding: 0; border-radius: 4px;
     display: inline-grid; place-items: center; background: none; border: 0; color: var(--text-3);
   }
-  #tree .row-tools button:hover { color: var(--text); }
+  #tree .row-tools > .menu-wrap > button:hover,
+  #tree .row-tools > .session-actions > button:hover,
+  #tree .row-tools > button:hover { color: var(--text); }
   /** The slot's children are one level deeper than the row now, so these are descendant selectors. */
   #tree li:hover > .row .row-tools,
   #tree li:focus-within > .row .row-tools,
@@ -929,10 +933,20 @@
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
   /** DSH's state word: the muted body type, before the name, smaller than it. */
   #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
-  /** A menu item: its glyph first, then its label, on one line. */
-  .menu button { display: flex; align-items: center; gap: .45rem; }
-  .menu .menu-glyph { display: inline-flex; flex: none; width: 14px; height: 14px; opacity: .75; }
-  .menu .menu-label { flex: 1 1 auto; min-width: 0; }
+  /**
+   * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
+   * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a
+   * descendant selector, which is what made an open menu 20px wide per item and squashed it.
+   */
+  .menu button {
+    display: flex; align-items: center; gap: 6px; width: 100%; min-height: 34px;
+    padding: 6px 8px; border-radius: 12px; font: inherit; font-size: 13px; text-align: left;
+    background: none; border: 0; color: inherit; cursor: pointer;
+  }
+  .menu button:hover { background: var(--hover); }
+  .menu .menu-glyph { display: inline-flex; flex: none; width: 16px; height: 16px; opacity: .75; }
+  .menu .menu-glyph svg { width: 16px; height: 16px; }
+  .menu .menu-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /** A floating menu is in the viewport now, so its own height has to fit it. */
   .menu { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 40; }
   /** A section name inside a menu, as DSH's View options has for its `WorkSpace` group. */
