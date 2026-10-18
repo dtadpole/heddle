@@ -39,9 +39,11 @@ test('a person\'s message carries the logged event time, which is the clock its 
     { type: 'message', at: '2026-10-17T22:03:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'what is in here' }] } },
     { type: 'message', at: '2026-10-17T22:03:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'two files' }] } },
   ])
-  assert.equal(turns[0].kind, 'user')
-  assert.equal(turns[0].time, '2026-10-17T22:03:00.000Z', 'the user turn carries the event time')
-  assert.equal(turns[1].kind, 'assistant')
+  const [asked, answered] = turns
+  assert.ok(asked !== undefined && answered !== undefined, 'the log folds into a question and its answer')
+  assert.equal(asked.kind, 'user')
+  assert.equal(asked.time, '2026-10-17T22:03:00.000Z', 'the user turn carries the event time')
+  assert.equal(answered.kind, 'assistant')
 })
 
 test('the answer carries the files its exchange wrote, with the lines each one now has', () => {
@@ -59,11 +61,16 @@ test('the answer carries the files its exchange wrote, with the lines each one n
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'both written' } },
   ])
   const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.ok(answer !== undefined, 'the exchange has an answer to hang the panel on')
   assert.deepEqual(answer.files, [
     { path: 'a.txt', added: 2 },
     { path: 'b.txt', added: 1 },
   ])
-  assert.equal(turns.find((turn) => turn.kind === 'user').files, undefined, 'the person\'s message carries no panel')
+  assert.equal(
+    turns.find((turn) => turn.kind === 'user')?.files,
+    undefined,
+    'the person\'s message carries no panel',
+  )
 })
 
 test('writes belong to their own exchange, and a read-only exchange carries no files', () => {
@@ -75,8 +82,9 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'nothing to write' } },
   ])
   const answers = turns.filter((turn) => turn.kind === 'assistant')
-  assert.deepEqual(answers[0].files, [{ path: 'a.txt', added: 1 }])
-  assert.equal(answers[1].files, undefined, 'the next exchange does not inherit the previous one\'s files')
+  assert.equal(answers.length, 2, 'one answer per exchange')
+  assert.deepEqual(answers[0]?.files, [{ path: 'a.txt', added: 1 }])
+  assert.equal(answers[1]?.files, undefined, 'the next exchange does not inherit the previous one\'s files')
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {
@@ -90,6 +98,7 @@ test('a turn stopped by the round limit keeps its reason on the answer', () => {
     { type: 'assistant/completed', text: 'partial answer', rounds: 32, ended: ['stopped after the round limit of 32'] },
   ])
   const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.ok(answer !== undefined, 'the stopped turn still produces an answer row')
   assert.deepEqual(answer.ended, ['stopped after the round limit of 32'])
 })
 

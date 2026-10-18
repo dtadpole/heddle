@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { describeEndpoint } from '../src/endpoints.ts'
 import { toAnthropicContent, toChatMessage, toResponsesContent } from '../src/llm/adapters.ts'
 import { acceptsImages, fileHandleText, projectAttachments, textOnlyImageText } from '../src/llm/attachments.ts'
-import type { ContentPart, EndpointConfig, Message } from '../src/llm/types.ts'
+import type { ContentPart, EndpointConfig, FilePart, ImagePart, Message } from '../src/llm/types.ts'
 
 /**
  * Unit tests for the attachment projection: what the model is sent for an attached file.
@@ -20,7 +20,7 @@ import type { ContentPart, EndpointConfig, Message } from '../src/llm/types.ts'
 
 const sha256 = 'ab'.repeat(32)
 
-const imagePart = (path: string): ContentPart => ({
+const imagePart = (path: string): ImagePart => ({
   type: 'image',
   name: 'shot.png',
   mimeType: 'image/png',
@@ -29,7 +29,7 @@ const imagePart = (path: string): ContentPart => ({
   sha256,
 })
 
-const filePart = (path = '/tmp/notes.md'): ContentPart => ({
+const filePart = (path = '/tmp/notes.md'): FilePart => ({
   type: 'file',
   name: 'notes.md',
   path,
