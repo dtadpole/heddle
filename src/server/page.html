@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="heddle-page" content="rail-sections/instant-swell" />
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Heddle</title>
 <!--
@@ -840,7 +841,7 @@
    *   after the pointer leaves, which is the whole difference between the two states.
    */
   #tree .age { font-size: 11px; color: var(--text-3); transition: opacity .12s ease; }
-  #tree li:hover > .row > .age, #tree li:focus-within > .row > .age { opacity: 0; }
+  #tree li:hover > .row .age, #tree li:focus-within > .row .age { opacity: 0; }
   /**
    * The row's right-hand slot holds two things in **one grid cell**: the age when the row is quiet, the controls when
    * the pointer or the keyboard is on it. The slot is therefore as wide as the wider of the two, which makes the label
@@ -856,8 +857,9 @@
     /** Its own surface, so no row text can ever read through the icons if a future layout brings them close. */
     background: var(--sidebar); border-radius: 6px; padding-left: 4px;
   }
-  #tree li:hover > .row > .row-tools,
-  #tree li:focus-within > .row > .row-tools,
+  /** The slot's children are one level deeper than the row now, so these are descendant selectors. */
+  #tree li:hover > .row .row-tools,
+  #tree li:focus-within > .row .row-tools,
   #tree .row-tools:has(.menu:not([hidden])) { opacity: 1; pointer-events: auto; }
   @media (hover: none) {
     #tree .age { opacity: 0; }
@@ -1442,7 +1444,7 @@
   #tr-table th.tr-th-event { width: 122px; }
   #tr-table td { height: 30px; padding: 0 8px; border-bottom: .5px solid var(--line); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #tr-table tbody tr { cursor: default; outline: none; transition: background-color .12s ease, opacity .12s ease; }
-  #tr-table tbody tr:hover { background: var(--hover); }
+  /* DSH paints no row hover: measured with a trusted pointer, its hovered row stays transparent. */
   #tr-table tbody tr[data-selected='true'] { background: rgba(255, 255, 255, .14); }
   #tr-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   #tr-table tbody tr[data-turn-start='true'] > td { border-top: 2px solid var(--border-strong); }
@@ -2426,6 +2428,20 @@ function scrubMinimap(clientY) {
   log.scrollTop = Math.max(0, Math.min(max, fraction * max))
 }
 
+/**
+ * The rail expands the row the pointer **is in** as soon as the pointer enters, not only when it then moves: a web
+ * rail's hover is a pointer-presence state, and a synthetic or assistive entry can arrive without a `pointermove`.
+ * The reference was measured expanding in response to the pointer's presence, with `transition: all 0s`, so the
+ * entry paint uses the same ramp with no easing.
+ */
+minimapHit.addEventListener('pointerenter', (event) => {
+  const index = mmIndexAt(event.clientY)
+  if (index < 0) return
+  mmHover = index
+  mmKeyboardIndex = index
+  showMinimapPreview(index)
+  paintMinimap()
+})
 minimapHit.addEventListener('pointermove', (event) => {
   const index = mmIndexAt(event.clientY)
   if (index !== mmHover) {
@@ -3563,13 +3579,15 @@ if (rememberedSidebar !== null) setSidebarWidth(rememberedSidebar, { persist: fa
  *
  * Measured from DSH on 2026-10-17: its sidebar is 280 pixels wide and 56 when collapsed, the control sits at the top
  * of the panel, its chord is `Alt+Meta+B`, and the state is **not** remembered — a reload brings the wide panel back.
- * Heddle remembers the *width* already, so it remembers this too; a panel a reader put away coming back by itself
- * after every reload is the kind of small forgetfulness a reader stops trusting.
+ *
+ * That last part is copied rather than improved, and the reason is a report from the owner: the collapsed state was
+ * remembered here, so a reader who put the panel away once found a reload bring back a rail and **no tree**, with
+ * nothing on screen to say the tree had been put away rather than lost. A collapse is a look at the content, not a
+ * preference about the workspace; the width is the preference, and that is what survives.
  *
  * Collapsed, `body[data-sidebar='collapsed']` is what the stylesheet reads, so there is one source of truth for the
  * state and no class list to keep in step with an attribute.
  */
-const SIDEBAR_COLLAPSED_KEY = 'heddle.layout.collapsed.v1'
 const sidebarToggle = document.getElementById('sidebar-toggle')
 
 /** Whether the sidebar is collapsed, read from the document rather than tracked twice. */
@@ -3578,25 +3596,21 @@ function sidebarCollapsed() {
 }
 
 /**
- * Apply the collapsed state, name the control for it, and remember it.
+ * Apply the collapsed state and name the control for it.
  *
  * The control's **accessible name changes with the state** — "Collapse sidebar" / "Open sidebar" — because the name
  * of a toggle is the action, and a reader who hears "Collapse sidebar" while it is collapsed is being told to do
  * something that is already done.
+ *
+ * Nothing is written to storage: DSH does not remember this either, and a rail that outlives its reload hides the
+ * tree from a reader who has forgotten the click that put it away.
  */
-function setSidebarCollapsed(collapsed, options = {}) {
+function setSidebarCollapsed(collapsed) {
   document.body.dataset.sidebar = collapsed ? 'collapsed' : 'expanded'
   sidebarToggle.setAttribute('aria-expanded', String(!collapsed))
   const label = collapsed ? 'Open sidebar' : 'Collapse sidebar'
   sidebarToggle.setAttribute('aria-label', label)
   sidebarToggle.title = `${label} (⌥⌘B)`
-  if (options.persist !== false) {
-    try {
-      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? 'true' : 'false')
-    } catch {
-      // A browser that refuses storage still gets a working control; only the memory is lost.
-    }
-  }
 }
 
 sidebarToggle.addEventListener('click', () => {
@@ -3617,12 +3631,8 @@ document.getElementById('sidebar-search').addEventListener('click', () => {
   field.select()
 })
 
-/** The state a previous visit left, or the wide panel when there is none. */
-try {
-  setSidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true', { persist: false })
-} catch {
-  setSidebarCollapsed(false, { persist: false })
-}
+/** Every visit starts wide: a collapse is a look at the content, and DSH does not carry it across a reload either. */
+setSidebarCollapsed(false)
 
 /**
  * The composer: the draft, the queue it feeds, and the model seat — DSH's input bar, reduced to heddle's parts.
@@ -5857,6 +5867,10 @@ document.addEventListener('click', closeMenus)
 Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
 
 function nodeRow(node) {
+  /** The row's right-hand slot, declared before anything appends to it: a later `const` was a TDZ error that took
+   * every session row out of the tree while its branch still rendered. */
+  const rowRight = document.createElement('span')
+  rowRight.className = 'row-right'
   const li = document.createElement('li')
   li.setAttribute('role', 'treeitem')
   li.dataset.kind = node.kind
@@ -5962,8 +5976,6 @@ function nodeRow(node) {
    * the pointer or the keyboard arrives rather than always. The two direct ones are the acts frequent enough to
    * skip the menu — pin and archive — and the `…` holds the rest. A row with nothing to do still draws nothing.
    */
-  const rowRight = document.createElement('span')
-  rowRight.className = 'row-right'
   const rowTools = document.createElement('span')
   rowTools.className = 'row-tools'
   /**
