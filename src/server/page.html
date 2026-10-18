@@ -3270,6 +3270,18 @@ function settleChat() {
 }
 
 /**
+ * A thinking block ends when the model stops thinking: the next content of the round is the answer or a tool call.
+ *
+ * A tool row has its own end — its result lands and the row settles — but reasoning had no such event, so its row
+ * kept `running` until `settleChat` at the end of the **turn**. On a long turn that was minutes of shimmering
+ * "thinking" that never became solid (the owner asked why it never ended); the reference settles each process block
+ * as its own step. Called on the chunks that end a thought, and at the turn boundary.
+ */
+function settleReasoning() {
+  for (const node of log.querySelectorAll('.turn.reasoning[data-state="running"]')) node.dataset.state = 'settled'
+}
+
+/**
  * A reasoning or tool block: one line while it is closed, the whole thing when it is opened.
  *
  * A `<details>` rather than a scripted toggle, which is what DSH's client uses too: the disclosure is the
@@ -4857,9 +4869,12 @@ events.addEventListener('session', (message) => {
     }
     return
   }
-  if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') add('assistant', event.chunk.text)
-  else if (event.type === 'assistant/chunk' && event.chunk.type === 'reasoning-delta') add('reasoning', event.chunk.text)
+  if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') {
+    settleReasoning()
+    add('assistant', event.chunk.text)
+  } else if (event.type === 'assistant/chunk' && event.chunk.type === 'reasoning-delta') add('reasoning', event.chunk.text)
   else if (event.type === 'assistant/chunk' && event.chunk.type === 'tool-call') {
+    settleReasoning()
     add('tool', event.chunk.arguments ?? '{}', false, '→ ' + event.chunk.name, {
       name: event.chunk.name,
       toolCallId: event.chunk.id,
@@ -5834,6 +5849,7 @@ async function runTurn(text, key, attachments = []) {
           else log.append(turnNotice(payload.ended))
         }
         /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
+        settleReasoning()
         settleChat()
         void renderSettledAnswers()
         /**
@@ -5854,6 +5870,7 @@ async function runTurn(text, key, attachments = []) {
          */
         stopRequested = false
         stopButton.disabled = false
+        settleReasoning()
         /** A question the stopped turn was waiting on has no answer to give now. */
         hideApproval()
         settleChat()

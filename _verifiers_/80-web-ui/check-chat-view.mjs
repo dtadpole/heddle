@@ -34,7 +34,22 @@ async function startServer(label, steps, options = {}) {
      * check that fails because the tree is mid-write says nothing about the page. Unset, the project's own patch is
      * used, which is what a normal run wants.
      */
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []), '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), ...(options.maxRounds !== undefined ? ['--max-rounds', String(options.maxRounds)] : [])],
+    [
+      'web',
+      '--host',
+      '127.0.0.1',
+      '--port',
+      '0',
+      '--config',
+      join(repoRoot, 'cordis.yml'),
+      ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []),
+      '--endpoint',
+      'scripted',
+      '--session-root',
+      join(home, 'sessions'),
+      ...(options.maxRounds !== undefined ? ['--max-rounds', String(options.maxRounds)] : []),
+      ...(options.sandboxRoot === true ? ['--sandbox-root', work] : []),
+    ],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config }, cwd: work },
   )
   return {
@@ -1492,6 +1507,78 @@ test('the live state is a shimmer on the words, not a band across the row', asyn
     assert.equal(state.duration, '1.5s', 'at the reference’s duration')
     assert.match(state.timing, /^steps\(48/, `with its stepped timing (${state.timing})`)
     assert.equal(state.clip, 'text', 'through a text clip, so the band moves under the glyphs and nowhere else')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * Speak into the composer the way a person does: the textarea's input handler, then Enter.
+ *
+ * Copied from the approval check's helper; this file's other tests settle turns through `/api/turn` and then reload,
+ * which cannot see a **live** row's state mid-turn.
+ */
+async function sendMessage(browser, text) {
+  await browser.evaluate(`(() => {
+    const field = document.querySelector('textarea')
+    field.value = ${JSON.stringify(text)}
+    field.dispatchEvent(new Event('input', { bubbles: true }))
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    return true
+  })()`)
+}
+
+test('a thinking row shimmers only while it is thinking, and turns solid when the thought ends', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner liked the running shimmer but asked why "thinking" kept shimmering after the model had moved on: a tool
+   * row settles when its result lands, while a reasoning row only settled at the **end of the turn** — on a long turn,
+   * minutes of a title that never became solid. The model's next content is the end of the thought, so a text or
+   * tool-call chunk settles it. This drives a multi-round turn and watches the live rows: at least one moment has a
+   * settled thinking row while the turn is still running, and after the turn nothing is running or animating.
+   */
+  const steps = (work) => [
+    ...Array.from({ length: 20 }, (_, index) => ({
+      reasoning: `thinking about round ${index + 1}`,
+      toolCall: { name: 'list_dir', arguments: { path: work } },
+    })),
+    { text: 'all rounds done' },
+  ]
+  const server = await startServer('reasoning-settle', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'run a long task')
+    const snapshots = []
+    const deadline = Date.now() + 25_000
+    while (Date.now() < deadline) {
+      const snapshot = JSON.parse(
+        await browser.evaluate(`JSON.stringify({
+          running: document.getElementById('send').hidden,
+          rows: document.querySelectorAll('#log .turn').length,
+          reasoning: [...document.querySelectorAll('#log .turn.reasoning')].map((node) => node.dataset.state),
+          runningRows: document.querySelectorAll('#log .turn[data-state="running"]').length,
+        })`),
+      )
+      snapshots.push(snapshot)
+      if (!snapshot.running && snapshot.rows > 0 && snapshot.tools > 0) break
+      if (!snapshot.running && snapshot.reasoning.length > 0) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    const during = snapshots.filter((snapshot) => snapshot.running)
+    assert.ok(during.length > 0, 'the turn was observed while it was running')
+    assert.ok(
+      during.some((snapshot) => snapshot.reasoning.includes('settled')),
+      `a thinking row became solid before the turn ended (${JSON.stringify(during.map((snapshot) => snapshot.reasoning))})`,
+    )
+    const settled = snapshots[snapshots.length - 1]
+    assert.equal(settled.running, false, 'the turn ended')
+    assert.equal(settled.runningRows, 0, `no row is left shimmering (${JSON.stringify(settled)})`)
+    const animated = await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#log .turn.reasoning summary .title')].map((node) => getComputedStyle(node).animationName))`)
+    assert.deepEqual(JSON.parse(animated).filter((name) => name !== 'none'), [], 'and no thinking title keeps the shimmer')
   } finally {
     browser.close()
     await server.close()
