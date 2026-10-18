@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
+import { contextBreakdownWithFallback, laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
 
 /**
  * Unit tests for the Trajectory ledger.
@@ -574,4 +574,16 @@ test('session stats carry the most recent request\'s context breakdown', () => {
   ]
   assert.deepEqual(projectSessionStats(events).contextBreakdown, { system: 100, tools: 250, messages: 600 }, 'the last request is the one the panel describes')
   assert.equal(projectSessionStats([{ type: 'model/request' }]).contextBreakdown, undefined, 'a request without a breakdown leaves the section absent')
+})
+
+test('the context panel prefers the recorded sections and falls back to the current surface', async () => {
+  const recorded = { system: 1, tools: 2, messages: 3 }
+  const current = { systemTokens: 10, toolsTokens: 20, messageTokens: 30 }
+  assert.deepEqual(contextBreakdownWithFallback(recorded, current), { contextBreakdown: recorded, contextBreakdownSource: 'request' })
+  assert.deepEqual(contextBreakdownWithFallback(undefined, current), {
+    contextBreakdown: { system: 10, tools: 20, messages: 30 },
+    contextBreakdownSource: 'current',
+  })
+  assert.deepEqual(contextBreakdownWithFallback(undefined, { systemTokens: 0, toolsTokens: 0, messageTokens: 0 }), {}, 'a surface with nothing in it measures nothing to show')
+  assert.deepEqual(contextBreakdownWithFallback(undefined, undefined), {})
 })

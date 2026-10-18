@@ -12,7 +12,7 @@ import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload } from './uploads.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
-import { projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
+import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { PREVIEW_CSP, rewriteResources } from './html.ts'
@@ -74,9 +74,21 @@ export const DEFAULT_PORT = 3082
 /** The default host. Anything else is refused. */
 export const DEFAULT_HOST = '127.0.0.1'
 
+/**
+ * Rounds an interactive turn gets before the loop stops it.
+ *
+ * The loop's own default of eight is for a one-shot turn, where a model that keeps asking for tools should be cut
+ * off before the bill grows. A person watching the Web UI is doing the opposite: the owner's complex prompts
+ * measured more than twenty model-plus-tools rounds, and at eight the server stopped mid-task with no answer and
+ * no reason. Interactive turns get 32 unless the operator says otherwise (`heddle web --max-rounds`).
+ */
+export const DEFAULT_WEB_MAX_ROUNDS = 32
+
 export interface WebServerOptions {
   readonly host?: string
   readonly port?: number
+  /** Rounds one interactive turn may take; {@link DEFAULT_WEB_MAX_ROUNDS} when absent. */
+  readonly maxRounds?: number
   /** Where the cookie-signing secret lives. */
   readonly secretPath?: string
   /** The launch token; generated when absent, which is the normal case. */
@@ -218,6 +230,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       subscribers,
       running,
       controllers,
+      maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
     }).catch((error: unknown) => {
@@ -303,6 +316,8 @@ interface RequestState {
    * the composer grew a Stop.
    */
   readonly controllers: Map<string, Set<AbortController>>
+  /** Rounds an interactive turn may take before the loop stops it; {@link DEFAULT_WEB_MAX_ROUNDS} by default. */
+  readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
 }
@@ -1548,7 +1563,23 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * every one of those is a fact of this record, so they travel with it rather than being re-derived
            * by the page from whatever happened to be on screen.
            */
-          stats: projectSessionStats(events),
+          stats: (() => {
+            const projected = projectSessionStats(events)
+            let measured: { systemTokens: number; toolsTokens: number; messageTokens: number } | undefined
+            if (projected.contextBreakdown === undefined) {
+              try {
+                measured = ctx.context.measure(handle, { tools: ctx.tools.describe() })
+              } catch {
+                measured = undefined
+              }
+            }
+            const { contextBreakdown, contextBreakdownSource } = contextBreakdownWithFallback(projected.contextBreakdown, measured)
+            return {
+              ...projected,
+              ...(contextBreakdown !== undefined ? { contextBreakdown } : {}),
+              ...(contextBreakdownSource !== undefined ? { contextBreakdownSource } : {}),
+            }
+          })(),
         },
         null,
         2,
@@ -2061,6 +2092,12 @@ export function sessionRequestSelection(
       endpoint,
       prompt: body.prompt,
       signal: controller.signal,
+      /**
+       * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
+       * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
+       * "backend stopped to respond" on prompts with more than twenty steps.
+       */
+      maxRounds: state.maxRounds,
       ...(runModel !== undefined ? { model: runModel } : {}),
       ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
     })
@@ -2071,6 +2108,8 @@ export function sessionRequestSelection(
         finishReason: result.finishReason,
         rounds: result.rounds,
         denials: result.denials,
+        /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
+        ...(result.ended !== undefined ? { ended: result.ended } : {}),
         /** What the provider said the turn cost; the page derives a rate and a context share from it. */
         ...(result.usage !== undefined ? { usage: result.usage } : {}),
       })}\n\n`,
@@ -2279,6 +2318,18 @@ export function transcriptTurns(
       continue
     }
     if (event.type !== 'assistant/chunk') {
+      /**
+       * A stopped turn records its reason on the completion. It is attached to the answer it stopped — or, when
+       * the model produced no text at all, to a settled row that exists only to carry the notice.
+       */
+      if (event.type === 'assistant/completed' && Array.isArray(event.ended)) {
+        const ended = event.ended.filter((entry): entry is string => typeof entry === 'string')
+        if (ended.length > 0) {
+          const last = turns[turns.length - 1]
+          if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended }
+          else turns.push({ kind: 'assistant', text: typeof event.text === 'string' ? event.text : '', ended })
+        }
+      }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()
       continue
@@ -2351,6 +2402,11 @@ export interface ChatTurn {
    * than zero, so the page shows only what it knows.
    */
   readonly files?: readonly { readonly path: string; readonly added: number }[]
+  /**
+   * Why the turn stopped early, from its `assistant/completed` event — the page's notice row. The reason was
+   * local to the loop before this; a reloaded transcript could not say why its answer was empty.
+   */
+  readonly ended?: readonly string[]
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */

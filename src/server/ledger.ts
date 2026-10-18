@@ -287,6 +287,33 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
   }
 }
 
+/**
+ * The context panel's sections, preferring what the request recorded and falling back to a measurement of the
+ * current surface.
+ *
+ * Requests made before this field existed carry no sections, so an older session's panel would print only its
+ * percentage and used/window — while the reference's panel is a projection of the **current** context pressure
+ * and always has the three sections. The fallback is the same meter the request used, applied to the surface the
+ * session has now; its source is stated so a reader (and the page) can tell the two apart, and a surface that
+ * cannot be measured leaves the sections absent rather than zeroed.
+ */
+export function contextBreakdownWithFallback(
+  recorded: { readonly system: number; readonly tools: number; readonly messages: number } | undefined,
+  measured: { readonly systemTokens: number; readonly toolsTokens: number; readonly messageTokens: number } | undefined,
+): {
+  readonly contextBreakdown?: { readonly system: number; readonly tools: number; readonly messages: number }
+  readonly contextBreakdownSource?: 'request' | 'current'
+} {
+  if (recorded !== undefined) return { contextBreakdown: recorded, contextBreakdownSource: 'request' }
+  if (measured !== undefined && (measured.systemTokens > 0 || measured.toolsTokens > 0 || measured.messageTokens > 0)) {
+    return {
+      contextBreakdown: { system: measured.systemTokens, tools: measured.toolsTokens, messages: measured.messageTokens },
+      contextBreakdownSource: 'current',
+    }
+  }
+  return {}
+}
+
 /** One row of the Trajectory table: a record, plus where it sits. */
 export interface LedgerRow {
   readonly turn: number
