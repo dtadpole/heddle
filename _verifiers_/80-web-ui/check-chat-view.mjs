@@ -914,32 +914,51 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
     assert.ok(hovered.hovered.o > 0.9, `the hovered bar is at full strength (${hovered.hovered.o})`)
     assert.match(hovered.hovered.t, /matrix\(2\.0|matrix\(2\.1/, `it swells horizontally to about 2.1x (${hovered.hovered.t})`)
     assert.ok(hovered.near.o > hovered.far.o, 'the swell falls off with distance')
+    /**
+     * The ramp is **linear over five rows** on the reference: the hovered bar 2.1, then 1.88 / 1.66 / 1.44 / 1.22,
+     * and the sixth row back at 1. Heddle's floored falloff used to keep the fourth row at 1.53, a visibly wider
+     * band; this measures every offset so a changed formula cannot pass on the peak alone.
+     */
+    const ramp = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const bars = [...document.querySelectorAll('#minimap .mm-bar')]
+        const peak = ${rowPoint.index}
+        const scale = (bar) => { const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform); return m ? Number(Number(m[1]).toFixed(2)) : 1 }
+        const at = (offset) => { const bar = bars[peak + offset]; return bar ? scale(bar) : 1 }
+        return { m4: at(-4), m3: at(-3), m2: at(-2), m1: at(-1), peak: at(0), p1: at(1), p2: at(2), p3: at(3), p4: at(4), p5: at(5) }
+      })())`),
+    )
+    for (const [key, expected] of [['m1', 1.88], ['p1', 1.88], ['m2', 1.66], ['p2', 1.66], ['m3', 1.44], ['p3', 1.44], ['m4', 1.22], ['p4', 1.22]]) {
+      if (key.startsWith('m') && ramp[key] === 1) continue // the row may not exist at the rail's top edge
+      assert.ok(Math.abs(ramp[key] - expected) <= 0.02, `the ${key} row swells to ${expected}x, the reference's linear ramp (${ramp[key]})`)
+    }
+    assert.equal(ramp.peak, 2.1, 'and the hovered row is the reference\'s 2.1x')
+    if (ramp.p5 !== 1) assert.ok(Math.abs(ramp.p5 - 1) <= 0.02, `the row five away is back at 1x (${ramp.p5})`)
     assert.equal(hovered.previewVisible, true, 'a preview card appears')
     assert.ok(hovered.previewText.length > 2, `with the turn's text (${hovered.previewText})`)
     assert.equal(hovered.previewWidth, 300, 'at the reference width of 300px')
     assert.equal(hovered.previewBg, 'rgb(36, 36, 36)', 'on the reference surface')
     assert.equal(hovered.previewRadius, '8px', 'at the reference radius')
     /**
-     * Entry, without a move: a rail's hover is a pointer-presence state, and the reference expands the row the
-     * pointer is in as soon as it is there (`transition: all 0s`, so the ramp is immediate). Heddle painted from
-     * `pointermove` alone, so an entry that never moved showed nothing — the owner's "no fat expansion".
+     * Presence without movement does **not** expand on the reference: agentcloud was measured with a
+     * `pointerover` + `pointerenter` and no `pointermove`, and every bar stayed at scale 1; the swell arrives with
+     * the first move. Heddle painted on entry for a while, which was a deviation from the reference, so this now
+     * asserts the reference's behaviour.
      */
     await browser.evaluate('document.getElementById("minimap-hit").dispatchEvent(new PointerEvent("pointerleave", { bubbles: true, pointerId: 31, pointerType: "mouse" }))')
     await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 400, y: 300, button: 'none' })
     await new Promise((resolve) => setTimeout(resolve, 200))
-    const entryState = JSON.parse(
+    const presenceScales = JSON.parse(
       await browser.evaluate(`JSON.stringify((() => {
         const rows = [...document.querySelectorAll('#minimap .mm-row')]
         const row = rows[5]
         const box = row.getBoundingClientRect()
         const hit = document.getElementById('minimap-hit')
-        for (const type of ['pointerover', 'pointerenter']) hit.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: Math.round(box.left + 6), clientY: Math.round(box.top + box.height / 2), pointerId: 31, pointerType: 'mouse', isPrimary: true }))
-        const bar = document.querySelectorAll('#minimap .mm-bar')[5]
-        const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform)
-        return { scale: m ? Number(Number(m[1]).toFixed(2)) : 1 }
+        for (const type of ['pointerover', 'pointerenter', 'mouseover']) hit.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: Math.round(box.left + 6), clientY: Math.round(box.top + box.height / 2), pointerId: 31, pointerType: 'mouse', isPrimary: true }))
+        return [...document.querySelectorAll('#minimap .mm-bar')].map((bar) => { const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform); return m ? Number(Number(m[1]).toFixed(2)) : 1 })
       })())`),
     )
-    assert.ok(entryState.scale >= 1.9, `entering the rail expands the row under the pointer without a move (${entryState.scale})`)
+    assert.ok(presenceScales.every((scale) => scale === 1), `presence alone does not expand the rail (${presenceScales.map((scale) => scale.toFixed(1)).join(',')})`)
     await browser.evaluate('document.getElementById("minimap-hit").dispatchEvent(new PointerEvent("pointerleave", { bubbles: true, pointerId: 31, pointerType: "mouse" }))')
 
     /**

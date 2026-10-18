@@ -297,14 +297,13 @@
   }
   #minimap .mm-row { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; height: 12px; padding-right: 4px; }
   /**
-   * The reference's bar carries **no transition at all** (`transition: all 0s` measured on agentcloud), so its hover
-   * swell is instant: the ramp is applied in the frame the pointer arrives. Ours eased it over .18s and read as
-   * sluggish — the owner's "fast expansion" was the reference's zero duration. Opacity keeps a short ease because
-   * that is the scroll window's motion, which the reference paints without one but which is not what was reported.
+   * The reference's bar carries **no transition at all** — `transition: all` with a zero duration, measured on
+   * agentcloud — so both the hover swell and the scroll window's opacity change in the frame they are applied.
+   * Ours eased opacity over .18s while the transform was already instant; that remaining ease was a deviation.
    */
   #minimap .mm-bar {
     width: 12px; border-radius: 1px; transform-origin: right center;
-    transition: opacity .18s ease, background-color .18s ease;
+    transition: none;
   }
   /** The two inks of the reference: the person in the read ink, the answer in the secondary one. */
   #minimap .mm-bar[data-role='user'] { background: var(--text); }
@@ -2296,7 +2295,13 @@ const MM_ROW_HEIGHT = 12
 /** The resting opacity per role, from the reference. Rows the reference does not have get a quieter value. */
 const MM_REST = { user: 0.33, assistant: 0.267, tool: 0.2, reasoning: 0.2 }
 const MM_HOVER_SPAN = 4
-const MM_HOVER_FLOOR = 0.42
+/**
+ * The reference's ramp, measured per row on agentcloud (2026-10-17): the hovered bar is `scaleX` **2.1** and its
+ * neighbours are **1.88 / 1.66 / 1.44 / 1.22**, i.e. a **linear** five-row ramp (swell 1.0 / 0.8 / 0.6 / 0.4 / 0.2)
+ * with the sixth row back at 1. Heddle used a floored, non-linear falloff (0.42 + …) that stayed at **1.53** in the
+ * fourth row — a wider, softer band than the reference's. Scale opacity uses the same swell, not a second ramp.
+ */
+const MM_HOVER_RAMP = (distance) => Math.max(0, (MM_HOVER_SPAN + 1 - distance) / (MM_HOVER_SPAN + 1))
 
 let mmEntries = []
 let mmHover = -1
@@ -2373,7 +2378,7 @@ function paintMinimap() {
     let swell = 0
     if (mmHover >= 0) {
       const distance = Math.abs(index - mmHover)
-      if (distance <= MM_HOVER_SPAN) swell = MM_HOVER_FLOOR + (1 - MM_HOVER_FLOOR) * (1 - distance / (MM_HOVER_SPAN + 0.5))
+      if (distance <= MM_HOVER_SPAN) swell = MM_HOVER_RAMP(distance)
     }
     opacity = Math.max(opacity, swell)
     entry.bar.style.opacity = opacity.toFixed(3)
@@ -2493,19 +2498,10 @@ function scrubMinimap(clientY) {
 }
 
 /**
- * The rail expands the row the pointer **is in** as soon as the pointer enters, not only when it then moves: a web
- * rail's hover is a pointer-presence state, and a synthetic or assistive entry can arrive without a `pointermove`.
- * The reference was measured expanding in response to the pointer's presence, with `transition: all 0s`, so the
- * entry paint uses the same ramp with no easing.
+ * The reference expands on **movement**, not on presence: measured on agentcloud, a `pointerover` + `pointerenter`
+ * with no `pointermove` leaves every bar at scale 1, and the swell appears with the first move. Heddle painted on
+ * entry for a while; that was a deviation, so the pointermove handler below is the single trigger.
  */
-minimapHit.addEventListener('pointerenter', (event) => {
-  const index = mmIndexAt(event.clientY)
-  if (index < 0) return
-  mmHover = index
-  mmKeyboardIndex = index
-  showMinimapPreview(index)
-  paintMinimap()
-})
 minimapHit.addEventListener('pointermove', (event) => {
   const index = mmIndexAt(event.clientY)
   if (index !== mmHover) {
