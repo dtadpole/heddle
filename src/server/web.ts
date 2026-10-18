@@ -2199,9 +2199,18 @@ export function sessionRequestSelection(
    * this route asks the same question about the same fact. It is a count because two turns on one session are
    * possible, and a set would clear the mark for a session that is still running.
    */
-  state.running.set(handle.id, (state.running.get(handle.id) ?? 0) + 1)
-  /** The clock's origin, recorded once per running session: the first turn to run here owns it. */
-  if (!state.runningSince.has(handle.id)) state.runningSince.set(handle.id, Date.now())
+  /**
+   * A **new turn starts its own clock**.
+   *
+   * `runningSince` is the origin the running row counts from, so it must be this turn's start, not whatever start an
+   * earlier turn left behind (a missed cleanup, or a turn that followed one whose end event was lost, used to make
+   * the row read as a cumulative time instead of "this turn so far"). The count transitions 0 → 1 exactly when a
+   * turn begins on an idle session; a second concurrent turn on the same session does not reset the first one's
+   * clock.
+   */
+  const activeTurns = state.running.get(handle.id) ?? 0
+  state.running.set(handle.id, activeTurns + 1)
+  if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
   /**
    * The turn's abort handle, registered before the stream opens so a stop arriving immediately after the
    * request still finds it. The `finally` below removes it either way, which is what keeps a finished
@@ -2290,7 +2299,12 @@ export function sessionRequestSelection(
        * stream instead of reading one line.
        */
       ctx.logger.warn('web: the turn failed — %s', (error as Error).message)
-      safeWrite(`event: error\ndata: ${JSON.stringify({ message: (error as Error).message })}\n\n`)
+      /**
+       * The failure carries its session. Without it a page could not clear the running state a failed turn set, and
+       * a session that is not running kept its spinner and its running row (the owner's "weaving shows for sessions
+       * that are not active at all").
+       */
+      safeWrite(`event: error\ndata: ${JSON.stringify({ session: handle.id, message: (error as Error).message })}\n\n`)
     }
   } finally {
     handles.delete(controller)

@@ -1994,3 +1994,53 @@ test('a provider that streams blank lines between tokens still reads as prose', 
     double.server.close()
   }
 })
+
+test('a new turn starts a fresh weaving clock instead of carrying the last one', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The running row counts **this turn**, so the server's `runningSince` has to be reset when a turn begins rather
+   * than kept from whatever an earlier turn left behind. Two sequential turns on one session prove it: the second
+   * turn's start is after the first turn's completion, and its label starts near a second — not at the first turn's
+   * elapsed time.
+   */
+  const steps = () => [
+    ...Array.from({ length: 8 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } } })),
+    { text: 'a turn' },
+  ]
+  const server = await startServer('fresh-clock', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  const labelSeconds = () => Number(/(\d+)s/.exec(String(document.querySelector('[data-chat-running] .label')?.textContent ?? null))?.[1] ?? 0)
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(server.work)} }) })`)
+    const session = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)}, new: true }) }).then((r) => r.json()).then((body) => body.session?.id ?? null)`)
+    assert.ok(typeof session === 'string' && session.startsWith('session-'), `a session exists (${session})`)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(session)})`)
+    const startTurn = () => browser.evaluate(`(() => { window.__turn = fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'go', session: ${JSON.stringify(session)} }) }); return true })()`)
+    const runningEntry = () => browser.evaluate(`fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.id === ${JSON.stringify(session)}) ?? null)`)
+
+    await startTurn()
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000), 'the first turn weaves')
+    const first = await runningEntry()
+    assert.ok(first !== null && typeof first.runningSince === 'string', `the first turn has a start (${JSON.stringify(first?.runningSince ?? null)})`)
+    await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000)
+    const afterFirst = await runningEntry()
+    assert.equal(afterFirst.running, false, 'the first turn ended')
+    assert.ok(typeof afterFirst.turnCompletedAt === 'string', 'and the list knows when it completed')
+
+    await startTurn()
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000), 'the second turn weaves')
+    const second = await runningEntry()
+    assert.ok(typeof second.runningSince === 'string', 'the second turn has a start')
+    assert.ok(Date.parse(second.runningSince) >= Date.parse(first.runningSince), 'the second start is a later moment than the first')
+    assert.ok(Date.parse(second.runningSince) > Date.parse(afterFirst.turnCompletedAt), `the second start follows the first completion (${second.runningSince} vs ${afterFirst.turnCompletedAt})`)
+    const label = await browser.evaluate(`Number(/(\\d+)s/.exec(document.querySelector('[data-chat-running] .label')?.textContent ?? "")?.[1] ?? 0)`)
+    assert.ok(label <= 2, `the second turn's label starts fresh rather than continuing the first (${label}s)`)
+    await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

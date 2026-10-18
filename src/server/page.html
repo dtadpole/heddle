@@ -5337,8 +5337,14 @@ events.addEventListener('session', (message) => {
   }
   if (event.type === 'todo/write' && payload.session === (current ?? composerKey)) scheduleTodoRefresh()
   if (event.type === 'model/request') {
+    /**
+     * A request from a session that was **not running** starts a new turn, so its clock starts here; a request from a
+     * session that was already running is another round of the same turn and keeps the origin. The reset also heals a
+     * stale start left by a missed end event.
+     */
+    const wasRunning = runningSessions.has(payload.session)
     runningSessions.add(payload.session)
-    if (!runningSince.has(payload.session)) {
+    if (!wasRunning || !runningSince.has(payload.session)) {
       const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
       runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
     }
