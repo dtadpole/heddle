@@ -83,7 +83,9 @@ test('the text deltas reach the caller while the route is still writing', async 
   const texts = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text)
   assert.deepEqual(texts, ['one', ' two'], 'both deltas arrive, in order')
   assert.ok(arrivals.length === 2, `the answer arrives as separate deltas, not one folded body (${arrivals.length})`)
-  const spread = arrivals[1] - arrivals[0]
+  const [firstArrival, secondArrival] = arrivals
+  assert.ok(firstArrival !== undefined && secondArrival !== undefined, 'both deltas have an arrival time')
+  const spread = secondArrival - firstArrival
   assert.ok(spread >= 150, `the second delta is read after the route waits, not at the end (${Math.round(spread)}ms after the first)`)
 })
 
@@ -122,7 +124,9 @@ test('an event stream with no content type still streams, not buffered', async (
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
   assert.deepEqual(texts, ['one', ' two'], 'both deltas arrive, in order')
-  assert.ok(arrivals[1] - arrivals[0] >= 150, `an unlabelled stream keeps its pacing (${Math.round(arrivals[1] - arrivals[0])}ms)`)
+  const [firstArrival, secondArrival] = arrivals
+  assert.ok(firstArrival !== undefined && secondArrival !== undefined, 'both deltas have an arrival time')
+  assert.ok(secondArrival - firstArrival >= 150, `an unlabelled stream keeps its pacing (${Math.round(secondArrival - firstArrival)}ms)`)
 })
 
 test('a route that answers one JSON body is still read whole', async () => {
