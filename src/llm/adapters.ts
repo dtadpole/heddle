@@ -428,13 +428,31 @@ export function openAiResponsesAdapter(
   signal?: AbortSignal,
 ): AsyncIterable<Chunk> {
   const effort = reasoningValue(endpoint, request)
+  /**
+   * Whether this endpoint's models reason at all, which is what makes the summary request meaningful.
+   *
+   * A reasoning model reasons even when the person selects no level, and the route only streams its
+   * `response.reasoning_summary_text.delta` events when the request asks for a summary. Measured 2026-10-18: the
+   * Meta Codex route streamed 0 reasoning events with `{ effort }` alone, 87 deltas / 393 characters with
+   * `summary: 'auto'`, and the no-level `gpt-5.6-sol-ptu` streamed 99 summary deltas when asked and none when not.
+   * A Responses route serving a non-reasoning model may refuse the field, so it is sent only when the endpoint
+   * declares the capability or an offered model declares its own reasoning ladder.
+   */
+  const reasoningConfigured =
+    (Array.isArray(endpoint.capabilities) && endpoint.capabilities.includes('reasoning')) ||
+    endpoint.reasoning !== undefined ||
+    (endpoint.models ?? []).some((model) => typeof model === 'object' && model !== null && model.reasoning !== undefined)
+  const reasoning: { effort?: string | number; summary?: string } = {
+    ...(effort !== undefined && effort.value !== null ? { effort: effort.value } : {}),
+    ...(reasoningConfigured ? { summary: 'auto' } : {}),
+  }
   const body = {
     model: request.model ?? endpoint.model,
     input: toResponsesInput(request.messages),
     store: false,
     stream: true,
-    /** The Responses shape nests the level under `reasoning.effort`; the route's own error names the values. */
-    ...(effort !== undefined && effort.value !== null ? { reasoning: { effort: effort.value } } : {}),
+    /** The Responses shape nests the level under `reasoning.effort`, and its summary under `reasoning.summary`. */
+    ...(Object.keys(reasoning).length > 0 ? { reasoning } : {}),
     ...(request.tools && request.tools.length > 0
       ? {
           tools: request.tools.map((tool) => ({

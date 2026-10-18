@@ -182,15 +182,43 @@ test('an openai-chat call carries the selected level as reasoning_effort', async
   }
 })
 
-test('an openai-responses call carries the selected level under reasoning.effort', async () => {
+test('an openai-responses call nests the effort and asks for a reasoning summary', async () => {
   const server = await recordingServer('responses')
   try {
     const target: EndpointConfig = { ...endpoint, kind: 'openai-responses', baseUrl: server.baseUrl }
     await drain(openAiResponsesAdapter(target, requestFor({ reasoningEffort: 'max' })))
-    const body = JSON.parse(server.bodies[0] ?? '{}') as { reasoning?: { effort?: string } }
-    assert.equal(body.reasoning?.effort, 'max', 'the Responses shape nests the effort')
+    const body = JSON.parse(server.bodies[0] ?? '{}') as { reasoning?: { effort?: string; summary?: string } }
+    assert.deepEqual(
+      body.reasoning,
+      { effort: 'max', summary: 'auto' },
+      'the Responses shape nests the effort, and the summary is what makes the thinking visible',
+    )
+    /**
+     * A reasoning model that publishes no level still reasons, and its summary must be requested for it: measured
+     * 2026-10-18 against the Meta Codex route, the no-level `gpt-5.6-sol-ptu` streamed 99 reasoning-summary
+     * deltas when asked for a summary and none when not asked.
+     */
     await drain(openAiResponsesAdapter(target, requestFor()))
-    assert.equal(JSON.parse(server.bodies[1] ?? '{}').reasoning, undefined, 'no selection sends no reasoning object')
+    assert.deepEqual(
+      JSON.parse(server.bodies[1] ?? '{}').reasoning,
+      { summary: 'auto' },
+      'a reasoning-capable model is asked for its summary even with no level selected',
+    )
+  } finally {
+    await server.close()
+  }
+})
+
+test('an openai-responses call to a model with no reasoning asks for no reasoning object', async () => {
+  /**
+   * The summary is not free to send everywhere: a Responses route that serves a non-reasoning model may refuse a
+   * `reasoning` field, so the request carries one only when the endpoint or a model declares reasoning.
+   */
+  const server = await recordingServer('responses')
+  try {
+    const plain: EndpointConfig = { name: 'plain', kind: 'openai-responses', baseUrl: server.baseUrl, model: 'plain-model' }
+    await drain(openAiResponsesAdapter(plain, requestFor({ endpoint: 'plain', model: 'plain-model' })))
+    assert.equal(JSON.parse(server.bodies[0] ?? '{}').reasoning, undefined, 'no declared reasoning sends no reasoning object')
   } finally {
     await server.close()
   }

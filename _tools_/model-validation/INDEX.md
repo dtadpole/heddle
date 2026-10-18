@@ -17,7 +17,7 @@ endpoint nobody called is an endpoint nobody knows works.
 | Format | Kinds | Streaming | Reasoning | Tool call |
 |---|---|---|---|---|
 | claude | `anthropic-vertex` | publisher `streamRawPredict` SSE → ≥2 text deltas and a `done` chunk | every declared level sent as adaptive thinking + `output_config.effort`; the route must accept it, **and the summarized thinking must actually arrive** (measured: adaptive thinking without a summarized display streams one empty delta, so the page has nothing to show) | a streamed `tool_use` call to `probe_echo` |
-| codex | `openai-responses` | Responses SSE (`response.output_text.delta`) → ≥2 deltas and completion | every declared level sent as `reasoning.effort` | a streamed `function_call` to `probe_echo` |
+| codex | `openai-responses` | Responses SSE (`response.output_text.delta`) → ≥2 deltas and completion | every declared level sent as `reasoning.effort`, **and the summarized reasoning requested with `reasoning.summary: 'auto'` must arrive** for a reasoning-configured endpoint (three attempts, because a route may not summarize every response) | a streamed `function_call` to `probe_echo` |
 | deepseek | `openai-chat` | Chat Completions SSE → ≥2 deltas and a `done` chunk | every declared level sent as `reasoning_effort` | a streamed `tool_calls` entry to `probe_echo` |
 
 Offline fixtures (`scripted`) and unknown kinds are skipped by design: a deterministic fixture streaming is not a
@@ -61,6 +61,13 @@ edit changes the fingerprint, so it goes stale and the verifier fails until this
   `thinking.display: 'summarized'` opened a thinking block and streamed one empty `thinking_delta` — 0 characters
   for the transcript and the page. The adapter now asks for the summarized display, and the Claude row of this
   matrix fails if a configured model streams no visible thinking text.
+- **Reasoning that is configured but invisible, again — Codex.** The Responses adapter sent `reasoning: { effort }`
+  and never asked for `reasoning.summary`, so the Meta Codex route streamed **zero** reasoning events (measured:
+  0 without the summary, 87 deltas / 393 characters with `summary: 'auto'`, and the no-level `gpt-5.6-sol-ptu`
+  streamed 99 when asked). The adapter now asks when the endpoint's models reason, and the Codex row of this matrix
+  fails if a configured reasoning model streams no summarized thinking. The claim is given three attempts because
+  the route decides per response whether to summarize: the same model produced 95-104 deltas on one call and none
+  on the next.
 - **Budgets that judged the budget instead of the claim.** A reasoning call asked for 8 output tokens (the Codex
   route's minimum is 16), and the streaming call asked for 128 — a DeepSeek reasoning turn spent all 128 on
   `reasoning_content` and produced 0-1 text deltas. The tiny call now asks for the route minimum, and the streaming

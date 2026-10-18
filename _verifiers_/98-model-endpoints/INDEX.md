@@ -39,7 +39,7 @@ sh verify.sh                   # judges the record against the current configura
 | Check | The claim |
 |---|---|
 | a fresh validation record exists | a validator run exists for **this** configuration's fingerprint and covers streaming, reasoning and tool calls |
-| every configured model passes | each endpoint/model carries a passing streaming, reasoning-level and tool-call result; for the Claude family, the reasoning text must also be visible (non-empty summarized thinking), because that is the thing the page shows |
+| every configured model passes | each endpoint/model carries a passing streaming, reasoning-level and tool-call result; for Claude, and for a Codex endpoint whose models reason, the summarized thinking text must also be visible (non-empty), because that is the thing the page shows |
 
 On a machine with no local endpoint configuration both checks report **unjudged** (the project's 3): a fresh clone
 or CI has nothing to validate, and passing silently would be the same mistake as calling a green branch a
@@ -60,6 +60,10 @@ model type is configured — not once, by hand. Two real defects made the rule c
   display, so the route streamed one empty `thinking_delta` (0 characters) and the Web UI's Think row had nothing
   to show. The adapter was fixed, and this verifier's reasoning claim for the Claude family now includes that the
   thinking text arrived.
+- Codex's configured reasoning was invisible for the same kind of reason at the other end of the wire: the
+  Responses request never asked for `reasoning.summary`, so the route streamed no summary events at all. With
+  `summary: 'auto'` the same route streams ~87-104 summary deltas before the answer; the fix is in the adapter and
+  the Codex row of the record now requires visible summarized thinking.
 
 ## How a new endpoint or model type is gated
 

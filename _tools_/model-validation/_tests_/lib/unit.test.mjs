@@ -38,6 +38,7 @@ const configured = {
     },
     { name: 'codex', kind: 'openai-responses', baseUrl: 'http://127.0.0.1:2/v1', model: 'gpt', models: [{ id: 'gpt', reasoning: { levels: [{ id: 'none', name: 'None', value: null }] } }] },
     { name: 'claude', kind: 'anthropic-vertex', baseUrl: 'http://127.0.0.1:3/v1', project: 'p', region: 'global', model: 'claude', models: [{ id: 'claude' }] },
+    { name: 'codex-plain', kind: 'openai-responses', baseUrl: 'http://127.0.0.1:4/v1', model: 'plain', models: [{ id: 'plain' }] },
     { name: 'fixture', kind: 'scripted', baseUrl: '~/.heddle/scripted.json' },
   ],
 }
@@ -75,9 +76,13 @@ test('the three wire formats are named for the provider families', () => {
 
 test('targets cover the three formats and skip excluded or offline endpoints, with every model', () => {
   const targets = validationTargets(configured)
-  assert.deepEqual(targets.map((target) => target.name), ['chat', 'codex', 'claude'], 'excluded fixture and order preserved')
+  assert.deepEqual(targets.map((target) => target.name), ['chat', 'codex', 'claude', 'codex-plain'], 'excluded fixture and order preserved')
   assert.deepEqual(targets[0].models.map((model) => model.id), ['chat-small', 'chat-large'], 'every listed model, not only the default')
   assert.deepEqual(targets[1].models[0].levels.map((level) => level.value), [null], 'a level that sends nothing is kept')
+  assert.equal(targets[0].reasoningConfigured, true, 'a declared level makes the endpoint reasoning-configured')
+  assert.equal(targets[1].reasoningConfigured, true, 'a model-level ladder counts too')
+  assert.equal(targets[2].reasoningConfigured, false, 'a Claude endpoint with no ladder is still handled by family')
+  assert.equal(targets[3].reasoningConfigured, false, 'a Responses endpoint with no reasoning is not asked for summaries')
 })
 
 test('the single-model shorthand is a model list of one', () => {
@@ -110,6 +115,9 @@ test('the fingerprint changes when a new endpoint, model, level or address is co
   const credentialOnly = structuredClone(configured)
   credentialOnly.endpoints[0].apiKey = 'a-secret-that-is-not-in-the-fingerprint'
   assert.equal(fingerprint(credentialOnly), base, 'a credential is not part of the identity written beside results')
+  const capabilityOnly = structuredClone(configured)
+  capabilityOnly.endpoints[3].capabilities = ['reasoning']
+  assert.notEqual(fingerprint(capabilityOnly), base, 'a newly declared reasoning capability re-triggers validation, because it changes what is requested')
 })
 
 test('a fresh passing record judges true; a missing, stale or failing record does not', () => {
@@ -151,6 +159,12 @@ test('a fresh passing record judges true; a missing, stale or failing record doe
   const invisibleClaude = cacheFor(configured)
   invisibleClaude.results[resultKey('claude', 'claude')].reasoning.visible = { deltas: 1, chars: 0 }
   assert.match(judge(invisibleClaude, configured).failures.join(' '), /claude\/claude: reasoning is not visible/)
+  const invisibleCodex = cacheFor(configured)
+  invisibleCodex.results[resultKey('codex', 'gpt')].reasoning.visible = { deltas: 0, chars: 0 }
+  assert.match(judge(invisibleCodex, configured).failures.join(' '), /codex\/gpt: reasoning is not visible/, 'a reasoning Codex model must publish its summary')
+  const invisiblePlainCodex = cacheFor(configured)
+  invisiblePlainCodex.results[resultKey('codex-plain', 'plain')].reasoning.visible = { deltas: 0, chars: 0 }
+  assert.equal(judge(invisiblePlainCodex, configured).ok, true, 'a Responses endpoint with no reasoning is not held to a summary')
   const invisibleDeepSeek = cacheFor(configured)
   invisibleDeepSeek.results[resultKey('chat', 'chat-small')].reasoning.visible = { deltas: 0, chars: 0 }
   assert.equal(judge(invisibleDeepSeek, configured).ok, true, 'a non-Claude family is not required to disclose its reasoning text')

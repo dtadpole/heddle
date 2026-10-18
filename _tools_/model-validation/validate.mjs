@@ -176,7 +176,7 @@ function streamingVerdict(recording) {
  * so the transcript and page had nothing to show; the adapter now asks for `display: 'summarized'`, and this check
  * keeps that true for every configured Claude model.
  */
-async function reasoningVerdict(endpoint, model, levels, apiType) {
+async function reasoningVerdict(endpoint, model, levels, target) {
   const recorded = []
   for (const level of levels) {
     if (level.value === null) {
@@ -193,17 +193,36 @@ async function reasoningVerdict(endpoint, model, levels, apiType) {
   }
   const failure = recorded.find((entry) => entry.ok !== true)
   if (failure !== undefined) return { ok: false, levels: recorded, error: `level '${failure.id}' — ${failure.error}` }
-  if (apiType !== 'claude') return { ok: true, levels: recorded }
+  /**
+   * The families whose summarized thinking a person can see. Claude always publishes it when asked; Codex publishes
+   * it when the endpoint's models reason (the request carries `summary: 'auto'` for those), so both are held to
+   * "the text arrived" once configured. DeepSeek's chat route streams reasoning_content by default and is not part
+   * of this visibility claim.
+   */
+  const visibleRequired = target.apiType === 'claude' || (target.apiType === 'codex' && target.reasoningConfigured === true)
+  if (!visibleRequired) return { ok: true, levels: recorded }
   const visibleLevel = levels.find((level) => level.id === 'max') ?? levels.at(-1)
-  const visible = await callRetrying(endpoint, model.id, {
-    messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT_REASONING }] }],
-    maxOutputTokens: 512,
-    ...(visibleLevel !== undefined && visibleLevel.value !== null ? { reasoningEffort: visibleLevel.id } : {}),
-  })
-  const reading = { deltas: visible.reasoningDeltas, chars: visible.reasoningChars, sample: visible.reasoningSample }
+  /**
+   * A provider may answer one call without disclosing a reasoning summary even though the model reasons — a route
+   * decides per response whether its thinking is worth summarizing. Measured 2026-10-18: the same Codex model
+   * streamed 95-104 summary deltas on one call and none on the next. A single empty observation would therefore
+   * make the gate flaky, so the visibility claim is given three chances before it fails; the attempt count is
+   * recorded.
+   */
+  let visible
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    visible = await callRetrying(endpoint, model.id, {
+      messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT_REASONING }] }],
+      maxOutputTokens: 1024,
+      ...(visibleLevel !== undefined && visibleLevel.value !== null ? { reasoningEffort: visibleLevel.id } : {}),
+    })
+    if (visible.reasoningChars > 0 || visible.failure !== undefined) break
+    visible = { ...visible, attempts: attempt }
+  }
+  const reading = { deltas: visible.reasoningDeltas, chars: visible.reasoningChars, sample: visible.reasoningSample, attempts: visible.attempts ?? 1 }
   if (visible.failure !== undefined) return { ok: false, levels: recorded, visible: reading, error: `visible reasoning call failed — ${visible.failure}` }
   if (reading.chars === 0) {
-    return { ok: false, levels: recorded, visible: reading, error: 'the declared reasoning is not visible: the route streamed no thinking text' }
+    return { ok: false, levels: recorded, visible: reading, error: 'the declared reasoning is not visible: the route streamed no thinking text in three attempts' }
   }
   return { ok: true, levels: recorded, visible: reading }
 }
@@ -234,7 +253,7 @@ async function validateModel(target, endpoint, model) {
      */
     maxOutputTokens: 1024,
   }))
-  const reasoning = await reasoningVerdict(endpoint, model, model.levels, target.apiType)
+  const reasoning = await reasoningVerdict(endpoint, model, model.levels, target)
   const tools = await toolsVerdict(endpoint, model)
   return {
     endpoint: target.name,

@@ -67,13 +67,21 @@ export function validationTargets(config) {
   return endpoints
     .filter((endpoint) => endpoint !== null && typeof endpoint === 'object')
     .filter((endpoint) => typeof endpoint.name === 'string' && !excluded.has(endpoint.name) && apiTypeFor(endpoint.kind) !== null)
-    .map((endpoint) => ({
-      name: endpoint.name,
-      kind: endpoint.kind,
-      apiType: apiTypeFor(endpoint.kind),
-      baseUrl: endpoint.baseUrl,
-      models: modelEntries(endpoint).map((model) => ({ id: model.id, levels: levelsFor(endpoint, model) })),
-    }))
+    .map((endpoint) => {
+      const models = modelEntries(endpoint).map((model) => ({ id: model.id, levels: levelsFor(endpoint, model) }))
+      return {
+        name: endpoint.name,
+        kind: endpoint.kind,
+        apiType: apiTypeFor(endpoint.kind),
+        baseUrl: endpoint.baseUrl,
+        /** Whether these models reason at all — which is what makes the summary request, and its evidence, apply. */
+        reasoningConfigured:
+          (Array.isArray(endpoint.capabilities) && endpoint.capabilities.includes('reasoning')) ||
+          endpoint.reasoning !== undefined ||
+          models.some((model) => model.levels.length > 0),
+        models,
+      }
+    })
 }
 
 /**
@@ -89,6 +97,7 @@ export function fingerprint(config) {
     name: target.name,
     kind: target.kind,
     baseUrl: target.baseUrl,
+    reasoningConfigured: target.reasoningConfigured,
     models: target.models.map((model) => ({
       id: model.id,
       levels: model.levels.map((level) => ({ id: level.id, value: level.value })),
@@ -180,7 +189,14 @@ export function judge(cache, config) {
         if (seen === undefined) failures.push(`${target.name}/${model.id}: reasoning level '${level.id}' has no validation entry`)
         else if (seen.ok !== true) failures.push(`${target.name}/${model.id}: reasoning level '${level.id}' — ${seen.error ?? 'not passing'}`)
       }
-      if (target.apiType === 'claude' && !(Number(result.reasoning?.visible?.chars ?? 0) > 0)) {
+      /**
+       * The Claude and Codex families publish a summarized thinking stream, and the page's Think row is the thing a
+       * person sees. Measured 2026-10-18: both routes streamed no reasoning summary events until the request asked
+       * for `summary: 'auto'` (Codex) or `display: 'summarized'` (Claude). A record for such an endpoint that
+       * reports no thinking text is a failure; a family that does not disclose its thinking is not held to it.
+       */
+      const visibleRequired = target.apiType === 'claude' || (target.apiType === 'codex' && target.reasoningConfigured === true)
+      if (visibleRequired && !(Number(result.reasoning?.visible?.chars ?? 0) > 0)) {
         failures.push(`${target.name}/${model.id}: reasoning is not visible — ${result.reasoning?.visible?.error ?? 'the recorded run streamed no thinking text'}`)
       }
       if (result.tools?.ok !== true) {
