@@ -864,6 +864,7 @@ async function runCommand(command: string, target: string | undefined, json: boo
         cwd: app.ctx.sandbox.workspaceRoot,
         tools: app.ctx.tools.describe(),
         ...(args.endpoint !== undefined ? { endpoint: args.endpoint } : {}),
+        ...(args.model !== undefined ? { model: args.model } : {}),
       })
       /**
        * What the model would read, not only how much of it.

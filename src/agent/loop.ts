@@ -411,6 +411,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
           tools,
           ...(options.system !== undefined ? { system: options.system } : {}),
           endpoint: options.endpoint,
+          ...(options.model !== undefined ? { model: options.model } : {}),
         })
         report = retried
         prepared = { messages: retried.messages, tools }

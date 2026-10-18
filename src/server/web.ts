@@ -941,10 +941,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      */
     const cwd = ctx.sandbox?.workspaceRoot ?? process.cwd()
     const endpoint = url.searchParams.get('endpoint')
+    const model = url.searchParams.get('model')
     const report = context.assemble(handle, {
       cwd,
       tools: ctx.tools.describe(),
       ...(endpoint !== null && endpoint.length > 0 ? { endpoint } : {}),
+      ...(model !== null && model.length > 0 ? { model } : {}),
     })
     const surface = ctx.session.store.surface(handle)
     const notes = ctx.session

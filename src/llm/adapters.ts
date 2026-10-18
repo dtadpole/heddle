@@ -1,6 +1,7 @@
 import { anthropicUsage, openaiChatUsage, openaiResponsesUsage, type TokenUsage } from './usage.ts'
 import {
   ModelError,
+  baseUrlFor,
   reasoningLevelFor,
   reasoningLevelsFor,
   type Adapter,
@@ -189,7 +190,7 @@ export function openAiChatAdapter(
 
   return (async function* chat() {
     const result = await post({
-      url: `${endpoint.baseUrl}/chat/completions`,
+      url: `${baseUrlFor(endpoint, request.model)}/chat/completions`,
       body: { ...body, stream: streaming },
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
       ...(endpoint.headers !== undefined ? { headers: endpoint.headers } : {}),
@@ -439,7 +440,7 @@ export function openAiResponsesAdapter(
 
   return (async function* responses() {
     const result = await post({
-      url: `${endpoint.baseUrl}/responses`,
+      url: `${baseUrlFor(endpoint, request.model)}/responses`,
       body,
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
       ...(endpoint.headers !== undefined ? { headers: endpoint.headers } : {}),
@@ -630,7 +631,7 @@ export function anthropicCall(
   }
 
   return {
-    url: `${endpoint.baseUrl}/projects/${endpoint.project}/locations/${endpoint.region}/publishers/anthropic/models/${model}:streamRawPredict`,
+    url: `${baseUrlFor(endpoint, request.model)}/projects/${endpoint.project}/locations/${endpoint.region}/publishers/anthropic/models/${model}:streamRawPredict`,
     body,
     headers: titleCaseHeaders(endpoint.headers ?? {}),
   }

@@ -5,7 +5,7 @@ import Schema from '@deepseek-ai/schemastery'
 
 import { heddleHome } from '../config/schema.ts'
 import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
-import { CONTEXT_WINDOW_EXCEEDED } from '../llm/types.ts'
+import { CONTEXT_WINDOW_EXCEEDED, contextWindowFor } from '../llm/types.ts'
 import { deriveMessage, indexBySeq, type SessionEvent, type SessionHandle, type SessionStore } from '../session/store.ts'
 
 import { resolveBudget, type Budget, type BudgetPolicy } from './budget.ts'
@@ -132,7 +132,13 @@ export interface BaselineOutcome {
 /** How the service reaches a model for a summary, injected so the service stays context-free. */
 export interface ContextDependencies {
   /** The routed endpoint's own window, when its adapter declares one. */
-  readonly endpointWindow?: (endpoint: string) => number | undefined
+  /**
+   * The window an endpoint — or one of its models — is served with.
+   *
+   * The model is passed because a gateway can give each deployment its own window, and a budget priced from the
+   * endpoint's single number would be wrong for one of them.
+   */
+  readonly endpointWindow?: (endpoint: string, model?: string) => number | undefined
   /** One non-streaming completion, for the summarising call. */
   readonly complete?: (request: {
     readonly endpoint: string
@@ -176,8 +182,9 @@ export class ContextService extends Service {
   }
 
   /** The budget for one endpoint, resolved from its own window when it declares one. */
-  budget(endpoint?: string): Budget {
-    const endpointWindow = endpoint === undefined ? undefined : this.dependencies.endpointWindow?.(endpoint)
+  budget(endpoint?: string, model?: string): Budget {
+    const endpointWindow =
+      endpoint === undefined ? undefined : this.dependencies.endpointWindow?.(endpoint, model)
     return resolveBudget({
       ...(endpoint !== undefined ? { endpoint } : {}),
       ...(endpointWindow !== undefined ? { endpointWindow } : {}),
@@ -395,12 +402,20 @@ export class ContextService extends Service {
    */
   assemble(
     handle: SessionHandle,
-    options: { readonly cwd: string; readonly tools?: readonly ToolSpec[]; readonly system?: string; readonly endpoint?: string },
+    options: {
+      readonly cwd: string
+      readonly tools?: readonly ToolSpec[]
+      readonly system?: string
+      readonly endpoint?: string
+      /** The model the request would name, so the budget prices the window that model is served with. */
+      readonly model?: string
+    },
   ): ContextReport {
     const baseline = this.ensureContext(handle, { cwd: options.cwd, ...(options.system !== undefined ? { system: options.system } : {}) })
     return this.report(handle, {
       ...(options.tools !== undefined ? { tools: options.tools } : {}),
       ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+      ...(options.model !== undefined ? { model: options.model } : {}),
       instructions: baseline.instructions,
     })
   }
@@ -424,7 +439,7 @@ export class ContextService extends Service {
     },
   ): Promise<ContextReport> {
     const baseline = this.ensureContext(handle, { cwd: options.cwd, ...(options.system !== undefined ? { system: options.system } : {}) })
-    const budget = this.budget(options.endpoint)
+    const budget = this.budget(options.endpoint, options.model)
     const tools = options.tools
     const measurement = this.measure(handle, tools !== undefined ? { tools } : {})
     const outcome = await this.compaction.compactIfNeeded(handle, {
@@ -437,6 +452,7 @@ export class ContextService extends Service {
     return this.report(handle, {
       ...(tools !== undefined ? { tools } : {}),
       endpoint: options.endpoint,
+      ...(options.model !== undefined ? { model: options.model } : {}),
       instructions: baseline.instructions,
       outcome,
     })
@@ -466,10 +482,11 @@ export class ContextService extends Service {
       readonly instructions: readonly string[]
       readonly outcome?: CompactionOutcome
       readonly endpoint?: string
+      readonly model?: string
     },
   ): ContextReport {
     const measurement = this.measure(handle, options.tools !== undefined ? { tools: options.tools } : {})
-    const budget = this.budget(options.endpoint)
+    const budget = this.budget(options.endpoint, options.model)
     return {
       /**
        * Every request goes through the repair: a log written before the loop closed its calls on unwind (or by a
@@ -502,7 +519,10 @@ export default class ContextPlugin extends ContextService {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, ctx.session.store, config, {
-      endpointWindow: (endpoint) => ctx.model.endpoint(endpoint)?.contextWindow,
+      endpointWindow: (endpoint, model) => {
+        const configured = ctx.model.endpoint(endpoint)
+        return configured === undefined ? undefined : contextWindowFor(configured, model)
+      },
       complete: async (request) => {
         const result = await ctx.model.generate({
           endpoint: request.endpoint,

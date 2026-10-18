@@ -154,6 +154,25 @@ export interface ModelOption {
    * non-thinking one. An endpoint-level block is the default for its models (see `ReasoningLevels`).
    */
   readonly reasoning?: ReasoningLevels
+  /**
+   * The gateway this model is served from, when the endpoint's models do not share one.
+   *
+   * A hosted route usually serves every model from one address, and then this is absent and the endpoint's
+   * `baseUrl` is used. An enterprise gateway can instead give **each deployment its own host** — measured
+   * 2026-10-18 against Meta's internal Codex gateway, where `gpt-6-luna` answers on
+   * `azure-codex-gpt-6-luna` and `gpt-6.1-sol-ptu` on `azure-codex-gpt-6-1-sol`, and asking a host for a
+   * deployment it does not carry is a `404`. Without this field those models can only be five endpoints, which
+   * makes one provider's family look like five unrelated backends in every list that shows endpoints.
+   */
+  readonly baseUrl?: string
+  /**
+   * This model's context window, when it differs from the endpoint's.
+   *
+   * The same routing table serves a 272k deployment beside a 1M one, so a single window on the endpoint would
+   * price every model against the wrong number — too large for the small one, which overflows at the worst
+   * moment, and too small for the large one, which compacts early for no reason.
+   */
+  readonly contextWindow?: number
 }
 
 /**
@@ -274,10 +293,32 @@ export function offeredModels(endpoint: EndpointConfig): readonly ModelOption[] 
   return endpoint.model !== undefined && endpoint.model.length > 0 ? [{ id: endpoint.model }] : []
 }
 
+/**
+ * The address a request for this model is sent to.
+ *
+ * The model's own gateway when it declares one, otherwise the endpoint's. Every adapter asks this rather than
+ * reading `endpoint.baseUrl`, because where a model lives is a fact about that model on a gateway that allocates
+ * a host per deployment.
+ */
+export function baseUrlFor(endpoint: EndpointConfig, modelId?: string): string {
+  return modelOptionOf(endpoint, modelId ?? endpoint.model)?.baseUrl ?? endpoint.baseUrl
+}
+
 /** The catalogue entry a model id names, or `undefined` when the endpoint does not offer it. */
 export function modelOptionOf(endpoint: EndpointConfig, modelId: string | undefined): ModelOption | undefined {
   if (modelId === undefined) return undefined
   return offeredModels(endpoint).find((model) => model.id === modelId)
+}
+
+/**
+ * The context window of the model a request would use.
+ *
+ * The model's own number wins over the endpoint's, for the reason `ModelOption.contextWindow` exists: one
+ * routing table can serve deployments of very different sizes, and a budget priced from the wrong window is
+ * wrong in whichever direction it is wrong.
+ */
+export function contextWindowFor(endpoint: EndpointConfig, modelId?: string): number | undefined {
+  return modelOptionOf(endpoint, modelId ?? endpoint.model)?.contextWindow ?? endpoint.contextWindow
 }
 
 /**
