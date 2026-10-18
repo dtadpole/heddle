@@ -289,6 +289,14 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
      * Picking a tick takes the reader to that turn. Measured by **scrolling**: the strip's job is navigation, and a
      * control that changes its own appearance while leaving the reader where they were has not navigated.
      */
+    // The ledger initially follows its tail. Establish a different reader position before picking
+    // the last tick; an already visible last turn is correctly a no-op under block: nearest.
+    await browser.evaluate(`(() => {
+      const pane = document.querySelector('.tr-pane')
+      pane.scrollTop = 0
+      pane.dispatchEvent(new Event('scroll'))
+    })()`)
+    await browser.waitFor(`Math.round(document.querySelector('.tr-pane').scrollTop) === 0`, 5000)
     const picked = JSON.parse(
       await browser.evaluate(`(() => {
         const ticks = [...document.querySelectorAll('#timeline .tr-tick')]
@@ -303,6 +311,7 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 900))
     const afterPick = await browser.evaluate(`Math.round(document.querySelector('.tr-pane').scrollTop)`)
     assert.notEqual(afterPick, picked.before, `picking the last tick moves the ledger (${picked.before} -> ${afterPick})`)
+    assert.ok(afterPick > 0, 'the last-turn tick navigates away from the explicitly chosen top')
 
     /**
      * The ledger opens at its **tail**, and following stops when the reader scrolls up.
