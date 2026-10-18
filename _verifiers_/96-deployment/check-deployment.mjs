@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -84,15 +85,22 @@ test("the page the owner sees is the deployment checkout's built page, byte for 
   const live = liveService()
   if (!skipUnless(context, agent !== null && live !== null, 'an installed agent and a live heddle service on this machine')) return
   const built = readFileSync(join(agent.root, 'dist', 'server', 'page.html'), 'utf8')
+  /**
+   * The build's own document is the file on disk; the served document is that file with **one** documented
+   * substitution — the `<meta name="heddle-page">` marker replaced by the first twelve hex of the file's own
+   * sha256 (`markedPage` in `src/server/web.ts`). That marker is how a stale build is told apart from a missing
+   * feature, so the check states both halves: the expected document carries this build's hash, and the served
+   * document is exactly that document. Anything else — a page from another checkout, or an older build that
+   * lacks the marker — fails on the hash, not merely on a length.
+   */
+  const marker = createHash('sha256').update(built).digest('hex').slice(0, 12)
+  const expected = built.replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+  assert.ok(expected.includes(`<meta name="heddle-page" content="${marker}">`), 'the build states its own identity')
   const response = await fetch(OWNER_URL, { redirect: 'follow', signal: AbortSignal.timeout(8000) })
   assert.equal(response.status, 200, `the owner's URL answers with a page (${response.status})`)
   const served = await response.text()
-  /**
-   * The server reads its page file per request, so byte identity is the sharpest available statement that
-   * the served page is this build and not a lookalike from another worktree or an older `dist`.
-   */
-  assert.equal(served.length, built.length, `the served page is this build's length (${served.length} vs ${built.length})`)
-  assert.equal(served, built, "the served page is the deployment checkout's built page, byte for byte")
+  assert.equal(served.length, expected.length, `the served page is this build's length (${served.length} vs ${expected.length})`)
+  assert.equal(served, expected, "the served page is the deployment checkout's built page, byte for byte")
 })
 
 test('the deployment checkout contains only committed main', async (context) => {
