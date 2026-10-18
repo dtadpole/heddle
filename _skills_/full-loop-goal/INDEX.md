@@ -1,12 +1,15 @@
 ---
 title: Full loop goal
-version: 1.3.0
-description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → verify → fix for a stated number of cycles, with each cycle's evidence required before it counts.
+version: 1.4.0
+description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → deliver → verify → fix for a stated number of cycles, with each cycle's evidence required before it counts — and the delivered surface, not a spawned copy of it, is what gets verified.
 grounded_in:
   - owner statement 2026-10-17 that a big job should be set up as a goal that researches, understands, plans, implements, verifies, fixes and loops three times
   - owner statement 2026-10-17 that each loop should include a brainstorm in the research phase, and should step back and broaden the scope where applicable
   - the goal reentrancy convention, which this procedure relies on for surviving restarts
   - owner statement 2026-10-17 that a goal's round cap defaults to 100 unless the owner names another number
+  - owner statement 2026-10-17 asking "did you verify on localhost:8082?" after a cycle reported a verified Web UI
+    the owner never saw: the browser check had spawned its own server, and the address the owner opened was served
+    by a daemon running another checkout's build
 ---
 
 # Full loop goal
@@ -18,6 +21,14 @@ what a round must contain.
 **v1.1 adds two steps to every cycle** — a **brainstorm** inside research, and a **step back** after
 understanding — plus the mechanisms in the second half. The rule that has not changed: a cycle counts only
 when its evidence is in the document and the suites are green.
+
+**v1.4 adds the delivery step.** A cycle of a served or installed artifact is not green at "suites green"; it is
+green when **the thing the person opens** is the build just measured. A check that starts its own server, a
+screenshot of a throwaway instance, or a passing unit suite verifies *code*, not *delivery*: it cannot see a stale
+`dist`, a daemon started from another checkout, a service supervisor pointing somewhere else, or a page that a
+browser is serving from cache. The rule is one sentence — **verify the address, not a copy of it** — and the
+mechanisms that make it true are below. This rule exists because the loop missed exactly that: every suite was
+green and the owner's URL still showed the old page.
 
 **v1.3 states the round cap.** A goal is created with `max_goal_rounds: 100` unless the owner names another
 number in the request; that is the harness default and it is the number this skill asks for explicitly, because a
@@ -32,6 +43,11 @@ rounds" overrides the relevant one, and the override is written into the objecti
   that would prove it, the report a person would read. If it cannot be measured, the job is not a goal yet.
 - **Name the instruments.** The reference at its address, the browser, the check runner, the commands whose
   output is evidence. A cycle that has to rediscover its instruments spends its budget on setup.
+- **Name the address the person opens, and what answers there.** Not "the Web UI": the URL in the owner's message
+  (a port, a gate, a domain), and the process, supervisor and checkout behind it. Write both down before cycle 1;
+  a verification that cannot name the process is a verification of something else. On this machine the heddle UI
+  is `http://127.0.0.1:8082/` (a token-supplying gate) → `127.0.0.1:3082` (a launchd agent running a checkout's
+  `dist/cli.js`) — two hops, and the build that matters is the one at the end of them.
 - **Budget the cycles explicitly** (three is a default) and say what a cycle is in your own words.
 - **Name the round cap.** Create the goal with `max_goal_rounds: 100`, which is the harness default, unless the
   owner asked for a different number. Say which number was used in the document: the cap is what turns "still
@@ -50,10 +66,10 @@ Run the <job> loop three times. Each cycle: (1) research — measure the referen
 three candidate approaches and record the discarded ones; (2) understand — why the reference does it, whether
 this project has the mechanism, then step back and check the objective against what was learned (broaden,
 narrow or re-cut the scope, and edit the goal if it changed); (3) plan the smallest fix that makes the
-difference disappear; (4) implement it; (5) verify by measurement, screenshot and a new assertion that has
-been shown to fail without the fix; (6) fix what the verification found. A cycle counts only when its
-evidence is in the document and the suites are green. Record each cycle in <the document> and the lessons in
-the skill.
+difference disappear; (4) implement it; (5) deploy it to the surface a person opens and verify **there** by measurement,
+screenshot and a new assertion that has been shown to fail without the fix; (6) fix what the verification
+found. A cycle counts only when its evidence is in the document, the suites are green **and the address the
+person opens serves this round's build**. Record each cycle in <the document> and the lessons in the skill.
 ```
 
 ## The cycle, phase by phase
@@ -66,7 +82,8 @@ the skill.
 | **step back** | the objective re-read against the evidence: still the right job? did it widen or narrow? should the fix target the *class* rather than this instance? |
 | **plan** | one sentence per change, the chosen approach, and why the alternatives were rejected |
 | **implement** | the change, in the file that owns the fact |
-| **verify** | the same measurement afterwards, a screenshot when it is visual, a new assertion **shown to fail without the fix**, and the suites green |
+| **deliver** | the build the person's process **actually runs** is the one just built: the service is switched or restarted, and the bytes served at the person's URL carry this round's marker; the URL, the process/PID and the checkout are recorded |
+| **verify** | the same measurement afterwards **at the address the person opens** (fresh browser profile, after a restart), a screenshot when it is visual, a new assertion **shown to fail without the fix**, and the suites green |
 | **fix** | whatever verify found; a red that cannot be fixed gets an **owner named** in the document |
 
 ### Research: measure first, then brainstorm
@@ -101,6 +118,32 @@ Broadening also has a cheap mechanical form: when a defect is found in one place
 (the same pattern in the neighbouring files) before closing the cycle. One measurement, a list of siblings,
 and the list goes in the document.
 
+### Deliver: the artifact a person opens
+
+The verify phase has a precondition, and it is where this loop has already been wrong once. A **fresh browser on the
+owner's URL** is the only instrument that sees the delivered artifact; everything else in the cycle sees the source
+tree it happens to be standing in.
+
+- **Find the chain and write it down** before changing anything: the address a person opens → the port it forwards to
+  → the process listening there (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) → its supervisor (launchd/agent/daemon) → the
+  **checkout and build** its command line names. A process started from `/repo-a/dist/cli.js` does not follow edits
+  or builds in `/repo-b`.
+- **Deploy by switching that chain, not by running a second server.** Point the supervisor at the build, restart it
+  (launchd: edit the plist, `launchctl bootout` + `bootstrap`, then confirm the new PID), and keep the old plist or
+  command in a backup so the switch is reversible. Write the revert command in the report.
+- **Pin the served bytes.** A page-level marker (an id/class/constant this round added) must be present in the HTML
+  fetched through the person's URL, and a browser probe must read the new behaviour from that URL. `grep` on a
+  spawned instance's page is not that.
+- **Re-start, then re-measure.** Restart before measuring a restart claim, and use a browser profile with no memory of
+  the previous page; an old tab keeps the old script.
+- **A spawned server is a code check.** Keep the isolated browser contract — it is the cheap, deterministic judge of
+  behaviour — but label it as such and never as the delivery. The delivery claim needs a second instrument: the
+  owner's URL, a screenshot from it, and the process facts.
+- **What the person sees may need one hard refresh** if the page is cached; say so, and prefer a cache-busting or
+  fresh-profile probe so the claim does not depend on the person's browser state.
+- **Both states are evidence.** "Ran from a checkout and passed" and "the person's URL serves that build" are
+  different facts; a report that gives only the first is the miss this section exists to prevent.
+
 ## The document the loop keeps
 
 The loop runs across goal rounds and survives restarts, so the **document is its memory**, not the context
@@ -112,7 +155,9 @@ Cycle n — <one-line aim>
   brainstorm: <candidates>  chosen: <one>  discarded: <why>
   step back:  <keep / widen / narrow / re-cut>  <what changed, and the goal edit if any>
   changed:    <files, one line each>
-  evidence:   <before → after, screenshot, the assertion that fails without the fix>
+  delivered:  <the address a person opens, its process/PID, the checkout the process runs, the build marker seen
+               in the bytes served there, and how the service was restarted; plus the revert command>
+  evidence:   <before → after, screenshot from the person's address, the assertion that fails without the fix>
   reds:       <none | named, with its owner>
   coverage:   <cells visited, cells not visited and why>
   invariants: <what the structural change could have broken, and the assertion that it did not>
@@ -129,6 +174,11 @@ will repeat work.
   fix), watch it fail, then restore. An assertion nobody has seen fail is a comment.
 - **Two instruments for one claim.** A measurement, a screenshot or an assertion is each one instrument; when
   they can disagree, use two. Visual claims get the screenshot *and* the assertion.
+- **One of the two instruments must be the delivered surface.** For anything served, the pair is "the isolated,
+  deterministic check" *and* "the owner's URL, after a restart, pinned by a marker". When the first is green and the
+  second is old, the cycle is **unverified**, not green — the two instruments disagreeing is the signal, not noise.
+- **Deploying is a measured step, not a courtesy at the end.** Record the URL, the PID, the checkout the PID runs,
+  and the marker in the served bytes. A report that cannot name the process serving the page has not verified it.
 - **Re-measure from a fresh process for restart and reentrancy claims.** A claim that "it survives a restart"
   is not judged in the process that made the change.
 - **Pre-mortem each cycle.** Before implementing, ask: how could this cycle pass while being wrong? Name the
@@ -166,6 +216,9 @@ will repeat work.
   convention. Everything else is the loop's job to decide.
 - **Do not start cycle n+1 until cycle n's evidence is committed.** The next cycle's research reads the
   document and the log; an uncommitted cycle is a cycle with no history.
+- **Do not call it done from a spawned instance.** If the address the person opens still serves the previous build, the
+  cycle is not verified: that URL, after a restart, is the last measurement before completion, and the completion
+  claim names it.
 
 ## Read next
 
