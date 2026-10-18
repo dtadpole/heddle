@@ -150,3 +150,22 @@ agreement.
 What is still available: the part 9 verifier launches its own headless browser and evaluates the page, so a
 proper re-measurement should be written **as a check** (or a script using the same helper) rather than as an
 interactive session. That is the next round's route.
+
+## Round 6: the trusted-input route exists, and the probe needs one fix
+
+The session's interactive browser tools did not come back, but the repository's own
+[`_tools_/browser-use`](../../_tools_/browser-use/INDEX.md) library does expose exactly what round 5 said was
+missing: `hover` moves the **real pointer** over CDP (`Input.dispatchMouseEvent`), `resizePage` sets the
+viewport (`Emulation.setDeviceMetricsOverride`), and `page.send` reaches any protocol method. So the route for
+the remaining states is a script, not an interactive session.
+
+[`probe-trajectory.mjs`](probe-trajectory.mjs) is that instrument: per side it reads the idle rows, moves a
+trusted pointer onto a row and reads the hover paint, moves it away and re-reads (the hover-left reset), then
+re-measures the table, its first-row cells and the details panel at 1000px and 1600px, and finally records how
+many rows live in the DOM at scroll 0/25/50/75/100%. Its first two runs did **not** produce usable numbers:
+its visible-row predicate (`rect.width > 0`) rejects table rows in this layout, and the DSH run needs a
+confirmed session selector in a fresh profile (it opened no session, so its trajectory never rendered).
+The honest state is: the instrument is in place and runs end to end, the numbers are not yet trustworthy.
+
+Next round: fix the predicate to test the cells' rects (or `display`/`offsetParent`) and select DSH's session
+through a selector verified in a snapshot, then run the matrix and record the numbers.

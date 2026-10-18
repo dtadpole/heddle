@@ -1,0 +1,74 @@
+{
+  "dsh": {
+    "label": "dsh",
+    "idle": {
+      "rows": 0,
+      "painted": 0,
+      "heights": [],
+      "hoverCandidates": []
+    },
+    "hoverState": null,
+    "geometry": {
+      "1000": {
+        "table": null,
+        "cells": [],
+        "rowHeight": null,
+        "panel": null,
+        "scroller": null
+      },
+      "1600": {
+        "table": null,
+        "cells": [],
+        "rowHeight": null,
+        "panel": null,
+        "scroller": null
+      },
+      "base": {
+        "table": null,
+        "cells": [],
+        "rowHeight": null,
+        "panel": null,
+        "scroller": null
+      }
+    },
+    "scroll": {
+      "counts": []
+    }
+  },
+  "heddle": {
+    "label": "heddle",
+    "idle": {
+      "rows": 0,
+      "painted": 0,
+      "heights": [],
+      "hoverCandidates": []
+    },
+    "hoverState": null,
+    "geometry": {
+      "1000": {
+        "table": null,
+        "cells": [],
+        "rowHeight": null,
+        "panel": null,
+        "scroller": null
+      },
+      "1600": {
+        "table": null,
+        "cells": [],
+        "rowHeight": null,
+        "panel": null,
+        "scroller": null
+      },
+      "base": {
+        "table": null,
+        "cells": [],
+        "rowHeight": null,
+        "panel": null,
+        "scroller": null
+      }
+    },
+    "scroll": {
+      "counts": []
+    }
+  }
+}
