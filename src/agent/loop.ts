@@ -227,6 +227,15 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const ended: string[] = []
 
   for (let round = 0; round < maxRounds; round += 1) {
+    /**
+     * A stopped turn ends at the next boundary. The provider connection is aborted too, but a round that is between
+     * model calls — waiting on a tool, or on an approval — has no connection to break, so the loop is where the stop
+     * has to be noticed. Measured: without this, a Stop during a pending approval waited for the ask's timeout.
+     */
+    if (signal?.aborted === true) {
+      ended.push('stopped by the caller')
+      break
+    }
     rounds += 1
 
     /**
@@ -455,6 +464,8 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     }
   }
 
+  /** The tools ran; if a stop arrived while they did, the next model call would be wasted. */
+  if (signal?.aborted === true && !ended.includes('stopped by the caller')) ended.push('stopped by the caller')
   if (rounds >= maxRounds) {
     ended.push(`stopped after the round limit of ${maxRounds}`)
   }
