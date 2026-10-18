@@ -126,3 +126,27 @@ double-click, asserted in part 9.
 
 Still unknown: DSH's table header row (no `thead`/`th` in the DOM, and no "Event"/"Content" labels were found
 by text) and the SYSTEM/COMPACTED tag colours (those rows were outside the rendered window in every scan).
+
+## Round 5 (2026-10-17): the browser automation tools went away
+
+The session's MCP browser tools (`select_page`, `evaluate_script`, `take_snapshot`, `screenshot`) are no longer
+in the tool list, and the browser helper the checks use (`_tools_/browser-use/browser.mjs`) exposes only
+`openBrowser` — no pointer dispatch, no viewport emulation. So this round could not take new live
+measurements, and it did not invent any: the remaining states are listed below as **not measured**, not as
+agreement.
+
+- **row hover / hover-left**: not measured on either side. No tool in this session can produce a trusted
+  pointer hover (a synthetic `pointerover` does not trigger CSS `:hover`), so the hover paint and its reset
+  must wait for a CDP-capable harness. Heddle's declared hover (`#tr-table tbody tr:hover { background:
+  var(--hover) }`) is known from source; DSH's paint is not.
+- **narrow / wide viewport geometry**: not measured. Viewport emulation is not available in this session's
+  tooling; the geometry pair from batch A/C stands at the current window only.
+- **scroll positions 0/25/50/75/100% and virtualisation**: not measured. DSH's trajectory is virtualised
+  (its a11y tree exposes a window of rows and a "Load earlier history" control); heddle renders every row.
+  Whether that is a defect or a deliberate trade for heddle's ledger sizes is a decision for a round that can
+  measure it, not for this one.
+- **collapsed turns / collapsed calls / search**: not measured beyond the toolbar controls' geometry.
+
+What is still available: the part 9 verifier launches its own headless browser and evaluates the page, so a
+proper re-measurement should be written **as a check** (or a script using the same helper) rather than as an
+interactive session. That is the next round's route.
