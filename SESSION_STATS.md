@@ -549,3 +549,38 @@ half of this cycle.
   them rather than inventing estimates. A future cycle can add the breakdown to the context service first.
 - **stop:** no fix row remains in the measured scope; the implementation is landed and deployed, and the only
   outstanding verification is the live session-selection probe noted above.
+
+## Stats-tab content loop — cycle 1: the reference's rows, measured one by one
+
+**Measured live at `127.0.0.1:8080`**, full text and the context panel's DOM:
+
+- **Session statistics** — order and wording: `LLM time 213m41s` · `Tool time 671m49s` · `Avg time to first token
+  (TTFT) 2.4s` · `Tokens per second (TPS) 252 tok/s`. Durations are compact (`XmYs`, one decimal under a minute).
+- **Token usage** — title figure carries the exact total (`1,099,572,523 tok`); rows in this order: `Cache hit
+  99.6%` · `Uncached input 4,338,369 tok` · `Cached input 1,093,655,680 tok` · `Output 1,578,474 tok`. No
+  cache-write row was shown (the session reported reads only).
+- **Context panel** — header row: percent `65%`, `of context used`, and `~649K / 1M`; a **three-segment bar**
+  whose widths are shares of the window (`0.226%`, `1.1902%`, `63.5836%`), and three rows each with a colour
+  swatch: `System prompt ~2K` · `Tool definitions ~10.3K` · `Messages ~550K`.
+
+**Heddle today, row by row:** the time surface has the right labels and order, but its figures were empty on the
+live page because the selected session had no data (the fallback copy is now explicit); the usage surface prints
+the same four buckets plus a cache-write row when a provider reports writes (the reference's write row was not
+observable in this session, so ours stays conditional and is recorded as an unmeasured reference cell); the
+context surface prints only the percent and `used/window` — **no bar and no breakdown rows**. The gap is a
+mechanism, not formatting: the context service estimates a request's total `estimatedTokens` and records it on
+`model/request`, but nothing computes or stores the three sections, so the bar and the rows have no honest
+source.
+
+**Brainstorm:** (a) estimate the three sections per request in the meter (the same four-characters-per-token
+rules it already uses) and record them on `model/request`; fold the last request's sections into the stats and
+render the bar — **chosen**; (b) estimate them in the page from the rendered transcript — rejected: the page
+does not know the system prompt or the tool definitions the request carried; (c) omit the bar and rows as today —
+rejected: the facts are estimable by the same deterministic meter the harness already trusts; (d) reuse the
+provider's last usage — rejected: it reports one prompt total, not sections.
+
+**Plan:** extend the meter with a section estimate (system prompt, tool definitions, messages) and have the
+request event carry it; `projectSessionStats` exposes the last request's sections; the page builds the reference's
+header row, a three-segment bar sized by `section / window`, and the three swatch rows in the measured wording,
+omitting any section (and the bar) when the window or sections were not observed. The unmeasured cache-write row
+and the duration formats are re-checked in the next cycle against the live app.
