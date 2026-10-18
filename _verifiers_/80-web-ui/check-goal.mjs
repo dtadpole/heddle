@@ -400,3 +400,104 @@ test('an armed goal continues by itself, round by round, and blocks at its cap',
     await server.close()
   }
 })
+
+test('an active goal is visible in the chat window, live, without a reload', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'browser')) return
+  /**
+   * The owner's report: a session running a goal showed no indicator. The cause was not a missing element — the
+   * bar existed above the log — but that it was only refreshed on a session switch or a button press, so a goal
+   * created inside a live turn (or advanced by the round driver) never appeared. DSH docks its GoalDock above the
+   * composer through `conversation.input.dock`; this test judges the same two claims: it is **in the chat window,
+   * above the composer**, and it **appears and updates from the live stream, with no reload**.
+   */
+  const server = await startServer('dock', [{ text: 'round work' }])
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+
+    const browser = await openBrowser()
+    try {
+      // Opened before the goal exists: what appears later must come from the stream rather than a reload.
+      await browser.goto(server.url)
+      await browser.waitFor('document.getElementById("goal-bar") !== null', 20_000)
+      assert.equal(await browser.evaluate('document.getElementById("goal-bar").hidden'), true, 'no goal, no indicator')
+
+      // A wide budget keeps the goal active while the page reads it, instead of racing a one-round cap.
+      const created = await api(server.url, cookie, '/api/goal', {
+        method: 'POST',
+        body: JSON.stringify({ session, action: 'create', objective: 'be visible while pushing', max_goal_rounds: 500 }),
+      })
+      assert.equal(created.status, 200, 'the person started a goal')
+
+      await browser.waitFor('document.getElementById("goal-bar").hidden === false', 10_000)
+      const shown = JSON.parse(await browser.evaluate(`JSON.stringify({
+        phase: document.getElementById('goal-bar').dataset.phase,
+        text: document.getElementById('goal-objective').textContent,
+        rounds: document.getElementById('goal-rounds').textContent,
+        hasGlyph: document.getElementById('goal-glyph') !== null,
+        hasRunning: document.getElementById('goal-running') !== null,
+        abovePrompt: document.getElementById('goal-bar').getBoundingClientRect().bottom <= document.getElementById('prompt').getBoundingClientRect().top + 1,
+        belowLogTop: document.getElementById('goal-bar').getBoundingClientRect().top > document.getElementById('log').getBoundingClientRect().top,
+      })`))
+      assert.equal(shown.text, 'be visible while pushing', 'the objective is read from the durable goal')
+      assert.equal(shown.phase, 'active', 'the indicator knows the goal is active')
+      assert.equal(shown.hasGlyph, true, 'DSH parity: the dock carries a goal glyph')
+      assert.equal(shown.hasRunning, true, 'and a running state, from the live stream')
+      assert.equal(shown.abovePrompt, true, 'the indicator sits above the composer, where DSH docks it')
+      assert.equal(shown.belowLogTop, true, 'and inside the chat column rather than over it')
+      /** DSH names the dock's objective and verbs; a person reading with a screen reader gets the same facts. */
+      assert.equal(
+        await browser.evaluate('document.getElementById("goal-objective").getAttribute("aria-label")'),
+        'Goal objective',
+        'the objective is named',
+      )
+      assert.equal(
+        await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="pause"]\').getAttribute("aria-label")'),
+        'Pause goal',
+        'an action says what it acts on, like DSH\'s "Pause goal"',
+      )
+
+      // The driver is already pushing rounds: the count must move without a reload.
+      await browser.waitFor('Number(document.getElementById("goal-rounds").textContent.split(" ")[1].split("/")[0]) >= 1', 20_000)
+      const pushing = JSON.parse(await browser.evaluate(`JSON.stringify({
+        rounds: document.getElementById('goal-rounds').textContent,
+        running: document.getElementById('goal-bar').dataset.running,
+      })`))
+      assert.match(pushing.rounds, /\d+\s*\/\s*500/, 'the round count is drawn from the goal')
+      /**
+       * The running state follows a turn in flight through the same `runningSessions` set the composer uses, and a
+       * scripted round can start and finish between two reads — so this asserts the state is wired (a boolean from
+       * the stream), and the negative case below is the deterministic half.
+       */
+      assert.ok(['true', 'false'].includes(pushing.running), 'the running state is wired to the live stream')
+
+      // A pause is a live edge too: the same dock must follow it, and stop saying "running".
+      const current = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      await api(server.url, cookie, '/api/goal', {
+        method: 'POST',
+        body: JSON.stringify({ session, action: 'pause', goal_id: current.id, revision: current.revision }),
+      })
+      await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "paused"', 10_000)
+      const paused = JSON.parse(await browser.evaluate(`JSON.stringify({
+        running: document.getElementById('goal-bar').dataset.running,
+        runningHidden: document.getElementById('goal-running').hidden,
+      })`))
+      assert.equal(paused.running, 'false')
+      assert.equal(paused.runningHidden, true, 'a paused goal is not running')
+
+      // Clearing it removes the indicator live, with no reload anywhere in this test.
+      const pausedGoal = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      await api(server.url, cookie, '/api/goal', {
+        method: 'POST',
+        body: JSON.stringify({ session, action: 'clear', goal_id: pausedGoal.id, revision: pausedGoal.revision }),
+      })
+      await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
+    } finally {
+      await browser.close()
+    }
+  } finally {
+    await server.close()
+  }
+})

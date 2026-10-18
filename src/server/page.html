@@ -543,15 +543,20 @@
    * The goal bar. The phase is a colour and a word; the objective takes the room. The buttons are the
    * person's verbs, and they are only the ones the transition table allows right now.
    */
-  #goal-bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; padding: .4rem .75rem; border-bottom: 1px solid var(--line); font-size: 13px; }
+  #goal-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0 .375rem .35rem; padding: .3rem .6rem; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
   #goal-bar[hidden] { display: none; }
+  #goal-glyph { display: inline-flex; align-items: center; opacity: .8; }
   #goal-phase { font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
-  #goal-bar[data-phase='active'] #goal-phase { color: #2fa36b; }
-  #goal-bar[data-phase='paused'] #goal-phase { color: #b7791f; }
-  #goal-bar[data-phase='blocked'] #goal-phase { color: #d14343; }
-  #goal-bar[data-phase='complete'] #goal-phase { color: color-mix(in oklab, currentColor 55%, transparent); }
-  #goal-objective { flex: 1; min-width: 8rem; }
-  #goal-rounds { opacity: .7; }
+  #goal-bar[data-phase='active'] #goal-phase, #goal-bar[data-phase='active'] #goal-glyph { color: #2fa36b; }
+  #goal-bar[data-phase='paused'] #goal-phase, #goal-bar[data-phase='paused'] #goal-glyph { color: #b7791f; }
+  #goal-bar[data-phase='blocked'] #goal-phase, #goal-bar[data-phase='blocked'] #goal-glyph { color: #d14343; }
+  #goal-bar[data-phase='complete'] #goal-phase, #goal-bar[data-phase='complete'] #goal-glyph { color: color-mix(in oklab, currentColor 55%, transparent); }
+  #goal-objective { flex: 1; min-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #goal-rounds { opacity: .7; font-size: 12px; }
+  #goal-running { display: inline-flex; align-items: center; gap: .3rem; font-size: 11px; opacity: .75; }
+  #goal-running[hidden] { display: none; }
+  #goal-running .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: goal-pulse 1.2s ease-in-out infinite; }
+  @keyframes goal-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   #goal-actions { display: flex; gap: .25rem; }
   #goal-actions button { font: inherit; font-size: 12px; padding: .1rem .45rem; }
   /**
@@ -2575,18 +2580,6 @@
       <kbd>⌥⌘N</kbd> to begin one in the workspace you are looking at.</p>
   </section>
   <!--
-    The goal bar: what the session is working toward, above the conversation rather than inside it.
-    It shows the **durable phase** and the **process-local activation** as two facts, because "active but
-    disarmed" is a real and confusing state — the goal is alive, but this process will not continue it
-    by itself until a person resumes it.
-  -->
-  <div id="goal-bar" hidden>
-    <span id="goal-phase"></span>
-    <span id="goal-objective"></span>
-    <span id="goal-rounds"></span>
-    <span id="goal-actions"></span>
-  </div>
-  <!--
     The team panel: the roster with live status, the shared task board, and the mailbox ledger. It reads the
     same /api/team projection the tools see and hides itself when the session has no team.
   -->
@@ -2668,6 +2661,20 @@
   <button id="gutter-column-left" class="column-grip" data-side="left" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <button id="gutter-column" class="column-grip" data-side="right" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <div id="composer">
+  <!--
+    The goal indicator, where DSH's `GoalDock` lives: **inside the chat window, above the composer**, not a banner
+    over the conversation. Measured from DSH's GoalDock in the `conversation.input.dock` slot: a goal glyph, the
+    objective, the phase, the round count, then the person's verbs. The durable phase and activation come from
+    `/api/goal`; **running** is the one fact the durable record cannot tell you, so it comes from the live stream.
+  -->
+  <div id="goal-bar" hidden role="status" aria-live="polite" aria-label="Session goal">
+    <span id="goal-glyph" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></span>
+    <span id="goal-phase"></span>
+    <span id="goal-objective" aria-label="Goal objective"></span>
+    <span id="goal-rounds"></span>
+    <span id="goal-running" hidden><span class="pulse" aria-hidden="true"></span>running</span>
+    <span id="goal-actions"></span>
+  </div>
   <!--
     DSH's approval card: an amber-bordered question above the composer, with the model's justification verbatim and
     one way to say no and one to allow exactly the call that asked. It is drawn from the server's
@@ -2876,6 +2883,15 @@ function followLedgerTail() {
 let current = null
 /** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
 let goalView = null
+/** The goal indicator is drawn from durable state, so every edge that can change it asks for one re-read. */
+let goalRefreshTimer = null
+function scheduleGoalRefresh() {
+  if (goalRefreshTimer !== null) return
+  goalRefreshTimer = setTimeout(() => {
+    goalRefreshTimer = null
+    void refreshGoal()
+  }, 120)
+}
 
 function add(kind, text, merge = true, label, tool) {
   /**
@@ -3430,9 +3446,20 @@ function refreshRunningStatus() {
  * that grew **after** the append — the settled answer's document, a tool's result, an edited-files card, a wider
  * image — left the view above the bottom (the owner's "sometimes it does not follow").
  */
-const FOLLOW_SLACK_PX = 25
+const CHAT_FOLLOW_SLACK_PX = 25
 let chatFollowing = true
 let chatFollowFrame = null
+/**
+ * Whether the reader has touched the transcript since the last event.
+ *
+ * DSH's `ScrollFollow.sample(metrics, movedByReader)` only changes follow intent for **reader** movement; a layout
+ * shift is not a reader movement. That distinction is what this page missed: when the settled answer replaced the
+ * streamed text the content briefly shrank, the browser clamped `scrollTop`, and the clamp's scroll event read as
+ * "the reader scrolled away" — after which nothing followed the growing transcript (the owner's "sometimes it does
+ * not move to the bottom"). Wheel, touch, a scrollbar press and the scroll keys are the reader's own words.
+ */
+let chatReaderMoved = false
+const CHAT_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
 
 function chatFloor() {
   return Math.max(0, log.scrollHeight - log.clientHeight)
@@ -3444,6 +3471,7 @@ function followChatTail(force = false) {
     chatFollowing = true
     log.dataset.following = 'true'
   }
+  log.dataset.following = String(chatFollowing)
   if (!chatFollowing || view !== 'chat') return
   if (chatFollowFrame !== null) return
   chatFollowFrame = requestAnimationFrame(() => {
@@ -3454,9 +3482,20 @@ function followChatTail(force = false) {
   })
 }
 
+log.addEventListener('wheel', () => { chatReaderMoved = true }, { passive: true })
+log.addEventListener('touchstart', () => { chatReaderMoved = true }, { passive: true })
+log.addEventListener('pointerdown', () => { chatReaderMoved = true }, { passive: true })
+log.addEventListener('keydown', (event) => {
+  if (CHAT_SCROLL_KEYS.has(event.key)) chatReaderMoved = true
+})
 log.addEventListener('scroll', () => {
-  /** Programmatic moves land here too, and the distance — not who moved it — is what decides. */
-  const following = chatFloor() - log.scrollTop <= FOLLOW_SLACK_PX
+  /**
+   * Only the reader's own movement changes the intent. A programmatic follow, a browser clamp after a layout
+   * shrink, or a restored position are all consequences of the content, and the follow intent must survive them.
+   */
+  if (!chatReaderMoved) return
+  chatReaderMoved = false
+  const following = chatFloor() - log.scrollTop <= CHAT_FOLLOW_SLACK_PX
   if (following !== chatFollowing) {
     chatFollowing = following
     log.dataset.following = String(following)
@@ -4824,11 +4863,15 @@ async function refreshGoal() {
     return
   }
   bar.hidden = false
+  const running = goalView.phase === 'active' && runningSessions.has(current)
   bar.dataset.phase = goalView.phase
   bar.dataset.activation = goalView.activation
-  document.getElementById('goal-phase').textContent = goalView.phase + (goalView.phase === 'active' && goalView.activation === 'disarmed' ? ' (disarmed)' : '')
+  bar.dataset.running = running ? 'true' : 'false'
+  const label = { active: 'Active', paused: 'Paused', blocked: 'Blocked', complete: 'Complete' }[goalView.phase] ?? goalView.phase
+  document.getElementById('goal-phase').textContent = label + (goalView.phase === 'active' && goalView.activation === 'disarmed' ? ' (disarmed)' : '')
   document.getElementById('goal-objective').textContent = goalView.objective
   document.getElementById('goal-rounds').textContent = 'round ' + goalView.roundsStarted + '/' + goalView.maxGoalRounds
+  document.getElementById('goal-running').hidden = !running
   const actions = document.getElementById('goal-actions')
   actions.replaceChildren()
   const verbs = []
@@ -4837,11 +4880,15 @@ async function refreshGoal() {
   if (goalView.phase !== 'complete') verbs.push(['complete', 'complete'])
   if (goalView.phase !== 'complete') verbs.push(['edit', 'edit'])
   verbs.push(['clear', 'clear'])
+  /** DSH names its dock verbs ("Pause goal", "Resume goal"); a text button still needs a name that says what it acts on. */
+  const names = { pause: 'Pause goal', resume: 'Resume goal', complete: 'Complete goal', edit: 'Edit goal objective', clear: 'Clear goal' }
   for (const [action, label] of verbs) {
     const button = document.createElement('button')
     button.type = 'button'
     button.dataset.goalAction = action
     button.textContent = label
+    button.setAttribute('aria-label', names[action] ?? label)
+    button.title = names[action] ?? label
     button.onclick = async () => {
       let body = { session: current, action, goal_id: goalView.id, revision: goalView.revision }
       if (action === 'edit') {
@@ -5010,6 +5057,9 @@ events.addEventListener('session', (message) => {
    * page did not start becomes visible — another window's, or the CLI's. `model/request` is appended once
    * per round and `turn/completed` once per turn, so the pair is a start and an end rather than a guess.
    */
+  if ((event.type === 'goal/change' || event.type === 'turn/completed' || event.type === 'model/request') && payload.session === (current ?? composerKey)) {
+    scheduleGoalRefresh()
+  }
   if (event.type === 'model/request') {
     runningSessions.add(payload.session)
     paintRunningMarks()
