@@ -202,6 +202,109 @@
     padding-right: .15rem;
   }
   /**
+   * The bottom area: anchored, and it never scrolls with the list.
+   *
+   * Measured from the reference: its settings area is 256×50 at y=757 in an 813-tall column, below the scroller, with a
+   * 42-pixel trigger. The separator is drawn on the foot rather than around each control, so the whole row reads as one
+   * region.
+   */
+  #panel-foot {
+    flex: none;
+    margin-top: .35rem;
+    padding-top: .35rem;
+    border-top: 1px solid var(--line);
+  }
+  #settings-open {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    width: 100%;
+    padding: 9px 8px;
+    border: none;
+    border-radius: 10px;
+    background: none;
+    color: var(--text-2);
+    font: inherit;
+    font-size: .875rem;
+    cursor: pointer;
+  }
+  #settings-open:hover, #settings-open:focus-visible { background: var(--hover); color: var(--text); }
+  #settings-open svg { width: 16px; height: 16px; flex: none; }
+  /** The rail keeps the gear alone, anchored to the bottom edge, which is where the reference puts its own settings. */
+  body[data-sidebar='collapsed'] #panel-foot {
+    margin-top: auto;
+    border-top: none;
+    padding-top: 0;
+  }
+  body[data-sidebar='collapsed'] #settings-open {
+    width: 36px;
+    height: 36px;
+    margin: 0 auto;
+    padding: 0;
+    justify-content: center;
+  }
+  body[data-sidebar='collapsed'] #settings-label { display: none; }
+  /**
+   * The dialog: the reference's own measurements, in this palette.
+   *
+   * `::backdrop` is what makes it modal rather than a panel floating over the conversation: the page behind it is what
+   * the settings are *for*, and the reference dims it too. The body scrolls rather than the dialog, so the heading and
+   * `Close` stay reachable when a machine has many endpoints.
+   */
+  #settings-dialog {
+    width: min(720px, 92vw);
+    max-height: 84vh;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 28px;
+    background: var(--composer);
+    color: var(--text);
+  }
+  #settings-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+  #settings-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px 8px;
+  }
+  #settings-head h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+  #settings-close {
+    padding: 4px 8px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--text-3);
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  #settings-close:hover, #settings-close:focus-visible { background: var(--hover); color: var(--text); }
+  #settings-body { max-height: calc(84vh - 64px); padding: 0 20px 20px; overflow-y: auto; }
+  #settings-body h3 {
+    margin: 14px 0 6px;
+    color: var(--text-3);
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  #settings-server { display: grid; grid-template-columns: 8rem 1fr; gap: .3rem .6rem; margin: 0; font-size: .875rem; }
+  #settings-server dt { color: var(--text-3); }
+  #settings-server dd { margin: 0; overflow-wrap: anywhere; }
+  #settings-models, #settings-workspaces { display: flex; flex-direction: column; gap: .35rem; margin: 0; padding: 0; list-style: none; }
+  .settings-endpoint {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .2rem .6rem;
+    padding: .5rem .6rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    font-size: .85rem;
+  }
+  .settings-endpoint .name { font-weight: 600; }
+  .settings-endpoint .meta { color: var(--text-3); }
+  .settings-workspace { display: flex; flex-direction: column; gap: .1rem; padding: .4rem .6rem; border-radius: 8px; background: var(--surface); font-size: .85rem; }
+  .settings-workspace .path { color: var(--text-3); font-size: .8rem; overflow-wrap: anywhere; }
+  /**
    * The conversation column, shared by the transcript and the composer.
    *
    * DSH's own relation, measured at 127.0.0.1:8080 on 2026-10-17: the text column is 680px, the composer card
@@ -1908,6 +2011,23 @@
       <ul id="adhoc" role="tree" aria-label="folders adopted because a session ran in them"></ul>
     </details>
   </div>
+  <!--
+    The panel's **anchored bottom area**, which the reference has and this panel did not.
+    Measured from DSH on 2026-10-17: a `settingsArea` 256x50 at y=757 in an 813-tall column (6px above the bottom) with
+    a `Settings` trigger 260x42, `padding: 0 10px 0 8px`, an 8-pixel gap, and `Mobile access` above it at y=711 — both
+    stay put while the workspace list scrolls. Heddle has no bottom area; this is the first thing in it, and the chord is
+    the reference's own `Alt+Meta+,`.
+  -->
+  <div id="panel-foot">
+    <button id="settings-open" type="button" aria-label="Settings" aria-haspopup="dialog" title="Settings (⌥⌘,)">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+        <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+        <path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4"
+              stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+      </svg>
+      <span id="settings-label">Settings</span>
+    </button>
+  </div>
 </aside>
 <!--
   The divider between the sidebar and the content.
@@ -2126,6 +2246,33 @@
   </div>
 </div>
 </main>
+<!--
+  The settings surface, as a **native dialog**: the reference's own shape (measured 2026-10-17: `role=dialog` 800x765,
+  radius 28, `rgb(44,44,46)`, sections and a `Close` action). This one is read-only, and it says so: the endpoint file
+  holds credentials and is never rendered, so what a reader gets is what this machine is configured with, not a way to
+  change it. Writing configuration from the page is recorded in SIDEBAR_PANEL.md as the next feature, not half-built.
+-->
+<dialog id="settings-dialog" aria-labelledby="settings-title">
+  <header id="settings-head">
+    <h2 id="settings-title">Settings</h2>
+    <button id="settings-close" type="button" aria-label="Close">✕</button>
+  </header>
+  <div id="settings-body">
+    <section>
+      <h3>Server</h3>
+      <dl id="settings-server"></dl>
+    </section>
+    <section>
+      <h3>Models</h3>
+      <ul id="settings-models"></ul>
+    </section>
+    <section>
+      <h3>Workspaces</h3>
+      <ul id="settings-workspaces"></ul>
+    </section>
+    <p id="settings-note" class="meta">Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.</p>
+  </div>
+</dialog>
 <script type="module">
 const log = document.getElementById('log')
 const ledger = document.getElementById('ledger')
@@ -3834,9 +3981,24 @@ async function refreshSessions() {
 }
 
 const events = new EventSource('/api/events')
+/**
+ * The list is redrawn shortly after activity, once per burst.
+ *
+ * The age and the order both come from the store's `updated`, so a message written anywhere — the composer here, another
+ * window, the CLI — has to make the tree re-read itself, or the row keeps the age and the place it had before. Debounced
+ * because a turn writes many events and one redraw is enough.
+ */
+let treeRefreshTimer = 0
+function scheduleTreeRefresh() {
+  clearTimeout(treeRefreshTimer)
+  treeRefreshTimer = setTimeout(() => {
+    void renderTree()
+  }, 400)
+}
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
+  if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
    *
@@ -5911,6 +6073,19 @@ function svgPath(d) {
  * state is visible without moving any other row — the owner's rule of 2026-10-11.
  */
 /** How long ago, in the compact form a list uses: `now`, `12min`, `3h`, `4d`. */
+/**
+ * Re-read every drawn row's age from its stamp.
+ *
+ * The tree is redrawn when something is written, but time also passes while nothing is: a row that said `now` an hour ago must
+ * stop saying it without a reload. One interval repaints the text only — it does not re-fetch or redraw the tree.
+ */
+function paintAges() {
+  for (const cell of document.querySelectorAll('#tree .age[data-stamp]')) {
+    cell.textContent = relativeAge(cell.dataset.stamp)
+  }
+}
+setInterval(paintAges, 30_000)
+
 function relativeAge(created) {
   const then = Date.parse(created)
   if (!Number.isFinite(then)) return ''
@@ -6621,6 +6796,116 @@ document.getElementById('new-session').addEventListener('click', () => {
 })
 
 /**
+ * The Settings surface behind the panel's bottom area.
+ *
+ * Read-only on purpose: the endpoint file holds credentials and this page is served over a loopback socket, so what it
+ * renders is what the machine is configured with — names, kinds, models, capabilities, context windows, and whether a
+ * credential is **set** — never the credential. `/api/endpoints` already answers in those terms.
+ *
+ * The dialog is native `<dialog>`, so Escape, focus containment and the backdrop come from the platform rather than
+ * from three hand-written listeners; `showModal()` is what makes it modal.
+ */
+const settingsDialog = document.getElementById('settings-dialog')
+
+/** One definition list row: the label and its value, both as text so a path is never parsed as markup. */
+function settingsTerm(label, value) {
+  const term = document.createElement('dt')
+  term.textContent = label
+  const definition = document.createElement('dd')
+  definition.textContent = value
+  return [term, definition]
+}
+
+/** One endpoint: its name, then the facts a person needs to tell two of them apart. */
+function settingsEndpoint(endpoint) {
+  const item = document.createElement('li')
+  item.className = 'settings-endpoint'
+  const name = document.createElement('span')
+  name.className = 'name'
+  name.textContent = endpoint.name
+  item.append(name)
+  const facts = [
+    endpoint.kind,
+    endpoint.model,
+    endpoint.contextWindow === undefined ? null : String(endpoint.contextWindow) + ' tokens',
+    endpoint.credential === 'set' ? 'credential set' : 'no credential',
+    Array.isArray(endpoint.capabilities) ? endpoint.capabilities.join(' · ') : null,
+  ].filter((fact) => typeof fact === 'string' && fact.length > 0)
+  for (const fact of facts) {
+    const span = document.createElement('span')
+    span.className = 'meta'
+    span.textContent = fact
+    item.append(span)
+  }
+  return item
+}
+
+/** Fill the dialog from the three routes it needs, each tolerating a profile that does not load it. */
+async function fillSettings() {
+  const server = document.getElementById('settings-server')
+  const models = document.getElementById('settings-models')
+  const workspaces = document.getElementById('settings-workspaces')
+  const read = async (path) => {
+    try {
+      const response = await fetch(path)
+      return response.ok ? await response.json() : null
+    } catch (error) {
+      return null
+    }
+  }
+  const [status, endpoints, tree] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
+  server.replaceChildren()
+  models.replaceChildren()
+  workspaces.replaceChildren()
+
+  const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
+  server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
+  server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
+
+  const list = endpoints === null || !Array.isArray(endpoints.endpoints) ? [] : endpoints.endpoints
+  if (list.length === 0) {
+    const note = document.createElement('li')
+    note.className = 'meta'
+    note.textContent = 'no endpoint is configured in this profile'
+    models.append(note)
+  }
+  for (const endpoint of list) models.append(settingsEndpoint(endpoint))
+
+  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
+  if (roots.length === 0) {
+    const note = document.createElement('li')
+    note.className = 'meta'
+    note.textContent = 'no workspace root is registered yet'
+    workspaces.append(note)
+  }
+  for (const root of roots) {
+    const item = document.createElement('li')
+    item.className = 'settings-workspace'
+    const title = document.createElement('span')
+    title.textContent = typeof root.label === 'string' ? root.label : root.path
+    const path = document.createElement('span')
+    path.className = 'path'
+    path.textContent = root.path
+    item.append(title, path)
+    workspaces.append(item)
+  }
+}
+
+async function showSettings() {
+  await fillSettings()
+  if (!settingsDialog.open) settingsDialog.showModal()
+}
+
+document.getElementById('settings-open').addEventListener('click', () => {
+  void showSettings()
+})
+document.getElementById('settings-close').addEventListener('click', () => settingsDialog.close())
+/** A click that lands on the dialog element itself is a click on the backdrop; the panel's own children stop it. */
+settingsDialog.addEventListener('click', (clickEvent) => {
+  if (clickEvent.target === settingsDialog) settingsDialog.close()
+})
+
+/**
  * The session shortcuts — DSH's own chords, read from its menu on 2026-10-17: `Alt+Meta+G` rename,
  * `Shift+Meta+F` fork, `Alt+Meta+A` archive, and `Alt+Meta+K` to reach the search box.
  *
@@ -6637,6 +6922,8 @@ const SESSION_SHORTCUTS = [
   { key: 'b', alt: true, action: 'sidebar' },
   /** DSH's chord for its primary action; read from its `New session` control on 2026-10-17. */
   { key: 'n', alt: true, action: 'new-session' },
+  /** DSH's chord for Settings, read from its menu in the same session. */
+  { key: ',', alt: true, action: 'settings' },
 ]
 
 /**
@@ -6680,6 +6967,10 @@ document.addEventListener('keydown', (event) => {
   }
   if (action === 'new-session') {
     void startNewSession()
+    return
+  }
+  if (action === 'settings') {
+    void showSettings()
     return
   }
   if (action === 'search') {
@@ -6904,7 +7195,14 @@ function nodeRow(node) {
      */
     const age = document.createElement('span')
     age.className = 'age'
-    age.textContent = relativeAge(node.session.created)
+    /**
+     * **Last written, not created.** Measured by the owner: a session that was being written to still showed the age it was
+     * created at ("1min" or "6d" forever). The reference ages its rows by the latest activity, so this reads `updated` and
+     * falls back to `created` for records that predate the field.
+     */
+    const stamp = node.session.updated ?? node.session.created
+    age.textContent = relativeAge(stamp)
+    age.dataset.stamp = stamp
     rowRight.append(age)
     if (node.session.turns > 0) row.title = row.title.length > 0 ? row.title : `${node.session.turns} turn${node.session.turns === 1 ? '' : 's'}`
   }
