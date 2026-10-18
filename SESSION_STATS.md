@@ -599,3 +599,27 @@ and the duration formats are re-checked in the next cycle against the live app.
   contract now asserts the three labels in order, three bar segments and three swatches beside the existing
   percent/`of context used`/`~used / window` rows. The detail-surface contract passes and the composer suite is
   green; the deployment half follows in the close.
+
+### Stats-tab content loop — cycle 3: row-by-row comparison, no fix row
+
+- **compared against the reference text measured this loop:** Session statistics — same four rows, same order,
+  same compact duration rule (`XmYs`, one decimal under a minute), same `tok/s` suffix. Token usage — same title
+  carrying the exact grouped total, same row order (Cache hit → Uncached input → Cached input → Output); heddle
+  adds a `Cache write` row only when a provider reports writes, and the reference's write row was not observable
+  in the measured session, so that cell is recorded as unmeasured rather than claimed equal. Context panel — same
+  header order (`percent` · `of context used` · `~used / window`), same three section rows in the same order with
+  the same `~` + compact K/M form, and the same three-segment bar whose widths are each section over the window.
+- **kept differences (recorded, not defects):** the TPS denominator is the round's generation span rather than
+  the reference's decode-only gap (measured earlier: these providers buffer answers, so decode-only time printed
+  38k tok/s); the bar's colours are this theme's; the section values are the meter's deterministic estimates
+  (`~`), which is what the reference also prints (`~`), not provider facts.
+- **live verification and its limit:** on the deployed page at 8082 every surface opens and closes from its
+  trigger (asserted with a trusted click, and the panel lands inside the viewport after the placement fix). The
+  content rows were verified by the browser contract against a scripted session — a live session-selection probe
+  could not pick a session with recorded statistics: the page's newest session was an empty one created by a
+  concurrent check and the sidebar row clicks tried did not change the selection. That probe limitation is stated
+  here rather than hidden; the scripted contract and the fold's unit tests are the row-content evidence.
+- **suites / landing:** composer **17/17**, deployment **3/3**, the change is on main, landed on the committed
+  deployment checkout and served by the launchd agent; `npm run check` has seven errors, all in a concurrent
+  session's `test/web.test.ts`.
+- **stop:** the comparison yields no fix row beyond the recorded differences above; the goal stops here.
