@@ -3605,6 +3605,7 @@ async function showSession(id) {
   sessionStats = null
   liveRounds = 0
   liveUsage = undefined
+  liveTurns = 0
   updateStatusBar()
   current = id
   paintEmptyState()
@@ -4618,6 +4619,8 @@ async function sendTurn(body) {
 }
 
 async function runTurn(text, key) {
+  liveTurns += 1
+  updateStatusBar()
   const startedAt = performance.now()
   const target = key === QUEUE_KEY_NONE ? null : key
   const response = await sendTurn({
@@ -4830,6 +4833,12 @@ let sessionStats = null
 /** Rounds of the turn running now, counted from `model/request`, and usage frames not yet in a durable fold. */
 let liveRounds = 0
 let liveUsage = undefined
+/**
+ * A turn this page started that the fold does not count yet. The reference's turn count moves when a prompt
+ * is sent, not when the transcript has finished drawing; the durable count on its own therefore lags a fresh
+ * turn, and counting rendered rows instead lags the other way. The sum is the figure a person expects.
+ */
+let liveTurns = 0
 
 /** Add two usage values bucket by bucket, keeping a bucket no frame reported absent. */
 function addUsage(previous, next) {
@@ -4892,7 +4901,7 @@ function updateStatusBar() {
     statusBar.hidden = true
     return
   }
-  const turns = log.querySelectorAll('.turn[data-kind="user"]').length
+  const turns = (sessionStats?.turns ?? 0) + liveTurns
   const steps = (sessionStats?.steps ?? 0) + liveRounds
   const usage = addUsage(sessionStats?.usage, liveUsage)
   const cell = (name) => statusBar.querySelector(`[data-stat="${name}"]`)
@@ -4964,6 +4973,7 @@ async function refreshSessionStats() {
     sessionStats = body.stats ?? null
     liveUsage = undefined
     liveRounds = 0
+    liveTurns = 0
     updateStatusBar()
   } catch {
     // A stats read that fails leaves the last drawn figures rather than blanking the dock.

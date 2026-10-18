@@ -350,3 +350,35 @@ where an endpoint declares no window but its model list reports one and the gaug
 - **found for cycle 3:** the turns figure is counted from rendered user rows, so a page that has not finished
   drawing history can show `0 turns` beside `31 steps` (seen in the live probe). The durable `stats.turns` is
   the right source, with the live turn added — cycle 3's fix row.
+
+### Completeness cycle 3 — the turns figure is the fold's, and the final audit
+
+- **found (live probe, cycle 2's close):** the dock showed `0 turns` beside `31 steps` while the transcript was
+  still arriving. The turns figure was counted from rendered user rows; a page whose history has not been drawn
+  yet prints zero, and a page that watched only part of the session prints too few. DSH's count moves when a
+  prompt is sent and never depends on painting.
+- **measured / understand:** the durable `stats.turns` is the right count and arrives in the same answer as the
+  transcript; the only thing it cannot know is a turn this page just sent and the fold has not recorded yet. So
+  the figure is `stats.turns + liveTurns`, where `liveTurns` is incremented when this page starts a turn and
+  reset whenever the durable answer is re-read — the two sources cannot double-count because the reset and the
+  re-read are the same step.
+- **brainstorm:** (a) render `stats.turns` alone — discarded: a just-sent turn shows nothing until the fold
+  catches up; (b) keep the row count — discarded: it is the defect; (c) `stats.turns + liveTurns` — **chosen**;
+  (d) re-read the session on every frame — discarded: a request per chunk for a number that changes twice a
+  turn.
+- **changed:** `src/server/page.html`: `liveTurns` state, reset beside `liveRounds`, incremented at the start of
+  `runTurn`, and the renderer uses `(sessionStats?.turns ?? 0) + liveTurns` instead of a DOM query. The browser
+  contract gained the invariant: after a reload, the dock's turns equals the backend fold's `stats.turns`
+  (fetched from the page itself), and the cumulative total and context share survive the reload.
+- **verify / final audit:** the contract is green; live at `http://localhost:8082/` the dock reads
+  `13 turns 31 steps · 692K tok · Cache hit 80% · 4%`
+  ([heddle-stats-dock-final.png](_context_/dsh-mechanisms/heddle-stats-dock-final.png)) with the turns figure
+  durable from the first paint; `/api/endpoints` reports the three windows with their sources
+  (`claude-opus 1000000 config`, `plugboard-d 1048576 provider-models`, `plugboard-x 500000 provider-models`);
+  the service behind 8082 runs the main checkout's `dist/cli.js` (deployment asserted, not assumed).
+- **all six elements, end to end:** turns and steps from `projectSessionStats` (`turn/completed.rounds`); tok/s
+  from the turn's reported output over its wall duration (decode-time is a recorded divergence); cumulative
+  tokens and cache share from the four usage buckets; the context gauge from `lastPromptTokens` over a window
+  that is declared or provider-discovered, and blank where neither exists. No figure is estimated.
+- **stop:** the full measurement now produces no fix row beyond the recorded divergences (the dialogs, the
+  decode-time rate, the wall-time blank after a reload). The loop stops here with that evidence.
