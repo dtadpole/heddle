@@ -584,3 +584,18 @@ request event carry it; `projectSessionStats` exposes the last request's section
 header row, a three-segment bar sized by `section / window`, and the three swatch rows in the measured wording,
 omitting any section (and the bar) when the window or sections were not observed. The unmeasured cache-write row
 and the duration formats are re-checked in the next cycle against the live app.
+
+### Stats-tab content loop — cycle 2: the context panel's bar and breakdown rows
+
+- **understand:** the meter already computed the three sections (`systemTokens`, `toolsTokens`, `messageTokens` on
+  its `Measurement`); nothing carried them to the log. That is the missing mechanism.
+- **changed:** `ContextReport` gained `breakdown`, `model/request` records it, `LedgerEvent` types it,
+  `projectSessionStats` exposes the most recent request's `contextBreakdown`, and the context popover renders the
+  reference's header row plus a three-segment bar (each section over the declared window) and three swatch rows in
+  the measured order and wording (`System prompt`, `Tool definitions`, `Messages`, estimates with `~` and the
+  compact K/M form). Without a window the rows still print and the bar is omitted; without sections the section is
+  absent rather than zeroed.
+- **verify:** a failing-first unit test pins the fold (last request wins; no breakdown → absent); the browser
+  contract now asserts the three labels in order, three bar segments and three swatches beside the existing
+  percent/`of context used`/`~used / window` rows. The detail-surface contract passes and the composer suite is
+  green; the deployment half follows in the close.

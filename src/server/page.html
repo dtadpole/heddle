@@ -1677,6 +1677,13 @@
   #stat-popover .stat-panel-headline { font-size: 15px; line-height: 20px; color: #f9fafb; font-weight: 500; }
   #stat-popover .stat-panel-sub { color: #adb2b8; margin-bottom: 4px; }
   #stat-popover .stat-panel-empty { color: #adb2b8; }
+  /** The reference's context panel: a header row, a three-segment bar sized by each section's share of the
+   * window, and one swatch row per section. Colours are this theme's, the arrangement is the reference's. */
+  #stat-popover .stat-panel-head-inline { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
+  #stat-popover .stat-panel-head-inline .stat-panel-figure { margin-left: auto; }
+  #stat-popover .stat-bar { display: flex; gap: 1px; height: 4px; margin: 10px 0 6px; border-radius: 999px; overflow: hidden; background: rgba(255, 255, 255, 0.08); }
+  #stat-popover .stat-bar-seg { height: 100%; }
+  #stat-popover .stat-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
   /** The menu opened by `+`: the file picker's action and the workspace tree, floating above the card. */
   #attach-menu {
     position: absolute; z-index: 6; left: 50%; bottom: calc(100% - .2rem); transform: translateX(-50%);
@@ -5887,6 +5894,7 @@ function renderStatPopover() {
   if (statPopoverKind === null) return
   const popover = document.getElementById('stat-popover')
   if (popover === null) return
+  const stats = sessionStats ?? {}
   const rows = statPanelRows(statPopoverKind)
   const head = document.createElement('div')
   head.className = 'stat-panel-head'
@@ -5894,24 +5902,89 @@ function renderStatPopover() {
   title.className = 'stat-panel-title'
   title.textContent = statPopoverKind === 'time' ? 'Session statistics' : statPopoverKind === 'usage' ? 'Token usage' : ''
   if (statPopoverKind === 'context') {
-    popover.replaceChildren()
     const percentRow = rows.find(([label]) => label === 'percent')
-    const headline = document.createElement('div')
-    headline.className = 'stat-panel-headline'
-    headline.textContent = percentRow === undefined ? '' : percentRow[1]
-    const sub = document.createElement('div')
-    sub.className = 'stat-panel-sub'
-    sub.textContent = percentRow === undefined ? '' : 'of context used'
     const usedRow = rows.find(([label]) => label === 'used')
-    const figures = document.createElement('div')
-    figures.className = 'stat-panel-sub'
-    figures.textContent = usedRow === undefined ? '' : usedRow[1]
-    popover.append(headline, sub, figures)
-    if (percentRow === undefined && usedRow === undefined) {
+    const sections = stats.contextBreakdown
+    const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
+    const window = endpoint?.contextWindow
+    popover.replaceChildren()
+    if (percentRow === undefined && usedRow === undefined && sections === undefined) {
       const empty = document.createElement('div')
       empty.className = 'stat-panel-empty'
       empty.textContent = 'No context figures yet — send a message to start measuring.'
       popover.append(empty)
+      positionStatPopover()
+      return
+    }
+    const header = document.createElement('div')
+    header.className = 'stat-panel-head-inline'
+    const percent = document.createElement('span')
+    percent.className = 'stat-panel-headline'
+    percent.textContent = percentRow === undefined ? '' : percentRow[1]
+    const sub = document.createElement('span')
+    sub.className = 'stat-panel-sub'
+    sub.textContent = percentRow === undefined ? '' : 'of context used'
+    header.append(percent, sub)
+    if (usedRow !== undefined) {
+      const figures = document.createElement('span')
+      figures.className = 'stat-panel-figure'
+      figures.textContent = usedRow[1]
+      header.append(figures)
+    }
+    popover.append(header)
+    if (sections !== undefined && typeof window === 'number' && window > 0) {
+      const bar = document.createElement('div')
+      bar.className = 'stat-bar'
+      const colours = ['#8b95a1', '#a78bfa', 'var(--accent)']
+      const names = ['System prompt', 'Tool definitions', 'Messages']
+      const values = [sections.system, sections.tools, sections.messages]
+      for (let index = 0; index < values.length; index += 1) {
+        const segment = document.createElement('div')
+        segment.className = 'stat-bar-seg'
+        segment.style.width = `${((values[index] / window) * 100).toFixed(2)}%`
+        segment.style.background = colours[index]
+        bar.append(segment)
+      }
+      popover.append(bar)
+      const list = document.createElement('dl')
+      list.className = 'stat-panel-rows'
+      list.style.margin = '0'
+      for (let index = 0; index < values.length; index += 1) {
+        const row = document.createElement('div')
+        row.className = 'stat-panel-row'
+        const term = document.createElement('dt')
+        const swatch = document.createElement('span')
+        swatch.className = 'stat-swatch'
+        swatch.style.background = colours[index]
+        term.append(swatch, document.createTextNode(names[index]))
+        const detail = document.createElement('dd')
+        detail.textContent = `~${formatWindow(values[index])}`
+        row.append(term, detail)
+        list.append(row)
+      }
+      popover.append(list)
+    } else if (sections !== undefined) {
+      /** Sections without a window still count; only the bar's denominators are missing. */
+      const values = [sections.system, sections.tools, sections.messages]
+      const names = ['System prompt', 'Tool definitions', 'Messages']
+      const colours = ['#8b95a1', '#a78bfa', 'var(--accent)']
+      const list = document.createElement('dl')
+      list.className = 'stat-panel-rows'
+      list.style.margin = '0'
+      for (let index = 0; index < values.length; index += 1) {
+        const row = document.createElement('div')
+        row.className = 'stat-panel-row'
+        const term = document.createElement('dt')
+        const swatch = document.createElement('span')
+        swatch.className = 'stat-swatch'
+        swatch.style.background = colours[index]
+        term.append(swatch, document.createTextNode(names[index]))
+        const detail = document.createElement('dd')
+        detail.textContent = `~${formatWindow(values[index])}`
+        row.append(term, detail)
+        list.append(row)
+      }
+      popover.append(list)
     }
     positionStatPopover()
     return

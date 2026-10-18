@@ -90,6 +90,12 @@ export interface ContextReport {
   readonly compacted: boolean
   /** The instruction files the baseline carried, in the order it carried them. */
   readonly instructions: readonly string[]
+  /**
+   * The request's estimated size split the way the reference's context panel shows it — the system prompts,
+   * the tool schemas, and every other message. The meter already computes these three; this surface is what
+   * carries them to the log and then to the dock's context panel.
+   */
+  readonly breakdown: { readonly system: number; readonly tools: number; readonly messages: number }
 }
 
 /** What {@link ContextService.ensureContext} did, so a caller need not guess. */
@@ -434,6 +440,7 @@ export class ContextService extends Service {
       pruned: options.outcome?.pruned ?? 0,
       compacted: options.outcome?.compacted ?? false,
       instructions: options.instructions,
+      breakdown: { system: measurement.systemTokens, tools: measurement.toolsTokens, messages: measurement.messageTokens },
     }
   }
 }

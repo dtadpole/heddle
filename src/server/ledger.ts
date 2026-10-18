@@ -37,6 +37,7 @@ export interface LedgerEvent {
   readonly estimatedTokens?: number
   readonly pruned?: number
   readonly compacted?: boolean
+  readonly breakdown?: { readonly system?: number; readonly tools?: number; readonly messages?: number }
   readonly endpoint?: string
   readonly model?: string
   /** The tools the request offered, when it recorded them. */
@@ -170,6 +171,8 @@ export interface SessionStats {
   readonly toolMs?: number
   readonly ttftMs?: number
   readonly ttftSteps?: number
+  /** The most recent request's meter sections, which the reference's context panel prints as rows and a bar. */
+  readonly contextBreakdown?: { readonly system: number; readonly tools: number; readonly messages: number }
   /**
    * The prompt-side total of the **most recent** reported round, which is what the context share divides by
    * the window (DSH's context pressure is the same fact). Absent when no frame reported a prompt side.
@@ -194,6 +197,7 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
   let ttftSeen = false
   let toolMs = 0
   let toolCalls = 0
+  let contextBreakdown: { system: number; tools: number; messages: number } | undefined
   const pendingCalls = new Map<string, number>()
   const timeOf = (value: string | undefined): number | undefined => {
     if (value === undefined) return undefined
@@ -213,6 +217,15 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
       /** A new round opens its own clock; a round that never reported tokens contributes nothing. */
       roundStartedAt = timeOf(event.at)
       ttftSeen = false
+      const sections = event.breakdown
+      if (sections !== undefined) {
+        const system = sections.system
+        const tools = sections.tools
+        const messages = sections.messages
+        if (system !== undefined || tools !== undefined || messages !== undefined) {
+          contextBreakdown = { system: system ?? 0, tools: tools ?? 0, messages: messages ?? 0 }
+        }
+      }
       continue
     }
     if (event.type === 'message' && event.message?.role === 'tool') {
@@ -270,6 +283,7 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
     ...(llmRounds > 0 ? { llmMs } : {}),
     ...(toolCalls > 0 ? { toolMs } : {}),
     ...(ttftSteps > 0 ? { ttftMs, ttftSteps } : {}),
+    ...(contextBreakdown !== undefined ? { contextBreakdown } : {}),
   }
 }
 

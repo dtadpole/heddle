@@ -564,3 +564,14 @@ test('the timing rows stay absent when no event pair measured them', () => {
   assert.equal(stats.ttftMs, undefined)
   assert.equal(stats.ttftSteps, undefined)
 })
+
+test('session stats carry the most recent request\'s context breakdown', () => {
+  /** The reference's context panel prints these three sections and draws them as a bar. */
+  const events: LedgerEvent[] = [
+    { type: 'model/request', at: '2026-10-17T00:00:00.000Z', breakdown: { system: 100, tools: 200, messages: 300 } },
+    { type: 'assistant/chunk', at: '2026-10-17T00:00:01.000Z', chunk: { type: 'done', finishReason: 'stop', usage: { outputTokens: 1 } } },
+    { type: 'model/request', at: '2026-10-17T00:00:02.000Z', breakdown: { system: 100, tools: 250, messages: 600 } },
+  ]
+  assert.deepEqual(projectSessionStats(events).contextBreakdown, { system: 100, tools: 250, messages: 600 }, 'the last request is the one the panel describes')
+  assert.equal(projectSessionStats([{ type: 'model/request' }]).contextBreakdown, undefined, 'a request without a breakdown leaves the section absent')
+})

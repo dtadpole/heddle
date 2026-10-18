@@ -1010,6 +1010,8 @@ export class SessionStore {
       readonly thresholdTokens?: number
       readonly pruned?: number
       readonly compacted?: boolean
+      /** The request's meter sections: system prompts, tool schemas, and every other message. */
+      readonly breakdown?: { readonly system?: number; readonly tools?: number; readonly messages?: number }
       /**
        * The surface generation this request was built at.
        *

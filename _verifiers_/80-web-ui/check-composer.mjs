@@ -1261,6 +1261,17 @@ test('the dock elements open the reference\u2019s detail surfaces, and close aga
     assert.ok(contextPanel.text.includes('30%'), 'the share is the last prompt over the declared window')
     assert.ok(contextPanel.text.includes('of context used'))
     assert.ok(contextPanel.text.includes('~600 / 2K'), 'and the used/window figures are the reference\u2019s compact form')
+    /** The reference's context surface also carries the three-section bar and its swatch rows, in order. */
+    const breakdown = JSON.parse(await browser.evaluate(`(() => {
+      const node = document.getElementById('stat-popover')
+      const segments = [...node.querySelectorAll('.stat-bar-seg')].map((segment) => Math.round(segment.getBoundingClientRect().width))
+      const labels = [...node.querySelectorAll('.stat-panel-row dt')].map((term) => term.textContent.trim())
+      return JSON.stringify({ segments, labels, swatches: node.querySelectorAll('.stat-swatch').length })
+    })()`))
+    assert.deepEqual(breakdown.labels, ['System prompt', 'Tool definitions', 'Messages'], 'the sections are printed in the reference\u2019s order')
+    assert.equal(breakdown.segments.length, 3, 'and drawn as three bar segments')
+    assert.ok(breakdown.segments.every((width) => width >= 0), 'with the sections\u2019 measured widths')
+    assert.equal(breakdown.swatches, 3, 'each row carries its section swatch')
 
     await browser.evaluate(`(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true })()`)
     assert.equal(JSON.parse(await panel()).hidden, true, 'Escape closes the surface')

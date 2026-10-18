@@ -310,6 +310,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         thresholdTokens: report.thresholdTokens,
         pruned: report.pruned,
         compacted: report.compacted,
+        breakdown: report.breakdown,
         generation: ctx.session.surface(options.session).contentGeneration,
       })
 
