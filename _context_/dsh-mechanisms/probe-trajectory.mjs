@@ -92,7 +92,53 @@ async function measure(label, page, prepare) {
   }
   await resizePage(page, { width: 1440, height: 900 })
   await sleep(400)
-  return { label, ready, rows: visible.length, heights: [...new Set(visible.map((row) => row.height))].slice(0, 3), hoverState, geometry }
+  // Scroll: how many rows live in the DOM at five positions (a virtualised table varies; a full render does not).
+  const scroll = json(await page.evaluate(`(() => {
+    const table = document.querySelector('#tr-table') ?? document.querySelector('table')
+    if (table === null) return JSON.stringify({ positions: [] })
+    let node = table.parentElement
+    while (node !== null && node.scrollHeight <= node.clientHeight + 4) node = node.parentElement
+    const rows = () => [...document.querySelectorAll('#tr-table tbody tr, table tbody tr')].filter((row) => row.querySelector('td') !== null)
+    if (node === null) return JSON.stringify({ positions: [], scroller: null })
+    const positions = []
+    for (const fraction of [0, 0.25, 0.5, 0.75, 1]) {
+      node.scrollTop = Math.round((node.scrollHeight - node.clientHeight) * fraction)
+      positions.push({ fraction, domRows: rows().length })
+    }
+    node.scrollTop = 0
+    return JSON.stringify({ scroller: node.id || String(node.className).slice(0, 16), scrollHeight: node.scrollHeight, positions })
+  })()`))
+  // Collapse turns / collapse calls: the row counts after each toggle, then restore.
+  const collapse = json(await page.evaluate(`(() => {
+    const buttons = [...document.querySelectorAll('button')]
+    const find = (pattern) => buttons.find((button) => pattern.test((button.textContent ?? '') + ' ' + (button.getAttribute('aria-label') ?? '') + ' ' + (button.getAttribute('title') ?? '')))
+    const rows = () => [...document.querySelectorAll('#tr-table tbody tr, table tbody tr')].filter((row) => row.querySelector('td') !== null).length
+    const out = { base: rows() }
+    for (const [name, pattern] of [['turns', /collapse turns/i], ['calls', /collapse calls/i]]) {
+      const button = find(pattern)
+      if (button === undefined) { out[name] = 'no control'; continue }
+      button.click()
+      const after = rows()
+      button.click()
+      out[name] = { after, restored: rows(), pressed: button.getAttribute('aria-pressed') }
+    }
+    return JSON.stringify(out)
+  })()`))
+  // Search: filter to a term and count what is left, then clear.
+  const search = json(await page.evaluate(`(() => {
+    const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]')
+    if (input === null) return JSON.stringify({ error: 'no search input' })
+    const rows = () => [...document.querySelectorAll('#tr-table tbody tr, table tbody tr')].filter((row) => row.querySelector('td') !== null).length
+    const base = rows()
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    setter.call(input, 'not-a-real-term-xyz')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    const filtered = rows()
+    setter.call(input, '')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    return JSON.stringify({ base, filtered, cleared: rows() })
+  })()`))
+  return { label, ready, rows: visible.length, heights: [...new Set(visible.map((row) => row.height))].slice(0, 3), hoverState, geometry, scroll, collapse, search }
 }
 
 const session = await openPage({ width: 1440, height: 900 })

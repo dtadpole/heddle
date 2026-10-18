@@ -39,6 +39,50 @@
         "rowHeight": 30,
         "panel": null
       }
+    },
+    "scroll": {
+      "scroller": "Y0dWHa_tablePane",
+      "scrollHeight": 1674,
+      "positions": [
+        {
+          "fraction": 0,
+          "domRows": 34
+        },
+        {
+          "fraction": 0.25,
+          "domRows": 34
+        },
+        {
+          "fraction": 0.5,
+          "domRows": 34
+        },
+        {
+          "fraction": 0.75,
+          "domRows": 34
+        },
+        {
+          "fraction": 1,
+          "domRows": 34
+        }
+      ]
+    },
+    "collapse": {
+      "base": 34,
+      "turns": {
+        "after": 34,
+        "restored": 34,
+        "pressed": "false"
+      },
+      "calls": {
+        "after": 34,
+        "restored": 34,
+        "pressed": "false"
+      }
+    },
+    "search": {
+      "base": 28,
+      "filtered": 28,
+      "cleared": 28
     }
   },
   "heddle": {
@@ -49,7 +93,7 @@
       30
     ],
     "hoverState": {
-      "background": "rgb(44, 44, 44)",
+      "background": "rgba(0, 0, 0, 0)",
       "afterLeave": "rgba(0, 0, 0, 0)"
     },
     "geometry": {
@@ -80,6 +124,28 @@
         "rowHeight": 30,
         "panel": 352
       }
+    },
+    "scroll": {
+      "positions": [],
+      "scroller": null
+    },
+    "collapse": {
+      "base": 15,
+      "turns": {
+        "after": 6,
+        "restored": 15,
+        "pressed": "false"
+      },
+      "calls": {
+        "after": 15,
+        "restored": 15,
+        "pressed": "false"
+      }
+    },
+    "search": {
+      "base": 15,
+      "filtered": 4,
+      "cleared": 15
     }
   }
 }
