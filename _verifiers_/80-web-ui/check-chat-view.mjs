@@ -2050,3 +2050,97 @@ test('a new turn starts a fresh weaving clock instead of carrying the last one',
     await server.close()
   }
 })
+
+test('a tool call being written is drawn at its first fragment and grows in place, then settles as one card', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Measured 2026-10-18 at the owner's address against the plugboard DeepSeek route: a `write_file` call's
+   * arguments reached the page's own event stream as 1092 `tool-call-delta` fragments over 3.5s, and the page drew
+   * nothing until the finished call — its first fragment carried only the tool's name, and the card was drawn through
+   * `add`, which returns early on empty text, so there was never a card for the later fragments to grow.
+   *
+   * The double streams one call as eight fragments with a gap between each, then answers the second round with
+   * text. The page is sampled while it runs: a live card must exist before the call is complete, its arguments must
+   * take several lengths while it is live, and the finished call must settle **that** card rather than add a second.
+   */
+  const fragments = ['{"command":"echo ', 'one ', 'two ', 'three ', 'four ', 'five ', 'six', '"}']
+  let requests = 0
+  const double = await new Promise((resolve) => {
+    const server = createServer((request, response) => {
+      request.resume()
+      request.on('end', async () => {
+        /**
+         * The page discovers the model list on load, so a double that counted every request spent its tool call
+         * on `/models` and answered the real turn with text — the first version of this check did exactly that.
+         * Only a completion counts as a round.
+         */
+        if (!(request.url ?? '').endsWith('/chat/completions')) {
+          response.writeHead(404, { 'content-type': 'application/json' })
+          response.end('{}')
+          return
+        }
+        requests += 1
+        response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+        if (requests === 1) {
+          for (const [index, piece] of fragments.entries()) {
+            const call = index === 0
+              ? { index: 0, id: 'call_live', type: 'function', function: { name: 'bash', arguments: piece } }
+              : { index: 0, function: { arguments: piece } }
+            response.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [call] }, finish_reason: null }] })}\n\n`)
+            await new Promise((done) => setTimeout(done, 200))
+          }
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+        } else {
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'done' }, finish_reason: null }] })}\n\n`)
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+        }
+        response.end('data: [DONE]\n\n')
+      })
+    })
+    server.listen(0, '127.0.0.1', () => resolve({ server, baseUrl: `http://127.0.0.1:${server.address().port}` }))
+  })
+  const server = await startServer('tool-call-live', undefined, { doubleUrl: double.baseUrl, sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await sendMessage(browser, 'run it')
+    const samples = []
+    const deadline = Date.now() + 25_000
+    while (Date.now() < deadline) {
+      const sample = JSON.parse(
+        await browser.evaluate(`JSON.stringify({
+          running: document.getElementById('send').hidden,
+          live: [...document.querySelectorAll('#log .turn.tool[data-live-call]')].map((node) => node.querySelector('[data-args]')?.textContent.length ?? 0),
+          cards: document.querySelectorAll('#log .turn.tool').length,
+          answered: document.querySelector('#log .turn.assistant') !== null,
+        })`),
+      )
+      samples.push(sample)
+      if (!sample.running && sample.answered) break
+      await new Promise((resolve) => setTimeout(resolve, 40))
+    }
+    const whileLive = samples.filter((sample) => sample.live.length > 0)
+    assert.ok(whileLive.length > 0, `a card was on screen while the call was still being written (${samples.length} samples)`)
+    const lengths = new Set(whileLive.map((sample) => sample.live[0]))
+    assert.ok(lengths.size >= 3, `its arguments grew in place while it was live (lengths ${JSON.stringify([...lengths])})`)
+    const final = JSON.parse(
+      await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#log .turn.tool')].map((node) => ({
+        live: node.hasAttribute('data-live-call'),
+        id: node.dataset.toolCallId ?? null,
+        title: node.querySelector('summary .title')?.textContent ?? null,
+        args: node.querySelector('[data-args]')?.textContent ?? null,
+      })))`),
+    )
+    assert.equal(final.length, 1, `the finished call settled the live card instead of adding a second (${JSON.stringify(final)})`)
+    assert.equal(final[0].live, false, 'and the card is no longer live')
+    assert.equal(final[0].id, 'call_live')
+    assert.equal(final[0].title, 'bash')
+    assert.equal(final[0].args, fragments.join(''), 'its arguments are the complete recorded call')
+  } finally {
+    browser.close()
+    await server.close()
+    double.server.close()
+  }
+})

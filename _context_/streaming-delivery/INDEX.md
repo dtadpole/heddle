@@ -20,6 +20,8 @@ One file per measurement a cycle of [`SESSION_STREAMING.md`](../../SESSION_STREA
 
 - `cycle-1-streamed-answer-8082.png` — the page at `http://127.0.0.1:8082/` after a 20-line DeepSeek
   Flash answer streamed into it, from a browser profile created after the daemon restart.
+- `cycle-2-tool-turn-8082.png` — the same address after a two-round tool turn (`bash`, then a streamed
+  answer about its output), taken from a fresh profile; the baseline of cycle 2, before the live tool card.
 
 ## Where it runs
 

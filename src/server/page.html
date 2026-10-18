@@ -3863,7 +3863,13 @@ function liveToolCard(index) {
 function growLiveToolCall(chunk) {
   let card = liveToolCard(chunk.index)
   if (card === null) {
-    add('tool', '', false, '→ ' + (chunk.name || 'tool'), {
+    /**
+     * Drawn with `addBlock`, not `add`: `add` returns early on empty text — rightly, for an answer with nothing to
+     * say — and a call's first fragment usually carries only its name, so going through `add` meant the card was
+     * never drawn and every later fragment found no card to grow. Measured 2026-10-18 at the owner's address: 1092
+     * fragments reached the page's own event stream and the page drew nothing until the finished call.
+     */
+    addBlock('tool', chunk.argumentsDelta || '', false, '→ ' + (chunk.name || 'tool'), {
       name: chunk.name || 'tool',
       toolCallId: chunk.id,
       state: 'running',
@@ -3871,6 +3877,9 @@ function growLiveToolCall(chunk) {
     card = lastTurnRow()
     if (card === null || card.dataset.kind !== 'tool') return
     card.dataset.liveCall = String(chunk.index)
+    if (chunk.id && !card.dataset.toolCallId) card.dataset.toolCallId = chunk.id
+    followChatTail()
+    return
   }
   if (chunk.id && !card.dataset.toolCallId) card.dataset.toolCallId = chunk.id
   if (chunk.name && card.dataset.toolName !== chunk.name) {

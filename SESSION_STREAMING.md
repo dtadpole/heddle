@@ -147,3 +147,47 @@ on how to peek: this session's version paused the response after the first chunk
 that a pause-based peek was **measured leaving a JSON-body provider pending forever**. So `cc9c576` is
 the one kept, and this cycle's job became verifying it at the address the owner opens rather than
 landing a second copy of it.
+
+## Cycle 2 — a tool call's arguments are written live and shown at once
+
+```
+Cycle 2 — the page goes silent while the model writes a tool call's arguments
+  measured:   Instrument 1, a tool turn at 8082 (python urllib, every data: line timed), "run echo, then write
+              12 sentences about it":
+                deepseek-flash   round 1: 85 reasoning deltas over 0.54s, one tool-call chunk at 2.384s,
+                                 done tool_calls; round 2 requested 2.438s, 340 deltas (312 text) over 3.07s,
+                                 done stop; turn/completed 6.994s with 2 rounds
+                deepseek-v4-pro  round 1: 53 reasoning deltas, tool-call at 3.650s; round 2: 537 deltas (279 text)
+                                 over 5.16s; 2 rounds
+              Instrument 2, the page (fresh Chrome profile `goalc2`, MutationObserver on #log): the new tool card
+              appeared at 13731ms in state `running`, settled `ok` at 13766ms, and the second round's answer row
+              then climbed 1 -> 2 -> 6 -> 14 -> 22 -> 26 -> 33 -> 38 ... over 15313..16481ms (316 distinct lengths).
+              Screenshot: _context_/streaming-delivery/cycle-2-tool-turn-8082.png.
+              So a short tool call streams around itself, and the loop continues. The gap is in the long one:
+              Instrument 3, the wire with a tool whose argument is long ("write_file with 40 sentences"): 793
+              argument fragments, 4060 characters, arriving 8.255s..10.986s — the provider streams them.
+              Instrument 4, the same turn at 8082: the longest silence between two SSE events is
+                deepseek-flash   3.683s, from the last reasoning delta (9.981s) to the tool-call chunk (13.664s)
+                deepseek-v4-pro 14.112s, from the last reasoning delta (3.537s) to the tool-call chunk (17.649s)
+              Nothing reaches the page during that time; then a finished card appears in one step.
+  understand: a mechanism this project lacks, not a value. `src/llm/adapters.ts` folds `delta.tool_calls[]` into a
+              map and yields one `tool-call` chunk at `finish_reason`; the chunk union in `src/llm/types.ts` has
+              no variant a partial call could travel in. DSH's union has `tool-call-delta` (index, id, name?,
+              argumentsDelta) for exactly this (`_context_/dsh-mechanisms/dsh-streaming.md` section 1).
+  brainstorm: (a) add a `tool-call-delta` chunk, emitted by the Chat adapter per fragment, keeping the final
+              `tool-call` chunk unchanged so every existing consumer still reads one complete call;
+              (b) replace `tool-call` with deltas only, and let every consumer assemble;
+              (c) emit a synthetic "a tool call is being written" status event from the loop, with no content;
+              (d) keep the adapter and show a generic spinner on the page whenever a round is open;
+              (e) send a progress counter (characters so far) instead of the fragments.
+              chosen: (a). discarded: (b) moves the assembly into five consumers (loop, store, ledger, printer,
+              page) and every one of them becomes a place the defect can return; (c) and (d) say "something is
+              happening" without showing it, which is the burst this loop exists to remove, renamed;
+              (e) is (a) with the content thrown away, and saves nothing — the fragments are already in memory.
+  step back:  widen, once. The objective says "the answer shows up incrementally"; a tool call is part of the
+              answer, and a 14-second silence on the owner's page is the same symptom cycle 1 removed. Scope for
+              this cycle: the Chat adapter (the plugboard route's shape) and the page's live tool card. Not this
+              cycle: the Responses and Anthropic adapters' equivalents (their routes are outside this objective;
+              recorded as siblings), and persisting deltas in the log — the durable record keeps one complete
+              call, as DSH's does.
+```
