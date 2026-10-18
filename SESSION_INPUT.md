@@ -118,3 +118,37 @@ viewport bottom — against DSH's 98px, 17px and 30px. Recorded for cycle 2, not
 - **lessons:** a measurement of the reference is **evidence, not a mandate**; when the owner's stated intent
   contradicts it, the cycle's product is a recorded divergence plus a contract that pins the choice, and the
   next reader must find the reference number beside the reason.
+
+### Cycle 2 — vertical rhythm
+
+- **measured:** both UIs at a 1400×900 browser (viewport height 813), idle, same probe:
+  - DSH: card 98px (top 685 → bottom 783), padding `8px 0 0`; editor 36px (693→729), padding `4px 8px 0
+    14px`; first control (Send) 741→775; card bottom padding 8px; the band under the card is 30px.
+  - Heddle: card 90px (693→783), padding `8px 0 0`; editor 36px (701→737), padding `4px 8px 8px 14px`;
+    control row 46px, padding `4px 8px 8px`; Send 741→775; card bottom padding 8px; status row 788→805
+    (17px), 5px under the card, 8px above the viewport bottom — the same 30px band.
+- **the visible rhythm, which is what a person feels:** last text line's box bottom → first control top is
+  **12px in both** (DSH 729→741; Heddle 737 − 8px of editor bottom padding = 729→741); card-bottom inset
+  **8px in both**; the under-card band **30px in both**. The 8px card-height difference is bookkeeping: DSH's
+  editor box ends at the text and the row's padding supplies the gap, while Heddle's editor box owns 8px of
+  bottom padding and the row supplies 4px. Same pixels, different owner.
+- **brainstorm:** (a) raise the card by 8px to make the height 98 — discarded: the card's top is set by the
+  content above it, so this creates 20px of empty editor box, not DSH's rhythm; (b) move the 8px from the
+  editor's padding to the row's — discarded: it changes no rendered pixel, only which box reports the height;
+  (c) **leave the spacing as it is** and record the equivalence rather than force a like-for-like box —
+  chosen; (d) restyle the status row to DSH's 12px pills — discarded for this cycle: that is typography, not
+  vertical rhythm, and the status band already has the same 30px; (e) a fixed `min-height: 98px` on the card
+  — discarded: the editor grows, so a fixed height would clip or leave dead space at every other draft size.
+- **step back:** the objective holds; this cycle's measurement produced **no fix row** — the rhythm matches
+  and the 8px is a box-ownership difference, not a spacing difference. That is the skill's stop signal for
+  this subject: a third cycle on the vertical rhythm would be theatre. The remaining measurement the loop
+  owes the objective is the **interactive states** (hover, focus, busy/queue, stop, drag), which cycle 3
+  takes up; if those produce no fix row either, the loop stops with this evidence.
+- **changed:** nothing in the UI; this block and the measurement note in the cycle.
+- **evidence:** the boxes and gaps above, produced by [`_context_/dsh-mechanisms/input-area-measure.mjs`](_context_/dsh-mechanisms/input-area-measure.mjs) against both running
+  apps in one browser session (headed-free automation: headless, per the browser-modes convention). Composer
+  contract remains 11/11.
+- **reds:** `70-workspaces-sessions` no longer red in this run (the concurrent session's tree work settled);
+  any suite red at cycle end is named at the end of the block.
+- **lessons:** compare the **pixels a person sees** (text-to-control distance, insets, bands), not the box
+  heights two implementations happen to report; equal rhythm can hide behind unequal boxes.
