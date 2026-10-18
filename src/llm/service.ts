@@ -56,7 +56,9 @@ export class ModelService extends Service {
   register(endpoint: EndpointConfig): void {
     this.endpoints.set(endpoint.name, adapterFor(endpoint))
     /** A replaced endpoint's discovered modalities described the old route, so they are dropped with it. */
-    this.modalityLookups.delete(endpoint.name)
+    for (const key of [...this.modalityLookups.keys()]) {
+      if (key.startsWith(`${endpoint.name}\u0000`)) this.modalityLookups.delete(key)
+    }
   }
 
   /**
@@ -64,28 +66,34 @@ export class ModelService extends Service {
    *
    * Read lazily and only for a request that actually carries an image: a text turn must not pay a model-list
    * round trip, and a provider that publishes nothing leaves the endpoint exactly as configured (text only).
-   * The promise is cached per endpoint name, and a failed read resolves to the configured endpoint, so a
+   * The promise is cached per endpoint and model, and a failed read resolves to the configured endpoint, so a
    * provider outage degrades an image to the text placeholder rather than failing the turn.
    */
-  private endpointWithModalities(endpoint: EndpointConfig): Promise<EndpointConfig> {
+  private endpointWithModalities(endpoint: EndpointConfig, model?: string): Promise<EndpointConfig> {
     if (endpoint.inputModalities !== undefined || endpoint.kind === 'scripted') return Promise.resolve(endpoint)
-    const cached = this.modalityLookups.get(endpoint.name)
+    /**
+     * Cached per endpoint **and model**, because the answer is a fact about one model: a gateway can serve an
+     * image-capable deployment beside a text-only one, and one cache entry for the endpoint would answer the
+     * second question with the first model's capabilities.
+     */
+    const key = `${endpoint.name}\u0000${model ?? endpoint.model ?? ''}`
+    const cached = this.modalityLookups.get(key)
     if (cached !== undefined) return cached
-    const pending = inputModalitiesFromModelList(endpoint)
+    const pending = inputModalitiesFromModelList(endpoint, { ...(model !== undefined ? { askAbout: model } : {}) })
       .then((modalities) => {
         /**
          * Only an answer is cached. A provider that failed to answer said nothing about its model, and holding
          * "said nothing" for the life of the process would turn one outage into a conversation that can never
          * send an image again; the next image-bearing request asks again.
          */
-        if (modalities === undefined) this.modalityLookups.delete(endpoint.name)
+        if (modalities === undefined) this.modalityLookups.delete(key)
         return withDiscoveredModalities(endpoint, modalities)
       })
       .catch(() => {
-        this.modalityLookups.delete(endpoint.name)
+        this.modalityLookups.delete(key)
         return endpoint
       })
-    this.modalityLookups.set(endpoint.name, pending)
+    this.modalityLookups.set(key, pending)
     return pending
   }
 
@@ -170,7 +178,7 @@ export class ModelService extends Service {
        * and a turn without an image never reads the model list for one.
        */
       const carriesImage = base.messages.some((message) => message.content.some((part) => part.type === 'image'))
-      const endpoint = carriesImage ? await self.endpointWithModalities(resolved.endpoint) : resolved.endpoint
+      const endpoint = carriesImage ? await self.endpointWithModalities(resolved.endpoint, base.model) : resolved.endpoint
       /**
        * The attachment projection sits between the recorded request and the adapter: files become handles,
        * images become bytes only on a route that accepts image input, and every other route sees

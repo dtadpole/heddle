@@ -23,15 +23,30 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 
+import { wire } from './http.ts'
+
 /** The fields of an endpoint these resolvers read. A subset of the configured endpoint, so a caller passes one. */
 export interface ModelInfoEndpoint {
   readonly name: string
   readonly kind: string
   readonly baseUrl: string
   readonly model?: string
+  /**
+   * The model to ask about, when it is not the endpoint's default.
+   *
+   * A gateway can place each deployment on **its own host** and give it its own window, so a read taken from the
+   * endpoint's address and answered about `endpoint.model` describes the wrong model from the wrong place. Measured
+   * 2026-10-18 against a two-host double: asking about a model that lived on the second host returned `undefined`
+   * from this resolver, which a caller reads as "text only", so an image on that model was silently degraded.
+   */
+  readonly askAbout?: string
   readonly apiKey?: string
   readonly apiKeyFile?: string
   readonly headers?: Record<string, string>
+  /** The forwarding hop, when this endpoint is reachable only through one. */
+  readonly proxy?: string
+  /** The models the endpoint offers, so a model's own address can be found. */
+  readonly models?: readonly (string | { readonly id: string; readonly baseUrl?: string })[]
 }
 
 /** What a model accepts: the two modalities the harness can deliver. */
@@ -39,6 +54,18 @@ export type InputModality = 'text' | 'image'
 
 /** How long a model-list read may take before the answer simply stays `undefined`. */
 const DEFAULT_TIMEOUT_MS = 1500
+
+/** What a read may be told: how long to wait, and which model to ask about when it is not the default. */
+export interface ModelInfoOptions {
+  readonly timeoutMs?: number
+  /**
+   * The model the caller is actually going to use.
+   *
+   * Stated per call rather than taken from the endpoint because the endpoint only ever names its **default**, and
+   * a gateway can put each deployment on its own host with its own capabilities.
+   */
+  readonly askAbout?: string
+}
 
 /** The provider's model-list body, by endpoint and model, so the window and the modalities share one read. */
 const lists = new Map<string, Promise<unknown | undefined>>()
@@ -53,20 +80,39 @@ function listedKind(kind: string): boolean {
   return kind === 'openai-chat' || kind === 'openai-responses'
 }
 
-/** One cache key: the route and the model its answers describe. */
+/** The model this read is about: the one asked about, else the endpoint's default. */
+function askedAbout(endpoint: ModelInfoEndpoint): string | undefined {
+  const model = endpoint.askAbout ?? endpoint.model
+  return model === undefined || model.length === 0 ? undefined : model
+}
+
+/** The address that serves that model, which is the model's own host when it declares one. */
+function addressOf(endpoint: ModelInfoEndpoint): string {
+  const model = askedAbout(endpoint)
+  const entry =
+    model === undefined
+      ? undefined
+      : endpoint.models?.find((candidate) => (typeof candidate === 'string' ? candidate : candidate.id) === model)
+  const declared = typeof entry === 'object' ? entry.baseUrl : undefined
+  return declared ?? endpoint.baseUrl
+}
+
+/** One cache key: the route and the model its answers describe, by the address that serves it. */
 function cacheKey(endpoint: ModelInfoEndpoint): string | undefined {
   if (!listedKind(endpoint.kind)) return undefined
-  if (endpoint.model === undefined || endpoint.model.length === 0) return undefined
-  return `${endpoint.name}\u0000${endpoint.baseUrl}\u0000${endpoint.model}`
+  const model = askedAbout(endpoint)
+  if (model === undefined) return undefined
+  return `${endpoint.name}\u0000${addressOf(endpoint)}\u0000${model}`
 }
 
 /** The model list, read once per endpoint and model and shared by both readers below. */
-function modelList(endpoint: ModelInfoEndpoint, options: { readonly timeoutMs?: number }): Promise<unknown | undefined> {
-  const key = cacheKey(endpoint)
+function modelList(endpoint: ModelInfoEndpoint, options: ModelInfoOptions): Promise<unknown | undefined> {
+  const about: ModelInfoEndpoint = options.askAbout === undefined ? endpoint : { ...endpoint, askAbout: options.askAbout }
+  const key = cacheKey(about)
   if (key === undefined) return Promise.resolve(undefined)
   const cached = lists.get(key)
   if (cached !== undefined) return cached
-  const pending = readModelList(endpoint, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const pending = readModelList(about, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
     .catch(() => undefined)
     .then((body) => {
       /**
@@ -80,17 +126,31 @@ function modelList(endpoint: ModelInfoEndpoint, options: { readonly timeoutMs?: 
   return pending
 }
 
-/** One authenticated GET of the provider's model list. */
+/**
+ * One authenticated GET of the provider's model list.
+ *
+ * Sent through the shared client rather than `fetch`, because an endpoint reachable only through a forwarding
+ * agent is the case this whole file exists for and `fetch` has no way to say so. Measured 2026-10-18: a plain
+ * `fetch` to a gateway that requires the hop could only ever fail, and a failed read here is indistinguishable
+ * from "the provider publishes no list".
+ */
 async function readModelList(endpoint: ModelInfoEndpoint, timeoutMs: number): Promise<unknown | undefined> {
   const headers: Record<string, string> = { accept: 'application/json', ...(endpoint.headers ?? {}) }
   const key = endpoint.apiKey ?? readKeyFile(endpoint.apiKeyFile)
-  if (key !== undefined) headers.authorization = `Bearer ${key}`
-  const response = await fetch(`${endpoint.baseUrl.replace(/\/+$/, '')}/models`, {
-    headers,
-    signal: AbortSignal.timeout(timeoutMs),
-  })
-  if (!response.ok) return undefined
-  return response.json()
+  try {
+    const response = await wire({
+      url: `${addressOf(endpoint).replace(/\/+$/, '')}/models`,
+      method: 'GET',
+      headers,
+      timeoutMs,
+      endpoint: endpoint.name,
+      ...(key !== undefined ? { apiKey: key } : {}),
+      ...(endpoint.proxy !== undefined ? { proxy: endpoint.proxy } : {}),
+    })
+    return 'json' in response ? response.json : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** The is-a-record guard both parsers share. */
@@ -125,11 +185,12 @@ function rowOf(body: unknown, kind: string, model: string): Record<string, unkno
  */
 export function contextWindowFromModelList(
   endpoint: ModelInfoEndpoint,
-  options: { readonly timeoutMs?: number } = {},
+  options: ModelInfoOptions = {},
 ): Promise<number | undefined> {
   return modelList(endpoint, options).then((body) => {
-    if (body === undefined || endpoint.model === undefined) return undefined
-    const reported = rowOf(body, endpoint.kind, endpoint.model)?.context_window
+    const model = options.askAbout ?? askedAbout(endpoint)
+    if (body === undefined || model === undefined) return undefined
+    const reported = rowOf(body, endpoint.kind, model)?.context_window
     return typeof reported === 'number' && Number.isFinite(reported) && reported > 0 ? Math.round(reported) : undefined
   })
 }
@@ -143,11 +204,12 @@ export function contextWindowFromModelList(
  */
 export function inputModalitiesFromModelList(
   endpoint: ModelInfoEndpoint,
-  options: { readonly timeoutMs?: number } = {},
+  options: ModelInfoOptions = {},
 ): Promise<readonly InputModality[] | undefined> {
   return modelList(endpoint, options).then((body) => {
-    if (body === undefined || endpoint.model === undefined) return undefined
-    return inputModalitiesOfRow(rowOf(body, endpoint.kind, endpoint.model))
+    const model = options.askAbout ?? askedAbout(endpoint)
+    if (body === undefined || model === undefined) return undefined
+    return inputModalitiesOfRow(rowOf(body, endpoint.kind, model))
   })
 }
 

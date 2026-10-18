@@ -227,10 +227,19 @@ function describeModel(endpoint: EndpointConfig, model: ModelOption): Record<str
    * would be checked against — a page that showed no effort control there would hide a level the route accepts.
    */
   const reasoning = model.reasoning ?? endpoint.reasoning
+  /**
+   * The model's own window travels with the model.
+   *
+   * The endpoint's single number used to be the only one a page could see, so a catalogue that declares a 1M
+   * deployment beside 272k ones had every model displayed against 272k — the gauge's denominator, wrong in the
+   * direction that reads as "nearly full" for a conversation that is nowhere near it.
+   */
+  const contextWindow = model.contextWindow ?? endpoint.contextWindow
   return {
     id: model.id,
     name: model.name ?? model.id,
     ...(reasoning !== undefined ? { reasoning: describeReasoning(reasoning) } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
   }
 }
 
