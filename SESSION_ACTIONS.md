@@ -123,6 +123,27 @@ The cycle that the goal's stop rule asks for: all three actions measured togethe
   the tree placement and the menu path to fork. Not measured, and named: the archive confirmation dialog's own look (only its
   accept path is exercised), and concurrent forks of one source.
 
+## Cycle 4 — age, order and the pressed control (2026-10-17)
+
+The owner reported three behaviours; each was reproduced before it was changed, and each now has an assertion.
+
+- **Age.** Rows read `created`, so a continuing conversation kept the age it was born with. The store now writes `updated` on
+  every message and on each turn boundary (`message()`, `turn/completed`, `assistant/completed`, `context/note`), the tree
+  exposes it as `session.updated`, the row ages by it, and a 30 s ticker moves the text while nothing happens. Activity in
+  any window re-reads the list (debounced 400 ms), so a message sent from the CLI or another tab moves the row.
+- **Order.** The comparator's last resort was the definition folder's clock name. Non-pinned sessions now order by
+  `updated` descending, pinned first (newest pin first among them) — the reference's list order.
+- **Pin.** Reproduced with a trusted pointer: the handler and the store were right, but the press at the icon's centre was
+  delivered to the row's **age span**, which shares the right-hand slot and painted above the controls. The age is now
+  `pointer-events: none`, the controls carry `position: relative; z-index: 1`, and the blinking icon reported in the same
+  breath is the same defect seen as paint/hit-test disagreement.
+
+**Verified.** Unit: the store's `updated` (a message and a turn boundary both move it) and the tree's order (newest write
+first; still pinned-first). Part 7: one browser check drives the whole cycle with trusted input — rows are ordered by write
+time, a `POST /api/turn` to the older session moves it to the top with its age reading its `updated`, and a trusted click on
+the row's **hover pin control** (the press target asserted to be the control, not `SPAN.age`) holds it at the top with the
+store recording exactly one pin. Unit 334 and part 7 green after the change.
+
 ## This project's implementation, before cycle 1
 
 | Action | Backend | UI |

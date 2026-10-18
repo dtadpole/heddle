@@ -37,6 +37,8 @@ export interface TreeSession {
   readonly title?: string
   /** When it started, so a row can say how long ago it was — DSH's own session rows carry an age. */
   readonly created: string
+  /** When it was last written to: the age a row shows, and the order sessions inside one folder take. */
+  readonly updated?: string
 }
 
 export interface TreeNode {
@@ -299,7 +301,13 @@ function row(
     session:
       meta === undefined
         ? null
-        : { id: meta.id, turns: meta.turns, created: meta.created, ...(meta.title !== undefined ? { title: meta.title } : {}) },
+        : {
+            id: meta.id,
+            turns: meta.turns,
+            created: meta.created,
+            ...(meta.title !== undefined ? { title: meta.title } : {}),
+            ...(meta.updated !== undefined ? { updated: meta.updated } : {}),
+          },
   }
 }
 
@@ -336,11 +344,13 @@ function sessionOf(dir: string, context: Context): TreeNode['session'] {
   if (definition === null) return null
   const meta = context.byId.get(definition.id)
   const title = meta?.title ?? definition.title
+  const updated = meta?.updated
   return {
     id: definition.id,
     turns: meta?.turns ?? 0,
     created: meta?.created ?? definition.createdAt,
     ...(title !== undefined ? { title } : {}),
+    ...(updated !== undefined ? { updated } : {}),
   }
 }
 
@@ -394,6 +404,7 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
           definition,
           pinned: meta?.pinned === true,
           ...(meta?.pinnedAt !== undefined ? { pinnedAt: meta.pinnedAt } : {}),
+          ...(meta?.updated !== undefined ? { updated: meta.updated } : {}),
           archived: meta?.archived === true,
         }
       })
@@ -413,6 +424,16 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
         /** A pinned record without a time is an older one; it sorts after a timed pin rather than crashing the order. */
         if (left.pinnedAt !== undefined && right.pinnedAt === undefined) return -1
         if (left.pinnedAt === undefined && right.pinnedAt !== undefined) return 1
+        /**
+         * Otherwise **last updated first**, which is the reference's list order: a conversation that just received a message
+         * moves to the top of its folder. The old comparator used the definition's clock name, so writing to an old session
+         * never moved it — measured by the owner as "the list is regularly sorted, but not by what I did last".
+         */
+        const leftUpdated = left.updated ?? left.definition?.createdAt
+        const rightUpdated = right.updated ?? right.definition?.createdAt
+        if (leftUpdated !== undefined && rightUpdated !== undefined && leftUpdated !== rightUpdated) {
+          return String(rightUpdated).localeCompare(String(leftUpdated))
+        }
         return collator.compare(right.entry.name, left.entry.name)
       })) {
         const node = row(one.dir, 'session', one.entry.name, context)

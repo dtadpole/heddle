@@ -414,3 +414,40 @@ test('pinned sessions order by when they were pinned, newest pin first', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('sessions inside one folder order by the time they were last written to, newest first', () => {
+  const root = scaffold(['_tools_/some-tool/_sessions_/alpha', '_tools_/some-tool/_sessions_/beta', '_tools_/some-tool/_sessions_/gamma'])
+  try {
+    for (const [name, id, created] of [
+      ['alpha', 'session-1', '2026-10-17T10:00:00.000Z'],
+      ['beta', 'session-2', '2026-10-17T11:00:00.000Z'],
+      ['gamma', 'session-3', '2026-10-17T12:00:00.000Z'],
+    ] as const) {
+      writeFileSync(
+        join(root, '_tools_/some-tool/_sessions_', name, 'session.json'),
+        JSON.stringify({ id, log: `/logs/${id}`, cwd: join(root, '_tools_/some-tool'), createdAt: created }),
+      )
+    }
+    const labelsFor = (sessions: readonly { readonly id: string }[]) =>
+      (tree(join(root, '_tools_/some-tool'), { roots: [{ path: root, title: 'fixture' }], sessions }).children ?? [])
+        .filter((child) => child.kind === 'session')
+        .map((child) => child.label)
+
+    /**
+     * The order is what a reader did **last**, not the clock in the folder name: gamma is the newest definition, but alpha was
+     * written to most recently and leads. The owner reported this as "sessions are regularly sorted, but not by what I did".
+     */
+    const sessions = [
+      { ...session('session-1', join(root, '_tools_/some-tool'), '2026-10-17T10:00:00.000Z'), updated: '2026-10-17T16:00:00.000Z' },
+      { ...session('session-2', join(root, '_tools_/some-tool'), '2026-10-17T11:00:00.000Z'), updated: '2026-10-17T13:00:00.000Z' },
+      { ...session('session-3', join(root, '_tools_/some-tool'), '2026-10-17T12:00:00.000Z'), updated: '2026-10-17T14:00:00.000Z' },
+    ]
+    assert.deepEqual(labelsFor(sessions), ['alpha', 'gamma', 'beta'], 'newest write first')
+
+    /** A pinned session still leads the folder, whatever its write time, and pinned ones order by their pin. */
+    const pinned = sessions.map((entry) => (entry.id === 'session-2' ? { ...entry, pinned: true, pinnedAt: '2026-10-17T15:00:00.000Z' } : entry))
+    assert.deepEqual(labelsFor(pinned), ['beta', 'alpha', 'gamma'], 'a pin holds the top of its folder')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
