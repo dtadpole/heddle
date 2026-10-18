@@ -66,7 +66,16 @@ function modelList(endpoint: ModelInfoEndpoint, options: { readonly timeoutMs?: 
   if (key === undefined) return Promise.resolve(undefined)
   const cached = lists.get(key)
   if (cached !== undefined) return cached
-  const pending = readModelList(endpoint, options.timeoutMs ?? DEFAULT_TIMEOUT_MS).catch(() => undefined)
+  const pending = readModelList(endpoint, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+    .catch(() => undefined)
+    .then((body) => {
+      /**
+       * Only an answer is cached. A failed read is not a fact about the model, and keeping it would turn one
+       * outage into a process that can never read this endpoint's list again — the next caller asks again.
+       */
+      if (body === undefined) lists.delete(key)
+      return body
+    })
   lists.set(key, pending)
   return pending
 }

@@ -72,8 +72,19 @@ export class ModelService extends Service {
     const cached = this.modalityLookups.get(endpoint.name)
     if (cached !== undefined) return cached
     const pending = inputModalitiesFromModelList(endpoint)
-      .then((modalities) => withDiscoveredModalities(endpoint, modalities))
-      .catch(() => endpoint)
+      .then((modalities) => {
+        /**
+         * Only an answer is cached. A provider that failed to answer said nothing about its model, and holding
+         * "said nothing" for the life of the process would turn one outage into a conversation that can never
+         * send an image again; the next image-bearing request asks again.
+         */
+        if (modalities === undefined) this.modalityLookups.delete(endpoint.name)
+        return withDiscoveredModalities(endpoint, modalities)
+      })
+      .catch(() => {
+        this.modalityLookups.delete(endpoint.name)
+        return endpoint
+      })
     this.modalityLookups.set(endpoint.name, pending)
     return pending
   }
