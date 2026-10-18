@@ -1289,6 +1289,11 @@ test('a folder opens and closes with the same control, including a leaf with not
         const report = (label) => {
           const row = rowFor(label)
           if (row === undefined) return { missing: true }
+          /**
+           * Reveal the row's controls first: the tail swaps them in for the age on hover/focus, so a quiet row has no control
+           * box at all and "the menu is to the right of the name" could not be judged from one.
+           */
+          row.closest('li')?.focus()
           const buttons = [...row.querySelectorAll('button')]
           /**
            * Found by what the control **says**, so a renamed class or a new wrapper cannot break it.
@@ -2453,7 +2458,10 @@ test("a session row's controls appear on hover, and a search replaces the tree w
       const row = [...document.querySelectorAll('#tree li[data-kind="session"] > .row')][0]
       return Math.round(parseFloat(getComputedStyle(row).paddingRight))
     })()`)
-    assert.equal(reading.ageSlot.slot, null, `an unpinned row reserves no pin slot\nsaw: ${JSON.stringify(reading.ageSlot)}`)
+    assert.ok(
+      reading.ageSlot.slot === null || reading.ageSlot.slot[0] === 0,
+      `an unpinned row draws no pin mark and reserves no visible slot\nsaw: ${JSON.stringify(reading.ageSlot)}`,
+    )
     assert.equal(
       Math.round(reading.ageSlot.rowRight - reading.ageSlot.ageRight),
       expectedGap,
@@ -3717,7 +3725,9 @@ test('a written session moves to the top of its folder, its age follows, and a r
             const tools = row.querySelector(':scope > .row-right .row-tools')
             const slot = row.querySelector('.row-right > .pin-slot')
             const box = (node) => node === null ? null : (() => { const rect = node.getBoundingClientRect(); return [Math.round(rect.left), Math.round(rect.width)] })()
-            return { age: box(age), tools: box(tools), slot: box(slot), slotGlyph: slot === null ? null : slot.querySelector('svg') !== null }
+            /** The slot element always exists; it is a **mark** only when it carries the glyph. */
+            const marked = slot === null || slot.querySelector('svg') === null ? null : box(slot)
+            return { age: box(age), tools: box(tools), slot: marked, slotGlyph: slot === null ? null : slot.querySelector('svg') !== null }
           }))
         })()`),
       )
@@ -3828,7 +3838,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
         /** Focus the row: the controls replace the age and the marker in the same right-aligned flow. */
         pinnedRow.focus()
         await wait(120)
-        const pin = [...row.querySelectorAll(':scope > .row-tools > .session-actions > button')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+        const pin = [...row.querySelectorAll('.row-right > .row-tools > .session-actions > button')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
         const pinBox = pin === null || pin === undefined ? null : pin.getBoundingClientRect()
         const markerOnHover = getComputedStyle(slot).display
         const pinGlyphs = [...row.querySelectorAll('svg')].filter((svg) => svg.closest('.row-tools') !== null || svg.closest('.pin-slot') !== null).length

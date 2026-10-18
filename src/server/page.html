@@ -573,6 +573,14 @@
    * 10px/16px stat line in the code font, rows at least 24px tall with a 12px path, and a 44px expand toggle. DSH
    * folds the list at four rows and labels the toggle "All {count} files".
    */
+  /**
+   * A turn that stopped early says why. It is the loop's own sentence (the round limit is the usual one), shown in
+   * the muted ink under the answer so an empty or cut answer never reads as a silent failure.
+   */
+  .turn-notice {
+    margin-top: 6px; padding: 2px 8px; font-size: 12px; line-height: 18px; color: var(--text-3);
+    border-left: 2px solid color-mix(in oklab, #d9a441 55%, transparent);
+  }
   .changed-files { margin-top: 8px; border: .5px solid var(--line); border-radius: 16px; background: var(--surface); overflow: hidden; }
   .changed-head {
     display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; height: 60px; padding: 8px 10px;
@@ -2721,6 +2729,7 @@ function add(kind, text, merge = true, label, tool) {
     node.dataset.copyText = node.innerText
     node.append(messageActions(node))
     if (tool !== undefined && Array.isArray(tool.files) && tool.files.length > 0) node.append(editedFilesPanel(tool.files))
+    if (tool !== undefined && Array.isArray(tool.ended) && tool.ended.length > 0) node.append(turnNotice(tool.ended))
   } else if (kind === 'user') {
     /**
      * A person's message is a **row**: the bubble, then the actions beneath it. History carries the event's own
@@ -2915,6 +2924,18 @@ function codeGlyph() {
  * the four-row fold are its behaviour, not a choice made here.
  */
 const CHANGED_FILES_COLLAPSED = 4
+
+/**
+ * Why a turn stopped early, as the reference's own words. It carries the loop's sentence rather than a rewording —
+ * "stopped after the round limit of 32" is the fact, and a page that paraphrased it could drift from the loop.
+ */
+function turnNotice(ended) {
+  const notice = document.createElement('div')
+  notice.className = 'turn-notice'
+  notice.setAttribute('role', 'status')
+  notice.textContent = `Turn stopped: ${ended.join('; ')}`
+  return notice
+}
 
 function basenameOf(path) {
   return path.split('/').pop() ?? path
@@ -5617,6 +5638,15 @@ async function runTurn(text, key) {
         updateStatusBar()
         void refreshSessionStats()
         for (const denial of payload.denials ?? []) add('denied', `${denial.tool}: ${denial.message}`)
+        /**
+         * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
+         * reason travels on the completed event, so a reload shows it again from the transcript.
+         */
+        if (Array.isArray(payload.ended) && payload.ended.length > 0) {
+          const last = log.lastElementChild
+          if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
+          else log.append(turnNotice(payload.ended))
+        }
         /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
         settleChat()
         void renderSettledAnswers()

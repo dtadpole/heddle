@@ -150,6 +150,24 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### One pin mark, at the right, and a slower glide (2026-10-17)
+
+Three follow-ups from the owner, and the layout reasoning behind them.
+
+- **The mark lives at the right only.** The pinned mark had drifted beside the name, so a pinned row showed a pin on the left
+  *and* a pin control on the right. It is now one 16px mark at the row's **right edge**, between the age and the controls, and
+  the old beside-the-name badge is gone. The check asserts that nothing draws `.pin-mark` and that the mark's right edge is the
+  row's content edge.
+- **The two states swap in place, never overlap.** The right-hand side is **one right-aligned flow** — age, marker, controls —
+  and the states swap their visible children by `display` (`age` + marker out, controls in), instead of stacking the controls
+  over the age in one grid cell. The hover pin control therefore lands on the **same right edge** the marker occupied (asserted
+  by edge equality), and only one pin icon is ever drawn. The swap also means the row must be **focusable** for a keyboard to
+  reach its controls: every tree row now carries `tabIndex = 0`, without which `:focus-within` could never fire because the
+  control it would focus is itself not rendered.
+- **The glide is slower.** 400 ms instead of the reference's 200, at the owner's request (at 200 the row reached the top before
+  the eye followed it, which read as a jump again). Easing, the entrance fade and the reduced-motion rule stay the
+  reference's; the duration is a stated local choice.
+
 ### The pin artwork and the glide (2026-10-17)
 
 **The icon is the reference's own.** DSH's primitives carry `IconPinOutlineArtwork` and `IconPinFillArtwork` (16px box, one
