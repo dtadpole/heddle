@@ -178,6 +178,10 @@ The owner asked which part of the suite is slow, and for browser checks to be op
   ("all 31 judged check(s) passed; 14 skipped by this target"). Without the flag a skip is still exit `3`, so the contract that
   unjudged is not passing is unchanged — the standard target simply names what it did not judge.
 - `npm run verify:fast` = unit suite + the standard target: **2 s + 47 s**. `npm run verify:ui` = every check: **149 s**.
+  *(Those two numbers were measured on part 7 alone. Across **every** verifier part the targets are measured as: standard
+  **234.5 s** and UI **593.3 s** on 2026-10-18 — the per-part table and the rule live in
+  [`_conventions_/verify-targets/`](_conventions_/verify-targets/INDEX.md), because a cost rule belongs with the repository's
+  conventions rather than only in this session's record.)*
 
 ### The tail in the middle of the head, at the reference's thickness (2026-10-17)
 

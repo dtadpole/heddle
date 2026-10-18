@@ -43,8 +43,8 @@
     "start": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
     "prepublishOnly": "npm run build",
-    "verify:ui": "sh _verifiers_/70-workspaces-sessions/verify.sh",
-    "verify:fast": "npm test && HEDDLE_VERIFY_UI=0 sh _verifiers_/70-workspaces-sessions/verify.sh --allow-skip"
+    "verify:ui": "node _tools_/verify-runner/all.mjs",
+    "verify:fast": "npm test && HEDDLE_VERIFY_UI=0 node _tools_/verify-runner/all.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.4",

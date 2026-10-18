@@ -167,6 +167,19 @@ Each proposal is a separate pass; none should be made while another session is e
 and each is a change to this contract rather than to a check.
 
 
+## Cost and targets
+
+The suite has two targets, with measured per-part costs recorded in
+[`_conventions_/verify-targets/`](../_conventions_/verify-targets/INDEX.md):
+
+```bash
+npm run verify:fast   # unit suite + every part without a browser (~4 min on the reference machine)
+npm run verify:ui     # every part, browser checks included (~10 min)
+```
+
+A standard deployment host has no browser; it runs `verify:fast`, which reports the browser checks as **skipped by this target**
+and prints how many. A change to a rendered surface additionally runs `verify:ui`.
+
 ## Read next
 
 [`ULTIMATE_GOAL.md`](../ULTIMATE_GOAL.md) for the parts these decide, and each folder's `INDEX.md`
