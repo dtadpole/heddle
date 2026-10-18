@@ -7,9 +7,9 @@ import { test } from 'node:test'
 import { skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
- * The check behind [`dsh-context.md`](dsh-context.md).
+ * The check behind [`dsh-context.md`](dsh-context.md) and [`dsh-jobs.md`](dsh-jobs.md).
  *
- * It judges one thing: **does that reading still describe the DSH that is installed here?** The
+ * It judges one thing: **do those readings still describe the DSH that is installed here?** Each
  * reading grounds design decisions in this repository, so a reading that has drifted is worse than no
  * reading — it cites line numbers and constants that no longer exist, and the code that trusted it
  * looks arbitrary. Every assertion below is a fact the reading states, so a failure is a statement
@@ -273,6 +273,102 @@ test('the reading itself states the facts this check guards', async (context) =>
     assert.ok(
       reading.includes(fact),
       `dsh-context.md does not state ${JSON.stringify(fact)} — every correction must be written into the reading, not only into this check`,
+    )
+  }
+})
+
+/**
+ * The facts [`dsh-jobs.md`](dsh-jobs.md) leans on, in the packages that own them.
+ *
+ * The reading states the job registry, the local backend's constants, the three tools, the notice
+ * text, the two background-subagent routes, and the composition that decides between them. Each
+ * assertion is one of those statements; a failure means the install moved and the reading must be
+ * re-read, not that the check is wrong.
+ */
+test('the jobs reading: registry, ring, notices and the two subagent lanes', async (context) => {
+  const jobs = needs(context, 'dsh-jobs')
+  const view = needs(context, 'dsh-jobs', 'lib/types/view.d.ts')
+  const local = needs(context, 'dsh-jobs-local')
+  const toolJobs = needs(context, 'dsh-tool-jobs')
+  if (jobs === undefined || view === undefined || local === undefined || toolJobs === undefined) return
+
+  states(jobs, 'super(ctx, "jobs")', 'dsh-jobs')
+  states(view, "export type JobStatus = 'running' | 'stopping' | 'completed' | 'killed' | 'failed';", 'dsh-jobs/view')
+  states(view, "subagent: 'subagent';", 'dsh-jobs/view')
+  states(local, 'const DEFAULT_MAX_CONCURRENT_JOBS_PER_OWNER = 10;', 'dsh-jobs-local')
+  states(local, 'const DEFAULT_RETAIN_BYTES = 256 * 1024;', 'dsh-jobs-local')
+  states(local, 'const DEFAULT_SETTLED_RETAIN_BYTES = 16 * 1024;', 'dsh-jobs-local')
+  states(local, 'const DEFAULT_PUMP_POLL_MS = 150;', 'dsh-jobs-local')
+  states(local, 'belongs to another session', 'dsh-jobs-local')
+
+  states(toolJobs, 'const waitDefault = config.waitTimeoutMs ?? 3e4;', 'dsh-tool-jobs')
+  states(toolJobs, 'const prefix = `background job ${job.id}`;', 'dsh-tool-jobs')
+  states(toolJobs, 'owner.followup(message)', 'dsh-tool-jobs')
+  states(toolJobs, 'Track every background job id you start', 'dsh-tool-jobs')
+  states(toolJobs, 'completionDelivery: z.union(["quiet", "wakeup"]).default("wakeup"),', 'dsh-tool-jobs')
+  states(toolJobs, 'attachController("tool-jobs")', 'dsh-tool-jobs')
+})
+
+test('the jobs reading: one-shot subagents are jobs, continuable ones are not', async (context) => {
+  const toolSubagent = needs(context, 'dsh-tool-subagent')
+  const subagent = needs(context, 'dsh-subagent')
+  const settlement = needs(context, 'dsh-subagent', 'lib/types/run-settlement.js')
+  if (toolSubagent === undefined || subagent === undefined || settlement === undefined) return
+
+  states(toolSubagent, 'started background subagent job ${value.jobId}', 'dsh-tool-subagent')
+  states(toolSubagent, 'started subagent ${value.subagentId}', 'dsh-tool-subagent')
+  states(toolSubagent, 'request.run_in_background ?? options.continuable', 'dsh-tool-subagent')
+  states(toolSubagent, 'subagents.startContinuable({', 'dsh-tool-subagent')
+  states(toolSubagent, 'kind: "subagent",', 'dsh-tool-subagent')
+  states(subagent, 'const subject = `Background subagent ${childId}`;', 'dsh-subagent')
+  states(subagent, 'kind: "subagent-settled",', 'dsh-subagent')
+  states(settlement, 'the one-shot background path uses Jobs; continuable children have no Task,', 'dsh-subagent/run-settlement')
+})
+
+test('the jobs reading: which producers register jobs', async (context) => {
+  const bash = needs(context, 'dsh-tool-bash')
+  const workflow = needs(context, 'dsh-tool-workflow')
+  if (bash === undefined || workflow === undefined) return
+
+  states(bash, 'if (args.run_in_background === true)', 'dsh-tool-bash')
+  states(bash, 'kind: "bash",', 'dsh-tool-bash')
+  states(workflow, 'kind: "workflow",', 'dsh-tool-workflow')
+  states(workflow, 'started in the background as job ${value.jobId}', 'dsh-tool-workflow')
+})
+
+test('the jobs reading: the composition that decides the lane', async (context) => {
+  const base = needs(context, 'dsh-base', 'cordis.patch.yml')
+  const preset = needs(context, 'dsh-web-app', 'presets/standard.patch.yml')
+  if (base === undefined || preset === undefined) return
+
+  assert.match(
+    base,
+    /backgroundMode: one-shot/,
+    'the base composition no longer mounts a one-shot subagent — dsh-jobs.md says the base row is one-shot',
+  )
+  assert.match(
+    preset,
+    /backgroundMode: continuable/,
+    'the standard preset no longer overrides a subagent to continuable — dsh-jobs.md says the Web presets do',
+  )
+})
+
+test('dsh-jobs.md states the facts this check guards', async (context) => {
+  if (!skipUnless(context, packageRoot !== undefined, CAPABILITY)) return
+  const reading = readFileSync(new URL('./dsh-jobs.md', import.meta.url), 'utf8')
+
+  for (const fact of [
+    'ctx.jobs',
+    'subagent-settled',
+    'tool-jobs',
+    'background job <id>',
+    'started background subagent job',
+    'started subagent <childId>',
+    'agent/inbox/spliced',
+  ]) {
+    assert.ok(
+      reading.includes(fact),
+      `dsh-jobs.md does not state ${JSON.stringify(fact)} — every correction must be written into the reading, not only into this check`,
     )
   }
 })
