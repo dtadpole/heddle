@@ -24,7 +24,8 @@ import { join } from 'node:path'
  * {
  *   "endpoints": {
  *     "plugboard-ds": { "baseUrl": "http://127.0.0.1:8790/ds", "model": "deepseek-flash" }
- *   }
+ *   },
+ *   "exclude": ["scripted"]
  * }
  * ```
  */
@@ -33,6 +34,13 @@ export interface LocalConfig {
   readonly endpoints?: Record<string, unknown>
   /** The endpoint a run uses when nothing else says. */
   readonly default?: string
+  /**
+   * Names this machine does not want in its endpoint list at all.
+   *
+   * The repository ships offline defaults so a fresh clone runs its checks; a person who only wants their own
+   * gateways says so here. Applied after every layer, so it can also hide an endpoint this same file declares.
+   */
+  readonly exclude?: readonly string[]
   /** Anything else the caller wants to read; passed through untouched. */
   readonly [key: string]: unknown
 }

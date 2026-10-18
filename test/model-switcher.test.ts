@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { defaultEndpoints, describeEndpoints } from '../src/endpoints.ts'
+import { defaultEndpoints, describeEndpoints, resolveEndpoints } from '../src/endpoints.ts'
 import { SessionStore, type SessionMeta } from '../src/session/store.ts'
 import { resolveTurnEffort, resolveTurnEndpoint, sessionRequestSelection } from '../src/server/web.ts'
 
@@ -170,6 +170,31 @@ test('the repository ships no machine-specific endpoint default', () => {
   assert.ok(
     defaultEndpoints().every((endpoint) => endpoint.kind === 'scripted'),
     'and it points at no network address at all',
+test('a local configuration can exclude the repository’s offline default from the catalogue', () => {
+  /**
+   * The repository's remaining default after the 2026-10-17 endpoint cleanup is the offline `scripted` fixture,
+   * which exists so a fresh clone runs its checks with no setup; it is not a backend a person chose. The local file
+   * needs a way to say "not in my selector" without the repository giving up that default, so `exclude` is applied
+   * after every layer has merged.
+   *
+   * The shape is asserted with the current defaults: the fixture is present unless excluded, and excluding it
+   * leaves only the operator's own endpoints. Another session removed `localhost` from the defaults, so the check
+   * names only what the merged tree actually ships.
+   */
+  const configured = [
+    { name: 'claude-opus', kind: 'anthropic-vertex' as const, baseUrl: 'http://127.0.0.1:1', project: 'p', region: 'global' },
+    { name: 'plugboard-d', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:2' },
+  ]
+  assert.deepEqual(defaultEndpoints().map((endpoint) => endpoint.name), ['scripted'], 'the only default is the offline fixture')
+  const all = resolveEndpoints(configured, [])
+  assert.deepEqual(all.map((endpoint) => endpoint.name), ['scripted', 'claude-opus', 'plugboard-d'], 'the fixture is offered by default')
+  const filtered = resolveEndpoints(configured, [], {}, ['scripted'])
+  assert.deepEqual(
+    filtered.map((endpoint) => endpoint.name),
+    ['claude-opus', 'plugboard-d'],
+    'excluding it leaves the operator’s catalogue only',
+  )
+})
 test('a switch records the reasoning level with the model, and a switch that names neither clears both', () => {
   /**
    * The level is part of the selection, not a second write: a session is run with one endpoint, one model and
