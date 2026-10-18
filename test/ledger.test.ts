@@ -487,7 +487,7 @@ test('session stats stay empty rather than zero where nothing was reported', () 
   assert.deepEqual(projectSessionStats(noUsage), { turns: 1, steps: 1 }, 'a frame with no usage leaves the usage absent')
 })
 
-test('session stats fold decode time and decoded tokens from each round\'s first-token and done timestamps', () => {
+test('session stats fold the generation span and decoded tokens of each round that reported them', () => {
   /**
    * DSH prints a session-wide tok/s from `decodeTokens / decodeMs`, where decode time is the gap between a
    * round's first streamed token and the message that closes it. Heddle's event log carries both halves — the
@@ -514,7 +514,7 @@ test('session stats fold decode time and decoded tokens from each round\'s first
     { type: 'turn/completed', at: at(1500), rounds: 1 },
   ]
   const stats = projectSessionStats(events)
-  assert.equal(stats.decodeMs, 700, 'two measurable rounds: 400ms + 300ms')
+  assert.equal(stats.generationMs, 900, 'two measurable rounds: request-to-done spans of 500ms + 400ms')
   assert.equal(stats.decodeTokens, 70, 'their reported output tokens: 50 + 20')
 })
 
@@ -525,6 +525,6 @@ test('decode time stays absent when no round reported tokens', () => {
     { type: 'assistant/chunk', at: '2026-10-17T00:00:00.500Z', chunk: { type: 'done', finishReason: 'stop' } },
   ]
   const stats = projectSessionStats(events)
-  assert.equal(stats.decodeMs, undefined, 'no tokens means no decode time to divide by')
+  assert.equal(stats.generationMs, undefined, 'no tokens means no generation time to divide by')
   assert.equal(stats.decodeTokens, undefined)
 })

@@ -147,12 +147,19 @@ export interface SessionStats {
   readonly steps: number
   readonly usage?: TokenUsage
   /**
-   * The session-wide decode timing behind the composer's `tok/s`: the sum, over every round that reported
-   * output tokens, of the gap between its first streamed token and the frame that closed it (`decodeMs`), and
-   * the tokens counted in those rounds (`decodeTokens`). Both absent until such a round exists — a rate needs
-   * a numerator and a denominator that were actually observed.
+   * The session-wide timing behind the composer's `tok/s`: the sum, over every round that reported output
+   * tokens, of the time from its request to the frame that closed it (`generationMs`), and the tokens counted
+   * in those rounds (`decodeTokens`). Both absent until such a round exists — a rate needs a numerator and a
+   * denominator that were actually observed.
+   *
+   * Measured 2026-10-18: DSH's projection divides the gap between a round's **first token and its closing
+   * frame**, which assumes the provider streams as it generates. Heddle's providers can buffer an answer and
+   * flush it in one burst (a real round showed a 2.5s request, then all deltas within 10ms), so that gap
+   * describes the socket, not the generation, and produced a nonsensical 38,000 tok/s. The round's whole span
+   * is the time the harness actually waited for those tokens, so that is the denominator this harness can
+   * honestly divide — with the divergence recorded in SESSION_STATS.md.
    */
-  readonly decodeMs?: number
+  readonly generationMs?: number
   readonly decodeTokens?: number
   /**
    * The prompt-side total of the **most recent** reported round, which is what the context share divides by
@@ -166,9 +173,9 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
   let steps = 0
   let usage: TokenUsage | undefined
   let lastPromptTokens: number | undefined
-  /** The current round's first streamed token, and the totals of the rounds that could be timed. */
-  let firstTokenAt: number | undefined
-  let decodeMs = 0
+  /** The current round's request time, and the totals of the rounds that could be timed. */
+  let roundStartedAt: number | undefined
+  let generationMs = 0
   let decodeTokens = 0
   const timeOf = (value: string | undefined): number | undefined => {
     if (value === undefined) return undefined
@@ -185,8 +192,8 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
       continue
     }
     if (event.type === 'model/request') {
-      /** A new round starts its own decode clock; a round that never streamed has nothing to time. */
-      firstTokenAt = undefined
+      /** A new round opens its own clock; a round that never reported tokens contributes nothing. */
+      roundStartedAt = timeOf(event.at)
       continue
     }
     if (event.type === 'assistant/chunk') {
@@ -198,19 +205,17 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
       }
       if (event.chunk?.type === 'done') {
         /**
-         * Only a round that reported tokens contributes a rate, and only when both ends of its decode window
-         * were recorded. DSH's projection makes the same two conditions; a rate with a missing denominator
-         * would be a number nobody measured.
+         * Only a round that reported tokens contributes a rate, and only when both ends of its span were
+         * recorded. A rate with a missing denominator would be a number nobody measured.
          */
         const outputTokens = event.chunk.usage?.outputTokens
-        if (firstTokenAt !== undefined && at !== undefined && outputTokens !== undefined) {
-          decodeMs += Math.max(0, at - firstTokenAt)
+        if (roundStartedAt !== undefined && at !== undefined && outputTokens !== undefined) {
+          generationMs += Math.max(0, at - roundStartedAt)
           decodeTokens += outputTokens
         }
-        firstTokenAt = undefined
+        roundStartedAt = undefined
         continue
       }
-      if (firstTokenAt === undefined && at !== undefined) firstTokenAt = at
     }
   }
   return {
@@ -218,7 +223,7 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
     steps,
     ...(usage !== undefined ? { usage } : {}),
     ...(lastPromptTokens !== undefined ? { lastPromptTokens } : {}),
-    ...(decodeTokens > 0 ? { decodeMs, decodeTokens } : {}),
+    ...(decodeTokens > 0 ? { generationMs, decodeTokens } : {}),
   }
 }
 

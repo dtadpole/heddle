@@ -3981,12 +3981,13 @@ async function refreshGoal() {
 }
 
 async function showSession(id) {
-  lastTurnUsage = null
-  lastTurnSeconds = 0
   sessionStats = null
   liveRounds = 0
   liveUsage = undefined
   liveTurns = 0
+  liveGenerationMs = 0
+  liveDecodeTokens = 0
+  liveRoundStartedAt = null
   updateStatusBar()
   current = id
   paintEmptyState()
@@ -4123,6 +4124,7 @@ events.addEventListener('session', (message) => {
   if (event.type === 'model/request') {
     runningSessions.add(payload.session)
     paintRunningMarks()
+    if (payload.session === (current ?? composerKey)) liveRoundStartedAt = performance.now()
     /** A round is one agent step: DSH's `steps` counts these, so the dock can count the running turn too. */
     if (payload.session === (current ?? composerKey)) {
       liveRounds += 1
@@ -4167,6 +4169,21 @@ events.addEventListener('session', (message) => {
    */
   if (event.type === 'assistant/chunk' && event.chunk.usage !== undefined) {
     liveUsage = addUsage(liveUsage, event.chunk.usage)
+    updateStatusBar()
+  }
+  if (event.type === 'assistant/chunk') {
+    if (event.chunk.type === 'done') {
+      /**
+       * A round's span closes at the frame that carries the provider's output tokens, which is what the durable
+       * fold also uses once the turn ends. A round without reported tokens is not timed here either.
+       */
+      const outputTokens = event.chunk.usage?.outputTokens
+      if (liveRoundStartedAt !== null && typeof outputTokens === 'number') {
+        liveGenerationMs += Math.max(0, performance.now() - liveRoundStartedAt)
+        liveDecodeTokens += outputTokens
+      }
+      liveRoundStartedAt = null
+    }
     updateStatusBar()
   }
   /**
@@ -5100,8 +5117,6 @@ async function runTurn(text, key) {
       } else if (name === 'done') {
         /** What the provider said the turn cost, and how long it took, if it said anything. */
         stopRequested = false
-        lastTurnUsage = payload.usage ?? null
-        lastTurnSeconds = (performance.now() - startedAt) / 1000
         liveRounds = 0
         liveUsage = undefined
         updateStatusBar()
@@ -5240,8 +5255,6 @@ function renderComposerState() {
  * Nothing is estimated: a bucket no provider frame reported leaves its phrase blank, which is what a blank
  * cell means everywhere else in this page.
  */
-let lastTurnUsage = null
-let lastTurnSeconds = 0
 /** The session's durable totals, from the same answer that carries its transcript. */
 let sessionStats = null
 /** Rounds of the turn running now, counted from `model/request`, and usage frames not yet in a durable fold. */
@@ -5253,6 +5266,14 @@ let liveUsage = undefined
  * turn, and counting rendered rows instead lags the other way. The sum is the figure a person expects.
  */
 let liveTurns = 0
+/**
+ * The rate's halves for the round in flight: when its request opened, the time to its done frame, and the
+ * output tokens that frame reported. Reset when the durable fold is re-read, so a finished turn is counted
+ * once — from the log, not twice.
+ */
+let liveGenerationMs = 0
+let liveDecodeTokens = 0
+let liveRoundStartedAt = null
 
 /** Add two usage values bucket by bucket, keeping a bucket no frame reported absent. */
 function addUsage(previous, next) {
@@ -5325,9 +5346,18 @@ function updateStatusBar() {
   if (turnsCell !== null) turnsCell.textContent = `${turns} turns`
   if (stepsCell !== null) stepsCell.textContent = `${steps} steps`
 
-  /** The rate needs the turn's own reported output and duration; DSH divides decode time, this divides wall time. */
-  const out = lastTurnUsage?.outputTokens
-  const rate = typeof out === 'number' && lastTurnSeconds > 0 ? formatRate(out / lastTurnSeconds) : null
+  /**
+   * The rate is `decodeTokens / generationMs` over the session's own log: one span per round from its request
+   * to the frame that closed it, and the output tokens that frame reported. The running round is added live;
+   * a re-read of the fold replaces both halves, so a finished turn is counted once. No reported tokens or no
+   * measured span leaves the phrase blank.
+   *
+   * The span is the round's whole generation wait rather than DSH's first-token→done gap, because these
+   * providers can buffer an answer and flush it in one burst; SESSION_STATS.md records that divergence.
+   */
+  const generationMs = (sessionStats?.generationMs ?? 0) + liveGenerationMs
+  const decodeTokens = (sessionStats?.decodeTokens ?? 0) + liveDecodeTokens
+  const rate = generationMs > 0 && decodeTokens > 0 ? formatRate(decodeTokens / (generationMs / 1000)) : null
   const tokensCell = cell('tokens')
   const rateSep = cell('rate-sep')
   if (tokensCell !== null) tokensCell.textContent = rate === null ? '' : `${rate} tok/s`
@@ -5388,6 +5418,9 @@ async function refreshSessionStats() {
     liveUsage = undefined
     liveRounds = 0
     liveTurns = 0
+    liveGenerationMs = 0
+    liveDecodeTokens = 0
+    liveRoundStartedAt = null
     updateStatusBar()
   } catch {
     // A stats read that fails leaves the last drawn figures rather than blanking the dock.

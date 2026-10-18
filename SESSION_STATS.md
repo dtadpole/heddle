@@ -416,3 +416,41 @@ timestamps exist.
 **Step back.** The objective holds and narrows usefully: no provider change, no new event — the projection
 gained a fold and the page will divide what it already receives. The landing rule applies: the rate must be
 visible on the deployed page, not only in a scripted check.
+
+### tok/s loop — cycle 2: the durable rate, and the denominator step back
+
+- **understand:** the reference folds `decodeMs` from **first streamed token to the closing message** and
+  divides the reported output tokens by it. Implemented literally, heddle printed `38,702 tok/s` on a live
+  session — because these providers buffer an answer and flush it in a burst. Measured in the session's own
+  log: a round opened at `03:44:08.855`, the first delta arrived at `03:44:11.415` (2.56s later), and the
+  tool-call and done frames followed within `10–40ms`. The DSH formula, applied to that record, measures the
+  socket, not the generation.
+- **step back (re-cut):** the denominator this harness can honestly provide is the **round's whole span**,
+  request → done: the time the harness actually waited for those tokens. The rate becomes
+  `decodeTokens / generationMs`, still only from rounds that reported output tokens, and still blank
+  otherwise. The divergence from DSH's decode-only denominator is recorded here, with its measurement, rather
+  than hidden in a heuristic.
+- **changed:** `src/server/ledger.ts` — the stats fold now sums `generationMs` (round span) beside
+  `decodeTokens`; `src/server/page.html` — the dock divides the durable fold plus the live round (the live
+  clock opens on `model/request` and closes on the done frame with its tokens), and the old
+  `lastTurnUsage`/`lastTurnSeconds` rate path is gone; `_verifiers_/80-web-ui/check-composer.mjs` — the dock
+  contract demands the rate **after a reload** and requires it to equal the backend fold's own
+  `decodeTokens / generationMs` formatted by the reference's rule.
+- **verify:** the contract failed before the wiring (`actual ''` against `'971 tok/s'`) and passes after; the
+  live page at `http://localhost:8082/` now prints `2 turns 12 steps · 123 tok/s · 154K tok · Cache hit 85% ·
+  2%` after a reload — a number in the reference's order of magnitude, from observed timestamps and tokens.
+  The rate is the ring's sibling, not a page memory.
+
+### tok/s loop — cycle 3: final audit and landing
+
+- **audit:** every figure's data path was re-checked after the change — turns/steps from the fold, rate from
+  `decodeTokens / generationMs`, total and cache share from the four usage buckets, context from
+  `lastPromptTokens` over a declared or discovered window. The rate's blank cases were re-measured: a round
+  with no reported tokens contributes to neither half, and a provider that reports nothing leaves the phrase
+  empty (asserted in the contract's bare-server case).
+- **landing:** the change is on `main` (this session commits there directly), `dist/` rebuilt, the main
+  daemon restarted from `/Users/zhenc/heddle/dist/cli.js`, and the deployment asserted by
+  `_verifiers_/96-deployment`: the serving process is this checkout's cli and the page at 8082 is this
+  checkout's built page byte for byte. No worktree branch was left unmerged.
+- **stop:** the full measurement yields no further fix row; the remaining difference (DSH's decode-only
+  denominator) is recorded above with the measurement that forced the re-cut.

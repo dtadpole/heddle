@@ -692,6 +692,24 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
     assert.equal(reloaded.turns, `${durableTurns} turns`, 'and the dock prints that count rather than a row count')
     assert.equal(reloaded.total, '2.1K tok', 'the cumulative total survives the reload')
     assert.equal(reloaded.context, '50%', 'and so does the context share')
+
+    /**
+     * The rate is the case this loop exists for: it used to live only in the page's memory of a turn it had
+     * just sent, so a reload erased it. It must now come from the session's own decode fold — and it must agree
+     * with that fold, because a rate the page invents is worse than a blank.
+     */
+    const expectedRate = await browser.evaluate(`(async () => {
+      const rows = await (await fetch('/api/sessions')).json()
+      const id = rows[0]?.id
+      const detail = id === undefined ? null : await (await fetch('/api/sessions/' + id)).json()
+      const stats = detail?.stats
+      if (!stats || !(stats.generationMs > 0) || !(stats.decodeTokens > 0)) return null
+      const value = stats.decodeTokens / (stats.generationMs / 1000)
+      const clamped = Math.max(0, value)
+      return clamped >= 10 ? String(Math.round(clamped)) : String(Math.round(clamped * 10) / 10)
+    })()`)
+    assert.ok(expectedRate !== null, 'the backend fold exposes decode time for the reloaded session')
+    assert.equal(reloaded.tokens, `${expectedRate} tok/s`, 'and the reloaded dock prints that durable rate')
   } finally {
     browser.close()
     await server.close()
