@@ -133,6 +133,19 @@ export function post(options: HttpOptions): Promise<WireResponse> {
   })
 }
 
+/**
+ * The endpoint's forwarding hop, when it has one.
+ *
+ * `proxy` is a fact about **where an endpoint is reachable from**, not about a wire shape, so every adapter
+ * passes it. Measured 2026-10-18: only the Anthropic publisher adapter did, so an `openai-responses` endpoint
+ * behind an enterprise forwarding agent sent its request **direct** to a gateway address that is routable only
+ * from the agent's side, and timed out on a call the agent answers in under a second. The field was documented
+ * on `EndpointConfig` the whole time; the two OpenAI-shaped adapters simply never read it.
+ */
+function hop(endpoint: Adapter['endpoint']): { readonly proxy?: string } {
+  return endpoint.proxy !== undefined ? { proxy: endpoint.proxy } : {}
+}
+
 /** A tool call assembled from the fragments a streaming provider sends. */
 export interface PartialToolCall {
   id: string
@@ -181,6 +194,7 @@ export function openAiChatAdapter(
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
       ...(endpoint.headers !== undefined ? { headers: endpoint.headers } : {}),
       ...(endpoint.timeoutMs !== undefined ? { timeoutMs: endpoint.timeoutMs } : {}),
+      ...hop(endpoint),
       stream: streaming,
       endpoint: endpoint.name,
       ...(signal !== undefined ? { signal } : {}),
@@ -245,14 +259,66 @@ export function openAiChatAdapter(
  * image form a Responses route accepts without the Files API, and it is what the recording double in
  * the browser contract asserts.
  */
-export function toResponsesContent(parts: readonly ContentPart[]): Record<string, unknown>[] {
+export function toResponsesContent(
+  parts: readonly ContentPart[],
+  role: 'user' | 'assistant' | 'developer' = 'user',
+): Record<string, unknown>[] {
+  /**
+   * The part's type depends on **who is speaking**, which is why the role is a parameter.
+   *
+   * Measured 2026-10-18 against a live Responses route: an assistant message whose text part was
+   * `input_text` was refused with `Invalid value: 'input_text'. Supported values are: 'output_text' and
+   * 'refusal'.` The shape names input and output apart, so a message replayed from a session is not the same
+   * part as a message being sent. Every turn after the first carries an assistant message, which is why this
+   * failed on a conversation rather than on a one-shot probe.
+   */
+  const textType = role === 'assistant' ? 'output_text' : 'input_text'
   return parts.flatMap((part): Record<string, unknown>[] => {
-    if (part.type === 'text') return [{ type: 'input_text', text: part.text }]
+    if (part.type === 'text') return [{ type: textType, text: part.text }]
     if (part.type === 'image' && part.data !== undefined) {
       return [{ type: 'input_image', image_url: `data:${part.mimeType};base64,${part.data}` }]
     }
     return []
   })
+}
+
+/**
+ * The Responses shape's `input` list, from a conversation.
+ *
+ * Three things this shape does that a message list does not carry, each measured against a live route on
+ * 2026-10-18 rather than read off a specification:
+ *
+ * - **A tool call is an item, not a content part.** `{type: 'function_call', call_id, name, arguments}` sits in
+ *   the list beside the messages. An adapter that dropped it ran a tool loop that could never continue.
+ * - **A tool result is an item too.** `{type: 'function_call_output', call_id, output}` replaces the `tool`
+ *   role, which this shape does not have.
+ * - **An assistant message with nothing to say is not sent.** A turn whose whole reply was a tool call has no
+ *   text, and an assistant item with empty content is refused; its `function_call` items carry the turn on
+ *   their own, which the route accepts.
+ */
+export function toResponsesInput(messages: GenerateRequest['messages']): Record<string, unknown>[] {
+  const items: Record<string, unknown>[] = []
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      items.push({
+        type: 'function_call_output',
+        call_id: message.toolCallId ?? '',
+        output: message.content
+          .filter((part) => part.type === 'text')
+          .map((part) => (part.type === 'text' ? part.text : ''))
+          .join('\n'),
+      })
+      continue
+    }
+    const role = message.role === 'system' ? 'developer' : message.role
+    const content = toResponsesContent(message.content, role)
+    if (content.length > 0) items.push({ role, content })
+    for (const part of message.content) {
+      if (part.type !== 'tool-call') continue
+      items.push({ type: 'function_call', call_id: part.id, name: part.name, arguments: part.arguments })
+    }
+  }
+  return items
 }
 
 /**
@@ -351,10 +417,7 @@ export function openAiResponsesAdapter(
   const effort = reasoningValue(endpoint, request)
   const body = {
     model: request.model ?? endpoint.model,
-    input: request.messages.map((message) => ({
-      role: message.role === 'system' ? 'developer' : message.role,
-      content: toResponsesContent(message.content),
-    })),
+    input: toResponsesInput(request.messages),
     store: false,
     stream: true,
     /** The Responses shape nests the level under `reasoning.effort`; the route's own error names the values. */
@@ -381,6 +444,7 @@ export function openAiResponsesAdapter(
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
       ...(endpoint.headers !== undefined ? { headers: endpoint.headers } : {}),
       ...(endpoint.timeoutMs !== undefined ? { timeoutMs: endpoint.timeoutMs } : {}),
+      ...hop(endpoint),
       stream: true,
       endpoint: endpoint.name,
       ...(signal !== undefined ? { signal } : {}),
@@ -411,7 +475,16 @@ export function openAiResponsesAdapter(
       } else if (type === 'response.output_item.added') {
         const item = parsed.item as { type?: string; id?: string; name?: string; call_id?: string } | undefined
         if (item?.type === 'function_call') {
-          calls.set(item.call_id ?? item.id ?? item.name ?? 'call', {
+          /**
+           * Keyed by the item's own `id`, not by its `call_id`, because those are **two different strings**
+           * and the argument deltas name the first. Measured 2026-10-18 against a live route: the item arrived
+           * as `id: fc_023f…, call_id: call_8xeHF…`, every `response.function_call_arguments.delta` carried
+           * `item_id: fc_023f…`, and keying the map by `call_id` made each delta miss its entry — so the tool
+           * call was emitted with the right id, an empty name and empty arguments, and the route refused the
+           * next request with `Invalid 'input[4].name': empty string`.
+           */
+          const key = String(item.id ?? item.call_id ?? 'call')
+          calls.set(key, {
             id: item.call_id ?? item.id ?? 'call',
             name: item.name ?? '',
             arguments: '',
@@ -424,10 +497,30 @@ export function openAiResponsesAdapter(
         calls.set(key, call)
       } else if (type === 'response.completed') {
         const response = parsed.response as
-          | { usage?: { input_tokens?: number; output_tokens?: number }; status?: string }
+          | {
+              usage?: { input_tokens?: number; output_tokens?: number }
+              status?: string
+              output?: { type?: string; call_id?: string; name?: string; arguments?: string }[]
+            }
           | undefined
         if (response?.usage) usage = openaiResponsesUsage(response.usage)
         finishReason = response?.status ?? 'stop'
+        /**
+         * The completed response restates every function call in full, so it is the authority for anything the
+         * event stream left incomplete. A name that arrived only here is still a name; preferring the deltas
+         * would turn a restated call into an empty one.
+         */
+        for (const item of response?.output ?? []) {
+          if (item.type !== 'function_call') continue
+          const id = String(item.call_id ?? '')
+          const known = [...calls.values()].find((call) => call.id === id)
+          if (known === undefined && id !== '') {
+            calls.set(id, { id, name: item.name ?? '', arguments: item.arguments ?? '' })
+          } else if (known !== undefined && known.name === '' && item.name !== undefined) {
+            known.name = item.name
+            if (known.arguments === '') known.arguments = item.arguments ?? ''
+          }
+        }
         for (const call of calls.values()) {
           yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
         }
@@ -670,8 +763,8 @@ export function anthropicVertexAdapter(
       body: call.body,
       headers: call.headers,
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
-      ...(endpoint.proxy !== undefined ? { proxy: endpoint.proxy } : {}),
       ...(endpoint.timeoutMs !== undefined ? { timeoutMs: endpoint.timeoutMs } : {}),
+      ...hop(endpoint),
       stream: true,
       endpoint: endpoint.name,
       ...(signal !== undefined ? { signal } : {}),
