@@ -378,26 +378,62 @@ const MENU_READ = `(() => {
   }
 })()`
 
-/** Open the menu from the seat with a click on the trigger. */
+/**
+ * A **trusted** pointer click on the element an expression names.
+ *
+ * The check's first version opened, drilled and chose with `element.click()`, and it was green while the deployed
+ * selector closed itself on every real click: a synthetic click does not run the focus default action, so the
+ * focus-loss path a mouse exercises never ran. The deployed page was measured with `Input.dispatchMouseEvent` on
+ * 2026-10-17 and the bug (`focusout` decided on a microtask, before the focus default action had handed focus to
+ * the clicked row) was fixed — but only because a person clicked it. Every interaction in this file is a
+ * protocol-level press/release now, and an option is scrolled into view first, because a person cannot click a row
+ * outside the menu's clipped area either.
+ */
+async function trustedClick(browser, expression, label) {
+  const raw = await browser.evaluate(`(() => {
+    const node = ${expression}
+    if (node === null || node === undefined) return null
+    node.scrollIntoView({ block: 'nearest' })
+    const rect = node.getBoundingClientRect()
+    const x = rect.left + rect.width / 2
+    const y = rect.top + rect.height / 2
+    const hit = document.elementFromPoint(x, y)
+    return JSON.stringify({ x, y, reaches: hit !== null && node.contains(hit) })
+  })()`)
+  assert.ok(raw !== null, `the element to click exists (${label})`)
+  const target = JSON.parse(raw)
+  assert.ok(target.reaches, `the element is hit-testable at its centre (${label})`)
+  await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y })
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+  await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1 })
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 40))
+  await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1 })
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, label.startsWith('option') || label.startsWith('cell') ? 500 : 300))
+}
+
+/** Open the menu from the seat with a real click on the trigger; the open seat owns focus, as DSH's does. */
 async function openMenu(browser) {
-  await browser.evaluate(`${SEAT}.click()`)
+  await trustedClick(browser, SEAT, 'seat')
   await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 5000)
+  assert.ok(await browser.waitFor(`document.activeElement === ${SEAT}`, 3000), 'the opened menu leaves focus on the seat')
 }
 
-/** Click one of the menu's root cells (`Model` or `Effort`). */
+/** Click one of the menu's root cells (`Model` or `Effort`) with a real click. */
 async function drill(browser, label) {
-  await browser.evaluate(
-    `[...document.querySelectorAll('#model-menu [role="menuitem"]')].find((cell) => cell.innerText.startsWith(${JSON.stringify(label)})).click()`,
+  await trustedClick(
+    browser,
+    `[...document.querySelectorAll('#model-menu [role="menuitem"]')].find((cell) => cell.innerText.startsWith(${JSON.stringify(label)}))`,
+    `cell ${label}`,
   )
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
 }
 
-/** Click one of the open pane's options by its visible name. */
+/** Click one of the open pane's options by its visible name with a real click. */
 async function choose(browser, text) {
-  await browser.evaluate(
-    `[...document.querySelectorAll('#model-menu [role="menuitemradio"]')].find((option) => option.innerText === ${JSON.stringify(text)}).click()`,
+  await trustedClick(
+    browser,
+    `[...document.querySelectorAll('#model-menu [role="menuitemradio"]')].find((option) => option.innerText === ${JSON.stringify(text)})`,
+    `option ${text}`,
   )
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
 }
 
 /** The session records the server would hand a reload. */
@@ -436,18 +472,32 @@ test('the seat and its two-level menu are DSH’s measured control', async (cont
     assert.equal(seat.cursor, 'pointer', 'the trigger is a control, so its cursor is a hand')
     assert.equal(seat.spans.find((span) => span.id === 'model-effort').hidden, true, 'the effort span exists but is hidden')
 
-    /** Hover paints DSH's 8% surface and clearing the pointer removes it. */
+    /**
+     * Hover paints DSH's 8% surface and clearing the pointer removes it.
+     *
+     * The pointer is parked away first and the state is **waited for** rather than read after a fixed delay: one
+     * run of this check read the background before the hover had been applied and called the surface missing — a
+     * flake in the instrument, measured while re-running it, not a UI defect. A hover is a state to wait for, not
+     * a race to sample.
+     */
     const at = await browser.evaluate(
       `(() => { const r = ${SEAT}.getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }) })()`,
     )
     const point = JSON.parse(at)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'none' })
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
     await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' })
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    assert.ok(
+      await browser.waitFor(`getComputedStyle(${SEAT}).backgroundColor !== 'rgba(0, 0, 0, 0)'`, 5000),
+      'moving onto the seat reaches the hover state',
+    )
     const hover = await browser.evaluate(`getComputedStyle(${SEAT}).backgroundColor`)
     assert.match(hover, /0\.08/, 'hover shows the reference’s 8% surface')
     await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'none' })
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
-    assert.equal(await browser.evaluate(`getComputedStyle(${SEAT}).backgroundColor`), 'rgba(0, 0, 0, 0)', 'and it clears')
+    assert.ok(
+      await browser.waitFor(`getComputedStyle(${SEAT}).backgroundColor === 'rgba(0, 0, 0, 0)'`, 5000),
+      'and leaving the seat clears it',
+    )
 
     /** Focus draws DSH's 2px ring in this theme's accent, as a box-shadow and not an outline. */
     await browser.evaluate(`${SEAT}.focus()`)

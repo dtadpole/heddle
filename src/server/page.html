@@ -5443,6 +5443,13 @@ function focusPaneStart() {
 }
 
 function openModelMenu() {
+  /**
+   * DSH's `show()` focuses its trigger before anything else, and the focus is load-bearing here: the menu's own
+   * keydown handler treats "the trigger is focused" as the state Tab enters the rows from. Opening the popup from
+   * a click gets that focus from the button's default action, but an opening that arrives any other way (a keyboard
+   * press, an assistive activation) would otherwise leave focus on body and the first Tab would walk the page.
+   */
+  modelTrigger.focus()
   modelPane = chosenEndpoint === null ? 'model' : 'root'
   modelQuery = ''
   modelHighlighted = null
@@ -5705,17 +5712,33 @@ modelSeat.addEventListener('keydown', (keyEvent) => {
 /**
  * Closing when focus leaves the seat is DSH's `onBlur`.
  *
- * The decision is deferred one microtask because a re-render (a drill, a selection) removes the focused row and
- * the browser then reports a `focusout` with no related target — closing the menu in that handler made every
- * keyboard drill close the menu instead of entering the pane. What matters is where focus is *after* the DOM has
- * settled: inside the seat keeps it open, anywhere else closes it.
+ * Two facts make this subtler than a one-line handler, and a real mouse found the second one after every synthetic
+ * check had passed:
+ *
+ * - a `focusout` whose `relatedTarget` is already inside the seat is not leaving: clicking a row moves focus from
+ *   the trigger to that row, and the menu must stay open;
+ * - a `focusout` may be reported **while a re-render removes the focused row** (a drill replaces the rows), with no
+ *   related target; the decision has to wait until the DOM has settled and the pane's own focus restore has run.
+ *
+ * The wait is a **macrotask, not a microtask**. Measured with a trusted `Input.dispatchMouseEvent` on the deployed
+ * page: the browser runs the microtask checkpoint between `focusout` and the following `focusin`, so a
+ * `queueMicrotask` handler still saw `document.activeElement === body` and closed the menu on every real click on a
+ * row — the menu opened and dismissed itself before the click could drill. A `setTimeout(0)` runs after the focus
+ * default action (and after a re-render's synchronous refocus), which is the state the decision needs.
  */
-modelSeat.addEventListener('focusout', () => {
-  queueMicrotask(() => {
+modelSeat.addEventListener('focusout', (focusEvent) => {
+  const next = focusEvent.relatedTarget
+  if (next instanceof Node && modelSeat.contains(next)) return
+  if (next !== null) {
+    closeModelMenu(false)
+    return
+  }
+  setTimeout(() => {
     const active = document.activeElement
     if (active instanceof Node && modelSeat.contains(active)) return
+    if (!modelMenu.hidden && modelMenu.contains(active)) return
     closeModelMenu(false)
-  })
+  }, 0)
 })
 
 /** The mode styles DSH's trigger clears once a selection's focus ring has served its purpose. */

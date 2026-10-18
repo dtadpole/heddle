@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { describeEndpoints } from '../src/endpoints.ts'
+import { describeEndpoints, resolveEndpoints } from '../src/endpoints.ts'
 import { SessionStore, type SessionMeta } from '../src/session/store.ts'
 import { resolveTurnEffort, resolveTurnEndpoint, sessionRequestSelection } from '../src/server/web.ts'
 
@@ -150,6 +150,39 @@ test('an endpoint summary carries the context window when it declares one', () =
   assert.equal(described.endpoints[0]?.contextWindow, 128000)
   const quiet = describeEndpoints([{ name: 'unstated', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:1' }])
   assert.equal('contextWindow' in (quiet.endpoints[0] ?? {}), false, 'and says nothing when the endpoint does not')
+})
+
+test('a local configuration can exclude the repository’s defaults from the catalogue', () => {
+  /**
+   * The owner's selector on 2026-10-17 showed `localhost` and `scripted` beside their three real endpoints. They
+   * are not in the owner's list by accident of their file alone: `scripted` was declared there for the offline
+   * fixture, and `localhost` is one of the repository's own defaults, which `resolveEndpoints` always merges in.
+   * A default exists so a fresh clone runs its checks with no setup; it is not a backend a person chose, so the
+   * local file needs a way to say "not in my selector" without the repository giving up its offline defaults.
+   *
+   * `exclude` is that word: names, applied after every layer has merged, defaulting to nothing. Excluding an
+   * endpoint the file itself declares is allowed too — that is how `scripted` leaves this machine's menu without
+   * deleting the fixture's definition from the file.
+   */
+  const configured = [
+    { name: 'claude-opus', kind: 'anthropic-vertex' as const, baseUrl: 'http://127.0.0.1:1', project: 'p', region: 'global' },
+    { name: 'plugboard-d', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:2' },
+  ]
+  const all = resolveEndpoints(configured, [])
+  assert.ok(all.some((endpoint) => endpoint.name === 'scripted'), 'the repository defaults are there by default')
+  assert.ok(all.some((endpoint) => endpoint.name === 'localhost'), 'including the loopback one')
+
+  const filtered = resolveEndpoints(configured, [], {}, ['localhost', 'scripted'])
+  assert.deepEqual(
+    filtered.map((endpoint) => endpoint.name),
+    ['claude-opus', 'plugboard-d'],
+    'excluding them leaves the operator’s catalogue only',
+  )
+  assert.deepEqual(
+    resolveEndpoints(configured, [], {}).map((endpoint) => endpoint.name),
+    ['scripted', 'localhost', 'claude-opus', 'plugboard-d'],
+    'and no exclusion keeps every layer, for the checks that use the offline fixture',
+  )
 })
 
 test('a switch records the reasoning level with the model, and a switch that names neither clears both', () => {

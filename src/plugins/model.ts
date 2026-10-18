@@ -72,7 +72,8 @@ export interface Config {
 export default function model(ctx: Context, config: Config = {}): void {
   const local = config.readLocalConfig === false ? null : readLocalConfig()
   const localEndpoints = (local?.config.endpoints ?? []) as readonly Partial<EndpointConfig>[]
-  const endpoints = resolveEndpoints(config.endpoints ?? [], localEndpoints)
+  const excluded = Array.isArray(local?.config.exclude) ? local.config.exclude : []
+  const endpoints = resolveEndpoints(config.endpoints ?? [], localEndpoints, process.env, excluded)
 
   const service = new ModelService(ctx, endpoints)
   // The configuration's nominated default is recorded on the service, so a caller that does not name an

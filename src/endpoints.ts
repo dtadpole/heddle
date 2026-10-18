@@ -125,6 +125,16 @@ export function resolveEndpoints(
   configured: readonly Partial<EndpointConfig>[] = [],
   local: readonly Partial<EndpointConfig>[] = [],
   env: NodeJS.ProcessEnv = process.env,
+  /**
+   * Endpoint names the operator does not want offered at all, applied after every layer has merged.
+   *
+   * The repository's defaults (`scripted`, and the loopback one when it ships) exist so a fresh clone runs its
+   * checks with no setup; they are not backends a person chose. Excluding them is a **user** decision, so it lives
+   * in the local configuration (`~/.heddle/heddle.json`) rather than in the repository, and it can also remove an
+   * endpoint the same file declares — which is how the offline fixture leaves one machine's selector without
+   * deleting its definition.
+   */
+  exclude: readonly string[] = [],
 ): readonly EndpointConfig[] {
   const byName = new Map<string, EndpointConfig>()
   for (const endpoint of defaultEndpoints()) byName.set(endpoint.name, endpoint)
@@ -147,6 +157,7 @@ export function resolveEndpoints(
   for (const endpoint of byName.values()) {
     if (endpoint.apiKeyFile !== undefined) byName.set(endpoint.name, materializeKey(endpoint))
   }
+  for (const name of exclude) byName.delete(name)
   return [...byName.values()]
 }
 
