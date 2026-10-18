@@ -5110,6 +5110,12 @@ events.addEventListener('session', (message) => {
   if (event.type === 'model/request') {
     runningSessions.add(payload.session)
     paintRunningMarks()
+    /**
+     * A turn this page did **not** start — a goal round continuing itself, the CLI, or another window — is a
+     * running turn all the same, and `model/request` is its start signal. Only the page's own send used to refresh
+     * the running row, so a goal-driven session showed no "Weaving" at all (the owner's "missing again").
+     */
+    refreshRunningStatus()
     if (payload.session === (current ?? composerKey)) liveRoundStartedAt = performance.now()
     /** A round is one agent step: DSH's `steps` counts these, so the dock can count the running turn too. */
     if (payload.session === (current ?? composerKey)) {

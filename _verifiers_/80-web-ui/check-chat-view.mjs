@@ -1748,8 +1748,52 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
       await browser.waitFor(`document.querySelectorAll("#log .turn").length > ${markFollow}`, 15_000),
       'and more content arrives',
     )
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    assert.ok((await distance()) <= 1, `and the follow is re-engaged (${await distance()}px away)`)
+    assert.ok(
+      await browser.waitFor('Math.round((() => { const log = document.getElementById("log"); return log.scrollHeight - log.scrollTop - log.clientHeight })()) <= 1', 15_000),
+      `and the follow is re-engaged (${await distance()}px away)`,
+    )
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a turn this page did not start still says Weaving', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner's "missing again": every goal round, CLI turn and other window's turn starts without this page's send,
+   * and the running row was only refreshed from the page's **own** submission. `model/request` is DSH's start signal
+   * for any turn, so the row must appear for a turn the page merely watched — and still leave when it ends.
+   */
+  const steps = () => [
+    ...Array.from({ length: 6 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.25' } } })),
+    { text: 'a watched answer' },
+  ]
+  const server = await startServer('weaving-external', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    /** One page-owned turn first, so the page has a session and the following turn is genuinely external. */
+    await sendMessage(browser, 'hello first')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 25_000), 'the first turn finished')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 10_000), 'the page shows its session')
+    const session = await browser.evaluate("fetch('/api/sessions').then((r) => r.json()).then((list) => list[0]?.id ?? null)")
+    assert.ok(typeof session === 'string' && session.startsWith('session-'), `the serving session is known (${session})`)
+    /**
+     * Start the turn from **outside** the composer: the same request the goal driver posts. The response stream is
+     * kept but not read here; the page's event stream is what must paint the row.
+     */
+    await browser.evaluate(`(() => { window.__externalTurn = fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'a goal round', session: ${JSON.stringify(session)} }) }); return true })()`)
+    assert.ok(
+      await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000),
+      'a turn started elsewhere shows the running row',
+    )
+    const label = await browser.evaluate('document.querySelector("[data-chat-running] .label")?.textContent ?? null')
+    assert.match(String(label), /^Weaving for \d+s ···$/, `with the reference's phrase (${label})`)
+    await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000)
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("a watched answer")', 15_000), 'and the watched turn answers')
   } finally {
     browser.close()
     await server.close()
