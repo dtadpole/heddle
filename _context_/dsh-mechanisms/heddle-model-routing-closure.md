@@ -208,6 +208,35 @@ Cycle 3 — the denominator a person reads
               sweeping the class, and a denominator that is wrong quietly is still wrong.
 ```
 
+## Where the loop stopped, measured 2026-10-18 after cycle 3
+
+| The claim | Standing |
+|---|---|
+| every adapter reports an end the loop understands | **met** — one real turn per endpoint kind: `meta-claude`, `plugboard-d`, `plugboard-x` and `meta-codex` all logged `finish=stop ended=None` |
+| an abnormal end says why | **met** — a budget-cut turn on `meta-codex` carried `round 1: max_output_tokens` |
+| every model in the catalogue is reachable and correctly described | **met** — five `meta-codex` models and five `meta-claude` models resolve their own gateway and window; a live turn ran on each of the five Meta deployments when they were introduced, and on `gpt-5.6-sol-ptu` after the per-model routing change |
+| the work is landed | **partly** — on `main` and pushed (`4625aea`, `0aaff60`, `5cb3f22`, with the cycle records in `195de01`); the deployment half is **open** |
+| the record is complete | **met** — an action-log entry per commit, input-log entries for the session's inputs |
+| types and suite | `npm run check` 0 errors; `npm test` 456 pass, 0 fail; page-contract 17/17 |
+
+**What is left is one act, and it is the owner's.** The daemon the owner opens
+(`http://127.0.0.1:8082/` → `127.0.0.1:3082`, launchd `com.dtadpole.heddle-web` running `~/heddle-deploy/dist/cli.js`)
+was gated behind an explicit instruction: fix first, restart after. The fixes are in; the restart has not been done
+and must not be. Until it is, the served page still divides by the endpoint window and still prints a stop notice
+for a healthy answer on two of the four endpoints — the defects are fixed in `dist`, not yet delivered.
+
+So the goal is **blocked on the owner**, not complete. Recording it any other way would be claiming a delivery this
+document's own `landed:` rule says has not happened.
+
+### What the restart needs, when the owner allows it
+
+```bash
+cd ~/heddle-deploy && git pull --ff-only && npm ci && npm run build
+launchctl bootout gui/$(id -u)/com.dtadpole.heddle-web
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dtadpole.heddle-web.plist
+# then: the served page carries CHAT_FOLLOW_SLACK_PX and windowFor, and one real turn through 3082 logs ended=None
+```
+
 ## Read next
 
 [`../../_skills_/full-loop-goal/INDEX.md`](../../_skills_/full-loop-goal/INDEX.md) for the procedure this follows,
