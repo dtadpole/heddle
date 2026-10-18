@@ -207,25 +207,3 @@ test('the model-visible policy statement names the mode and, under workspace-wri
   assert.match(sandboxPolicyStatement({ mode: 'danger-full-access', workspaceRoot: root, extraWritableRoots: [] }), /does not restrict file modifications/, 'full access says the sandbox does not restrict')
 })
 
-test('the runtime policy note is one surface message, replaced when the policy changes and silent when it has not', () => {
-  const store = new SessionStore(join(scratch, 'policy-note-sessions'))
-  const context = new ContextService(new Context(), store, { instructions: false })
-  const session = store.create({ cwd: workspace('policy-note-workspace') })
-  const readOnly = sandboxPolicyStatement({ mode: 'read-only', workspaceRoot: '/w', extraWritableRoots: [] })
-  const shared = sandboxPolicyStatement({ mode: 'workspace-write', workspaceRoot: '/w', extraWritableRoots: [] })
-
-  context.recordRuntimePolicy(session, readOnly)
-  const notes = () => store.read(session).filter((event) => event.type === 'context/note' && event.origin === 'sandbox-policy')
-  assert.equal(notes().length, 1, 'the first statement is one note')
-  assert.deepEqual(store.deriveMessages(session).filter((message) => message.role === 'user').map((message) => message.content.map((part) => (part.type === 'text' ? part.text : '')).join('')), [readOnly], 'and the model reads exactly that statement once')
-
-  context.recordRuntimePolicy(session, readOnly)
-  assert.equal(notes().length, 1, 'an unchanged policy writes nothing')
-  assert.equal(store.surface(session).nodes.length, 1, 'and costs no surface position')
-
-  context.recordRuntimePolicy(session, shared)
-  assert.equal(notes().length, 2, 'a changed policy is a new event')
-  assert.equal(store.surface(session).nodes.length, 1, 'that replaces the previous node rather than piling up beside it')
-  const texts = store.deriveMessages(session).filter((message) => message.role === 'user').map((message) => message.content.map((part) => (part.type === 'text' ? part.text : '')).join(''))
-  assert.deepEqual(texts, [shared], 'so the model reads one current policy, not two')
-})

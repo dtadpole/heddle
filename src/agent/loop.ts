@@ -218,14 +218,19 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      * to look for it, which is what this pair of readings does.
      */
     /**
-     * Keep the standing file policy in the surface before the round measures "what did the person say":
-     * DSH contributes the same statement before each request, and writing it on this side of the reading is what
-     * keeps the harness's own note from being mistaken for a steered message.
+     * Keep the runtime-context snapshot current before the round measures "what did the person say".
+     *
+     * This is DSH's pre-step assembly: the sandbox policy is a dynamic contribution, a changed snapshot is appended
+     * after retained history (so a mid-turn mode change reaches the active loop on its next request and stays
+     * legible afterwards), and an unchanged one costs no event. Writing it on this side of the reading is what keeps
+     * the harness's own snapshot from being mistaken for a steered message.
      */
-    ctx.context.recordRuntimePolicy(
-      options.session,
-      sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode))),
-    )
+    ctx.context.recordRuntimeContext(options.session, [
+      {
+        name: 'sandbox:policy',
+        text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode))),
+      },
+    ])
 
     let inputBefore = userInputSeqs(ctx, options.session)
 
