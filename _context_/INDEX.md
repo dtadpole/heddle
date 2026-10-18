@@ -1,6 +1,6 @@
 ---
 title: Context
-version: 1.1.0
+version: 1.2.0
 description: Gathered source material that grounds this project's design decisions.
 grounded_in:
   - source: human-authored
@@ -30,10 +30,12 @@ Two rules an instance follows:
 
 ## Contents
 
-- [`the reference-auth/`](the reference-auth/INDEX.md) — how an agent gets an authenticated the reference page
-  through the browser-use tool, including the hardware key tap for its hardware-backed 2FA.
 - [`dsh-mechanisms/`](dsh-mechanisms/INDEX.md) — how DeepSeek Harness implements streaming, context
   management, hooks, its Web UI and its token, and workspaces and sessions.
+
+Material that grounds the UI port but names internal systems is kept out of this public repository: it
+lives in the reflection repository's `_context_`
+([`../../reflection/_context_/INDEX.md`](../../reflection/_context_/INDEX.md)) instead.
 
 ## Read next
 
