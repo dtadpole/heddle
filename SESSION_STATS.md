@@ -623,3 +623,21 @@ and the duration formats are re-checked in the next cycle against the live app.
   deployment checkout and served by the launchd agent; `npm run check` has seven errors, all in a concurrent
   session's `test/web.test.ts`.
 - **stop:** the comparison yields no fix row beyond the recorded differences above; the goal stops here.
+
+## Context-breakdown fallback loop — the read-time measurement
+
+**Diagnosis (matches the owner's report):** DSH's context panel is a projection of the **current context
+pressure**, so it always has three sections; heddle rendered `contextBreakdown` recorded on requests made after
+the field existed, so every older session showed only the header. Measured on the live page: the newest session
+(an empty one created by a concurrent check) rendered "No context figures yet" — correct for an empty surface —
+and an older session would have had no recorded sections.
+
+**Fix:** `contextBreakdownWithFallback(recorded, measured)` in `src/server/ledger.ts` prefers the request's
+recorded sections (source `request`) and otherwise takes the same meter's measurement of the **current surface**
+(source `current`, `ctx.context.measure(handle, { tools: ctx.tools.describe() })`), exposed on the session stats
+with `contextBreakdownSource`; a surface that measures nothing leaves the sections and bar absent. Three
+failing-first unit tests pin the preference, the fallback and the empty case.
+
+**Landing:** committed on main, landed on the committed deployment checkout and served; `96-deployment` **3/3**.
+The live fallback could not be observed on the deployed page in this round because the page's auto-selected
+session was empty; the fallback is judged by its unit test and will be visible on any session with messages.
