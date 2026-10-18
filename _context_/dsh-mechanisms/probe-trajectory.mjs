@@ -66,6 +66,7 @@ const geometryExpression = `(() => {
     cells,
     rowHeight: rows[0] === undefined ? null : Math.round(rows[0].querySelector('td').getBoundingClientRect().height),
     panel: panel === undefined ? null : Math.round(panel.getBoundingClientRect().width),
+    sidebar: (() => { const aside = document.querySelector('aside, nav'); return aside === null ? null : Math.round(aside.getBoundingClientRect().width) })(),
   })
 })()`
 
@@ -108,37 +109,48 @@ async function measure(label, page, prepare) {
     node.scrollTop = 0
     return JSON.stringify({ scroller: node.id || String(node.className).slice(0, 16), scrollHeight: node.scrollHeight, positions })
   })()`))
-  // Collapse turns / collapse calls: the row counts after each toggle, then restore.
-  const collapse = json(await page.evaluate(`(() => {
+  // Collapse turns / collapse calls and search: staged, because both UIs render asynchronously and a
+  // same-task read would report "unchanged" for a state that simply had not painted yet.
+  const countRows = `(() => [...document.querySelectorAll('#tr-table tbody tr, table tbody tr')].filter((row) => row.querySelector('td') !== null).length)()`
+  const clickControl = (pattern) => `(() => {
     const buttons = [...document.querySelectorAll('button')]
-    const find = (pattern) => buttons.find((button) => pattern.test((button.textContent ?? '') + ' ' + (button.getAttribute('aria-label') ?? '') + ' ' + (button.getAttribute('title') ?? '')))
-    const rows = () => [...document.querySelectorAll('#tr-table tbody tr, table tbody tr')].filter((row) => row.querySelector('td') !== null).length
-    const out = { base: rows() }
-    for (const [name, pattern] of [['turns', /collapse turns/i], ['calls', /collapse calls/i]]) {
-      const button = find(pattern)
-      if (button === undefined) { out[name] = 'no control'; continue }
-      button.click()
-      const after = rows()
-      button.click()
-      out[name] = { after, restored: rows(), pressed: button.getAttribute('aria-pressed') }
-    }
-    return JSON.stringify(out)
-  })()`))
-  // Search: filter to a term and count what is left, then clear.
-  const search = json(await page.evaluate(`(() => {
+    const button = buttons.find((entry) => ${pattern}.test((entry.textContent ?? '') + ' ' + (entry.getAttribute('aria-label') ?? '') + ' ' + (entry.getAttribute('title') ?? '')))
+    button?.click()
+    return button === undefined ? 'no control' : 'clicked'
+  })()`
+  const collapse = { base: await page.evaluate(countRows) }
+  for (const [name, pattern] of [['turns', '/collapse turns/i'], ['calls', '/collapse calls/i']]) {
+    const clicked = await page.evaluate(clickControl(pattern))
+    await sleep(600)
+    collapse[name] = { clicked, after: await page.evaluate(countRows) }
+    await page.evaluate(clickControl(pattern))
+    await sleep(600)
+    collapse[name].restored = await page.evaluate(countRows)
+  }
+  const searchInput = `(() => {
     const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]')
-    if (input === null) return JSON.stringify({ error: 'no search input' })
-    const rows = () => [...document.querySelectorAll('#tr-table tbody tr, table tbody tr')].filter((row) => row.querySelector('td') !== null).length
-    const base = rows()
+    if (input === null) return 'no input'
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
     setter.call(input, 'not-a-real-term-xyz')
     input.dispatchEvent(new Event('input', { bubbles: true }))
-    const filtered = rows()
+    return 'typed'
+  })()`
+  const search = { base: await page.evaluate(countRows) }
+  search.typed = await page.evaluate(searchInput)
+  await sleep(700)
+  search.filtered = await page.evaluate(countRows)
+  await page.evaluate(`(() => {
+    const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]')
+    if (input === null) return
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
     setter.call(input, '')
     input.dispatchEvent(new Event('input', { bubbles: true }))
-    return JSON.stringify({ base, filtered, cleared: rows() })
-  })()`))
-  return { label, ready, rows: visible.length, heights: [...new Set(visible.map((row) => row.height))].slice(0, 3), hoverState, geometry, scroll, collapse, search }
+  })()`)
+  await sleep(700)
+  search.cleared = await page.evaluate(countRows)
+  // Sidebar width, at the same two viewports, because the content column depends on it.
+  const sidebar = (await page.evaluate(`(() => { const aside = document.querySelector('aside, nav'); return aside === null ? null : Math.round(aside.getBoundingClientRect().width) })()`))
+  return { label, ready, rows: visible.length, heights: [...new Set(visible.map((row) => row.height))].slice(0, 3), hoverState, geometry, scroll, collapse, search, sidebar }
 }
 
 const session = await openPage({ width: 1440, height: 900 })
