@@ -1841,3 +1841,103 @@ test('a failed turn leaves no session looking active, and no running row', async
     await server.close()
   }
 })
+
+test('the running clock survives navigating away and back', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner's report: navigating to another session and back restarted "Weaving for …" at 1s. The start time
+   * belonged to the **row**, and hiding the row — which is what navigation does — cleared it. It belongs to the
+   * **turn**: recorded when the turn's first `model/request` arrives, kept per session, dropped when that session's
+   * turn ends. This test leaves a turn running, navigates away, returns, and requires the clock to have moved on.
+   */
+  const steps = () => [
+    ...Array.from({ length: 60 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.25' } } })),
+    { text: 'the long weave finished' },
+  ]
+  const server = await startServer('weaving-navigation', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'start a long weave')
+    const secondsOn = async () =>
+      Number(/(\d+)s/.exec(String(await browser.evaluate('document.querySelector("[data-chat-running] .label")?.textContent ?? null')))?.[1] ?? 0)
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000), 'the turn is weaving')
+    assert.ok(await browser.waitFor('(document.querySelector("[data-chat-running] .label")?.textContent ?? "").includes("for 2s")', 20_000), 'the clock reaches 2s')
+    const session = await browser.evaluate("fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.running === true)?.id ?? null)")
+    assert.ok(typeof session === 'string' && session.startsWith('session-'), `the running session is known (${session})`)
+    const before = await secondsOn()
+    /**
+     * Navigate to another session in the same workspace — a real one, created through the same route the panel uses,
+     * because the row must leave the moment the panel shows a session that is not running.
+     */
+    await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(server.work)} }) })`)
+    const other = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)} }) }).then((r) => r.json()).then((body) => body.session?.id ?? body.id ?? null)`)
+    assert.ok(typeof other === 'string' && other.startsWith('session-'), `a second session exists (${other})`)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(other)})`)
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") === null', 15_000), 'the row leaves with the view')
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    /** And back to the session that is still running. */
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(session)})`)
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000), 'the row returns with the session')
+    const after = await secondsOn()
+    assert.ok(after >= before + 1, `the clock continued while away (${before}s before, ${after}s after)`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('the weaving clock comes from the server: it survives a reload and agrees with the list', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Where the clock's origin lives. The page used to start its own timer on first sight of an event, so a reload
+   * mid-turn restarted "Weaving for …" at 1s; the server now records when a running session's turn began and states
+   * it as `runningSince` on `/api/sessions`, and the page takes that as the origin. This test starts a turn from
+   * outside, checks the list's own timestamp against the row's label, reloads the page mid-turn and requires the
+   * clock to continue rather than restart.
+   */
+  const steps = () => [
+    ...Array.from({ length: 40 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.25' } } })),
+    { text: 'the long weave finished' },
+  ]
+  const server = await startServer('weaving-server-clock', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  const seconds = () =>
+    Number(/(\d+)s/.exec(String(document.querySelector('[data-chat-running] .label')?.textContent ?? null))?.[1] ?? 0)
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(server.work)} }) })`)
+    const session = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)}, new: true }) }).then((r) => r.json()).then((body) => body.session?.id ?? null)`)
+    assert.ok(typeof session === 'string' && session.startsWith('session-'), `a session exists (${session})`)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(session)})`)
+    await browser.waitFor('document.getElementById("session-title") !== null', 10_000)
+    await browser.evaluate(`(() => { window.__turn = fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'weave from outside', session: ${JSON.stringify(session)} }) }); return true })()`)
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000), 'the row is up')
+    assert.ok(await browser.waitFor('(() => { const label = document.querySelector("[data-chat-running] .label"); return label !== null && Number(/(\\d+)s/.exec(label.textContent)?.[1] ?? 0) >= 2 })()', 20_000), 'the row reaches 2s')
+    /** The list states when the turn began, and at the same moment the row's label is that elapsed time. */
+    const listed = await browser.evaluate("fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.running === true) ?? null)")
+    assert.ok(listed !== null && typeof listed.runningSince === 'string', `the list carries runningSince (${JSON.stringify(listed?.runningSince ?? null)})`)
+    const fromServer = Math.floor((Date.now() - Date.parse(listed.runningSince)) / 1000)
+    const shown = await browser.evaluate('Number(/(\\d+)s/.exec(document.querySelector("[data-chat-running] .label")?.textContent ?? "")?.[1] ?? 0)')
+    assert.ok(Math.abs(shown - fromServer) <= 1, `the row's seconds agree with the server's start (${shown}s row, ${fromServer}s list)`)
+    /** Reload mid-turn: the clock is the server's, so it must continue rather than restart at 1s. */
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 25_000), 'the row is up again after a reload')
+    const afterReload = await browser.evaluate('Number(/(\\d+)s/.exec(document.querySelector("[data-chat-running] .label")?.textContent ?? "")?.[1] ?? 0)')
+    assert.ok(afterReload >= 2, `the clock continued through the reload (${afterReload}s)`)
+    /** The completion is the server's fact too: the list says not running and when it completed, and the row is gone. */
+    assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000), 'the row leaves when the turn completes')
+    const finished = await browser.evaluate("fetch('/api/sessions').then((r) => r.json()).then((list) => list[0] ?? null)")
+    assert.equal(finished.running, false, 'the list says the session is not running')
+    assert.ok(typeof finished.turnCompletedAt === 'string', `the list states when the turn completed (${JSON.stringify(finished.turnCompletedAt ?? null)})`)
+    assert.ok(Date.parse(finished.turnCompletedAt) >= Date.parse(listed.runningSince), 'and the completion is after the start')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

@@ -3461,9 +3461,27 @@ function formatRunDuration(ms) {
   return `${hours > 0 ? `${hours}h` : ''}${total >= 60 ? `${minutes}m` : ''}${seconds}s`
 }
 
-let runStartedAt = null
+/**
+ * When each session's running turn started, keyed by session.
+ *
+ * One module-level start time was reset every time the row was hidden — and switching to another session hides it —
+ * so coming back to a session that had been weaving for a minute restarted at `1s` (the owner's report). The start
+ * belongs to the **turn**, not to the row: it is recorded when the turn's first `model/request` arrives (or when a
+ * page-side send starts, before the session id exists) and dropped only when that session's turn ends.
+ */
+const runningSince = new Map()
+let directPendingSince = null
 let runClock = null
 let runRow = null
+
+/** The start time for the session the row is about; recorded once and never reset by navigation. */
+function runningStartFor(key) {
+  const known = runningSince.get(key)
+  if (known !== undefined) return known
+  const startedAt = directTurnPending > 0 && directPendingSince !== null ? directPendingSince : Date.now()
+  if (key !== '') runningSince.set(key, startedAt)
+  return startedAt
+}
 
 /**
  * The running row, rebuilt from the state around it: shown while a turn runs, removed when it does not.
@@ -3483,10 +3501,9 @@ function refreshRunningStatus() {
       runRow.remove()
       runRow = null
     }
-    runStartedAt = null
     return
   }
-  if (runStartedAt === null) runStartedAt = Date.now()
+  const startedAt = runningStartFor(composerKey)
   if (runRow === null || !runRow.isConnected) {
     runRow = document.createElement('div')
     runRow.className = 'chat-running'
@@ -5195,19 +5212,46 @@ async function refreshSessions() {
    * that was not running at all could still show the running row.
    */
   if (Array.isArray(sessions)) {
-    const live = new Set(sessions.filter((entry) => entry !== null && typeof entry === 'object' && entry.running === true).map((entry) => String(entry.id ?? '')))
+    /** Running sessions, keyed by id, with the server's own start time for each — the clock's origin. */
+    const live = new Map()
+    for (const entry of sessions) {
+      if (entry === null || typeof entry !== 'object' || entry.running !== true) continue
+      live.set(String(entry.id ?? ''), entry)
+    }
     let changed = false
     for (const id of [...runningSessions]) {
       if (!live.has(id)) {
         runningSessions.delete(id)
+        runningSince.delete(id)
         changed = true
       }
     }
-    for (const id of live) {
-      if (id.length > 0 && !runningSessions.has(id)) {
+    for (const [id, entry] of live) {
+      if (id.length === 0) continue
+      if (!runningSessions.has(id)) {
         runningSessions.add(id)
         changed = true
       }
+      /**
+       * The server's `runningSince` is the clock's origin — it survives a reload and agrees across windows. A
+       * page-observed start is only the fallback for a server that predates the field.
+       */
+      const since = Date.parse(String(entry.runningSince ?? ''))
+      if (Number.isFinite(since)) {
+        if (runningSince.get(id) !== since) {
+          runningSince.set(id, since)
+          changed = true
+        }
+      } else if (!runningSince.has(id)) {
+        runningSince.set(id, Date.now())
+        changed = true
+      }
+      /**
+       * A completed turn is the server saying "not weaving any more". The row's render decision is `running`, and
+       * the completion also drops any remembered start so a later turn here begins its own clock.
+       */
+      const completed = Date.parse(String(entry.turnCompletedAt ?? ''))
+      if (Number.isFinite(completed) && completed >= since) runningSince.delete(id)
     }
     if (changed) {
       paintRunningMarks()

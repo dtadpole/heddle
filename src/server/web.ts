@@ -150,6 +150,16 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const running = new Map<string, number>()
   /** The handles a stop aborts, per session. */
   const controllers = new Map<string, Set<AbortController>>()
+  /** When each running session's turn began; one clock per server, read by the sessions route. */
+  const runningSince = new Map<string, number>()
+  /**
+   * When each session's last turn **completed**.
+   *
+   * `running` says a turn is going; this says one recently stopped and when. A page that missed the end — a reload,
+   * a dropped stream — can decide against a completion instead of guessing from its own event history, and the
+   * running row is not drawn for a session whose last turn completed after it started.
+   */
+  const completedAt = new Map<string, number>()
   // Tracked so shutdown can reach a connection whose handler is still awaiting a turn.
   const sockets = new Set<import('node:net').Socket>()
 
@@ -238,6 +248,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       subscribers,
       running,
       controllers,
+      runningSince,
+      completedAt,
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
@@ -315,6 +327,17 @@ interface RequestState {
    * DSH refuses a steer whose turn has ended, and this is the same question about the same fact.
    */
   readonly running: Map<string, number>
+  /**
+   * When each running session's turn began, in epoch milliseconds.
+   *
+   * The running count says **whether** a turn is going; the running row's clock needs **since when**, and that must
+   * be the server's fact rather than the page's first sighting of an event. A page that reloads mid-turn, or opens on
+   * a turn another window started, otherwise restarts the clock at 1s (measured: the owner saw exactly that, and
+   * navigating away and back reset it before this existed).
+   */
+  readonly runningSince: Map<string, number>
+  /** When each session's last turn completed, in epoch milliseconds. */
+  readonly completedAt: Map<string, number>
   /**
    * The abort handle of each running turn, per session.
    *
@@ -634,7 +657,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * "Weaving" row reconcile against. A page can miss the end of a turn (an error event, a reload mid-turn, a
      * dropped stream); without an authoritative answer that miss became a session that never stops looking active.
      */
-    const sessions = ctx.session.list().map((entry) => ({ ...entry, running: (state.running.get(entry.id) ?? 0) > 0 }))
+    const sessions = ctx.session.list().map((entry) => {
+      const since = state.runningSince.get(entry.id)
+      const completed = state.completedAt.get(entry.id)
+      return {
+        ...entry,
+        running: (state.running.get(entry.id) ?? 0) > 0,
+        ...(since !== undefined ? { runningSince: new Date(since).toISOString() } : {}),
+        ...(completed !== undefined ? { turnCompletedAt: new Date(completed).toISOString() } : {}),
+      }
+    })
     respond(response, 200, 'application/json', `${JSON.stringify(sessions, null, 2)}\n`)
     return
   }
@@ -2168,6 +2200,8 @@ export function sessionRequestSelection(
    * possible, and a set would clear the mark for a session that is still running.
    */
   state.running.set(handle.id, (state.running.get(handle.id) ?? 0) + 1)
+  /** The clock's origin, recorded once per running session: the first turn to run here owns it. */
+  if (!state.runningSince.has(handle.id)) state.runningSince.set(handle.id, Date.now())
   /**
    * The turn's abort handle, registered before the stream opens so a stop arriving immediately after the
    * request still finds it. The `finally` below removes it either way, which is what keeps a finished
@@ -2264,7 +2298,11 @@ export function sessionRequestSelection(
     unsubscribe()
     const left = (state.running.get(handle.id) ?? 1) - 1
     if (left > 0) state.running.set(handle.id, left)
-    else state.running.delete(handle.id)
+    else {
+      state.running.delete(handle.id)
+      state.runningSince.delete(handle.id)
+      state.completedAt.set(handle.id, Date.now())
+    }
     state.clients.delete(response)
     if (!response.writableEnded && !response.destroyed) response.end()
   }
