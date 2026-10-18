@@ -344,6 +344,9 @@ where an endpoint declares no window but its model list reports one and the gaug
   ([heddle-stats-dock-context-discovered.png](_context_/dsh-mechanisms/heddle-stats-dock-context-discovered.png)).
   The machine config now declares only the window Anthropic cannot report (`claude-opus`, via configuration),
   and the two plugboard routes are discovered.
+- **suites at the cycle's close:** composer **13/13**, `npm run check` **0 errors**, `npm test` **331
+  passing**, `npm run build` succeeded, and the full verifier sweep is **15/15** — including
+  `70-workspaces-sessions` at 43 checks, which the concurrent session finished in the same window.
 - **found for cycle 3:** the turns figure is counted from rendered user rows, so a page that has not finished
   drawing history can show `0 turns` beside `31 steps` (seen in the live probe). The durable `stats.turns` is
   the right source, with the live turn added — cycle 3's fix row.
