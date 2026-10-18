@@ -130,6 +130,36 @@ The owner reported three things after the cursor fix, and each had a different c
 
 **One regression was mine and it was worse than the three reports:** moving the age into the slot left a `const rowRight` declared *after* its first use — a TDZ error that threw for **every session row**, so branches rendered but their sessions vanished. It was found by capturing the page's `window.onerror` inside the probe, and the lesson is in the skill: a render that throws looks exactly like missing data.
 
+### Cycle 2 of the three-defect goal — the inventory probe (2026-10-17)
+
+**Research.** The three fixes were in place and the skill had just been rebuilt around a coverage matrix, so this cycle
+ran the **DOM-derived inventory** it now prescribes as a check rather than as advice.
+
+**Coverage.** Inventory of every visible interactive element (buttons, links, summaries, inputs, text areas, tabs,
+treeitems, focusables) on the running UI for: cursor against its state, hit-test at the centre, clipping by any ancestor;
+all three menus this page draws for `position`, opacity, viewport fit and a glyph per item; a long name against the row's
+controls; and the page's uncaught errors. Not measured this cycle: the reference's own inventory for comparison (the
+browser MCP is gone from this session, so DSH could not be driven; the reference numbers come from the earlier cycles).
+
+**What the measurement found — two fix rows.**
+
+1. **`Access mode` reported `cursor: default`.** It is a `<button>` with **no click handler**: an informational chip that
+   looked like a control. DSH's access control opens a mode menu, which this UI has no mechanism for. Fixed by marking it
+   `data-inert` in the page with the reason recorded — an inert chip keeps the arrow, an acting control is a hand — and
+   the inventory skips it deliberately rather than by exception.
+2. **The probe itself was wrong twice**: resize separators are `col-resize`, not pointers; and the controls the UI reveals
+   on hover are `opacity: 0; pointer-events: none`, so a hit-test at their centre correctly misses them. The probe now
+   knows both, which is the difference between an inventory that reports real defects and one that reports its own
+   assumptions.
+
+**Evidence.** After the fixes, the check passes: 40 part-7 checks, 309 unit tests, and the inventory reports no wrong
+cursor, no covered control, no clipped control, all three menus `fixed`, on screen, opaque and glyph-complete, the long
+name stopping before the controls, and no page errors. The invariant the structural change of cycle 1 could have broken —
+rows still render, hover still reveals, selection still paints — is asserted by the same check and the ones around it.
+
+**Verdict.** The three defects the owner reported have no fix row left, and the inventory that would catch their siblings
+now runs on every verification of this part.
+
 ## The three-cycle loop
 
 ### Cycle 1 — the view ring and the user turn (2026-10-17)

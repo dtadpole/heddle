@@ -1021,8 +1021,16 @@ test('a folder opens and closes with the same control, including a leaf with not
     await browser.goto(live.url)
     await browser.waitFor(`document.querySelectorAll("#tree .row").length > 0`, 20_000)
 
-    // The root is opened by clicking its **row**, which is the only control a folder has now.
-    await browser.evaluate('document.querySelector("#tree .row").click()')
+    /**
+     * The root is opened by clicking its **row**, which is the only control a folder has now — but only when it says
+     * it is closed. The page opens the first workspace on a first visit (DSH does, measured 2026-10-17), so an
+     * unconditional click here would close the branch it meant to open and the folders below would never appear.
+     */
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
     await browser.waitFor(`document.querySelectorAll('#tree li[data-kind="type"]').length > 0`, 20_000)
 
     /**
@@ -2894,6 +2902,178 @@ test('a running session says so before its name, and a workspace row offers the 
     assert.equal(result.whileRunning.beforeLabel, true, 'and says it before its name')
     assert.match(String(result.whileRunning.colour), /173, 178, 184/, `in DSH's muted body colour\nsaw: ${result.whileRunning.colour}`)
     assert.equal(result.after, null, 'and the word leaves when the session stops')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('the interactive inventory is cursor-bearing, hit-testable, unclipped and glyph-complete', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-inventory')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, made.stderr)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rowFor = (label) => [...document.querySelectorAll('#tree .row')].find((row) => row.querySelector('.label')?.textContent === label)
+        /** Levels are opened only if closed: a blind click closes one the page had already opened. */
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rowFor(label)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
+        for (let attempt = 0; attempt < 30 && document.querySelectorAll('#tree .row').length === 0; attempt += 1) await wait(150)
+        const first = document.querySelector('#tree .row')
+        if (first === null) return JSON.stringify({ error: 'the tree drew no rows' })
+        await ensureOpen(first.querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
+
+        /**
+         * The inventory probe from \`_skills_/ui-parity-audit\`: every element a person can point at, with the four things
+         * this UI has got wrong before — its cursor, whether a hit-test at its centre lands on it, whether an ancestor
+         * clips it, and (for menus) whether every item carries a mark.
+         */
+        const clips = (element) => {
+          const rect = element.getBoundingClientRect()
+          let current = element.parentElement
+          while (current !== null) {
+            const style = getComputedStyle(current)
+            if (/auto|scroll|hidden|clip/.test(style.overflowX + style.overflowY)) {
+              const outer = current.getBoundingClientRect()
+              if (rect.left < outer.left - 1 || rect.right > outer.right + 1 || rect.top < outer.top - 1 || rect.bottom > outer.bottom + 1) return true
+            }
+            current = current.parentElement
+          }
+          return false
+        }
+        const inventory = () => [...document.querySelectorAll(
+          'button, a[href], summary, input, textarea, [role="tab"], [role="treeitem"], [tabindex]:not([tabindex="-1"])',
+        )].filter((element) => {
+          const rect = element.getBoundingClientRect()
+          return rect.width > 0 && rect.height > 0
+        }).map((element) => {
+          const rect = element.getBoundingClientRect()
+          const style = getComputedStyle(element)
+          const centre = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          const disabled = element.disabled === true || element.getAttribute('aria-disabled') === 'true'
+          const typing = element.tagName === 'INPUT' || element.tagName === 'TEXTAREA'
+          /** A separator resizes; a control marked data-inert reports a state rather than acting. */
+          const separator = element.getAttribute('role') === 'separator'
+          const inert = element.getAttribute('data-inert') === 'true'
+          return {
+            tag: element.tagName.toLowerCase(),
+            role: element.getAttribute('role'),
+            name: (element.getAttribute('aria-label') ?? (element.textContent || '').trim()).slice(0, 40),
+            cursor: style.cursor,
+            expectedCursor: disabled || inert ? 'default' : separator ? 'col-resize' : typing ? 'text' : 'pointer',
+            hitTest: centre === null ? null : centre === element || element.contains(centre),
+            clipped: clips(element),
+            disabled,
+            /** A control the UI reveals on hover is deliberately not hit-testable while it is invisible. */
+            interactive: style.pointerEvents !== 'none' && Number(style.opacity) > 0.05 && style.visibility !== 'hidden',
+          }
+        })
+
+        /** Open each menu this page draws, one at a time, and read its own box and its items' marks. */
+        const menuReport = async (triggerSelector, scope) => {
+          const trigger = document.querySelector(triggerSelector)
+          if (trigger === null) return { error: 'no trigger ' + triggerSelector }
+          trigger.click(); await wait(250)
+          const menu = document.querySelector(scope + ' .menu:not([hidden])')
+          if (menu === null) return { error: 'did not open' }
+          const rect = menu.getBoundingClientRect()
+          const style = getComputedStyle(menu)
+          const items = [...menu.querySelectorAll('button')]
+          const report = {
+            position: style.position,
+            background: style.backgroundColor,
+            insideViewport: rect.left >= 0 && rect.top >= 0 && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight,
+            items: items.map((item) => ({ label: (item.textContent || '').trim().slice(0, 30), glyph: item.querySelector('svg') !== null })),
+          }
+          document.dispatchEvent(new MouseEvent('click', { bubbles: true })); await wait(150)
+          return report
+        }
+        const menus = {
+          viewOptions: await menuReport('#view-options button', '#view-options'),
+          sessionHeader: await menuReport('#session-more button', '#session-head'),
+        }
+        if (document.querySelector('#tree .row .menu-wrap > button') !== null) {
+          menus.sessionRow = await menuReport('#tree li[data-kind="session"] .menu-wrap > button', '#tree')
+        }
+
+        /** A long name must not reach the controls: the row's right-hand slot reserves its width. */
+        const longName = (() => {
+          const li = document.querySelector('#tree li[data-kind="session"]')
+          if (li === null) return null
+          const row = li.querySelector(':scope > .row')
+          const label = row.querySelector('.label')
+          const tools = row.querySelector('.row-tools')
+          const original = label.textContent
+          label.textContent = 'a session whose name is long enough to reach the right edge of the row and keep going'
+          void label.offsetWidth
+          const labelRight = Math.round(label.getBoundingClientRect().right)
+          const toolsLeft = Math.round(tools.getBoundingClientRect().left)
+          label.textContent = original
+          return { labelRight, toolsLeft, overlaps: labelRight > toolsLeft }
+        })()
+
+        return JSON.stringify({ inventory: inventory(), menus, longName, pageErrors: window.__probeErrors ?? [] })
+      })().then((value) => JSON.stringify(value))`, 30_000),
+    )
+    const result = JSON.parse(reading)
+    assert.equal(result.error, undefined, `the probe reached the page\nsaw: ${JSON.stringify(result)}`)
+
+    /** Every enabled, non-typing control announces itself to a mouse as a hand; a disabled one keeps the arrow. */
+    const wrongCursors = result.inventory.filter((item) => item.cursor !== item.expectedCursor)
+    assert.deepEqual(wrongCursors, [], `every interactive element has the cursor its state promises\nsaw: ${JSON.stringify(wrongCursors)}`)
+
+    /** Nothing a person can actually click is covered by another layer at its own centre. */
+    const covered = result.inventory.filter((item) => item.interactive === true && item.hitTest === false)
+    assert.deepEqual(covered, [], `no enabled control is covered at its centre\nsaw: ${JSON.stringify(covered)}`)
+
+    /** Nothing a person can click is cut by an ancestor's overflow. */
+    const clipped = result.inventory.filter((item) => item.clipped === true)
+    assert.deepEqual(clipped, [], `no interactive element is clipped by an ancestor\nsaw: ${JSON.stringify(clipped)}`)
+
+    /** Every menu floats in viewport coordinates, stays on screen, is opaque and marks each item. */
+    for (const [name, menu] of Object.entries(result.menus)) {
+      assert.equal(menu.error, undefined, `the ${name} menu opens\nsaw: ${JSON.stringify(menu)}`)
+      assert.equal(menu.position, 'fixed', `the ${name} menu floats in viewport coordinates\nsaw: ${JSON.stringify(menu)}`)
+      assert.equal(menu.insideViewport, true, `the ${name} menu is wholly on screen`)
+      assert.equal(menu.background, 'rgb(35, 35, 36)', `the ${name} menu has an opaque surface`)
+      assert.ok(menu.items.length > 0, `the ${name} menu has items`)
+      assert.ok(menu.items.every((item) => item.glyph === true), `every ${name} item carries a glyph\nsaw: ${JSON.stringify(menu.items)}`)
+    }
+
+    /** A long name ellipsizes before the controls, never underneath them. */
+    assert.equal(result.longName.overlaps, false, `a long name stops before the controls\nsaw: ${JSON.stringify(result.longName)}`)
+
+    /** And the page threw nothing while all of that was measured. */
+    assert.deepEqual(result.pageErrors, [], `the page reported no errors\nsaw: ${JSON.stringify(result.pageErrors)}`)
   } finally {
     browser?.close()
     live?.kill()

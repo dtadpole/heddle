@@ -1804,7 +1804,12 @@
       -->
       <div id="prompt-tools">
         <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" title="Insert a file path">+</button>
-        <button type="button" id="access" aria-label="Access mode" title="the sandbox mode this server runs under">Access</button>
+        <!--
+          What sandbox mode this server runs under. It **reports** the mode; DSH's own access control opens a menu to change
+          it, which this UI has no mechanism for — so this is an informational chip rather than a control, and
+          `data-inert` says so to the inventory check that looks for dead buttons.
+        -->
+        <button type="button" id="access" data-inert="true" aria-label="Access mode" title="the sandbox mode this server runs under">Access</button>
         <div id="model-seat">
           <button type="button" id="model-trigger" aria-haspopup="menu" aria-expanded="false" title="the model that answers this session">
             <span id="model-label">model</span>
