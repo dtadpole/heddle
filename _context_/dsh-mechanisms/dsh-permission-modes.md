@@ -321,13 +321,12 @@ Every instrument, from a clean build of this branch:
 - `_verifiers_/75-permission-sandbox/verify.sh` — 7 checks (5 three-mode + 2 session-mode), verdict 0.
 - `_verifiers_/80-web-ui/verify.sh` — 11 check files / 39 checks, exit 0, including the four-test
   access contract.
-- Every other verifier under `_verifiers_/`, because the access mode is a framework change: **12
-  verdict 0, 1 verdict 3, 1 verdict 1**. The `3` is `10-llm-backends`, the real-endpoint probe whose
-  unjudged answer is the documented exception when no backend is configured. The `1` is
-  `88-file-preview`'s "an html document is previewed as a page" — reproduced on a pristine checkout
-  of the base commit, so it is another workstream's pre-existing red (file preview), named here and
-  not edited under. `_tools_/*/_tests_/*/unit.test.mjs` — 35 pass. The convention linter over the
-  worktree — 68 folders, 0 errors, 0 warnings.
+- Every other verifier under `_verifiers_/`, because the access mode is a framework change: **14
+  verdict 0, 1 verdict 1, 0 unjudged** on this run. The one red is `88-file-preview`'s "an html
+  document is previewed as a page" — reproduced from a pristine build of the merge base (`19bab86`),
+  so it is another workstream's pre-existing red (file preview), named here and not edited under.
+  `_tools_/*/_tests_/*/unit.test.mjs` — 35 pass. The convention linter over the worktree — 68
+  folders, 0 errors, 0 warnings.
 
 ### step back
 
