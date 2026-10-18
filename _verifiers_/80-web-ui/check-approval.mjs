@@ -189,3 +189,43 @@ test('Reject answers the card, and the denied call stays undone', async (context
     await server.close()
   }
 })
+
+test('Stop ends a turn that is waiting on an approval, instead of leaving it stuck', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner's report: approving the card seemed to change nothing, and then Stop did nothing either — the turn sat
+   * waiting. The two are the same defect: the escalation's approval ask never carried the call's abort signal, so
+   * Stop could not settle it and the wait ran to its five-minute timeout. DSH's approval service races the signal
+   * (`dsh-user-approval.decide` answers `cancelled` on abort), and this proves the same here: a card is showing, the
+   * person presses Stop, and the turn ends in seconds with nothing executed.
+   */
+  const server = await startServer('stop', escalationSteps)
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    await sendMessage(browser, 'write outside the workspace')
+    assert.ok(await browser.waitFor('document.getElementById("approval-card").hidden === false', 20_000), 'the approval card appears')
+
+    /** Stop while the question is open: the abort must answer the ask, not wait for its timeout. */
+    const started = Date.now()
+    await browser.evaluate('document.getElementById("stop").click()')
+    assert.ok(
+      await browser.waitFor(
+        'document.getElementById("approval-card").hidden === true && document.getElementById("send").hidden === false',
+        10_000,
+      ),
+      'Stop ends the turn and the card goes away',
+    )
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 5_000, `the stop took ${elapsed}ms, not the answer timeout`)
+    assert.equal(existsSync(server.outsidePath), false, 'and the stopped call ran nothing')
+
+    /** The question is gone from the server too: a reload has nothing to repaint. */
+    const pending = await request(server, '/api/approvals').then((response) => response.json())
+    assert.deepEqual(pending.requests, [], 'no question is left waiting after the stop')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

@@ -58,11 +58,25 @@ export interface EscalationRequest {
   /** The family's noun for the escalated action: `command` for a shell, `operation` for a file mutation. */
   readonly subject: 'command' | 'operation'
   readonly session?: string
+  /**
+   * The call's own abort signal, so a Stop settles the question instead of waiting out its timeout.
+   *
+   * DSH's approval service (`dsh-user-approval`, `decide`) returns `cancelled` when the request's signal aborts, and
+   * starts cancelled when it already is; heddle's service handles the signal but the escalation never passed one,
+   * which left a Stop unable to end a turn waiting on a card.
+   */
+  readonly signal?: AbortSignal
 }
 
 /** The minimal approval channel the escalation needs; the tool layer supplies the real service behind it. */
 export interface EscalationApproval {
-  request(options: { readonly tool: string; readonly reason: string; readonly displayReason: string; readonly session?: string }): Promise<EscalationOutcome>
+  request(options: {
+    readonly tool: string
+    readonly reason: string
+    readonly displayReason: string
+    readonly session?: string
+    readonly signal?: AbortSignal
+  }): Promise<EscalationOutcome>
 }
 
 /** The refusal sentences a person and the model read, in DSH's shape. */
@@ -105,6 +119,7 @@ export async function approveEscalation(request: EscalationRequest, approval: Es
     reason: `escalate sandbox to ${target}: ${String(request.justification)}`,
     displayReason: `Allow this ${request.subject} with ${target} permissions: ${String(request.justification)}`,
     ...(request.session !== undefined ? { session: request.session } : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
   })
   if (outcome === 'allowed-once') return target
   const refusal = refusalFor(outcome, target, request.effectiveMode)

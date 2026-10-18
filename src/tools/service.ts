@@ -232,6 +232,8 @@ export class ToolRegistry extends Service {
             justification,
             subject: name === 'bash' ? 'command' : 'operation',
             ...(context.session !== undefined ? { session: context.session.id } : {}),
+            /** A Stop must end this wait too: the approval service settles it as cancelled on abort. */
+            ...(context.signal !== undefined ? { signal: context.signal } : {}),
           },
           { request: (options) => this.approvals.request(options) },
         )

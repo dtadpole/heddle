@@ -26,11 +26,23 @@ after(() => rmSync(scratch, { recursive: true, force: true }))
 
 /** An approval channel whose answers are scripted, so the ladder is judged without a UI. */
 function approver(outcomes: readonly ('allowed-once' | 'rejected' | 'cancelled' | 'unavailable')[]) {
-  const asked: { readonly tool: string; readonly reason: string; readonly displayReason: string; readonly session?: string }[] = []
+  const asked: {
+    readonly tool: string
+    readonly reason: string
+    readonly displayReason: string
+    readonly session?: string
+    readonly signal?: AbortSignal
+  }[] = []
   let index = 0
   return {
     asked,
-    request: async (options: { readonly tool: string; readonly reason: string; readonly displayReason: string; readonly session?: string }) => {
+    request: async (options: {
+      readonly tool: string
+      readonly reason: string
+      readonly displayReason: string
+      readonly session?: string
+      readonly signal?: AbortSignal
+    }) => {
       asked.push(options)
       const outcome = outcomes[index] ?? 'unavailable'
       index += 1
@@ -75,6 +87,57 @@ test('the three refusal outcomes all leave the call where it was', async () => {
       `${outcome} refuses the escalation with its own sentence`,
     )
   }
+})
+
+test('a Stop settles a waiting question: the ask carries the signal, and an abort answers it', async () => {
+  /**
+   * DSH's `dsh-user-approval` races the request's signal in `decide()`: an abort answers `cancelled` and an
+   * already-aborted signal starts there. Heddle's service did this too, but the escalation never passed the signal —
+   * so a Stop could not end a turn waiting on a card and the turn sat until the ask's timeout.
+   */
+  const controller = new AbortController()
+  const captured = approver([])
+  const pending = approveEscalation(
+    {
+      tool: 'bash',
+      requestedMode: 'danger-full-access',
+      effectiveMode: 'workspace-write',
+      justification: 'the file is outside',
+      subject: 'command',
+      signal: controller.signal,
+    },
+    {
+      request: async (options) => {
+        captured.asked.push(options)
+        return new Promise((resolve) => {
+          options.signal?.addEventListener('abort', () => resolve('cancelled'), { once: true })
+        })
+      },
+    },
+  )
+  assert.equal(captured.asked.length, 1, 'the escalation asked once')
+  assert.equal(captured.asked[0]?.signal, controller.signal, 'and the ask carries the call’s own signal')
+  controller.abort()
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof EscalationRefusal && error.code === 'CANCELLED',
+    'so a Stop answers it as cancelled rather than leaving it waiting',
+  )
+
+  /** The service itself: an abort settles the request, and an already-aborted signal answers at once. */
+  const serviceCtx = new Context()
+  const service = new ApprovalService(serviceCtx, { mode: 'allow', answerTimeoutMs: 30_000 })
+  service.attachAnswerer()
+  const stop = new AbortController()
+  const waiting = service.request({ tool: 'bash', reason: 'needs a wider mode', signal: stop.signal })
+  assert.equal(service.pendingRequests().length, 1, 'the question is pending')
+  stop.abort()
+  assert.equal(await waiting, 'cancelled', 'and an abort answers it as cancelled')
+  assert.equal(service.pendingRequests().length, 0, 'nothing is left waiting')
+
+  const already = new AbortController()
+  already.abort()
+  assert.equal(await service.request({ tool: 'bash', reason: 'x', signal: already.signal }), 'cancelled', 'an already-aborted signal starts cancelled')
 })
 
 test('the argument pairing a schema cannot express is validated', () => {

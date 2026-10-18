@@ -1630,7 +1630,19 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     const service = ctx.get('approvals') as { answer?: (id: string, outcome: 'allowed-once' | 'rejected' | 'cancelled') => boolean } | undefined
     const answered = service?.answer?.(id, outcome) ?? false
-    respond(response, 200, 'application/json', `${JSON.stringify({ answered })}\n`)
+    /**
+     * A question that is no longer waiting is a **conflict**, not a success.
+     *
+     * The page used to hide its card on any 200 and ignore this flag, so an answer that landed nowhere — a stale id
+     * from a reloaded page, a different server than the one holding the question, or one already timed out — made the
+     * card disappear while the turn waited out its full answer timeout. Measured as the owner's "approved but the
+     * backend is still stuck".
+     */
+    if (!answered) {
+      respond(response, 409, 'application/json', `${JSON.stringify({ answered: false, error: 'that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it' })}\n`)
+      return
+    }
+    respond(response, 200, 'application/json', `${JSON.stringify({ answered: true })}\n`)
     return
   }
 
@@ -2134,6 +2146,15 @@ export function sessionRequestSelection(
       ...(runModel !== undefined ? { model: runModel } : {}),
       ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
     })
+    /**
+     * A turn that was stopped is a cancellation, not a completion — including the case where the loop noticed the
+     * abort between rounds and returned a result instead of throwing. Without this, the page saw a normal `done`
+     * and left the composer in its running state.
+     */
+    if (controller.signal.aborted) {
+      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      return
+    }
     safeWrite(
       `event: done\ndata: ${JSON.stringify({
         session: handle.id,

@@ -1662,6 +1662,7 @@
   #approval-card .head { display: flex; align-items: center; gap: .45rem; font-size: 13px; font-weight: 600; color: #e0b15c; }
   #approval-card .dot { width: 7px; height: 7px; border-radius: 50%; background: #e0b15c; }
   #approval-card p { margin: .45rem 0 .6rem; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  #approval-card #approval-note { margin: -.2rem 0 .5rem; color: #d38b8b; font-size: 12px; }
   #approval-card .actions { display: flex; justify-content: flex-end; gap: .5rem; }
   #approval-card button { height: 32px; padding: 0 .8rem; font: inherit; font-size: 13px; border-radius: 10px; cursor: pointer; }
   #approval-reject { background: none; color: var(--text); border: 1px solid var(--border); }
@@ -2517,6 +2518,7 @@
   <div id="approval-card" role="alertdialog" aria-labelledby="approval-title" hidden>
     <div class="head"><span class="dot" aria-hidden="true"></span><span id="approval-title">Waiting for approval</span></div>
     <p id="approval-reason"></p>
+    <p id="approval-note" hidden></p>
     <div class="actions">
       <button type="button" id="approval-reject">Reject</button>
       <button type="button" id="approval-allow">Allow once</button>
@@ -5683,6 +5685,7 @@ async function runTurn(text, key, attachments = []) {
       } else if (name === 'done') {
         /** What the provider said the turn cost, and how long it took, if it said anything. */
         stopRequested = false
+        stopButton.disabled = false
         liveRounds = 0
         liveUsage = undefined
         updateStatusBar()
@@ -5717,6 +5720,9 @@ async function runTurn(text, key, attachments = []) {
          * sentence in the transcript for something the reader asked for.
          */
         stopRequested = false
+        stopButton.disabled = false
+        /** A question the stopped turn was waiting on has no answer to give now. */
+        hideApproval()
         settleChat()
         void renderSettledAnswers()
         if (typeof payload.session === 'string') {
@@ -5725,6 +5731,8 @@ async function runTurn(text, key, attachments = []) {
         }
         renderComposerState()
       } else if (name === 'error') {
+        stopButton.disabled = false
+        hideApproval()
         add('denied', payload.message)
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
         if (typeof payload.session === 'string') runningSessions.delete(payload.session)
@@ -6282,6 +6290,12 @@ async function stopTurn() {
     stopRequested = true
     return
   }
+  /**
+   * The button says it is working, because the acknowledgement is a different request from the stream the turn is
+   * on: a second click while the first is in flight is a person telling the UI it did nothing, which is the symptom
+   * a disabled state removes.
+   */
+  stopButton.disabled = true
   try {
     await fetch(`/api/sessions/${encodeURIComponent(composerKey)}/stop`, { method: 'POST' })
   } catch {
@@ -9675,25 +9689,51 @@ function showApproval(request) {
   if (request === null || typeof request !== 'object') return
   if (request.session !== undefined && current !== null && request.session !== current) return
   approvalPending = request
+  approvalCard.dataset.id = typeof request.id === 'string' ? request.id : ''
   document.getElementById('approval-reason').textContent = request.displayReason ?? request.reason ?? ''
   approvalCard.hidden = false
+  document.getElementById('approval-note').hidden = true
 }
 function hideApproval() {
   approvalCard.hidden = true
   approvalPending = null
 }
+/**
+ * Answer a waiting question.
+ *
+ * The card stays until the **server says the answer landed**: a stale id (a reloaded page, another server holding the
+ * question, an ask already timed out) is refused with 409, and hiding the card on that would leave the turn waiting
+ * with no visible cause — the owner's "approved but still stuck". On a refusal the card is refreshed from the pending
+ * list so it shows the question that is actually waiting, and the note says what happened.
+ */
 async function answerApproval(outcome) {
   const pending = approvalPending
   if (pending === null) return
-  hideApproval()
+  const allow = document.getElementById('approval-allow')
+  const reject = document.getElementById('approval-reject')
+  allow.disabled = true
+  reject.disabled = true
+  const note = document.getElementById('approval-note')
   try {
-    await fetch('/api/approvals/' + encodeURIComponent(pending.id), {
+    const response = await fetch('/api/approvals/' + encodeURIComponent(pending.id), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ outcome }),
     })
+    const body = await response.json().catch(() => ({}))
+    if (response.ok && body.answered === true) {
+      hideApproval()
+      return
+    }
+    note.textContent = body.error ?? 'that answer did not land: the question is no longer waiting'
+    note.hidden = false
+    await refreshApprovals()
   } catch (error) {
-    setNote(`could not answer the approval: ${(error && error.message) || error}`)
+    note.textContent = `could not answer the approval: ${(error && error.message) || error}`
+    note.hidden = false
+  } finally {
+    allow.disabled = false
+    reject.disabled = false
   }
 }
 document.getElementById('approval-allow').addEventListener('click', () => void answerApproval('allowed-once'))
@@ -9716,6 +9756,13 @@ async function refreshApprovals() {
     // a page that cannot read pending questions still answers the next one it is shown
   }
 }
+
+/** Questions wait for a person, so the card is discovered from the pending list as well as pushed by the stream. */
+setInterval(() => {
+  if (document.hidden) return
+  if (current === null) return
+  void refreshApprovals()
+}, 2000)
 
 await loadEndpoints()
 await loadStatus()
