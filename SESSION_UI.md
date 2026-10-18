@@ -150,6 +150,14 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### A thinner pin tail (2026-10-17)
+
+The tail was still thicker than the reference's. The shape was not the difference: the needle path **inherited the SVG root's
+`stroke: currentColor`**, so it was painted at its own filled width plus a 1-unit outline — about twice as thick. The reference's
+needle is **fill only**; the body is the part that carries a stroke. Setting `stroke: none` on the needle makes the tail thin
+without changing its shape or its tip: the bbox stays 4.10 × 5.29 units and the tip still reaches below the body. The check now
+asserts the needle reports `stroke: none` while the head keeps a stroke.
+
 ### The pin's tail: a malformed path (2026-10-17)
 
 The solid pin showed its head but not its thin tail. The cause was in this page, not in the reference's artwork: the **needle

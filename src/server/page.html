@@ -7976,6 +7976,12 @@ function kindIcon(kind, open = false) {
       'M6.05285 9.47511C6.27284 9.16094 6.70586 9.08458 7.02003 9.30457C7.3342 9.52455 7.41055 9.95757 7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
     )
     needle.setAttribute('fill', 'currentColor')
+    /**
+     * The needle is **fill only** — no stroke. The reference's artwork leaves the tail unstroked, while this SVG root carries
+     * `stroke: currentColor`, which the needle inherited: the tail was drawn at its own width **plus a 1-unit outline**, about
+     * twice as thick as the reference's. The owner asked for a thinner tail; this is the difference, not a new shape.
+     */
+    needle.setAttribute('stroke', 'none')
     if (kind === 'pin-fill') {
       body.setAttribute('fill', 'currentColor')
       body.setAttribute('stroke', 'currentColor')
