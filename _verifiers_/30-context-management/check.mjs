@@ -474,27 +474,65 @@ test('a provider that refused the call gets one reduction and one retry, and onl
 
 test('instructions are one durable baseline that follows an edit', async (context) => {
   if (!skipUnless(context, await supportsContext(), CAPABILITY)) return
+  /**
+   * Two folders, because the rule under test is **which** one supplies the baseline.
+   *
+   * `workspace` is where the person runs, and so the folder the conversation is bound to. The profile's
+   * sandbox root is a **different** directory holding a decoy `AGENTS.md`, so a baseline read from the
+   * sandbox root instead of from the session's own folder announces itself as the wrong safe word rather
+   * than passing quietly. Pointing both settings at one folder — as this check first did — cannot tell the
+   * two readings apart, and measured: the baseline followed the sandbox root, so a resumed session could
+   * be handed another project's house rules.
+   */
   const workspace = tempDir('heddle-instructions-')
+  const elsewhere = tempDir('heddle-instructions-sandbox-')
   const h = harness('instructions', {
     contextWindow: 100_000,
-    workspace,
+    workspace: elsewhere,
     steps: [{ text: 'done' }, { text: 'done again' }],
   })
   try {
     writeFileSync(join(workspace, 'AGENTS.md'), '# house rules\n\nThe safe word is ALPHA.\n')
-    const first = await runCli(['--profile', h.profileDir, '--endpoint', 'scripted', '--turn', 'hello'], { env: h.env })
+    writeFileSync(join(elsewhere, 'AGENTS.md'), '# another project\n\nThe safe word is ELSEWHERE.\n')
+    const first = await runCli(['--profile', h.profileDir, '--endpoint', 'scripted', '--turn', 'hello'], {
+      env: h.env,
+      cwd: workspace,
+    })
     assert.equal(first.code, 0, `the first turn ran\n${first.stdout}${first.stderr}`)
     const session = sessionOf(h.home)
+
+    /**
+     * What the **turn** read, taken from the log and read before asking the harness anything.
+     *
+     * The order is a correction, not a style: `derived()` runs the `context` command, which re-derives the
+     * surface and writes its own baseline. A check that asked it first would see the command's correct
+     * answer even when the turn had read the wrong folder — measured, a deliberately broken loop passed
+     * for exactly that reason. The log is the record of what the turn did, and a replaced note stays in
+     * it, so a turn that read the sandbox root's rules cannot hide behind a later correction.
+     */
+    const read = eventsOf(h.home, session)
+      .filter((event) => event.origin === 'instructions')
+      .map((event) => JSON.stringify(event.message ?? {}))
+    assert.ok(read.length > 0, 'the turn recorded an instruction baseline')
+    assert.ok(read.some((text) => text.includes('ALPHA')), 'the baseline carries the session folder’s rules')
+    assert.ok(
+      !read.some((text) => text.includes('ELSEWHERE')),
+      'and the sandbox root’s rules were never read at all, not merely replaced afterwards',
+    )
 
     const view = await derived(h, session)
     const reminders = view.messages.filter((message) => (message.text ?? '').includes('<system-reminder>'))
     assert.equal(reminders.length, 1, 'the instructions arrive as one block, not one message per file')
     assert.ok(reminders[0].text.includes('ALPHA'), 'and they carry what the file says')
+    assert.ok(
+      !reminders[0].text.includes('ELSEWHERE'),
+      'the baseline comes from the session’s own folder, not from the sandbox root',
+    )
 
     writeFileSync(join(workspace, 'AGENTS.md'), '# house rules\n\nThe safe word is BETA.\n')
     const second = await runCli(
       ['--profile', h.profileDir, '--endpoint', 'scripted', '--resume', session, '--turn', 'again'],
-      { env: h.env },
+      { env: h.env, cwd: workspace },
     )
     assert.equal(second.code, 0, `the second turn ran\n${second.stdout}${second.stderr}`)
 
@@ -516,6 +554,7 @@ test('instructions are one durable baseline that follows an edit', async (contex
   } finally {
     removeDir(h.home)
     removeDir(workspace)
+    removeDir(elsewhere)
   }
 })
 
@@ -587,7 +626,15 @@ test('an instruction budget drops whole files before it truncates one, and names
     steps: [{ text: 'done' }],
   })
   try {
-    const run = await runCli(['--profile', h.profileDir, '--endpoint', 'scripted', '--turn', 'hello'], { env: h.env })
+    /**
+     * The run happens **in** `nested`: the baseline is read from the session's own folder, so that is the
+     * directory whose two files this check is about, and `workspace`'s `.git` is what makes the walk from
+     * it accept the broader file as a candidate worth dropping.
+     */
+    const run = await runCli(['--profile', h.profileDir, '--endpoint', 'scripted', '--turn', 'hello'], {
+      env: h.env,
+      cwd: nested,
+    })
     assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
     const view = await derived(h, sessionOf(h.home))
     const baseline = view.messages.map((message) => message.text ?? '').find((text) => text.includes('<system-reminder>'))
