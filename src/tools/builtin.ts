@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 
+import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
 import type { SandboxService } from '../sandbox/service.ts'
 import type { ToolDefinition, ToolResult } from './service.ts'
 
@@ -96,7 +97,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     spec: {
       name: 'bash',
       description:
-        'Run a shell command in the workspace and return its combined output. It runs with the workspace as its working directory; the sandbox governs the paths the harness itself writes, not what a command does. A read-only session refuses the shell entirely, because an unconfined shell could write outside those paths.',
+        'Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.',
       parameters: {
         type: 'object',
         properties: {
@@ -110,43 +111,48 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
+      const mode = context.mode
+
       /**
-       * A read-only session refuses the shell.
+       * Confine the exact argv, or refuse to run it.
        *
-       * The refusal is not an accident of this tool's implementation: the sandbox governs the paths **the
-       * harness itself writes**, and a shell's writes to the filesystem are outside it. A `read-only` mode
-       * that still started a shell would therefore be a promise the harness cannot keep, and "no file
-       * effects" has to mean none. The alternative — an OS-level confinement — is a different, much larger
-       * mechanism, and the module's own doc says this one is not that.
+       * `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox
+       * service for a wrapped argv; if this host cannot confine, the call fails closed with the reason rather than
+       * running unconfined — that is the difference between a sandbox and a suggestion.
        */
-      if (context.mode === 'read-only') {
-        return {
-          output: '',
-          error: {
-            code: 'SANDBOX',
-            message:
-              "the session is read-only, so the shell is refused: heddle's sandbox governs its own file tools, and a shell could write outside them",
-          },
+      let confined: ConfinedArgv | null = null
+      try {
+        if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode)
+      } catch (error) {
+        if (error instanceof SandboxUnavailableError) {
+          context.log(`refused a '${mode}' shell: ${error.message}`)
+          return {
+            output: '',
+            error: { code: 'SANDBOX_UNAVAILABLE', message: error.message },
+            data: { sandbox: { mode, denied: false, unavailable: true } },
+          }
         }
+        throw error
       }
-      // The working directory is the workspace, and that is the only confinement
-      // claimed here: this is the harness's own shell, not an OS-level seccomp
-      // boundary, and the description says so rather than implying more.
+      const argv = confined?.argv ?? ['/bin/sh', '-c', command]
+      // The working directory is the workspace. The confinement, when there is one, is the wrapped argv's: the
+      // whole process tree is under the kernel profile, not only the command this tool spawns.
       const cwd = sandbox.workspaceRoot
       const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
-        const child = spawn('sh', ['-c', command], { cwd, env: { ...process.env, NO_COLOR: '1' } })
-        let output = ''
+        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
+        let stdout = ''
+        let stderr = ''
         let timedOut = false
         const timer = setTimeout(() => {
           timedOut = true
           child.kill('SIGKILL')
         }, limit)
         child.stdout.on('data', (chunk: Buffer) => {
-          output += chunk.toString()
+          stdout += chunk.toString()
         })
         child.stderr.on('data', (chunk: Buffer) => {
-          output += chunk.toString()
+          stderr += chunk.toString()
         })
         context.signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true })
         child.on('error', (error) => {
@@ -155,16 +161,51 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         })
         child.on('close', (code) => {
           clearTimeout(timer)
-          const trimmed = output.length > 20_000 ? `${output.slice(0, 20_000)}\n… truncated` : output
+          const combined = stdout + stderr
+          const trimmed = combined.length > 20_000 ? `${combined.slice(0, 20_000)}\n… truncated` : combined
+          /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
+          const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
           if (timedOut) {
-            resolve({ output: trimmed, error: { code: 'TIMEOUT', message: `the command exceeded ${limit}ms and was killed` } })
+            resolve({
+              output: trimmed,
+              error: { code: 'TIMEOUT', message: `the command exceeded ${limit}ms and was killed` },
+              data: { sandbox: { ...sandboxFacts, denied: false } },
+            })
+            return
+          }
+          const outcome = confined === null ? ({ kind: 'exited' } as const) : classifyOutcome({ exitCode: code ?? 1, stderr, confined })
+          /**
+           * A runner failure means the command **never ran**, so it is reported as a sandbox problem and outranks
+           * any denial sentence in the output. An ordinary denial says which mode refused the effect.
+           */
+          if (outcome.kind === 'runner-failure') {
+            resolve({
+              output: trimmed,
+              error: {
+                code: 'SANDBOX_UNAVAILABLE',
+                message: `the sandbox runner failed under '${mode}' mode — the command did not run: ${outcome.detail}`,
+              },
+              data: { sandbox: { ...sandboxFacts, denied: false, runnerFailed: true } },
+            })
+            return
+          }
+          if (outcome.kind === 'denied') {
+            resolve({
+              output: trimmed,
+              error: { code: 'SANDBOX', message: `[sandbox: file access denied under ${mode} mode]` },
+              data: { sandbox: { ...sandboxFacts, denied: true } },
+            })
             return
           }
           if (code !== 0) {
-            resolve({ output: trimmed, error: { code: 'EXIT', message: `the command exited ${code}` } })
+            resolve({
+              output: trimmed,
+              error: { code: 'EXIT', message: `the command exited ${code}` },
+              data: { sandbox: { ...sandboxFacts, denied: false } },
+            })
             return
           }
-          resolve({ output: trimmed, data: { exitCode: code } })
+          resolve({ output: trimmed, data: { exitCode: code, sandbox: { ...sandboxFacts, denied: false } } })
         })
       })
     },

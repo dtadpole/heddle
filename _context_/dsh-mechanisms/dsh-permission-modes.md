@@ -146,7 +146,9 @@ override and a per-call policy argument; the sandbox's `mode` field is process-w
   above, deferred).
 - **Did the evidence narrow it?** It sharpened one point: heddle cannot confine a shell, so
   `read-only` that still allowed `bash` would be a lie. `read-only` must refuse the shell — a gate
-  rule, not a UI rule, and it belongs to this cycle.
+  rule, not a UI rule, and it belongs to this cycle. *(Superseded: the sandbox-backend cycle gave heddle a
+  kernel runner, so on a host with a backend `read-only` now keeps the shell and the kernel denies its writes —
+  see [`dsh-sandbox-backends.md`](dsh-sandbox-backends.md).)*
 - **Is the target right for this project?** DSH's `Auto review EXP` option has no substrate here
   (no auto-review integration), so heddle offers three options and keeps that difference with its
   reason. DSH's chip also lacks `aria-haspopup`/`aria-expanded` and its menu items lack
@@ -183,7 +185,8 @@ override and a per-call policy argument; the sandbox's `mode` field is process-w
 - A mode change **never touches an in-flight call**: the policy is resolved once per call, so a
   widening cannot retroactively permit the call that is already running, and a narrowing cannot
   break one that started under the wider mode.
-- `read-only` refuses `bash`, because heddle's sandbox cannot confine a shell's file effects.
+- `read-only` refuses `bash` **until a backend exists**, because without one heddle's sandbox cannot confine a
+  shell's file effects. (Superseded by the sandbox-backend cycle for hosts with a runner.)
 - **A narrowed session cannot widen by delegating.** A subagent's session and a teammate's session are created
   with no mode of their own, so on their own they would run under the deployment default; both spawn paths now
   copy the parent's recorded mode onto the child at creation (`inheritRecordedMode`), and the unit suite judges

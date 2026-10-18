@@ -41,12 +41,20 @@ after(() => rmSync(scratch, { recursive: true, force: true }))
 
 let fixtures = 0
 /** One sandbox, one session store, one registry and one session — the four things a tool call needs. */
-function fixture(options: { readonly mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; readonly root?: string } = {}) {
+function fixture(options: {
+  readonly mode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+  readonly root?: string
+  readonly backend?: 'auto' | 'none'
+} = {}) {
   fixtures += 1
   const root = options.root ?? join(scratch, `sessions-${fixtures}`)
   const workspace = join(scratch, `workspace-${fixtures}`)
   mkdirSync(workspace, { recursive: true })
-  const sandbox = new SandboxService(new Context(), { mode: options.mode ?? 'workspace-write', workspaceRoot: workspace })
+  const sandbox = new SandboxService(new Context(), {
+    mode: options.mode ?? 'workspace-write',
+    workspaceRoot: workspace,
+    ...(options.backend !== undefined ? { backend: options.backend } : {}),
+  })
   const sessions = new SessionService(new Context(), { root })
   const approvals = new ApprovalService(new Context(), { mode: 'allow' })
   const registry = new ToolRegistry(new Context(), approvals, sandbox, sessions)
@@ -71,7 +79,7 @@ test('the three modes are a closed vocabulary, and a per-call mode outranks the 
 
   const { sandbox, workspace } = fixture()
   const inside = join(workspace, 'inside.txt')
-  const outside = join(scratch, 'outside.txt')
+  const outside = '/opt/heddle-sandbox-probe.txt'
 
   /** The deployment mode is the default, so the old call sites keep working. */
   assert.equal(sandbox.assertWritable(inside), canonical(inside), 'workspace-write permits a write inside the workspace')
@@ -174,7 +182,7 @@ test('every tool call is gated by the session’s mode, and a tool argument cann
   assert.equal(withoutSession.output, 'workspace-write', 'a call with no session runs under the deployment mode')
 })
 
-test('a read-only session refuses the write and the shell; workspace-write permits the same write', async () => {
+test('a read-only session refuses the write; its shell runs but the kernel denies its writes', async () => {
   const { sessions, registry, handle, workspace } = fixture()
   const context = { cwd: workspace, session: handle, log: () => {} }
 
@@ -184,17 +192,46 @@ test('a read-only session refuses the write and the shell; workspace-write permi
   assert.match(refusedWrite.error?.message ?? '', /read-only/, 'and the sentence names the mode')
   assert.equal(existsSync(join(workspace, 'inside.txt')), false, 'and nothing landed on disk')
 
-  const refusedShell = await registry.call('bash', { command: 'echo hi' }, context)
-  assert.equal(refusedShell.error?.code, 'SANDBOX', 'read-only refuses the shell too')
-  assert.match(refusedShell.error?.message ?? '', /shell/, 'because a shell is not confined by this sandbox')
+  /**
+   * The shell is no longer refused: on a host with a backend it runs **confined**, which is a better claim than
+   * "read-only refuses the shell". The write it attempts is denied by the kernel and reported as a denial; a host
+   * with no backend fails closed instead, which the next test judges.
+   */
+  const shell = await registry.call('bash', { command: 'echo the-shell-ran' }, context)
+  if (process.platform === 'darwin') {
+    assert.equal(shell.error, undefined, `the shell runs under read-only (${shell.error?.message ?? ''})`)
+    assert.match(shell.output, /the-shell-ran/, 'and its output comes back')
+    const shellWrite = await registry.call('bash', { command: 'echo denied > shell-write.txt' }, context)
+    assert.equal(shellWrite.error?.code, 'SANDBOX', 'a write from the shell is a denial')
+    assert.match(shellWrite.error?.message ?? '', /read-only/, 'and the marker names the mode')
+    assert.equal(existsSync(join(workspace, 'shell-write.txt')), false, 'the write left no file')
+  } else {
+    assert.equal(shell.error?.code, 'SANDBOX_UNAVAILABLE', 'without a backend the shell fails closed')
+  }
 
   sessions.setMode(handle, 'workspace-write', 'workspace-write')
   const allowedWrite = await registry.call('write_file', { path: 'inside.txt', content: 'inside' }, context)
   assert.equal(allowedWrite.error, undefined, 'workspace-write permits the same write')
   assert.equal(existsSync(join(workspace, 'inside.txt')), true, 'and it landed')
   const allowedShell = await registry.call('bash', { command: 'echo hi' }, context)
-  assert.equal(allowedShell.error, undefined, 'and permits the shell')
-  assert.match(allowedShell.output, /hi/, 'which ran')
+  if (process.platform === 'darwin') {
+    assert.equal(allowedShell.error, undefined, 'and permits the shell, still confined')
+    assert.match(allowedShell.output, /hi/, 'which ran')
+  }
+})
+
+test('a confined shell fails closed when the deployment has no backend', async () => {
+  const { sessions, registry, handle, workspace } = fixture({ backend: 'none' })
+  const context = { cwd: workspace, session: handle, log: () => {} }
+  sessions.setMode(handle, 'workspace-write', 'workspace-write')
+  const shell = await registry.call('bash', { command: 'echo hi' }, context)
+  assert.equal(shell.error?.code, 'SANDBOX_UNAVAILABLE', 'the call reports that no backend can enforce the mode')
+  assert.match(shell.error?.message ?? '', /no sandbox backend is usable/i, 'and says so')
+  assert.equal(existsSync(join(workspace, 'inside.txt')), false, 'the command never ran')
+  sessions.setMode(handle, 'danger-full-access', 'workspace-write')
+  const full = await registry.call('bash', { command: 'echo hi' }, context)
+  assert.equal(full.error, undefined, 'full access is the bypass and never consults a backend')
+  assert.match(full.output, /hi/)
 })
 
 test('a delegated child inherits the parent’s mode, so read-only cannot be widened by spawning a child', async () => {

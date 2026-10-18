@@ -115,11 +115,19 @@ test('a session can be switched to another endpoint, and the switch survives a r
     /**
      * The seat starts on the endpoint the run nominated, which is what `selectWorkspace`-style defaults mean:
      * a page that opened on the first row of the list would ignore `--endpoint` and the configuration.
+     *
+     * Wait for the **text**, not only for the element: the label exists as `model` before `loadEndpoints` answers,
+     * so asserting on presence alone measured the boot order rather than the seat (it failed on this machine while
+     * other checks held the machine busy, on a build where nothing in this area had changed).
      */
+    assert.ok(
+      await browser.waitFor('document.getElementById("model-label").textContent.startsWith("double-one")', 20_000),
+      'the seat shows the endpoint the run nominated',
+    )
     assert.equal(
       await browser.evaluate('document.getElementById("model-label").textContent'),
       'double-one · model-one',
-      'the seat shows the endpoint the run nominated',
+      'with the model the endpoint answers with',
     )
 
     /** The menu holds every configured endpoint, with the current one marked, and it is drawn by the page. */

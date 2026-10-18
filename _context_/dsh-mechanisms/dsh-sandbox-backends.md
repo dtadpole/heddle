@@ -309,9 +309,88 @@ The step back changed the scope in two ways and kept one:
 8. Docs: this block, the sandbox/verifier INDEX entries, and the limitation sentence in the
    service that says the shell is not confined.
 
+### changed
+
+- `src/sandbox/paths.ts` — `canonical`/`contains`, moved out of the service so the fence, the policy and the
+  profiles share one comparison.
+- `src/sandbox/policy.ts` — the mode vocabulary and `writableRoots(policy)`; **DSH's set for
+  `workspace-write`** (workspace, named extra roots, `/tmp`, `tmpdir()`, canonicalised).
+- `src/sandbox/backend.ts` — the backend contract, `selectBackend`, `SandboxUnavailableError`, and
+  `classifyOutcome` (runner failure outranks denial; a denial needs a failed command).
+- `src/sandbox/seatbelt.ts` — DSH's SBPL profile, a functional probe around `true`, and the darwin rung.
+- `src/sandbox/service.ts` — re-exports the moved vocabulary, adds `confine(argv, mode)`, the `backend`
+  config knob (`auto`/`none`), and uses `writableRoots` for the fence too.
+- `src/tools/builtin.ts` — `bash` spawns the confined argv, reports `sandbox: { mode, enforcement, denied }`,
+  keeps the shell under read-only instead of refusing it, and fails closed when the deployment has no backend.
+- Tests and checks: `test/sandbox-backend.test.ts` (new), `test/permission-mode.test.ts` (the read-only
+  shell claim updated), `_verifiers_/75-permission-sandbox/check-shell-confinement.mjs` (new),
+  `check.mjs` (the temp claim replaced by the DSH-parity claim), `check-session-mode.mjs` (the shell step
+  removed, the write claim kept), and `_verifiers_/80-web-ui/check-model-switcher.mjs` (a boot race fixed —
+  it asserted the seat's text before `loadEndpoints` answered; reproduced on a build with no sandbox change).
+- `src/sandbox/INDEX.md`, `_verifiers_/75-permission-sandbox/INDEX.md` and the permission-modes document's
+  superseded shell claim.
+
 ### evidence
 
-Filled in after the implementation run below.
+**Before.** Measured, not read: a scripted `workspace-write` turn ran
+`bash 'echo escaped > <outsidePath>'` and the file landed **outside** the workspace, with the tool reported
+`ok`. `read-only` refused the shell rather than confining it, and there was no backend seam, no enforcement
+fact and no fail-closed error.
+
+**Failing first.** `test/sandbox-backend.test.ts` was red with the new modules absent
+(`ERR_MODULE_NOT_FOUND`); `_verifiers_/75-permission-sandbox/check-shell-confinement.mjs` reported
+`verdict 1 — 3 check(s) failed` (the outside write succeeded, read-only had no shell, and the forced-missing
+backend ran the command).
+
+**After** (measured on this branch):
+
+| Instrument | Before | After |
+|---|---|---|
+| `test/sandbox-backend.test.ts` | missing modules | 6 pass, including the real kernel checks on macOS |
+| `npm test` | 338 pass | **345 pass / 0 fail** |
+| `npm run check`, `npm run build` | green | green |
+| `_verifiers_/75-permission-sandbox/` | 7 checks | **11 checks, all pass** (5 three-mode + 2 session-mode + 4 shell-confinement) |
+| `_verifiers_/80-web-ui/` | 11 files green (with a flaky model-seat check) | 11 files green after the flake fix |
+
+Kernel facts measured by the new checks: `workspace-write` permits the inside write and denies the outside
+one (`Operation not permitted`), **including from a grandchild shell**; `/dev/null` stays writable; a
+read-only shell runs and cannot write; `danger-full-access` writes outside; a forced-missing backend refuses
+the command and nothing it would have written exists; a command that prints `Operation not permitted` and
+exits 0 is not reported as denied.
+
+**Two claims deliberately replaced, not silently dropped:**
+
+1. **The temp area.** DSH's `workspace-write` grants `/tmp` and `tmpdir()`; the previous cycle deliberately
+   excluded them and the verifier asserted the refusal. Matching DSH means adopting the set for both the fence
+   and the kernel profile, so `check.mjs`'s claim was replaced with "workspace-write admits the host temp area,
+   and read-only does not". The earlier concern (a shared, world-writable tree under `/var/folders`) is the
+   recorded cost of parity rather than a difference any more.
+2. **The read-only shell.** It is no longer refused on a host with a backend: the kernel confines it and denies
+   its writes, which is the stronger claim. The permission-mode document marks the old sentence superseded.
+
+### coverage
+
+Measured: the inside/outside write under each mode, descendant confinement, `/dev/null`, a false-positive
+denial sentence, a forced-missing backend, the file fence's roots (now including the temp areas), the profile
+text and quoting, selection per platform, and the classification order. Not measured this cycle: the Linux
+rungs (next cycle), the model-visible policy statement (next cycle), the escalation ladder and its approval
+card (cycle 3), and the Windows rung (out of scope, fails closed).
+
+### invariants
+
+The permission control's browser contract still passes (the chip, its menu, the risk gate and the refusal
+row); the session-mode checks pass with the shell step removed; the unit suite pins that a delegated child
+inherits the parent's mode, so the new kernel boundary is not widened by delegation; `danger-full-access`
+never consults a backend, which a unit test asserts.
+
+### lessons
+
+- **The mode had two consumers and heddle implemented one.** The gap was invisible because every check
+  exercised the fence; the shell is the consumer that made the mode a claim instead of a preference.
+- **Fail-closed is a code path that must be forced in a test.** `backend: none` exists so the refusal is
+  measured, not trusted.
+- **Classification is part of the boundary.** A denial reported as an ordinary exit teaches the model to
+  retry the wrong way; a runner failure reported as a denial teaches it the command failed when it never ran.
 
 ## Read next
 
