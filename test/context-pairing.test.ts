@@ -51,6 +51,26 @@ test('every call is answered when the conversation ends on the calls', () => {
   assert.deepEqual(answers, ['c1', 'c2', 'c3'])
 })
 
+test('an answer separated from its call by a steering message is moved into place, not replaced', () => {
+  const separated = [
+    assistant('c1'),
+    { role: 'user' as const, content: [{ type: 'text' as const, text: 'steer: also check the tests' }] },
+    answer('c1', 'the real tool output'),
+  ]
+  const repaired = repairToolPairing(separated)
+  assert.deepEqual(
+    repaired.map((message) => [message.role, message.toolCallId ?? null]),
+    [
+      ['assistant', null],
+      ['tool', 'c1'],
+      ['user', null],
+    ],
+  )
+  const result = repaired[1]
+  assert.ok(result !== undefined && result.role === 'tool')
+  assert.match(String(result.content[0]?.type === 'text' ? result.content[0].text : ''), /the real tool output/)
+})
+
 test('an answer whose question is absent is dropped rather than sent as an orphan', () => {
   const repaired = repairToolPairing([answer('gone'), { role: 'user', content: [{ type: 'text', text: 'next' }] }])
   assert.deepEqual(
