@@ -858,10 +858,10 @@ async function runCommand(command: string, target: string | undefined, json: boo
          * The directory the run resolved its instructions from, not the shell's.
          *
          * Asking a resumed session what it would send and getting a different answer than the run
-         * would produce is the whole failure this avoids: the workspace root is what the sandbox
-         * names, and it is the directory a session's `AGENTS.md` was read from.
+         * would produce is the whole failure this avoids: use the session's recorded folder,
+         * with the sandbox root only as a fallback for a legacy record with no directory.
          */
-        cwd: app.ctx.sandbox.workspaceRoot,
+        cwd: app.ctx.session.folder(handle) ?? app.ctx.sandbox.workspaceRoot,
         tools: app.ctx.tools.describe(),
         ...(args.endpoint !== undefined ? { endpoint: args.endpoint } : {}),
         ...(args.model !== undefined ? { model: args.model } : {}),

@@ -207,6 +207,8 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
   const maximumTokens = options.maxOutputTokens
   const cwd = ctx.sandbox.workspaceRoot
+  // Instructions belong to the conversation; tools retain the configured sandbox root.
+  const instructionCwd = ctx.session.folder(options.session) ?? cwd
 
   ctx.session.userContent(
     options.session,
@@ -272,7 +274,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      * judge it without a loop.
      */
     let report = await ctx.context.prepare(options.session, {
-      cwd,
+      cwd: instructionCwd,
       endpoint: options.endpoint,
       ...(options.model !== undefined ? { model: options.model } : {}),
       tools,
@@ -391,7 +393,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
             session: options.session,
             endpoint: options.endpoint,
             ...(options.model !== undefined ? { model: options.model } : {}),
-            cwd,
+            cwd: instructionCwd,
             tools,
           },
           () => undefined,
@@ -407,7 +409,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
          */
         const generationBefore = ctx.session.surface(options.session).replaceGeneration
         const retried = ctx.context.assemble(options.session, {
-          cwd,
+          cwd: instructionCwd,
           tools,
           ...(options.system !== undefined ? { system: options.system } : {}),
           endpoint: options.endpoint,

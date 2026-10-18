@@ -1000,7 +1000,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * session's composition and getting a different answer than the run would produce is the failure
      * this avoids, which is why the same option is passed here as the CLI passes there.
      */
-    const cwd = ctx.sandbox?.workspaceRoot ?? process.cwd()
+    const cwd = ctx.session.folder(handle) ?? ctx.sandbox?.workspaceRoot ?? process.cwd()
     const endpoint = url.searchParams.get('endpoint')
     const model = url.searchParams.get('model')
     const report = context.assemble(handle, {

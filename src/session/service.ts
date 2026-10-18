@@ -1,6 +1,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
+import { readFileSync } from 'node:fs'
 
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
@@ -83,6 +84,21 @@ export class SessionService extends Service {
   ) {
     super(ctx, 'session')
     this.store = new SessionStore(config.root ?? defaultSessionRoot(), options)
+  }
+
+  /**
+   * The folder this session belongs to, not the directory its caller was launched in.
+   * Read this handle's metadata directly so another session in the same store cannot supply the answer.
+   * A legacy record with no readable folder leaves the caller its explicit fallback.
+   */
+  folder(handle: SessionHandle): string | undefined {
+    try {
+      const meta: unknown = JSON.parse(readFileSync(handle.meta, 'utf8'))
+      if (typeof meta !== 'object' || meta === null || !('cwd' in meta)) return undefined
+      return typeof meta.cwd === 'string' && meta.cwd.trim().length > 0 ? meta.cwd : undefined
+    } catch {
+      return undefined
+    }
   }
 
   /** Open the session a run continues, or start one. */
