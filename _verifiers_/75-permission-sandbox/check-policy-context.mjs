@@ -89,7 +89,7 @@ async function supportsWeb() {
   return /--profile/.test(help.stdout)
 }
 
-test('the model reads the standing policy in its request, and the note is not a person’s turn', async (context) => {
+test('a mode change appends a superseding snapshot after the one the earlier step read', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   const home = isolatedHome('policy-context')
   const work = fixtureDir('policy-context-work')
@@ -101,35 +101,60 @@ test('the model reads the standing policy in its request, and the note is not a 
     assert.ok(typeof session === 'string' && session.length > 0, 'the turn named its session')
 
     const bodies = () => double.requests.map((entry) => entry.body)
-    const shared = bodies().filter((body) => body.includes('Current heddle file policy: workspace-write'))
-    assert.equal(shared.length, 1, `the workspace-write policy is in the request the model received\nsaw ${bodies().length} request(s)`)
-    assert.ok(shared[0].includes(repoRoot), 'and names the session workspace the mode promises')
-    assert.equal(
-      bodies().filter((body) => body.includes('Current heddle file policy:')).length,
-      1,
-      'one policy statement per request, not a pile of them',
-    )
+    const snapshots = (body) => (body.match(/Current runtime context\. This snapshot supersedes earlier runtime-context snapshots\./g) ?? []).length
+    const policies = (body) => body.match(/Current heddle file policy: [a-z-]+/g) ?? []
+
+    assert.equal(snapshots(bodies()[0]), 1, 'the first request carries one runtime-context snapshot')
+    assert.deepEqual(policies(bodies()[0]), ['Current heddle file policy: workspace-write'], 'naming the deployment mode')
+    assert.match(bodies()[0], new RegExp(repoRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'and the session workspace the mode promises')
 
     /** The note is the harness's: the transcript must not render it as something the person typed. */
     const history = await request(server, `/api/sessions/${encodeURIComponent(session)}`).then((response) => response.json())
     assert.ok(
-      !(history.turns ?? []).some((entry) => String(entry.text ?? '').includes('Current heddle file policy:')),
-      'the policy note is not drawn as a conversation turn',
+      !(history.turns ?? []).some((entry) => String(entry.text ?? '').includes('Current runtime context')),
+      'the snapshot is not drawn as a conversation turn',
     )
 
-    /** A change of mode is a change of statement: the next request carries the new one, once. */
+    /** A change of mode is a changed snapshot: the old one stays in history, the new one supersedes it. */
     const changed = await request(server, `/api/sessions/${encodeURIComponent(session)}/permission`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'read-only' }),
     })
     assert.equal(changed.status, 200, 'the session can be narrowed')
     await turn(server, { session, prompt: 'second turn' })
-    const readOnly = bodies().filter((body) => body.includes('Current heddle file policy: read-only'))
-    assert.equal(readOnly.length, 1, 'the next request carries the read-only policy')
-    assert.ok(
-      !readOnly[0].includes('Current heddle file policy: workspace-write'),
-      'and not the previous one beside it',
+    const afterChange = bodies()[1]
+    assert.equal(snapshots(afterChange), 2, 'the next request carries the earlier snapshot and the new one')
+    assert.deepEqual(policies(afterChange), ['Current heddle file policy: workspace-write', 'Current heddle file policy: read-only'], 'in history order, so the model reads what changed and when')
+    /** The body is JSON, so the snapshot's blank line is escaped; the header still immediately precedes the new policy. */
+    assert.match(
+      afterChange,
+      /supersedes earlier runtime-context snapshots\.\\n\\nCurrent heddle file policy: read-only/,
+      'the new snapshot is the latest word',
     )
+
+    /** An unchanged request reuses the retained snapshot rather than piling another one on. */
+    await turn(server, { session, prompt: 'third turn' })
+    assert.equal(snapshots(bodies()[2]), 2, 'a steady request adds no snapshot')
+
+    /** Reverting the mode is another change, and it is recorded as one. */
+    await request(server, `/api/sessions/${encodeURIComponent(session)}/permission`, {
+      method: 'POST',
+      body: JSON.stringify({ mode: 'workspace-write' }),
+    })
+    await turn(server, { session, prompt: 'fourth turn' })
+    assert.equal(snapshots(bodies()[3]), 3, 'the revert is the third snapshot')
+    assert.deepEqual(policies(bodies()[3]).slice(-1), ['Current heddle file policy: workspace-write'], 'and the model reads the mode actually in force')
+
+    /** The log attributes each snapshot to the runtime context, so a reader after the fact can see what changed. */
+    const logText = await request(server, `/api/sessions/${encodeURIComponent(session)}/log`).then((response) => response.text())
+    const logEvents = logText.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    const notes = logEvents.filter((event) => event.type === 'context/note' && event.origin === 'runtime-context')
+    assert.equal(notes.length, 3, 'one snapshot per change, in the log')
+    assert.equal(notes.at(-1)?.message?.source?.kind, 'runtime-context', 'each is attributed to the runtime context')
+    assert.equal(notes.at(-1)?.message?.source?.form, 'snapshot', 'as a snapshot')
+    assert.equal(notes.at(-1)?.message?.source?.sections?.[0]?.name, 'sandbox:policy', 'naming the contributing section')
+    const modeEvents = logEvents.filter((event) => event.type === 'permission/mode')
+    assert.deepEqual(modeEvents.map((event) => event.mode), ['read-only', 'workspace-write'], 'and the mode changes themselves are the log-only events they always were')
   } finally {
     server.kill()
     await double.close()

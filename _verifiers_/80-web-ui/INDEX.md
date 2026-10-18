@@ -34,6 +34,9 @@ doubles. Nothing here needs a display, so it runs unattended.
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
   extension, and a file's own script tags shown rather than obeyed.
+- [`check-runtime-context.mjs`](check-runtime-context.mjs) — a mode change as a **trajectory fact**: the
+  Trajectory view names the runtime-context snapshots (with each policy text in its details pane) while the Chat
+  view does not draw them as turns, so a reader after the fact can see the expectation changed and what it became.
 - [`check-approval.mjs`](check-approval.mjs) — the approval card as a control: it appears when a call asks for a
   wider mode, carries the model's justification verbatim, Allow once runs the one denied call, Reject leaves it
   undone, and the session's own mode never moves.

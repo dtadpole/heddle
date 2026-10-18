@@ -1,6 +1,6 @@
 ---
 title: DSH Mechanisms
-version: 1.3.0
+version: 1.4.0
 description: How DeepSeek Harness implements each mechanism heddle mirrors, read from the installed packages and measured in its browser, with the context reading corrected and guarded by a check beside it.
 grounded_in:
   - source: the installed DSH packages under ~/.volta, read on 2026-10-11 and 2026-10-17
@@ -44,6 +44,10 @@ the frontmatter every authored artifact carries.
 - [`dsh-permission-modes.md`](dsh-permission-modes.md) — the access-mode chip, menu, full-access risk
   gate and refusal approval measured in DSH's browser, with the session-scoped mode heddle implements
   beside it, the designs discarded, and the loop document for that work.
+- [`dsh-runtime-context.md`](dsh-runtime-context.md) — how a sandbox-mode change is recorded so a running loop and
+  every later reader know the expectation changed: DSH's log-only `sandbox/mode` event and its sourced
+  runtime-context snapshot (superseding header, named sections, appended after retained history, reused while
+  unchanged), measured against heddle's replacing policy note, with the snapshot mechanism heddle now implements.
 - [`dsh-sandbox-backends.md`](dsh-sandbox-backends.md) — how DSH confines shell and file effects on each
   platform (the seam, the bwrap/Landlock/Seatbelt/Windows-ACL profiles, writable roots, denial dialects,
   enforcement and fail-closed), probed on this Mac, with a phased plan for heddle's own backend.

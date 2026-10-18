@@ -26,8 +26,29 @@ export * from './prune.ts'
 
 export const name = 'context'
 
-/** The origin of the one runtime-policy note; distinct from the system prompt and the instruction baseline. */
-export const SANDBOX_POLICY_ORIGIN = 'sandbox-policy'
+/** The origin of the harness's runtime-context snapshots; distinct from the system prompt and the instruction baseline. */
+export const RUNTIME_CONTEXT_ORIGIN = 'runtime-context'
+
+/** The prefix DSH gives a full snapshot, so a model with earlier ones in history reads the newest as current. */
+export const RUNTIME_CONTEXT_HEADER = 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.'
+
+/** What a snapshot says when every contribution has gone away. */
+export const CLEARED_RUNTIME_CONTEXT = 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.'
+
+/** One named contribution to a runtime-context snapshot, the way DSH attributes each part to its subsystem. */
+export interface RuntimeContextSection {
+  readonly name: string
+  readonly text: string
+}
+
+/** Render DSH's joined snapshot text from the named contributions. */
+function renderRuntimeContext(sections: readonly RuntimeContextSection[]): string {
+  const body = sections
+    .map((section) => section.text)
+    .filter((text) => text.length > 0)
+    .join('\n\n')
+  return body.length === 0 ? CLEARED_RUNTIME_CONTEXT : `${RUNTIME_CONTEXT_HEADER}\n\n${body}`
+}
 
 export const Config = Schema.object({
   /** The system prompt, written to the surface as its first node. */
@@ -216,37 +237,53 @@ export class ContextService extends Service {
   }
 
   /**
-   * Keep exactly one standing file-policy note in the surface.
+   * Keep the runtime-context snapshot current, the way DSH's agent loop does.
    *
-   * DSH contributes a `sandbox:policy` runtime-context snapshot before each request; heddle writes the same
-   * statement as a `context/note` with its own origin, because it is neither the person's words nor a message the
-   * model produced — the Web UI's transcript must not show it as a turn, and the model must read it every round.
+   * The standing file policy is **dynamic context**, not a stable prompt section: DSH assembles the registered
+   * contexts before every request and, when the rendered snapshot differs from the retained one, logs it as a
+   * sourced `user/message` with "This snapshot supersedes earlier runtime-context snapshots." The earlier
+   * snapshots stay in history — that is what lets a later round, a replay, or a reader after the fact see which
+   * policy each step ran under — while the newest one is the standing fact.
    *
-   * A changed policy **replaces** the previous note rather than appending beside it, the same rule the
-   * instruction baseline follows: two policies in one request is a model asked to obey both. An unchanged policy
-   * writes nothing, so an ordinary round costs no event.
+   * Heddle had a replacing note before this: it kept the model's request correct but erased from model history
+   * *when* the expectation changed. This is the DSH shape instead: append on change, write nothing when nothing
+   * changed (so an unchanged request reuses the retained snapshot), and attribute the parts so a log reader can
+   * see that the harness said it, not a person.
+   *
+   * A session written by the old mechanism carries a `sandbox-policy` note; the first snapshot **replaces** it, so
+   * the model never reads a stale "Current …" sentence beside the current snapshot.
    */
-  recordRuntimePolicy(handle: SessionHandle, statement: string): void {
+  recordRuntimeContext(handle: SessionHandle, sections: readonly RuntimeContextSection[]): void {
+    const snapshot = renderRuntimeContext(sections)
     const events = this.store.read(handle)
-    let current: { readonly seq: number; readonly identity?: unknown } | undefined
+    let retained: { readonly seq: number; readonly identity?: unknown } | undefined
+    let legacy: { readonly seq: number } | undefined
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]
-      if (event?.type === 'context/note' && event.origin === SANDBOX_POLICY_ORIGIN) {
-        current = { seq: event.seq, ...(event.identity !== undefined ? { identity: event.identity } : {}) }
+      if (event?.type !== 'context/note') continue
+      if (event.origin === RUNTIME_CONTEXT_ORIGIN) {
+        retained = { seq: event.seq, ...(event.identity !== undefined ? { identity: event.identity } : {}) }
         break
       }
+      if (event.origin === 'sandbox-policy' && legacy === undefined) legacy = { seq: event.seq }
     }
-    if (current !== undefined && current.identity === statement) return
-    const message = { role: 'user' as const, content: [{ type: 'text' as const, text: statement }] }
-    if (current === undefined) {
-      this.store.append(handle, { type: 'context/note', message, origin: SANDBOX_POLICY_ORIGIN, identity: statement }, { surfaceOp: 'append' })
+    if (retained !== undefined && retained.identity === snapshot) return
+    const message = {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: snapshot }],
+      source: sections.length === 0 ? { kind: RUNTIME_CONTEXT_ORIGIN } : { kind: RUNTIME_CONTEXT_ORIGIN, form: 'snapshot', sections },
+    }
+    const legacyIsSurface =
+      retained === undefined && legacy !== undefined && this.store.surface(handle).nodes.includes(legacy.seq)
+    if (retained === undefined && legacyIsSurface && legacy !== undefined) {
+      this.store.append(
+        handle,
+        { type: 'context/note', message, origin: RUNTIME_CONTEXT_ORIGIN, identity: snapshot },
+        { surfaceOp: { op: 'replace', startSeq: legacy.seq, endSeq: legacy.seq }, sourceEventSeqs: [legacy.seq] },
+      )
       return
     }
-    this.store.append(
-      handle,
-      { type: 'context/note', message, origin: SANDBOX_POLICY_ORIGIN, identity: statement },
-      { surfaceOp: { op: 'replace', startSeq: current.seq, endSeq: current.seq }, sourceEventSeqs: [current.seq] },
-    )
+    this.store.append(handle, { type: 'context/note', message, origin: RUNTIME_CONTEXT_ORIGIN, identity: snapshot }, { surfaceOp: 'append' })
   }
 
   /**

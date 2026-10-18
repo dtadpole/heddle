@@ -1,6 +1,6 @@
 ---
 title: Context
-version: 1.1.0
+version: 1.2.0
 description: How a model call's context is derived from a surface, priced, pruned and compacted.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, that context and prompt composition must follow DSH
@@ -19,7 +19,7 @@ in `@deepseek-ai/dsh-*`:
 | [`prune.ts`](prune.ts) | oversized tool results, rewritten as surface replacements |
 | [`compaction.ts`](compaction.ts) | range selection, summarisation, and the one replacement that shadows it |
 | [`instructions.ts`](instructions.ts) | the project's rule files, rendered as one baseline inside a byte budget |
-| [`service.ts`](service.ts) | the seam the loop talks to, and the only place that knows all five |
+| [`service.ts`](service.ts) | the seam the loop talks to; the only place that knows all five, plus the runtime-context snapshot (the standing facts a model is told, appended as a sourced user message when they change) |
 
 ## What belongs here
 
