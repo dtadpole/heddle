@@ -3738,7 +3738,12 @@ function columnMax() {
  * relation with a different floor.
  */
 function columnDefault() {
-  return Math.min(columnMax(), Math.max(680, Math.min(920, Math.round(chatMain.clientWidth * 0.64))))
+  /**
+   * The owner's default: **80-85% of the screen** (82.5% chosen as the midpoint), clamped by the column's
+   * maximum. DSH's own `clamp(area * .64, 680, 920)` was here briefly and starts every window near 680px,
+   * which is not what was asked for; the browser-remembered width still wins over this default.
+   */
+  return Math.min(columnMax(), Math.max(640, Math.round(window.innerWidth * 0.825)))
 }
 /** Write the column, clamped, and report what was actually written. The grips follow it. */
 function setColumn(width) {

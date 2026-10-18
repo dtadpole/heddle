@@ -774,6 +774,15 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
      */
     assert.ok(shape.turns >= 24, `the transcript has more turns than sections once the tool steps are in (${shape.turns})`)
     assert.equal(shape.rows, 16, `but the rail has one row per section (${shape.rows})`)
+    /**
+     * A stale page is a failed comparison, not a mystery. The page states which rail build it carries, so the check
+     * (and a reader) can tell a current document from an older one served out of an out-of-date `dist`.
+     */
+    assert.match(
+      await browser.evaluate('document.querySelector(\'meta[name="heddle-page"]\')?.content ?? ""'),
+      /^rail-sections\//,
+      'the page states the rail build it carries, so a stale page cannot pass silently',
+    )
     assert.deepEqual(shape.roleCounts, { user: 8, assistant: 8 }, `and only the person's and the answer's roles (${JSON.stringify(shape.roleCounts)})`)
     /**
      * The unit is the **section**, not the turn: the old assertion pinned "one row per displayed turn", which is
@@ -910,6 +919,29 @@ test('the conversation minimap follows agentcloud: rows, a bright window, a hove
     assert.equal(hovered.previewWidth, 300, 'at the reference width of 300px')
     assert.equal(hovered.previewBg, 'rgb(36, 36, 36)', 'on the reference surface')
     assert.equal(hovered.previewRadius, '8px', 'at the reference radius')
+    /**
+     * Entry, without a move: a rail's hover is a pointer-presence state, and the reference expands the row the
+     * pointer is in as soon as it is there (`transition: all 0s`, so the ramp is immediate). Heddle painted from
+     * `pointermove` alone, so an entry that never moved showed nothing — the owner's "no fat expansion".
+     */
+    await browser.evaluate('document.getElementById("minimap-hit").dispatchEvent(new PointerEvent("pointerleave", { bubbles: true, pointerId: 31, pointerType: "mouse" }))')
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 400, y: 300, button: 'none' })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const entryState = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const rows = [...document.querySelectorAll('#minimap .mm-row')]
+        const row = rows[5]
+        const box = row.getBoundingClientRect()
+        const hit = document.getElementById('minimap-hit')
+        for (const type of ['pointerover', 'pointerenter']) hit.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: Math.round(box.left + 6), clientY: Math.round(box.top + box.height / 2), pointerId: 31, pointerType: 'mouse', isPrimary: true }))
+        const bar = document.querySelectorAll('#minimap .mm-bar')[5]
+        const m = /matrix\\(([-\\d.]+)/.exec(getComputedStyle(bar).transform)
+        return { scale: m ? Number(Number(m[1]).toFixed(2)) : 1 }
+      })())`),
+    )
+    assert.ok(entryState.scale >= 1.9, `entering the rail expands the row under the pointer without a move (${entryState.scale})`)
+    await browser.evaluate('document.getElementById("minimap-hit").dispatchEvent(new PointerEvent("pointerleave", { bubbles: true, pointerId: 31, pointerType: "mouse" }))')
+
     /**
      * The fat band's driver is the **pointer**, not the scroll position; the bright window's driver is the scroll.
      * Measured on the reference: hovering row 6 swells rows 2-10 and a programmatic scroll leaves that swelling
