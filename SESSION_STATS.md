@@ -220,8 +220,11 @@ centred on the card (card centre 777, dock centre 776.5 at the measured window).
   `1 turns / 1 steps / … tok/s / 1.1K tok / Cache hit 80% / 50%`, ring `11×11` with `17.28 34.56` at 50%; the
   composer suite is 12/12; the screenshot from cycle 2 was taken before these corrections and the built page
   was re-measured after them.
-- **reds:** none in the input area. The full sweep's one red, when present, is the concurrent session's
-  `70-workspaces-sessions` tree work and is named in the round report.
+- **reds:** none in the input area. The full sweep at the cycle's close is 14/15: `70-workspaces-sessions`
+  has two reds, from another session's in-flight pin/archive/fork work (its `check.mjs` is modified in the
+  shared tree); every other suite — including `80-web-ui` and the 12-check composer contract — is green.
+- **close:** `npm run check` 0 errors, `npm test` 322 passing, `npm run build` succeeded; the goal's three
+  cycles are done and the last full measurement produced no further fix row, so the loop stops here.
 - **lessons:** "the dock is centred" and "the dock hugs its content" are two claims — a flex row with `margin:
   auto` centres its text while stretching its own box, and only measuring the element's own width against its
   children catches it. Separator and ring sizes are properties like any other: measured at 1px, they are
