@@ -190,9 +190,21 @@ test('the browser shows a Python file as source, and does not run what a file sa
      * The row is the control now: the owner removed the `+` / `−` box once clicking a folder began to open and
      * close it, so this clicks the row rather than a control that no longer exists.
      */
-    await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000)
-    await browser.evaluate('document.querySelector("#tree .row").click()')
-    await browser.waitFor(`Array.from(document.querySelectorAll('#tree .row')).some((row) => row.dataset.path.endsWith('tool.py'))`, 10_000)
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    /**
+     * Open the root only when it says it is closed. The page opens the first workspace on a first visit (measured from
+     * DSH, 2026-10-17), so an unconditional click closed the branch it meant to open and the file below was never drawn
+     * — the failure read as `Cannot read properties of undefined (reading 'click')` two steps later.
+     */
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#tree .row')).some((row) => row.dataset.path.endsWith('tool.py'))`, 10_000),
+      'the workspace\'s files are drawn once it is open',
+    )
     await browser.evaluate(`Array.from(document.querySelectorAll('#tree .row')).find((row) => row.dataset.path.endsWith('tool.py')).click()`)
     await browser.waitFor('document.querySelectorAll("#file-body .line").length > 0', 10_000)
 

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — the resizable panels.
@@ -63,6 +64,21 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
 
   const home = isolatedHome('resize')
   const work = fixtureDir('resize')
+  /**
+   * A workspace with one folder in it, seeded before the server starts: the panel's primary action has to have
+   * somewhere to start, and the tree's first-visit default only has a branch to open when one exists. Written in the
+   * store's own shape rather than through the API, because registering a folder needs an authenticated request and this
+   * part is about the panel, not about the registration route.
+   */
+  mkdirSync(join(work, 'notes'), { recursive: true })
+  const seededAt = new Date().toISOString()
+  writeJson(join(home, 'workspaces.json'), {
+    version: 3,
+    workspaceIds: ['w1'],
+    workspaces: {
+      w1: { id: 'w1', path: work, title: 'resize', origin: 'added', createdAt: seededAt, updatedAt: seededAt },
+    },
+  })
   const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
   const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
     HEDDLE_HOME: home,
@@ -94,6 +110,62 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.ok(separator.tabindex >= 0, 'and reachable by keyboard')
     assert.ok(separator.hasValue, 'with a value a screen reader can report')
     assert.equal(separator.cursor, 'col-resize', 'and a cursor that says it can be dragged')
+
+    /**
+     * The panel's **primary action** — DSH's `New session`, measured on its sidebar on 2026-10-17: a full-width control
+     * between the brand row and the workspace list, 14-pixel medium text, a 12-pixel radius, a 1-pixel 16%-white border,
+     * and the chord `Alt+Meta+N`. Judged here because it is the sidebar's; the click is real, and what it must do is
+     * start a conversation in the workspace the reader is looking at.
+     */
+    /** The seeded workspace has to be drawn before the action has a target; the tree is a fetch of its own. */
+    assert.ok(
+      await browser.waitFor('document.querySelector("#tree li[data-kind=\\"workspace\\"]") !== null', 20_000),
+      'the seeded workspace is in the tree',
+    )
+    const primary = JSON.parse(
+      await browser.evaluate(`(() => {
+        const button = document.getElementById('new-session')
+        const style = getComputedStyle(button)
+        const box = button.getBoundingClientRect()
+        return JSON.stringify({
+          label: button.innerText.trim(),
+          box: Math.round(box.width) + 'x' + Math.round(box.height),
+          radius: style.borderRadius,
+          fontSize: style.fontSize,
+          fontWeight: style.fontWeight,
+          borderWidth: style.borderWidth,
+          padding: style.padding,
+          widthOfPanel: Math.round(button.parentElement.getBoundingClientRect().width),
+          borders: style.borderTopWidth !== '0px' && style.borderTopColor.includes('/ 0.16')
+        })
+      })()`),
+    )
+    assert.equal(primary.label, 'New session', 'the panel has DSH\'s primary action')
+    assert.equal(primary.radius, '12px', 'rounded by the panel\'s own rule')
+    assert.equal(primary.fontSize, '14px', 'at DSH\'s 14-pixel label')
+    assert.equal(primary.fontWeight, '500', 'and its medium weight')
+    assert.equal(primary.borders, true, 'with DSH\'s 16%-white border')
+    assert.equal(primary.padding, '8px 12px', 'and its padding')
+
+    /** The act: a conversation starts in the selected workspace and the tree shows its row. */
+    await browser.evaluate(`document.getElementById('new-session').click()`)
+    assert.ok(
+      await browser.waitFor('document.querySelectorAll("#tree li[data-kind=\\"session\\"]").length > 0', 20_000),
+      'clicking the primary action starts a session, visible in the tree',
+    )
+    assert.notEqual(
+      await browser.evaluate(`document.getElementById('session-title').textContent`),
+      'No session',
+      'and the panel opens it',
+    )
+
+    /** DSH\'s chord, `Alt+Meta+N`, does the same thing from the keyboard. */
+    const sessionsBefore = await browser.evaluate(`document.querySelectorAll('#tree li[data-kind="session"]').length`)
+    await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', altKey: true, metaKey: true, bubbles: true }))`)
+    assert.ok(
+      await browser.waitFor(`document.querySelectorAll('#tree li[data-kind="session"]').length > ${sessionsBefore}`, 20_000),
+      'the chord starts another one',
+    )
 
     /** Drag it wider, the way a person does, with a pointer that has coordinates. */
     const dragged = JSON.parse(
@@ -259,6 +331,29 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(icon.markBox, '24x24', 'at 24 pixels, inside the 36-pixel control')
     assert.equal(icon.toggleBox, '36x36', 'which is the rail control DSH uses')
     assert.equal(icon.glyphShown, false, 'with the panel glyph put away')
+
+    /**
+     * And the primary action becomes the rail's **second icon**: DSH's collapsed sidebar measures `Open sidebar` at
+     * y=18 and `New session` at y=66 — a 48-pixel pitch — both 36x36 at x=10. The label is put away with the words.
+     */
+    const railAction = JSON.parse(
+      await browser.evaluate(`(() => {
+        const button = document.getElementById('new-session')
+        const box = button.getBoundingClientRect()
+        return JSON.stringify({
+          box: Math.round(box.width) + 'x' + Math.round(box.height),
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          labelShown: getComputedStyle(document.getElementById('new-session-label')).display !== 'none',
+          background: getComputedStyle(button).backgroundColor
+        })
+      })()`),
+    )
+    assert.equal(railAction.box, '36x36', 'the action is a 36-pixel icon in the rail')
+    assert.equal(railAction.x, 10, 'at the rail\'s own inset')
+    assert.equal(railAction.y, 66, 'on DSH\'s 48-pixel pitch below the control that opens the panel')
+    assert.equal(railAction.labelShown, false, 'with its label put away')
+    assert.equal(railAction.background, 'rgba(0, 0, 0, 0)', 'and no fill, which would be the loudest thing left')
 
     /** A reload puts the panel back — DSH's behaviour, and the fix for the owner's report of a missing tree. */
     await browser.goto(server.url)

@@ -125,6 +125,26 @@ test('a first visit opens a workspace, so the tree arrives with its sessions on 
   assert.match(page, /if \(firstBranch !== undefined\) \{\s*expanded\.add\(firstBranch\.path\)\s*rememberExpanded\(\)/, 'writing the choice like any other')
 })
 
+test('the panel has DSH\'s primary action, and it starts a session where the reader is', () => {
+  /**
+   * Measured from DSH's sidebar on 2026-10-17: a full-width `New session` control between the brand row and the
+   * workspace list, 252x38 inside its 280-pixel panel, 12-pixel radius, a 1-pixel 16%-white border, 14-pixel text at
+   * weight 500, and the chord `Alt+Meta+N`. Its collapsed rail carries the same action as its **second icon**, on the
+   * 48-pixel pitch that begins with the control which opens the panel.
+   */
+  assert.match(page, /<button id="new-session" type="button" title="New session \(⌥⌘N\)">/, 'the control exists, named with its chord')
+  assert.match(page, /<span id="new-session-label">New session<\/span>/, 'and says what it does')
+  assert.match(page, /#new-session \{[\s\S]*?border-radius: var\(--radius-md\);/, 'rounded by the panel\'s own rule')
+  assert.match(page, /#new-session \{[\s\S]*?font-size: \.875rem;[\s\S]*?font-weight: 500;/, 'at DSH\'s 14-pixel medium')
+  assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')
+  assert.match(page, /let treeTops = \[\]/, 'the tree keeps the workspace rows the action needs')
+  assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
+  assert.match(page, /if \(selectedPath !== null\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'from the selected row\'s workspace first')
+  assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
+  assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
+  assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
+})
+
 test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
   /**
    * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as
