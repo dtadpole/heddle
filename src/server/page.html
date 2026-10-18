@@ -1128,16 +1128,38 @@
    * ran underneath them and its text showed between the icons, which is what "the `…` disappears when the name is long"
    * was. Stacking them in a grid keeps the age at the edge and never lets either touch the name.
    */
-  #tree .row-right { display: inline-grid; grid-auto-flow: column; grid-template-areas: 'slot'; place-items: center end; flex: none; margin-left: auto; }
-  #tree .row-right > .age, #tree .row-right > .row-tools { grid-area: slot; }
+  /**
+   * The right-hand tail is **one flow, right-aligned**: age, then the pinned marker, then the controls. The two states swap
+   * which children are visible **in place**, rather than stacking two layers in one cell (the previous grid) — the owner's
+   * report that the hover overlapped the resting row. With everything right-aligned, the rightmost element of either state
+   * ends at the same x: the controls' right edge is where the marker's right edge was, so the pin lands where the eye left it.
+   */
+  #tree .row-right { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; flex: none; margin-left: auto; }
+  /**
+   * The pinned marker: 16px at the row's right edge, only drawn on a pinned row. `:empty` collapses the slot on every other
+   * row, so an unpinned list does not pay for it — the reason an earlier fixed slot was removed — while a pinned row still
+   * gets a marker that cannot collide with anything.
+   */
+  #tree .pin-slot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--accent); pointer-events: none; }
+  #tree .pin-slot:empty { display: none; }
+  #tree .pin-slot svg { width: 14px; height: 14px; }
+  /** The resting state: age and marker. The controls are not in flow until the row is hovered or focused. */
+  #tree .age { display: inline-flex; }
+  #tree .row-tools { display: none; }
+  #tree li:hover > .row .age, #tree li:focus-within > .row .age { display: none; }
+  #tree li:hover > .row .pin-slot, #tree li:focus-within > .row .pin-slot { display: none; }
+  #tree li:hover > .row .row-tools, #tree li:focus-within > .row .row-tools,
+  #tree li:has(.menu:not([hidden])) > .row .row-tools { display: inline-flex; }
+  #tree li:has(.menu:not([hidden])) > .row .age, #tree li:has(.menu:not([hidden])) > .row .pin-slot { display: none; }
   #tree .row-tools {
-    display: inline-flex; align-items: center; gap: 6px;
+    /** Not rendered until the row is hovered, focused, or has a menu open — the tail swaps it in where the age was. */
+    display: none; align-items: center; gap: 6px;
     /**
      * Above the age that shares this slot: without a stacking context here the two boxes paint in DOM order and a hover can
      * land on the transparent age while the icon is what the eye sees.
      */
     position: relative; z-index: 1;
-    opacity: 0; pointer-events: none; transition: opacity .12s ease;
+    opacity: 1; pointer-events: auto;
     /**
      * **No surface of its own.** Measured from DSH: its row actions sit directly on the row — transparent buttons over the
      * row's own hover tint — while an earlier version here drew a `--sidebar` patch behind them, which read as a second
@@ -1607,6 +1629,30 @@
   #composer-status .stat-ring-track { fill: none; stroke: var(--border-strong); stroke-width: 2; }
   #composer-status .stat-ring-fill { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; }
   #composer-status [hidden] { display: none; }
+  /**
+   * The dock's detail popovers — DSH's own surface, measured on 2026-10-18: `rgba(67,69,74,.45)`, radius 16,
+   * padding 16, 12px/18px, #cfd3d6, a hairline light ring and a soft drop shadow. One surface, three contents:
+   * "Session statistics" for the time pill, "Token usage" for the usage pill, and the context panel for the
+   * gauge. It is a fixed popover rather than a modal: it closes on a second trigger click, outside pressure or
+   * Escape, and never traps focus.
+   */
+  #stat-popover {
+    position: fixed; z-index: 40; box-sizing: border-box; min-width: 220px; max-width: min(340px, calc(100vw - 24px));
+    background: rgba(67, 69, 74, 0.45); backdrop-filter: blur(12px);
+    border-radius: 16px; padding: 16px; font-size: 12px; line-height: 18px; color: #cfd3d6;
+    box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 12px 32px rgba(0, 0, 0, 0.35);
+    font-variant-numeric: tabular-nums;
+  }
+  #stat-popover[hidden] { display: none; }
+  #stat-popover .stat-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  #stat-popover .stat-panel-title { color: #f9fafb; font-weight: 500; }
+  #stat-popover .stat-panel-figure { color: #f9fafb; font-weight: 500; }
+  #stat-popover .stat-panel-rule { height: 0.5px; background: rgba(255, 255, 255, 0.12); margin: 0 0 10px; }
+  #stat-popover .stat-panel-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 2px 0; }
+  #stat-popover .stat-panel-row dt { color: #adb2b8; margin: 0; }
+  #stat-popover .stat-panel-row dd { margin: 0; color: #f9fafb; text-align: right; }
+  #stat-popover .stat-panel-headline { font-size: 15px; line-height: 20px; color: #f9fafb; font-weight: 500; }
+  #stat-popover .stat-panel-sub { color: #adb2b8; margin-bottom: 4px; }
   /** The menu opened by `+`: the file picker's action and the workspace tree, floating above the card. */
   #attach-menu {
     position: absolute; z-index: 6; left: 50%; bottom: calc(100% - .2rem); transform: translateX(-50%);
@@ -2465,6 +2511,7 @@
       <span data-stat="context"></span>
     </span>
   </div>
+  <div id="stat-popover" role="dialog" aria-label="Session statistics" hidden></div>
   <div id="attach-menu" role="menu" aria-label="Add a file or insert a file path" hidden></div>
   <!--
     The `+` menu's computer-side half: the operating system's file picker. A browser does not reveal
@@ -5592,6 +5639,181 @@ function formatCacheHit(cacheRead, billed) {
   return percent.toFixed(places).replace(/0+$/, '').replace(/\.$/, '')
 }
 
+/**
+ * The dock's detail surfaces: the time pill's "Session statistics", the usage pill's "Token usage", and the
+ * context panel. Contents are built from the same folded facts the dock prints, and a row whose fact was never
+ * observed is omitted rather than filled with a placeholder.
+ */
+let statPopoverKind = null
+let statPopoverAnchor = null
+
+/** DSH's `formatDuration`: one decimal under a minute, `XmYs` from there on. */
+function formatDurationMs(ms) {
+  const seconds = ms / 1000
+  if (seconds < 60) return `${Math.round(seconds * 10) / 10}s`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / 60)}m${whole % 60}s`
+}
+
+/** Exact counts with grouped digits — the usage surface prints them whole. */
+function formatExactCount(value) {
+  return new Intl.NumberFormat('en-US').format(value)
+}
+
+/** The window's compact form in the context panel (`~612K / 1M`). */
+function formatWindow(value) {
+  if (value < 1e3) return String(value)
+  const scaled = (candidate) => (candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10))
+  return value < 1e6 ? `${scaled(value / 1e3)}K` : `${scaled(value / 1e6)}M`
+}
+
+function statPanelRows(kind) {
+  const stats = sessionStats ?? {}
+  const rows = []
+  const push = (label, value) => { if (value !== undefined && value !== null && value !== '') rows.push([label, value]) }
+  if (kind === 'time') {
+    if (typeof stats.llmMs === 'number') push('LLM time', formatDurationMs(stats.llmMs))
+    if (typeof stats.toolMs === 'number') push('Tool time', formatDurationMs(stats.toolMs))
+    if (typeof stats.ttftMs === 'number' && typeof stats.ttftSteps === 'number' && stats.ttftSteps > 0) push('Avg time to first token (TTFT)', formatDurationMs(stats.ttftMs / stats.ttftSteps))
+    if (typeof stats.generationMs === 'number' && stats.generationMs > 0 && typeof stats.decodeTokens === 'number' && stats.decodeTokens > 0) push('Tokens per second (TPS)', `${formatRate(stats.decodeTokens / (stats.generationMs / 1000))} tok/s`)
+  } else if (kind === 'usage') {
+    const usage = stats.usage
+    if (usage !== undefined) {
+      const billed = (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+      const hasBilled = usage.inputTokens !== undefined || usage.cacheReadTokens !== undefined || usage.cacheWriteTokens !== undefined
+      const total = hasBilled && usage.outputTokens !== undefined ? billed + usage.outputTokens : hasBilled ? billed : usage.outputTokens
+      if (total !== undefined) push('total', `${formatExactCount(total)} tok`)
+      if (hasBilled && billed > 0 && usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) push('Cache hit', `${formatCacheHit(usage.cacheReadTokens, billed)}%`)
+      if (usage.inputTokens !== undefined) push('Uncached input', `${formatExactCount(usage.inputTokens)} tok`)
+      if (usage.cacheReadTokens !== undefined) push('Cached input', `${formatExactCount(usage.cacheReadTokens)} tok`)
+      if (usage.cacheWriteTokens !== undefined) push('Cache write', `${formatExactCount(usage.cacheWriteTokens)} tok`)
+      if (usage.outputTokens !== undefined) push('Output', `${formatExactCount(usage.outputTokens)} tok`)
+    }
+  } else {
+    const used = stats.lastPromptTokens
+    const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
+    const window = endpoint?.contextWindow
+    const percent = typeof used === 'number' && typeof window === 'number' && window > 0 ? Math.min(100, Math.round((used / window) * 100)) : null
+    if (percent !== null) push('percent', `${percent}%`)
+    if (typeof used === 'number' && typeof window === 'number' && window > 0) push('used', `~${formatWindow(used)} / ${formatWindow(window)}`)
+  }
+  return rows
+}
+
+function positionStatPopover() {
+  const popover = document.getElementById('stat-popover')
+  if (popover === null || statPopoverAnchor === null) return
+  const rect = statPopoverAnchor.getBoundingClientRect()
+  popover.style.left = '0px'
+  popover.style.top = '0px'
+  const width = popover.offsetWidth
+  const left = Math.min(Math.max(8, rect.left), innerWidth - width - 8)
+  popover.style.left = `${Math.round(left)}px`
+  popover.style.top = `${Math.round(rect.bottom + 8)}px`
+}
+
+function renderStatPopover() {
+  if (statPopoverKind === null) return
+  const popover = document.getElementById('stat-popover')
+  if (popover === null) return
+  const rows = statPanelRows(statPopoverKind)
+  const head = document.createElement('div')
+  head.className = 'stat-panel-head'
+  const title = document.createElement('span')
+  title.className = 'stat-panel-title'
+  title.textContent = statPopoverKind === 'time' ? 'Session statistics' : statPopoverKind === 'usage' ? 'Token usage' : ''
+  if (statPopoverKind === 'context') {
+    popover.replaceChildren()
+    const percentRow = rows.find(([label]) => label === 'percent')
+    const headline = document.createElement('div')
+    headline.className = 'stat-panel-headline'
+    headline.textContent = percentRow === undefined ? '' : percentRow[1]
+    const sub = document.createElement('div')
+    sub.className = 'stat-panel-sub'
+    sub.textContent = percentRow === undefined ? '' : 'of context used'
+    const usedRow = rows.find(([label]) => label === 'used')
+    const figures = document.createElement('div')
+    figures.className = 'stat-panel-sub'
+    figures.textContent = usedRow === undefined ? '' : usedRow[1]
+    popover.append(headline, sub, figures)
+    positionStatPopover()
+    return
+  }
+  const totalRow = rows.find(([label]) => label === 'total')
+  const figure = document.createElement('span')
+  figure.className = 'stat-panel-figure'
+  figure.textContent = totalRow === undefined ? '' : totalRow[1]
+  if (totalRow !== undefined) head.append(title, figure)
+  else head.append(title)
+  const rule = document.createElement('div')
+  rule.className = 'stat-panel-rule'
+  const list = document.createElement('dl')
+  list.className = 'stat-panel-rows'
+  list.style.margin = '0'
+  for (const [label, value] of rows) {
+    if (label === 'total') continue
+    const row = document.createElement('div')
+    row.className = 'stat-panel-row'
+    const term = document.createElement('dt')
+    term.textContent = label
+    const detail = document.createElement('dd')
+    detail.textContent = value
+    row.append(term, detail)
+    list.append(row)
+  }
+  popover.replaceChildren(head, rule, list)
+  positionStatPopover()
+}
+
+function closeStatPopover() {
+  const popover = document.getElementById('stat-popover')
+  statPopoverKind = null
+  if (popover !== null) popover.hidden = true
+  for (const trigger of document.querySelectorAll('[data-stat-pill]')) trigger.setAttribute('aria-expanded', 'false')
+}
+
+function toggleStatPopover(kind, trigger) {
+  const popover = document.getElementById('stat-popover')
+  if (popover === null) return
+  if (statPopoverKind === kind && popover.hidden === false) {
+    closeStatPopover()
+    return
+  }
+  for (const row of statPanelRows(kind)) void row
+  statPopoverKind = kind
+  statPopoverAnchor = trigger
+  popover.hidden = false
+  popover.setAttribute('aria-label', kind === 'time' ? 'Session statistics' : kind === 'usage' ? 'Token usage' : 'Context usage')
+  trigger.setAttribute('aria-expanded', 'true')
+  renderStatPopover()
+}
+
+for (const trigger of document.querySelectorAll('[data-stat-pill]')) {
+  const kind = trigger.getAttribute('data-stat-pill')
+  if (kind === null) continue
+  trigger.setAttribute('role', 'button')
+  trigger.setAttribute('tabindex', '0')
+  trigger.setAttribute('aria-haspopup', 'dialog')
+  trigger.setAttribute('aria-expanded', 'false')
+  trigger.style.cursor = 'pointer'
+  trigger.addEventListener('click', () => toggleStatPopover(kind, trigger))
+  trigger.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    toggleStatPopover(kind, trigger)
+  })
+}
+document.addEventListener('pointerdown', (event) => {
+  if (statPopoverKind === null) return
+  const popover = document.getElementById('stat-popover')
+  if (popover === null) return
+  if (popover.contains(event.target) || event.target.closest?.('[data-stat-pill]') !== null) return
+  closeStatPopover()
+})
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && statPopoverKind !== null) closeStatPopover()
+})
+
 /** Show the dock only when at least one figure is printable. */
 function paintDock() {
   if (statusBar === null) return
@@ -5683,6 +5905,7 @@ function updateStatusBar() {
     }
   }
   paintDock()
+  renderStatPopover()
 }
 
 /** Re-read the session's durable statistics — what a reload, another client's turn, and a turn's end share. */
@@ -8265,6 +8488,12 @@ function nodeRow(node, depth = 0) {
   /** The content's indent, as a number the stylesheet multiplies: a fact about where the row sits, not a second layout. */
   li.style.setProperty('--tree-depth', String(depth))
   li.setAttribute('role', 'treeitem')
+  /**
+   * A row is **focusable**, and that is what makes the display swap keyboard-reachable: the controls are not rendered until the
+   * row is focused, so the row itself has to be the thing a keyboard can land on. Without this, `:focus-within` could only fire
+   * from a control that is never rendered — a keyboard reader had no way to reach a row's actions at all.
+   */
+  li.tabIndex = 0
   li.dataset.kind = node.kind
   /** The key the movement animation matches a previous position to: a session by its id, anything else by its path. */
   li.dataset.rowKey = node.kind === 'session' && node.session !== undefined && node.session !== null ? 'session:' + node.session.id : 'node:' + node.path
@@ -8438,32 +8667,27 @@ function nodeRow(node, depth = 0) {
   const menuSlot = rowTools.querySelector(':scope > .menu-wrap')
   const quickSlot = rowTools.querySelector(':scope > .session-actions')
   if (menuSlot !== null && quickSlot !== null) rowTools.insertBefore(menuSlot, quickSlot)
+  /**
+   * The pinned mark goes **at the right edge**, between the age and the controls.
+   *
+   * The owner's report: the mark sat beside the name on the left, so a pinned row showed a pin on the left ("do not show
+   * that") and the controls on hover added a second one on the right. This is the reference's arrangement — title, time,
+   * marker, actions — and the marker steps aside while the controls are visible, so the row shows exactly one pin mark at
+   * any moment, at the right edge.
+   */
+  const pinSlot = document.createElement('span')
+  pinSlot.className = 'pin-slot'
+  if (node.pinned === true && node.archived !== true) {
+    pinSlot.append(kindIcon('pin-fill'))
+    pinSlot.setAttribute('role', 'img')
+    pinSlot.setAttribute('aria-label', 'pinned')
+    pinSlot.title = 'pinned'
+    li.dataset.pinned = 'true'
+  }
+  rowRight.append(pinSlot)
   /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
   if (rowTools.children.length > 0) rowRight.append(rowTools)
   if (rowRight.children.length > 0) row.append(rowRight)
-  /**
-   * The pinned mark: a small accent badge **beside the name, only on a row that is pinned**.
-   *
-   * It used to be a fixed 16-pixel slot reserved at the row's right edge on every row, which cost the whole list that
-   * width whether or not anything was pinned — the owner's report that the right side was not using the full space. The
-   * mark now costs nothing on an unpinned row, and because it sits with the name rather than at the edge it **cannot
-   * move** the age or the hover controls when a row is pinned: pinning adds a badge to the left-hand text line and
-   * leaves the right-hand slot's geometry alone.
-   */
-  if (node.pinned === true && node.archived !== true) {
-    const pinMark = document.createElement('span')
-    pinMark.className = 'pin-mark'
-    pinMark.append(kindIcon('pin-fill'))
-    pinMark.setAttribute('role', 'img')
-    pinMark.setAttribute('aria-label', 'pinned')
-    pinMark.title = 'pinned'
-    li.dataset.pinned = 'true'
-    /** Immediately after the name, before the right-hand slot: the pin reads as part of the row's label. */
-    const label = row.querySelector(':scope > .label')
-    if (label === null) row.append(pinMark)
-    else label.after(pinMark)
-  }
-
   row.onclick = async () => {
     /**
      * Three kinds of row, three different acts — the owner's rules of 2026-10-11.
@@ -8567,7 +8791,12 @@ function titleMarquee(label) {
  * viewport, turns itself off under `prefers-reduced-motion`, and stays off until the first pointer or keyboard input inside
  * the list so a page load does not animate itself in.
  */
-const ROW_GLIDE_MS = 200
+/**
+ * **400 ms, not the reference's 200.** The owner asked for the pin/unpin move to be slower: at 200 the row reached the top
+ * before the eye had followed it, which reads as a jump again. The mechanism, the easing and the fade stay the reference's;
+ * only this duration is a stated local choice.
+ */
+const ROW_GLIDE_MS = 400
 const ROW_FADE_MS = 100
 /** The row boxes as they are now, keyed by the same key the rows render with. */
 function captureRowBoxes() {

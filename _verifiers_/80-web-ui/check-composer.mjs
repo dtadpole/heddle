@@ -1198,3 +1198,74 @@ test('a file larger than ten megabytes is accepted, and lands in the draft', asy
     await server.close()
   }
 })
+
+/**
+ * Each dock element opens the reference's detail surface, with the reference's rows.
+ *
+ * DSH's time pill opens "Session statistics" (LLM time, tool time, average TTFT, TPS), its usage pill opens
+ * "Token usage" (exact total plus the prompt-side buckets and output), and its context gauge opens a context
+ * panel (percent, "of context used", used/window). Measured on the live app on 2026-10-18: one shared
+ * popover surface, `rgba(67,69,74,.45)`, radius 16, padding 16, 12px/18px, closing on a second click, outside
+ * pressure or Escape. A row appears only when the fact was observed; this provider reports usage but no tool
+ * call, so "Tool time" is absent here — and that absence is asserted.
+ */
+test('the dock elements open the reference\u2019s detail surfaces, and close again', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('dialogs', {
+    usage: { prompt_tokens: 600, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 400 } },
+    contextWindow: 2000,
+    holdOpenMs: 50,
+  })
+  const browser = await openBrowser()
+  const panel = () =>
+    browser.evaluate(`(() => {
+      const node = document.getElementById('stat-popover')
+      return JSON.stringify({ hidden: node === null ? null : node.hidden, text: node === null ? null : node.innerText.replace(/\\n/g, ' | '), label: node === null ? null : node.getAttribute('aria-label'), expanded: [...document.querySelectorAll('[data-stat-pill]')].map((item) => item.getAttribute('aria-expanded')) })
+    })()`)
+  const click = (kind) => browser.evaluate(`(() => { document.querySelector('[data-stat-pill="${kind}"]').click(); return true })()`)
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    const before = JSON.parse(await panel())
+    assert.equal(before.hidden, true, 'nothing is open before a click')
+
+    await type(browser, 'open the tables')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000))
+
+    await click('time')
+    const time = JSON.parse(await panel())
+    assert.equal(time.hidden, false, 'the time pill opens a surface')
+    assert.equal(time.label, 'Session statistics')
+    assert.match(time.text, /LLM time \| \d+(\.\d)?m?\d*s/, 'LLM time is a measured duration')
+    assert.match(time.text, /Tokens per second \(TPS\) \| \d+(\.\d)? tok\/s/, 'and TPS is the folded rate')
+    assert.ok(!time.text.includes('Tool time'), 'tool time is absent because no tool call was observed')
+    assert.equal(time.expanded[0], 'true', 'the trigger reports itself expanded')
+    await click('time')
+    assert.equal(JSON.parse(await panel()).hidden, true, 'a second click closes it')
+
+    await click('usage')
+    const usage = JSON.parse(await panel())
+    assert.equal(usage.hidden, false)
+    assert.equal(usage.label, 'Token usage')
+    assert.match(usage.text, /Token usage \| 620 tok/, 'the exact total rides the title (600 billed + 20 output)')
+    assert.ok(usage.text.includes('Cache hit | 67%'), 'the cache share is the reference\u2019s rounded text')
+    assert.ok(usage.text.includes('Uncached input | 200 tok'), 'the uncached bucket is exact and grouped')
+    assert.ok(usage.text.includes('Cached input | 400 tok'))
+    assert.ok(usage.text.includes('Output | 20 tok'))
+
+    await click('context')
+    const contextPanel = JSON.parse(await panel())
+    assert.equal(contextPanel.hidden, false)
+    assert.equal(contextPanel.label, 'Context usage')
+    assert.ok(contextPanel.text.includes('30%'), 'the share is the last prompt over the declared window')
+    assert.ok(contextPanel.text.includes('of context used'))
+    assert.ok(contextPanel.text.includes('~600 / 2K'), 'and the used/window figures are the reference\u2019s compact form')
+
+    await browser.evaluate(`(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true })()`)
+    assert.equal(JSON.parse(await panel()).hidden, true, 'Escape closes the surface')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

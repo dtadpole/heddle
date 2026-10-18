@@ -510,3 +510,23 @@ a log with only a request keeps every row absent. The usage dialog's rows need n
 already in the stats — and the context panel's breakdown is still not exposed by the context service, so those
 rows will be omitted rather than guessed. The shared popover and its three content renderers are the frontend
 half of this cycle.
+
+### Footer-dialog loop — cycle 2/3: the shared popover and its three surfaces
+
+- **changed:** `src/server/page.html` gained one fixed popover and three content renderers, in the reference's
+  measured surface (`rgba(67,69,74,.45)`, radius 16, padding 16, `12px/18px`, hairline ring + soft shadow):
+  the time pill prints LLM time, tool time, average TTFT (ttftMs/ttftSteps) and TPS (decodeTokens/generationMs);
+  the usage pill prints the exact total on its title and the four exact buckets, with the reference's rounded
+  cache share; the context panel prints the percent, "of context used", and `~used / window` — its three
+  breakdown rows are absent because the context service does not expose a breakdown, and a row whose fact was
+  not observed is omitted. Triggers are buttons (`role`, `tabindex`, `aria-haspopup`, `aria-expanded`) that
+  toggle on click/Enter/Space; the surface closes on a second click, outside pressure or Escape, and re-renders
+  while open as the figures move.
+- **verify:** the new browser contract clicks each of the three elements and asserts the surface's text: LLM
+  time and TPS present with the reference's formats, **Tool time absent** (no tool call was observed in that
+  session), the usage title carrying the exact `620 tok`, `Cache hit 67%`, the exact buckets, the context panel's
+  `30%` + `~600 / 2K`, `aria-expanded` on the trigger, closing on a second click and on Escape. The composer
+  suite is 14/14 green; `npm test` 395 passing.
+- **landing / live:** committed to main, the deployment checkout fast-forwarded and rebuilt, the launchd agent
+  serving it, and `96-deployment` green (process, byte-identical page, clean committed main); the surfaces were
+  opened on the live page at 8082.
