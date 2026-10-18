@@ -699,3 +699,96 @@ test('the default column is the owner\u2019s 80-85% of the screen, clamped', asy
     await server.close()
   }
 })
+
+/**
+ * The action controls' **states** are DSH's, measured with a trusted pointer.
+ *
+ * DSH's own composer, measured 2026-10-17 with `Input.dispatchMouseEvent`:
+ *
+ * - the editor's caret is the accent colour (`rgb(122,170,255)`), not the text colour;
+ * - a disabled Send keeps the accent background at `opacity: .4` instead of turning grey;
+ * - an enabled Send **darkens** on hover (`#7aaaff` → `#4176e6`);
+ * - the `+` is half-transparent at rest (`opacity: .5`) and fully opaque on hover, with no background
+ *   change.
+ *
+ * Heddle's own accent is its theme's blue, so the states are judged against `--accent` rather than DSH's
+ * exact hue: the *behaviour* is the reference, the hue is the palette.
+ */
+test('the action controls carry DSH\u2019s states', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('states')
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    const style = (selector, props) =>
+      browser.evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(selector)})
+        if (node === null) return JSON.stringify(null)
+        const s = getComputedStyle(node)
+        return JSON.stringify(${JSON.stringify(props)}.reduce((out, key) => { out[key] = s.getPropertyValue(key); return out }, {}))
+      })()`)
+    const centre = (selector) =>
+      browser.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }) })()`)
+    const move = async (point) => {
+      await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y })
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+
+    const accentValue = await browser.evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()`)
+    const dim = await browser.evaluate(`(() => { const probe = document.createElement('span'); probe.style.background = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(); document.body.append(probe); const value = getComputedStyle(probe).backgroundColor; probe.remove(); return value })()`)
+    assert.ok(accentValue.length > 0, `the page declares an accent (${accentValue})`)
+
+    /** The caret is the accent, which is what DSH's editor shows while typing. */
+    const editorStyle = JSON.parse(await style('#prompt textarea', ['caret-color']))
+    assert.equal(editorStyle['caret-color'], dim, 'the editor cursor is the accent colour')
+
+    /** Empty draft: Send keeps the accent and drops to opacity .4, like DSH's disabled action. */
+    const empty = JSON.parse(await style('#send', ['background-color', 'opacity', 'color']))
+    assert.equal(empty['background-color'], dim, 'a disabled Send keeps the accent background')
+    assert.equal(empty.opacity, '0.4', 'and dims with opacity, as DSH does')
+    assert.equal(empty.color, 'rgb(255, 255, 255)', 'with a white glyph')
+
+    /** Typed draft: enabled, and hovering darkens it. */
+    await type(browser, 'x')
+    const enabled = JSON.parse(await style('#send', ['background-color', 'opacity']))
+    assert.equal(enabled.opacity, '1', 'a draft enables the action')
+    /**
+     * Hover is judged by the **rendered** colour, not its text: `color-mix()` resolves to an `oklab(...)`
+     * string in computed style, so both are drawn on a 1×1 canvas and the channel sums compared.
+     */
+    const colourSum = () =>
+      browser.evaluate(`(() => {
+        const node = document.querySelector('#send')
+        const canvas = document.createElement('canvas')
+        canvas.width = canvas.height = 1
+        const context = canvas.getContext('2d')
+        context.fillStyle = getComputedStyle(node).backgroundColor
+        context.fillRect(0, 0, 1, 1)
+        const [r, g, b] = context.getImageData(0, 0, 1, 1).data
+        return r + g + b
+      })()`)
+    const idleSum = await colourSum()
+    const sendPoint = JSON.parse(await centre('#send'))
+    await move(sendPoint)
+    const hoverSum = await colourSum()
+    assert.ok(hoverSum < idleSum, `hover darkens the action (channels ${idleSum} → ${hoverSum})`)
+    await move({ x: 2, y: 2 })
+    const left = JSON.parse(await style('#send', ['background-color']))
+    assert.equal(left['background-color'], enabled['background-color'], 'and moving away restores it')
+
+    /** The `+` is half-transparent at rest and opaque on hover, without changing its background. */
+    const attachIdle = JSON.parse(await style('#attach', ['opacity', 'background-color']))
+    assert.equal(attachIdle.opacity, '0.5', 'the + rests at half opacity')
+    const attachPoint = JSON.parse(await centre('#attach'))
+    await move(attachPoint)
+    const attachHover = JSON.parse(await style('#attach', ['opacity', 'background-color']))
+    assert.equal(attachHover.opacity, '1', 'and is fully opaque under the pointer')
+    assert.equal(attachHover['background-color'], attachIdle['background-color'], 'with its background unchanged')
+    await move({ x: 2, y: 2 })
+    assert.equal(JSON.parse(await style('#attach', ['opacity'])).opacity, '0.5', 'and moving away restores the resting opacity')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

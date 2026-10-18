@@ -154,3 +154,38 @@ viewport bottom — against DSH's 98px, 17px and 30px. Recorded for cycle 2, not
   alone, per the skill.
 - **lessons:** compare the **pixels a person sees** (text-to-control distance, insets, bands), not the box
   heights two implementations happen to report; equal rhythm can hide behind unequal boxes.
+
+### Cycle 3 — the controls' interactive states
+
+- **measured:** both composers with a **trusted pointer** (`Input.dispatchMouseEvent`) and a typed character,
+  on 2026-10-17:
+  - DSH: editor caret `rgb(122,170,255)` (its accent, not its text colour); a disabled Send keeps the accent
+    background at `opacity: .4` (it is not grey); an enabled Send **darkens** on hover
+    (`#7aaaff` → `#4176e6`); the `+` rests at `opacity: .5` and is fully opaque on hover with no background
+    change; the access chip and model seat take a `rgba(255,255,255,.08)` hover wash.
+  - Heddle before: caret was the text colour; a disabled Send turned `#242424` grey at full opacity; hover
+    **lightened** the accent; the `+` was fully opaque at rest and lightened its background on hover.
+- **brainstorm:** (a) copy DSH's exact hues — discarded: Heddle's accent is this theme's blue, the behaviour is
+  the reference and the palette is the project's; (b) change the four states per property, keeping the accent
+  value — **chosen**; (c) leave the disabled Send grey and call it a theme choice — discarded: the measured
+  behaviour is that the action keeps its colour and dims, which is the felt difference; (d) animate the caret
+  colour on focus — discarded: DSH's caret is always the accent; (e) keep the `+` background hover — discarded:
+  DSH's `+` changes opacity, not background, and both are one property each in CSS.
+- **step back:** all four are values in one CSS block (the control states), not missing mechanisms; the access
+  chip's hover remains a **kept divergence** (it reports instead of switching, so it has no menu affordance).
+  After the fixes, a **full re-measurement of the same states produced no fix row** — the remaining
+  differences are the divergences already recorded (the chip, the palette hue, the absent effort/voice).
+  That is the loop's stop condition: cycle three verified, nothing left to fix.
+- **plan:** caret = `var(--accent)`; disabled Send = accent at `opacity: .4`; Send hover darkens the accent;
+  `+` rests at `opacity: .5`, opaque on hover, background unchanged.
+- **changed:** `src/server/page.html` (the four state rules); `_verifiers_/80-web-ui/check-composer.mjs`
+  (a new contract, "the action controls carry DSH's states", driven by a trusted pointer).
+- **evidence:** the new contract was written **before** the CSS and failed on the caret
+  (`rgb(249,250,251)` vs the accent `rgb(38,148,254)`), then passed after the four rules. The live re-measure
+  after the change: caret `rgb(38,148,254)`; a disabled Send is `rgb(38,148,254)` on white; the `+` rests at
+  `.5` and is opaque under the pointer; the composer suite is green, twelve checks.
+- **reds:** none remaining in the input area; the suite's other reds, when present, belong to concurrent
+  sessions and are named in the round report.
+- **lessons:** a **state** is the unit for interaction parity, not a colour: the same pixel under a different
+  pointer state is a different behaviour, and only a trusted pointer can show it. `color-mix()` computes to
+  `oklab(...)`, so colour comparisons are drawn on a canvas and compared as channels, never as strings.
