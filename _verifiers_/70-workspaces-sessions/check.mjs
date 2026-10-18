@@ -1205,7 +1205,9 @@ test('a folder opens and closes with the same control, including a leaf with not
     await browser.evaluate(
       `[...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === 'INDEX.md').click()`,
     )
-    await browser.waitFor(`document.getElementById("file-body").innerText.includes("# _tools_")`, 20_000)
+    // Markdown is previewed as a document, not as raw source. Wait for its heading so a loading
+    // placeholder or a correct rendered preview cannot be mistaken for missing file content.
+    await browser.waitFor(`document.querySelector("#file-body h1")?.textContent === "_tools_"`, 20_000)
     const fileView = JSON.parse(
       await browser.evaluate(`JSON.stringify((() => {
         const row = [...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === 'INDEX.md')
@@ -1233,14 +1235,7 @@ test('a folder opens and closes with the same control, including a leaf with not
      * A markdown document arrives **rendered** — that is what the preview is for — so the assertion is the
      * heading's text rather than its source, and the verbatim case is judged on a file that is not markdown.
      */
-    /**
-     * The assertion is on the text the fixture actually wrote, `# _tools_`.
-     *
-     * It looked for `/tools/` before, which the string `_tools_` does not contain — so it could never have passed,
-     * and it was only reached once the failure above it was fixed. Measured: the wait for `# _tools_` succeeded
-     * while this line failed, which is what a wrong claim looks like next to a correct wait.
-     */
-    assert.match(fileView.body, /tools/, 'the panel shows the document that was opened, not a summary of it')
+    assert.equal(fileView.body, '_tools_', 'the panel shows the rendered heading from the document that was opened')
     assert.ok(!fileView.body.includes('# _tools_'), 'rendered rather than handed over as its source')
     assert.equal(fileView.logHidden, true, 'and the conversation steps aside while the file is shown')
     assert.equal(fileView.disclosure, 'none', 'a file is a leaf, so its row carries no disclosure control')
