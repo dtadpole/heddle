@@ -66,3 +66,63 @@ Cycle 1 — replay the feature onto the rewritten main and verify the merged bui
 
 (cycles 2 and 3 appended as they complete: private-server live probe, landing, deployment hand-off and the
 owner-URL verification)
+
+## Cycle 2 — main's landing convention and the two v1.4 skills
+
+```
+Cycle 2 — merge the refreshed main and keep both completion rules
+  measured:   main moved twice while the first integration was verified: ed183ea (permission modes, sidebar column,
+              session flags) and 42bfc17, which added `_conventions_/landed-and-deployed/` and
+              `_verifiers_/96-deployment/` — the judge that fails when the process behind 3082 is not this
+              checkout's `dist/cli.js` or when the 8082 page is not this checkout's built page. Both main and this
+              branch had independently written a v1.4.0 of `full-loop-goal`: main's landing rule and this
+              branch's delivery rule.
+  brainstorm: skill clash: (a) take main's version — loses the deliver-at-the-owner's-address mechanisms the branch
+              learned; (b) take the branch's — loses the landing rule and the `landed:` cycle line; (c) keep both
+              as one v1.4 — chosen: they are the two halves of completion (deliver to the address, then land and
+              deploy). Conflict-resolution: page.html and page-contract auto-merged this time (main's latest edits
+              were the access-control markup already merged in cycle 1).
+  step back:  the acceptance criterion is now explicit and external: land in main, then the deployment must be
+              verified by `_verifiers_/96-deployment` (process + byte-identical owner page) **and** the
+              user-visible selector on 8082. A green integration branch is a checkpoint.
+  changed:    branch integrate/model-selector now = main 42bfc17 + the six feature commits + two merge commits
+              (f733609, b282d68). Skill conflict resolved by combining the two v1.4 intros and grounding bullets.
+  evidence:   npm run check clean; 352/352 unit tests; build clean; model-switcher contract 5/5; the final
+              integrated build on a private server (3086) passes the live probe 50/50 including the running-turn
+              switch, reload, keyboard and trusted mouse clicks; screenshot `heddle-live-integrated-3086.png`.
+              `_verifiers_/80-web-ui` folder was green (39 checks) before the latest docs-only merge; the merged
+              tree's `96-deployment` cannot pass by construction until main itself carries the build.
+  delivered:  not yet. Landing is blocked by another session's **uncommitted** edits in the main checkout to four
+              files this change also edits: src/local-config.ts, src/server/page.html, src/session/store.ts,
+              test/page-contract.test.ts (measured 20:52, diff 71 lines total, mtimes 20:28-20:43). A fast-forward
+              would overwrite them; sweeping them into main is the anti-pattern the new convention names. The
+              landing is therefore **handed over ready-to-run**: branch `integrate/model-selector` @ b282d68,
+              fast-forwards main; the deploy half (restart of com.dtadpole.heddle-web) is the Lead's, and the
+              8082 verification runs after that restart.
+  reds:       none in the integrated tree. Two external conditions block completion and are named: (1) main
+              checkout dirty on overlapping files; (2) service restart owned by the Lead.
+  coverage:   private-server live probe states (seat, root, grouped models, search, effort, keyboard, selection,
+              reload, running switch, clamp, outside click) on the integrated build; the owner's 8082 behaviour is
+              not measured yet by construction.
+  invariants: main's new `_verifiers_/96-deployment`, permission modes, stats dock, session flags and sidebar are all
+              in the same merged tree and the 80-web-ui folder remained green.
+  lessons:    "merge, deploy, verify" already existed as a convention in the target main — a workstream's completion
+              rule must be read from the target line, not assumed from its own skill.
+```
+
+## Cycle 3 — readiness
+
+```
+Cycle 3 — the landing package and its judge
+  measured:   the landing command is a fast-forward of main to b282d68 (main 42bfc17 is an ancestor). The judge
+              after the merge is `_verifiers_/96-deployment` (two assertions: process path, served-page byte
+              identity), plus the model-selector live probe against 8082 after the Lead restarts the service.
+  state:      branch pushed (origin/integrate/model-selector), main untouched, service untouched (still
+              /Users/zhenc/heddle/dist/cli.js, PID seen at 20:43).
+  landing steps recorded for whoever holds the clean window:
+              1. `git -C /Users/zhenc/heddle merge --ff-only integrate/model-selector`
+              2. `npm run build` in /Users/zhenc/heddle
+              3. Lead/owner restarts com.dtadpole.heddle-web (this workstream must not)
+              4. `sh _verifiers_/96-deployment/verify.sh` and the trusted-click selector probe at 8082
+  lessons:    a delivery that cannot land because someone else's half-written tree overlaps it is a handover, not a
+              completion; the branch and the exact steps are the deliverable until the window opens.
