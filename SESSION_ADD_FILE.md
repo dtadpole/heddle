@@ -276,6 +276,33 @@ deployment checkout's `dist/cli.js` and 8082 serving that checkout's built page 
 | 2 | the same menu, re-read | `File` only at the menu's root; two-file and removal behaviour | 1: `File` disappears inside the tree | pinned at every level; failing-first browser check now passes |
 | 3 | the same menu, re-read | `File` at every level, picker asked, stored path in the draft | none | stopped early with the differences above recorded rather than worked around |
 
+## The upload ceiling, raised after the owner's report
+
+The owner loaded a screenshot and the composer answered
+`could not add LWScreenShot 2026-05-25 at 6.53.05 PM.png: the file is larger than this server accepts`.
+Measured: the route capped an upload at **10 MiB = 10,485,760 bytes**, and an ordinary Retina
+screenshot passes that; the message did not say what the ceiling was.
+
+Why raising it is honest rather than permissive: the bytes are written under `$HEDDLE_HOME/uploads` and
+the conversation receives a **path** the agent reads, so the ceiling is a local-memory guard, not a
+prompt-size one. It is now **50 MiB = 52,428,800 bytes** — covers screenshots, images and small documents,
+still bounds one request's buffered body — and a refusal states the limit instead of leaving a person to
+guess it.
+
+- **Failing first:** the browser contract's new case (an 11 MiB PNG chosen through `+`) failed against the
+  10 MiB cap and passes after; the stored copy is asserted at the whole 11,534,344 bytes.
+  Screenshot: [`_context_/add-file/cycle-4-large-file.png`](_context_/add-file/cycle-4-large-file.png).
+- **Landed:** commit `99aae14` `fix(web): an uploaded file may be larger than ten megabytes, so a
+  screenshot fits` on `main`, pushed to `origin/main`.
+- **Deployed and observed:** `/Users/zhenc/heddle-deploy` pulled and rebuilt at `99aae14`, the agent
+  restarted (PID 10994 runs the deployment checkout's `dist/cli.js`), `_verifiers_/96-deployment` is
+  3 of 3, and at `http://127.0.0.1:8082/` an **11,534,344-byte** file chosen through `+` landed as
+  `/Users/zhenc/.heddle/uploads/2026-10-18T04-36-02-715Z-landed-large-screenshot.png` with that exact
+  size. Screenshot:
+  [`_context_/add-file/landed-large-8082.png`](_context_/add-file/landed-large-8082.png).
+- **Still a bound:** a file over 50 MiB is refused with the limit in the sentence; that refusal is not
+  exercised in the browser.
+
 ## What is not covered
 
 - A file larger than 10 MiB is refused by the route; the browser gesture for that refusal is not
