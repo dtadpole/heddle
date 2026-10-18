@@ -166,8 +166,8 @@ test('a fork is named the way the reference names it: an existing ordinal is inc
 })
 
 test('a fork inherits the projection cut at the last completed turn, not a dangling half-turn', () => {
-  const at = (seq, type, extra = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
-  const message = (seq, role, text) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
+  const at = (seq: number, type: string, extra: Record<string, unknown> = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
+  const message = (seq: number, role: string, text: string) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
 
   /** A completed turn followed by a question whose answer never arrived: only the completed part is inherited. */
   const log = [
@@ -187,8 +187,8 @@ test('a fork inherits the projection cut at the last completed turn, not a dangl
 })
 
 test('a fork is refused on a question with no answer, and allowed on a conversation that was itself forked', () => {
-  const at = (seq, type, extra = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
-  const message = (seq, role, text) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
+  const at = (seq: number, type: string, extra: Record<string, unknown> = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
+  const message = (seq: number, role: string, text: string) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
 
   const dangling = [message(0, 'user', 'a question that never got an answer')]
   assert.equal(inheritsAnswer(dangling), false, 'a recorded question with no answer has nothing to continue')

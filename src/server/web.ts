@@ -1,3 +1,4 @@
+import { contextWindowFromModelList } from '../llm/model-info.ts'
 import { readFileSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
@@ -514,7 +515,22 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
     const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
-    respond(response, 200, 'application/json', `${JSON.stringify(described, null, 2)}\n`)
+    /**
+     * A provider that lists its models already knows each one's context window, and the composer's gauge needs
+     * it. The declarative configuration always wins; only an endpoint that declares none asks its provider, and
+     * a provider that cannot answer leaves the entry without a window — the page then prints no percentage,
+     * which is the truth rather than a guessed denominator.
+     */
+    const discovered = await Promise.all(
+      endpoints.map((endpoint) =>
+        endpoint.contextWindow !== undefined ? undefined : contextWindowFromModelList(endpoint),
+      ),
+    )
+    const withWindows = described.endpoints.map((entry, index) => {
+      const window = discovered[index]
+      return window === undefined ? entry : { ...entry, contextWindow: window, contextWindowSource: 'provider-models' }
+    })
+    respond(response, 200, 'application/json', `${JSON.stringify({ ...described, endpoints: withWindows }, null, 2)}\n`)
     return
   }
 

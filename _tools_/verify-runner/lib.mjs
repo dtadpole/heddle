@@ -236,7 +236,13 @@ export async function chatDouble(options = {}) {
       body += chunk
     })
     request.on('end', () => {
-      requests.push({ url: request.url ?? '', body, headers: request.headers })
+      /**
+       * The model list is discovered on page load, so it is not one of the "endpoint was asked" requests the
+       * turn checks count; it is answered (or refused) here, before the completion path below.
+       */
+      const pathname = new URL(request.url ?? '/', 'http://x').pathname
+      const isModelList = pathname.endsWith('/models')
+      if (!isModelList) requests.push({ url: request.url ?? '', body, headers: request.headers })
       const message = options.toolCall
         ? {
             role: 'assistant',
@@ -263,6 +269,16 @@ export async function chatDouble(options = {}) {
         return
       }
 
+      if (isModelList) {
+        if (options.modelList !== undefined) {
+          response.writeHead(200, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ object: 'list', data: options.modelList }))
+        } else {
+          response.writeHead(404, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: 'no model list' }))
+        }
+        return
+      }
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const finish = () => {
         /**

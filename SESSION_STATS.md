@@ -307,3 +307,43 @@ restarted and the live page checked at `http://localhost:8082/`:
 second; cache; failure leaves it absent), failing-first unit tests for each wire shape, a browser contract
 where an endpoint declares no window but its model list reports one and the gauge appears, then the live
 8082 check and the suites.
+
+### Completeness cycle 2 — the window is discovered from the provider, not configured by hand
+
+- **measured (cycle 1's finding, restated):** the gauge was hidden because `plugboard-d`/`plugboard-x`
+  declared no window, while both providers' model lists report it (`data[].context_window` 1,048,576;
+  `models[].context_window` 500,000).
+- **understand / step back:** the value is the provider's own fact, so asking the provider is a mechanism the
+  harness should have — a configured number would be a second, staler copy and a hardcoded table would be a
+  guess.
+- **brainstorm:** (a) leave it to machine configuration — kept only as the declared path, because a person who
+  declares a window should not be overridden; (b) hardcode a model→window table — rejected: guesses for private
+  models and stale on the next route change; (c) query the endpoint's model list, kind-aware, cache it, and
+  leave the answer absent when the provider cannot answer — **chosen**; (d) fetch it in the page — rejected: the
+  browser would need the provider's credentials and the signing path.
+- **plan / changed:**
+  - `src/llm/model-info.ts` (new): `contextWindowFromModelList(endpoint)` — openai-chat reads
+    `data[].context_window`, openai-responses reads `models[].context_window`, matched to the endpoint's model;
+    a 1.5s timeout, a failed or missing answer yields `undefined`, and answers are cached per endpoint+model
+    (concurrent callers share one promise). Kinds with no list route (Anthropic) return `undefined` without a
+    request.
+  - `src/server/web.ts`: `GET /api/endpoints` now awaits that resolver for endpoints that declare no window and
+    merges the result with `contextWindowSource: 'provider-models'`; `src/endpoints.ts` marks a declared window
+    `contextWindowSource: 'config'`.
+  - `test/model-info.test.ts` (new) and the verifier double: five unit tests (both wire shapes, an unlisted
+    model, a failed request, caching, a kind with no route); `chatDouble` serves (or refuses) `/models` without
+    counting it as one of a turn's completion requests.
+- **verify:** the new browser contract, "the context gauge uses a window the provider reports, and stays blank
+  when it reports none", was written before the wiring and failed on the missing gauge, then passed: an endpoint
+  that declares nothing and whose provider reports 500,000 renders `50%`, and an endpoint whose provider reports
+  nothing prints no percentage with the item hidden.
+- **live, end to end:** the manual declarations were removed again to force the mechanism and the daemon
+  restarted. `GET /api/endpoints` then reported `plugboard-d · deepseek-flash · 1048576 · provider-models`,
+  `plugboard-x · gpt-6.1-sol · 500000 · provider-models`, `claude-opus · 1000000 · config`; at
+  `http://localhost:8082/` the dock read `692K tok · Cache hit 80% · 4%`
+  ([heddle-stats-dock-context-discovered.png](_context_/dsh-mechanisms/heddle-stats-dock-context-discovered.png)).
+  The machine config now declares only the window Anthropic cannot report (`claude-opus`, via configuration),
+  and the two plugboard routes are discovered.
+- **found for cycle 3:** the turns figure is counted from rendered user rows, so a page that has not finished
+  drawing history can show `0 turns` beside `31 steps` (seen in the live probe). The durable `stats.turns` is
+  the right source, with the live turn added — cycle 3's fix row.

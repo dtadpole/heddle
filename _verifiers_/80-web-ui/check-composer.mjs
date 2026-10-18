@@ -50,6 +50,7 @@ async function startServer(label, options = {}) {
     reasoning: 'thinking',
     holdOpenMs: options.holdOpenMs ?? 1200,
     ...(options.usage !== undefined ? { usage: options.usage } : {}),
+    ...(options.modelList !== undefined ? { modelList: options.modelList } : {}),
   })
   const config = writeJson(join(home, 'heddle.json'), {
     default: 'held',
@@ -883,5 +884,67 @@ test('the action controls carry DSH\u2019s states', async (context) => {
   } finally {
     browser.close()
     await server.close()
+  }
+})
+
+/**
+ * When the provider lists its model's context window, the gauge gets a real denominator without configuration.
+ *
+ * The endpoint below declares no `contextWindow`; its provider's model list reports 500,000. A session that used
+ * 250,000 prompt tokens therefore reads 50%, and an endpoint whose provider reports nothing still prints no
+ * gauge — the rule that a number appears only when a provider gave the fact behind it.
+ */
+test('the context gauge uses a window the provider reports, and stays blank when it reports none', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('context-window', {
+    modelList: [{ id: 'held-model', context_window: 500000 }],
+    usage: { prompt_tokens: 250000, completion_tokens: 10 },
+    holdOpenMs: 50,
+  })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    await type(browser, 'measure the context')
+    await press(browser, { key: 'Enter' })
+    assert.ok(
+      await browser.waitFor('(document.querySelector(\'[data-stat="context"]\') || {}).textContent !== ""', 20_000),
+      'the gauge fills once the provider-reported window is discovered',
+    )
+    const shown = JSON.parse(await browser.evaluate(`(() => {
+      const cell = (name) => (document.querySelector('[data-stat="' + name + '"]') || {}).textContent || ''
+      const item = document.querySelector('[data-stat-pill="context"]')
+      return JSON.stringify({ context: cell('context'), hidden: item === null ? null : item.hidden })
+    })()`))
+    assert.equal(shown.context, '50%', 'the share is the last prompt over the provider\'s own window')
+    assert.equal(shown.hidden, false, 'and the item is not hidden')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+
+  /** A provider that reports no model list leaves the gauge blank rather than borrowing a number. */
+  const bare = await startServer('context-window-absent', {
+    usage: { prompt_tokens: 250000, completion_tokens: 10 },
+    holdOpenMs: 50,
+  })
+  const browser2 = await openBrowser()
+  try {
+    await browser2.goto(bare.url)
+    await browser2.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    await type(browser2, 'measure without a window')
+    await press(browser2, { key: 'Enter' })
+    assert.ok(await browser2.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent !== ""', 20_000))
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const absent = JSON.parse(await browser2.evaluate(`(() => {
+      const cell = (name) => (document.querySelector('[data-stat="' + name + '"]') || {}).textContent || ''
+      const item = document.querySelector('[data-stat-pill="context"]')
+      return JSON.stringify({ context: cell('context'), hidden: item === null ? null : item.hidden })
+    })()`))
+    assert.equal(absent.context, '', 'no window means no percentage')
+    assert.equal(absent.hidden, true, 'and the item is hidden')
+  } finally {
+    browser2.close()
+    await bare.close()
   }
 })
