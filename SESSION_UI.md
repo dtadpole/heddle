@@ -150,6 +150,21 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### Row age, order and the blinking control (2026-10-17)
+
+Three reports from the owner, one root each.
+
+| Report | Root | Fix |
+|---|---|---|
+| A session being written to kept its old age (`1min`, `6d`) | the row aged by **`created`**, and nothing re-read the list while a turn ran | the store records **`updated`** on every message and turn boundary; the row ages by it and a 30 s ticker repaints the text; activity from any window re-reads the tree (debounced) |
+| The pin "did not appear to work" | the mechanism worked, but the row's **age span intercepted the press**: the age shares the right-hand grid slot with the controls and painted above them | the age is **decoration** (`pointer-events: none`) and the controls carry `position: relative; z-index: 1`, so the icon that is seen is the icon that is pressed |
+| Sessions were not ordered by what was done last | the comparator fell back to the **definition folder's clock name** | non-pinned sessions order by **`updated` descending**; pinned sessions still lead, and among pins the newest pin leads |
+
+The second root is the same one as a fourth report — *the archive and pin icons blink while hovered*. A press dispatched at the icon's
+centre was delivered to the age span while `elementFromPoint` named the icon; the two disagreeing is exactly a box that paints but
+is not the one hit-testing reaches, and hovering puts the two in a loop. With the age out of the event layer the press reaches the
+control, which the part-7 check now asserts by recording the mousedown target and refusing `SPAN.age`.
+
 ### The control chrome, measured from DSH's own sheet (2026-10-17)
 
 The owner reported the row's icon buttons as a little too small and with a background unlike the reference. Both were

@@ -28,7 +28,7 @@ export interface LedgerEvent {
   readonly at?: string
   readonly type: string
   readonly message?: { readonly role?: string; readonly content?: readonly { readonly type?: string; readonly text?: string }[]; readonly toolCallId?: string }
-  readonly chunk?: { readonly type?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly text?: string; readonly usage?: TokenUsage }
+  readonly chunk?: { readonly type?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly text?: string; readonly finishReason?: string; readonly usage?: TokenUsage }
   readonly text?: string
   readonly reasoning?: string
   readonly finishReason?: string
@@ -147,6 +147,14 @@ export interface SessionStats {
   readonly steps: number
   readonly usage?: TokenUsage
   /**
+   * The session-wide decode timing behind the composer's `tok/s`: the sum, over every round that reported
+   * output tokens, of the gap between its first streamed token and the frame that closed it (`decodeMs`), and
+   * the tokens counted in those rounds (`decodeTokens`). Both absent until such a round exists — a rate needs
+   * a numerator and a denominator that were actually observed.
+   */
+  readonly decodeMs?: number
+  readonly decodeTokens?: number
+  /**
    * The prompt-side total of the **most recent** reported round, which is what the context share divides by
    * the window (DSH's context pressure is the same fact). Absent when no frame reported a prompt side.
    */
@@ -158,6 +166,15 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
   let steps = 0
   let usage: TokenUsage | undefined
   let lastPromptTokens: number | undefined
+  /** The current round's first streamed token, and the totals of the rounds that could be timed. */
+  let firstTokenAt: number | undefined
+  let decodeMs = 0
+  let decodeTokens = 0
+  const timeOf = (value: string | undefined): number | undefined => {
+    if (value === undefined) return undefined
+    const time = Date.parse(value)
+    return Number.isFinite(time) ? time : undefined
+  }
   for (const event of events) {
     if (event.type === 'message' && event.message?.role === 'user') {
       turns += 1
@@ -167,10 +184,33 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
       steps += typeof event.rounds === 'number' && event.rounds > 0 ? event.rounds : 0
       continue
     }
-    if (event.type === 'assistant/chunk' && event.chunk?.usage !== undefined) {
-      usage = mergeTokenUsage(usage, event.chunk.usage)
-      const billed = billedInputTokens(event.chunk.usage)
-      if (billed !== undefined) lastPromptTokens = billed
+    if (event.type === 'model/request') {
+      /** A new round starts its own decode clock; a round that never streamed has nothing to time. */
+      firstTokenAt = undefined
+      continue
+    }
+    if (event.type === 'assistant/chunk') {
+      const at = timeOf(event.at)
+      if (event.chunk?.usage !== undefined) {
+        usage = mergeTokenUsage(usage, event.chunk.usage)
+        const billed = billedInputTokens(event.chunk.usage)
+        if (billed !== undefined) lastPromptTokens = billed
+      }
+      if (event.chunk?.type === 'done') {
+        /**
+         * Only a round that reported tokens contributes a rate, and only when both ends of its decode window
+         * were recorded. DSH's projection makes the same two conditions; a rate with a missing denominator
+         * would be a number nobody measured.
+         */
+        const outputTokens = event.chunk.usage?.outputTokens
+        if (firstTokenAt !== undefined && at !== undefined && outputTokens !== undefined) {
+          decodeMs += Math.max(0, at - firstTokenAt)
+          decodeTokens += outputTokens
+        }
+        firstTokenAt = undefined
+        continue
+      }
+      if (firstTokenAt === undefined && at !== undefined) firstTokenAt = at
     }
   }
   return {
@@ -178,6 +218,7 @@ export function projectSessionStats(events: readonly LedgerEvent[]): SessionStat
     steps,
     ...(usage !== undefined ? { usage } : {}),
     ...(lastPromptTokens !== undefined ? { lastPromptTokens } : {}),
+    ...(decodeTokens > 0 ? { decodeMs, decodeTokens } : {}),
   }
 }
 

@@ -486,3 +486,45 @@ test('session stats stay empty rather than zero where nothing was reported', () 
   ]
   assert.deepEqual(projectSessionStats(noUsage), { turns: 1, steps: 1 }, 'a frame with no usage leaves the usage absent')
 })
+
+test('session stats fold decode time and decoded tokens from each round\'s first-token and done timestamps', () => {
+  /**
+   * DSH prints a session-wide tok/s from `decodeTokens / decodeMs`, where decode time is the gap between a
+   * round's first streamed token and the message that closes it. Heddle's event log carries both halves — the
+   * chunk timestamps and the provider's output tokens on the done frame — so the rate can be durable instead
+   * of living only in the page's memory of a turn it watched.
+   */
+  const t0 = Date.parse('2026-10-17T00:00:00.000Z')
+  const at = (ms: number) => new Date(t0 + ms).toISOString()
+  const events: LedgerEvent[] = [
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } },
+    { type: 'model/request', at: at(0) },
+    { type: 'assistant/chunk', at: at(100), chunk: { type: 'text-delta', text: 'a' } },
+    { type: 'assistant/chunk', at: at(500), chunk: { type: 'done', finishReason: 'stop', usage: { outputTokens: 50 } } },
+    { type: 'turn/completed', at: at(500), rounds: 1 },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } },
+    { type: 'model/request', at: at(600) },
+    { type: 'assistant/chunk', at: at(700), chunk: { type: 'reasoning-delta', text: 'think' } },
+    { type: 'assistant/chunk', at: at(1000), chunk: { type: 'done', finishReason: 'stop', usage: { outputTokens: 20 } } },
+    { type: 'turn/completed', at: at(1000), rounds: 1 },
+    /** A round whose provider reported no tokens cannot contribute a rate; its time is not counted either. */
+    { type: 'model/request', at: at(1100) },
+    { type: 'assistant/chunk', at: at(1200), chunk: { type: 'text-delta', text: 'b' } },
+    { type: 'assistant/chunk', at: at(1500), chunk: { type: 'done', finishReason: 'stop' } },
+    { type: 'turn/completed', at: at(1500), rounds: 1 },
+  ]
+  const stats = projectSessionStats(events)
+  assert.equal(stats.decodeMs, 700, 'two measurable rounds: 400ms + 300ms')
+  assert.equal(stats.decodeTokens, 70, 'their reported output tokens: 50 + 20')
+})
+
+test('decode time stays absent when no round reported tokens', () => {
+  const events: LedgerEvent[] = [
+    { type: 'model/request', at: '2026-10-17T00:00:00.000Z' },
+    { type: 'assistant/chunk', at: '2026-10-17T00:00:00.100Z', chunk: { type: 'text-delta', text: 'x' } },
+    { type: 'assistant/chunk', at: '2026-10-17T00:00:00.500Z', chunk: { type: 'done', finishReason: 'stop' } },
+  ]
+  const stats = projectSessionStats(events)
+  assert.equal(stats.decodeMs, undefined, 'no tokens means no decode time to divide by')
+  assert.equal(stats.decodeTokens, undefined)
+})

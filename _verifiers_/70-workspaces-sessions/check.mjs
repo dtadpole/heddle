@@ -2637,7 +2637,12 @@ test('the four session shortcuts act on the selected session, and say so when th
         await wait(1800)
         const forked = sessions()
 
-        /** Archive: the selected row leaves the list. */
+        /**
+         * Archive: the selected row leaves the list. The session is **re-selected** first, because the fork chord re-reads the
+         * tree and a re-render is not an interaction — the chord's contract is "the selected session", so the test selects.
+         */
+        rows().find((row) => row.querySelector('.label')?.textContent === 'a name from a chord')?.click()
+        await wait(800)
         press('a', { altKey: true, metaKey: true })
         await wait(2600)
         const archived = sessions()
@@ -3666,10 +3671,12 @@ test('a written session moves to the top of its folder, its age follows, and a r
     assert.notEqual(later.ages[0], earlier.ages.at(-1), 'and the age text is no longer the one it showed before the write')
 
     /**
-     * Pin through the **row's menu**, with trusted pointer input: reveal the row, open the menu through its own trigger, then
-     * press the Pin item. This is the path a person takes, and it exercises the same handler as the hover button.
+     * Pin through the **hover control**, with trusted pointer input — the path the owner pressed.
+     *
+     * Regression this encodes: the age span shares the row's right slot with the controls and used to receive the press
+     * (measured: the icon blinked while hovered and the mousedown target was the age). The press must reach the control.
      */
-    const menuTarget = JSON.parse(
+    const pinTarget = JSON.parse(
       await browser.evaluate(`(async () => {
         const wait = (ms) => new Promise((done) => setTimeout(done, ms))
         const rows = () => [...document.querySelectorAll('#tree li[data-kind="session"]')]
@@ -3677,47 +3684,41 @@ test('a written session moves to the top of its folder, its age follows, and a r
         const row = target.querySelector(':scope > .row')
         const rect = row.getBoundingClientRect()
         await wait(50)
-        const trigger = target.querySelector(':scope > .row .menu-wrap > button')
-        if (trigger === null) return JSON.stringify({ error: 'no menu trigger' })
-        const own = trigger.getBoundingClientRect()
+        const button = [...target.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+        if (button === undefined) return JSON.stringify({ error: 'no pin button' })
+        const own = button.getBoundingClientRect()
         return JSON.stringify({ x: Math.round(own.left + own.width / 2), y: Math.round(own.top + own.height / 2), row: { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }, label: target.querySelector(':scope > .row .label').textContent })
       })()`),
     )
-    assert.equal(menuTarget.error, undefined, `the second row offers a menu\nsaw: ${JSON.stringify(menuTarget)}`)
-    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: menuTarget.row.x, y: menuTarget.row.y })
-    await new Promise((done) => setTimeout(done, 250))
-    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: menuTarget.x, y: menuTarget.y })
+    assert.equal(pinTarget.error, undefined, `the second row offers a pin\nsaw: ${JSON.stringify(pinTarget)}`)
+    /** Enter the row to reveal its controls, then measure the control's fresh box and press it. */
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pinTarget.row.x, y: pinTarget.row.y })
     await new Promise((done) => setTimeout(done, 300))
-    const openTrigger = JSON.parse(
+    const freshPin = JSON.parse(
       await browser.evaluate(`(() => {
         const target = [...document.querySelectorAll('#tree li[data-kind="session"]')][1]
-        const trigger = target.querySelector(':scope > .row .menu-wrap > button')
-        const own = trigger.getBoundingClientRect()
+        const button = [...target.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+        const own = button.getBoundingClientRect()
         return JSON.stringify({ x: Math.round(own.left + own.width / 2), y: Math.round(own.top + own.height / 2) })
       })()`),
     )
-    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: openTrigger.x, y: openTrigger.y })
+    await browser.evaluate(`(() => {
+      window.__pinPress = []
+      document.addEventListener('mousedown', (event) => {
+        const at = event.target instanceof Element ? event.target : null
+        window.__pinPress.push({ target: at === null ? 'none' : at.tagName + '|' + String(at.className).slice(0, 24), atPoint: (() => { const point = document.elementFromPoint(event.clientX, event.clientY); return point === null ? 'none' : point.tagName + '|' + (point.getAttribute('aria-label') ?? '') })() })
+      }, true)
+    })()`)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: freshPin.x, y: freshPin.y })
     await new Promise((done) => setTimeout(done, 250))
-    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: openTrigger.x, y: openTrigger.y, button: 'left', buttons: 1, clickCount: 1 })
-    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: openTrigger.x, y: openTrigger.y, button: 'left', buttons: 0, clickCount: 1 })
-    await new Promise((done) => setTimeout(done, 500))
-    const pinItem = JSON.parse(
-      await browser.evaluate(`(() => {
-        const target = [...document.querySelectorAll('#tree li[data-kind="session"]')][1]
-        const item = [...target.querySelectorAll(':scope > .row .menu button')].find((button) => (button.textContent || '').trim().toLowerCase().includes('pin'))
-        if (item === undefined) return JSON.stringify({ error: 'no pin item' })
-        const own = item.getBoundingClientRect()
-        return JSON.stringify({ x: Math.round(own.left + own.width / 2), y: Math.round(own.top + own.height / 2), text: (item.textContent || '').trim() })
-      })()`),
-    )
-    assert.equal(pinItem.error, undefined, `the menu carries the pin item\nsaw: ${JSON.stringify(pinItem)}`)
-    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pinItem.x, y: pinItem.y })
-    await new Promise((done) => setTimeout(done, 250))
-    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pinItem.x, y: pinItem.y, button: 'left', buttons: 1, clickCount: 1 })
-    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pinItem.x, y: pinItem.y, button: 'left', buttons: 0, clickCount: 1 })
+    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: freshPin.x, y: freshPin.y, button: 'left', buttons: 1, clickCount: 1 })
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: freshPin.x, y: freshPin.y, button: 'left', buttons: 0, clickCount: 1 })
     await new Promise((done) => setTimeout(done, 1500))
+    const press = JSON.parse(await browser.evaluate('JSON.stringify(window.__pinPress)'))
+    assert.equal(press.length, 1, `the press was observed\nsaw: ${JSON.stringify(press)}`)
+    assert.ok(!String(press[0].target).includes('SPAN|age'), `the press reaches the control, not the age painted beside it\nsaw: ${JSON.stringify(press)}`)
     const pinned = await readRows()
-    assert.equal(pinned.labels[0], menuTarget.label, `a pressed pin holds the top of its folder\nsaw: ${JSON.stringify({ pinned, menuTarget, pinItem })}`)
+    assert.equal(pinned.labels[0], pinTarget.label, `a pressed pin holds the top of its folder\nsaw: ${JSON.stringify({ pinned, pinTarget, press })}`)
     const pinnedMetas = (await sessionsNow()).filter((meta) => meta.pinned === true)
     assert.equal(pinnedMetas.length, 1, `and the store records exactly one pin\nsaw: ${JSON.stringify(pinnedMetas)}`)
   } finally {

@@ -87,6 +87,14 @@ export interface RecordedMessage {
 export interface SessionMeta {
   readonly id: SessionId
   readonly created: string
+  /**
+   * When the session was **last written to**, which is the age a row shows.
+   *
+   * The reference's session rows are aged by their latest activity, not by their creation: a conversation that continues for
+   * an hour reads as live, while one created an hour ago and untouched reads as old. `created` is still kept for duration and
+   * ordering records; this field moves with the log.
+   */
+  readonly updated?: string
   readonly cwd: string
   readonly endpoint?: string
   readonly model?: string
@@ -767,6 +775,13 @@ export class SessionStore {
     const line = `${JSON.stringify(record)}\n`
     appendFileSync(handle.transcript, this.load(handle).framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
     this.load(handle).events.push(record)
+    /**
+     * A turn boundary is activity: the row's age moves while an answer is being produced, not only when a message is typed.
+     * Messages are touched by `message()` instead, which also counts the turn in the same write.
+     */
+    if (record.type === 'turn/completed' || record.type === 'assistant/completed' || record.type === 'context/note') {
+      this.touch(handle)
+    }
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
@@ -959,7 +974,8 @@ export class SessionStore {
   /** Record a message and keep the metadata's turn count honest. */
   message(handle: SessionHandle, message: RecordedMessage): SessionEvent {
     const event = this.append(handle, { type: 'message', message })
-    if (message.role === 'user') this.bumpTurns(handle)
+    /** One write for both facts: the age moved, and a user message is a turn. */
+    this.touch(handle, { bumpTurns: message.role === 'user' })
     return event
   }
 
@@ -1028,10 +1044,24 @@ export class SessionStore {
   }
 
   private bumpTurns(handle: SessionHandle): void {
+    this.touch(handle, { bumpTurns: true })
+  }
+
+  /**
+   * Record that the session was written to, and optionally count a user turn in the same write.
+   *
+   * The meta is a convenience beside the log: failing to write it must never lose the event that was just appended, which is
+   * why the catch swallows. `updated` is what a row's age reads, and `turns` what its tooltip counts.
+   */
+  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean } = {}): void {
     const path = handle.meta
     try {
       const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
-      const updated: SessionMeta = { ...meta, turns: (meta.turns ?? 0) + 1 }
+      const updated: SessionMeta = {
+        ...meta,
+        updated: new Date().toISOString(),
+        ...(options.bumpTurns === true ? { turns: (meta.turns ?? 0) + 1 } : {}),
+      }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)
     } catch {
       // A session without readable metadata is still a usable session; the count

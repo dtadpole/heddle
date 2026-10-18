@@ -207,3 +207,80 @@ because it is a native modal dialog.
 endpoint appears" but "no secret-shaped string appears", which is why the check greps the dialog's own text for the
 shapes a key takes.
 
+## Cycle 3 — the review: the region's own geometry, and the short list
+
+**measured:** the reference's list, 1200×800: `scrollbar-gutter: stable`, `::-webkit-scrollbar` **5px**,
+`padding: 0 5px 16px 4px`, `offsetWidth - clientWidth` **5**, and its last content ending **16px** above the list's
+bottom edge. Heddle's region measured `offsetWidth - clientWidth` **0** (a platform overlay bar), `padding-bottom`
+**0px**, its last row flush against the panel's foot.
+
+**brainstorm:**
+
+1. **Copy the reference's exact mechanism** — `scrollbar-gutter: stable` + a 5-pixel `::-webkit-scrollbar` + 16px
+   bottom padding. *Chosen:* it is DSH's own combination, and each part is measurable.
+2. **`scrollbar-width: thin` alone** (the first attempt). *Discarded by measurement:* it set nothing — Chrome does not
+   apply `::-webkit-scrollbar` while `scrollbar-width: thin` is in force, so the gutter stayed 0 and the platform drew
+   an overlay bar.
+3. **`overflow-y: scroll` to force a classic bar.** *Discarded:* it shows a disabled bar when the list is short, and the
+   reference's short state was not measured to do that; `stable` reserves the same gutter without promising a track.
+4. **A custom thumb element ridden on scroll.** *Discarded:* a scrollbar is the platform's job, and a hand-drawn one
+   loses drag-to-scroll and the accessibility the browser already provides.
+5. **Padding only (no bar change).** *Discarded:* it fixes the flush last row but leaves the bar overlay, which is the
+   visible difference a person notices while scrolling.
+
+**understand:** the reference's geometry is **reserved**, not floating: a fixed 5px column for the bar and 16px of end
+padding, so a row's age never sits under a bar and the last row never touches what is below. Heddle had left both to the
+platform, which on macOS means an overlay bar and content flush to the edge. This is a value/arrangement difference —
+no new mechanism.
+
+**step back:** the three cycles are now the whole of the owner's request: the pane does not scroll (cycle 1), the
+bottom area holds Settings (cycle 2), and the region's scroll geometry matches the reference (cycle 3). Nothing widened
+the scope: the divergences recorded in cycles 1–2 (read-only settings, no tabs, no "open configuration file") are
+features the owner has not asked for yet. Sibling check: the transcript (`#log`) and the trajectory pane (`.tr-pane`)
+have their own scrollers with the platform's bar — but the reference styles its session list only, so those stay as
+they are; recorded rather than changed.
+
+**plan:**
+
+- `#workspace-scroll`: `scrollbar-gutter: stable` (the reference's own property), a 5-pixel `::-webkit-scrollbar` with
+  a themed thumb, and `padding-bottom: 1rem`.
+- drop `scrollbar-width: thin`, which is what made the first attempt reserve nothing.
+- judged by part 11 (gutter 5, `stable`, `padding-bottom: 16px`, the last row ≥ 12px above the edge, and a closed
+  workspace leaving a region that does not scroll while the foot stays at the bottom) and by unit contracts.
+
+**changed:** `src/server/page.html` — the region's scroll geometry; `_verifiers_/87-resizable-panels/check.mjs` — the
+geometry and the short-list claims; `test/page-contract.test.ts` — four contracts including the `scrollbar-width` that
+must **not** be there.
+
+**evidence:** measured before and after, 1200×800 with 40 files.
+
+| | before | after | reference |
+|---|---|---|---|
+| `offsetWidth - clientWidth` | 0 | **5** | 5 |
+| `scrollbar-gutter` | auto | **stable** | stable |
+| `padding-bottom` | 0px | **16px** | 16px |
+| last content to the list's bottom | 0 | **16px** | 16px |
+| short list (3 files) | region fits, foot at the bottom | unchanged, and now asserted | not measured |
+
+Screenshot: [`_context_/sidebar-panel/cycle-3-region.png`](_context_/sidebar-panel/cycle-3-region.png) — the region
+scrolled to its middle, with the reserved 5-pixel bar and the end padding.
+
+The assertion that proves it: part 11's `the region reserves the reference's 5-pixel scrollbar` etc. — against the
+previous CSS the gutter reads 0 and `scrollbarGutter` reads `auto`, so the claim fails.
+
+**reds:** none of this cycle's own. The sweep's intermittent red remains named: part 80's `model-switcher` check, the
+concurrent session's model-seat work, failing only under a full parallel sweep.
+
+**coverage:** the **collapsed rail** is judged in part 11 (the tree and search hidden, the gear anchored to the bottom);
+the **short list** is now asserted. Not visited: a list long enough to scroll **while the panel is narrower than its
+minimum** (the resizer clamps it), and a scrollbar drag in the rail — the rail has no list to scroll, so the second is
+vacuous.
+
+**invariants:** the pane still does not scroll (part 11); the foot still does not move while the region scrolls; the
+settings dialog is unaffected by the gutter change (it is outside the region); the first-visit expansion still opens
+the workspace after a reload.
+
+**lessons:** a scrollbar is geometry as well as paint. The measurable facts are `offsetWidth - clientWidth`,
+`scrollbar-gutter` and the end padding — and the first attempt failed on a property (`scrollbar-width: thin`) whose
+only effect was to switch the mechanism off, which is why the new contract asserts its **absence**.
+
