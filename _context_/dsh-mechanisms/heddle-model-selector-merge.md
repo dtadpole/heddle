@@ -126,3 +126,66 @@ Cycle 3 — the landing package and its judge
               4. `sh _verifiers_/96-deployment/verify.sh` and the trusted-click selector probe at 8082
   lessons:    a delivery that cannot land because someone else's half-written tree overlaps it is a handover, not a
               completion; the branch and the exact steps are the deliverable until the window opens.
+
+## Cycle 4 — landed and deployed (the completion)
+
+```
+Cycle 4 — the deployment checkout, the merge, and the owner's address
+  measured:   the shared `~/heddle` checkout could not be landed into: another session holds 17-22 uncommitted
+              files there, three to five of them the same files this change edits (src/local-config.ts,
+              src/server/page.html, test/page-contract.test.ts, ...). Polling for a clean window for ten minutes
+              measured no window; the other session was committing every few minutes and editing between commits.
+              The owner's rule (2026-10-17): when main is not clean, a folder that contains only committed main
+              exists and the daemon runs from there. That is now the deployment checkout.
+  brainstorm: (a) keep polling for a clean `~/heddle` window — rejected: the window is not a contract, and a build
+              started there reflects whichever other file the workspace holds; (b) create a clean clone of main
+              elsewhere and serve it — chosen; (c) hand the branch over — rejected by the owner's instruction to
+              fix it here, not ask others.
+  step back:  the mechanism the convention needed was not a merge trick but a **separation of roles**: a workspace
+              where sessions edit, and a deployment checkout that only ever contains committed main. Once the
+              daemon serves the deployment checkout, landing is a plain fast-forward on a clean tree and no
+              session's dirty tree can leak into what the owner sees.
+  changed:    machine-local `/Users/zhenc/heddle-deploy` — a clone with only committed `main`, built with
+              `npm ci`, `npm run check` (clean), `npm test` (358/358), `npm run build`; `main` fast-forwarded to
+              the integration commit and pushed to origin as `a2d66f7..17ff222`.
+              Repository: `_conventions_/landed-and-deployed` v1.1.0 gained **the deployment checkout**;
+              `_verifiers_/96-deployment` now reads the installed agent's ProgramArguments and judges that
+              checkout (process, page bytes, and clean-main); `_tools_/web-daemon/install.sh` refuses to install
+              from a checkout that is not on `main` or has uncommitted changes; `full-loop-goal`'s landing rule
+              names the deployment checkout; the conventions index records the extended row.
+              Deployment: `install.sh` was run **from the deployment checkout**, which wrote the agent to
+              `/Users/zhenc/heddle-deploy/dist/cli.js` with `WorkingDirectory /Users/zhenc/heddle-deploy` and
+              restarted it (launchd PID 40825, started 21:07:54).
+  evidence:   `_verifiers_/96-deployment` from the deployment checkout: **3/3** (process runs the deployment
+              checkout's cli; the 8082 page is its built page byte for byte; the checkout is main at its tip
+              with no uncommitted changes). `95-web-daemon`: **3/3**. Model-switcher contract: **5/5**. The
+              trusted-click live probe against the owner's real `http://127.0.0.1:8082/`: **50/50**, including
+              real-mouse selection, effort, keyboard, reload survival, running-turn switch, the 12px clamp and
+              the excluded `scripted`/`localhost` catalogue. Served page markers: `id="model-effort"` ×1,
+              "Model and reasoning effort" ×4. Screenshot: `heddle-live-deployed-8082.png` (two-level model pane
+              over main's statistics dock and Settings entry, at 8082).
+  delivered:  the owner's address, not a copy of it. Before: 8082 served the old `~/heddle` build (one flat
+              menu, no effort span, `scripted`/`localhost` in the list, no statistics dock), because the shared
+              checkout could not be landed into. After: 8082 serves `/Users/zhenc/heddle-deploy` at main
+              `17ff222`, with the two-tier selector, the exclusion and main's newer UI; the merge commit is
+              `17ff222` and origin `main` is fast-forwarded to it.
+  reds:       none. The workspace checkout `~/heddle` still runs the old judge from its own older tree (it has not
+              pulled main), which is expected for a workspace: the deployment judge is read from the installed
+              agent, and the deployment checkout is what answers for the deployment.
+  coverage:   every selector state is measured with trusted pointer input at the owner's URL; main's new
+              permission chip, statistics dock and Settings entry are on the same page and their own verifier
+              folders are green in the deployment checkout.
+  invariants: the agent's log/health endpoints, the token handshake, the session store under `~/.heddle`, and the
+              8082 proxy are unchanged; the proxy still targets 3082 and needed no change.
+  lessons:    when two roles share one checkout, the fix is a second checkout, not a clean-window ritual. The
+              convention now carries the rule, the judge and the installer guard so the next session meets the
+              mechanism instead of the race.
+```
+
+## Completion
+
+The model selector is **merged to `main`** (`17ff222`, pushed to origin) and **deployed**: the launchd agent runs
+the committed-main deployment checkout `/Users/zhenc/heddle-deploy`, the deployment judge passes 3/3 from that
+checkout, the daemon judge passes 3/3, the model-switcher contract passes 5/5, and the owner's URL
+`http://127.0.0.1:8082/` passes the 50-check trusted-click live probe. The `landed:` evidence is this section and
+the screenshot beside it.

@@ -227,14 +227,19 @@ assertions, the screenshots — can all run there. What the branch must not do i
 **The job is not done when the branch is green.** It is done when both of these are true and recorded:
 
 1. **Merged into `main`.** The branch is merged (fast-forward or merge, per the repository's practice) after its
-   own suites are green. If `main` carries another session's uncommitted work, do not sweep it into the merge:
-   stage only this loop's hunks, and if that cannot be done cleanly, stop and hand the branch over rather than
-   committing someone else's half-written tree. Record the merge commit.
+   own suites are green. Merge into a checkout that contains only committed `main` — the **deployment checkout**
+   — not the shared working checkout, which carries feature branches and other sessions' uncommitted files; if a
+   deployment checkout does not exist, create one from the origin's `main` (this machine: `/Users/zhenc/heddle-deploy`).
+   Do not wait for a window in a dirty shared tree and do not sweep anyone's half-written work into the merge.
+   Record the merge commit and push `main` to the origin.
 2. **The deployment is verified working.** Name the service the owner actually uses, read **which checkout its
    process runs** (not merely that `dist/` was rebuilt — a daemon still executing an old or other-worktree
    `dist/cli.js` is the exact failure this rule exists for), confirm the served artifact carries the feature,
    and observe the user-visible behaviour end to end. A fresh `npm run build` is not a deployment; a running
-   process on a stale checkout and a stale `dist` look identical from the source tree.
+   process on a stale checkout and a stale `dist` look identical from the source tree. The deployment checkout
+   itself must be a **committed** checkout of `main` (branch `main`, no uncommitted changes): a workspace served
+   by the daemon can be modified under the running process. [`../../_verifiers_/96-deployment/`](../../_verifiers_/96-deployment/INDEX.md)
+   judges exactly this from the installed agent's configuration, so it can be run from any checkout.
 
 A cycle that ends on a green branch without those two is a checkpoint, not a completion: keep the goal active,
 say in the document what is left to land, and let the next round do it. The failure mode is real — a loop
