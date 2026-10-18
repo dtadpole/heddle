@@ -358,6 +358,30 @@ number without its element is a rumour.
 - **No `agent team` or `subagents`** in the panel: Heddle has no such mechanism, and a control for a
   thing that does not exist is worse than no control.
 
+## The rail, and the one decision that came from a report
+
+The left panel collapses, which it did not before, and the arrangement is DSH's **measured** one rather than an
+approximation. Read from its collapsed sidebar on 2026-10-17 with `getComputedStyle`, per element:
+
+| Property | DSH | Heddle, before | Heddle, now |
+|---|---|---|---|
+| rail width | 56px | 56px | 56px |
+| container padding | `18px 10px 6px` | `12px 4.8px` | `18px 10px 6px` |
+| control box | 36×36 at x=10 | 26–32px at x=12/23 | 36×36 at x=10 |
+| vertical pitch | 48px (36 + 12 gap) | 23px, then 7–8px gaps | 48px: y=18, 66, 114, 162 |
+| icon | 18×18 | 16 and 15px mixed | 18×18 |
+| radius | 12px | 8px | 12px |
+| top control | the **brand mark**, 36×36, named `Open sidebar` | a generic panel glyph | the **Heddle icon**, 24×24 inside 36×36, named `Open sidebar` |
+
+The owner's report that the tree had "stopped showing" was the **remembered** collapse: the state was written to
+`localStorage`, so a reader who collapsed the panel once came back to a rail with no tree and nothing on screen to say
+the tree had been put away rather than lost. DSH does **not** remember the state — its reload brings the wide panel
+back — and that behaviour is now copied rather than improved on. The **width** is the preference and survives; the
+collapse is a look at the content and does not. The browser check asserts the reload, not the storage key.
+
+The workspaces row's controls were also unstyled `<button>`s: the `+` painted as a platform chip (a grey fill and a
+2-pixel border) beside a `…` that painted nothing. They are icon buttons with no chrome now, in both states.
+
 ## Read next
 
 [`SESSION_TREE.md`](SESSION_TREE.md) for the tree's own rules — the boundaries, the badges, and

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -62,12 +63,15 @@ test('the rail\'s top control is the Heddle icon, and the wide panel\'s panel gl
   assert.match(page, /body\[data-sidebar='collapsed'\] #sidebar-toggle-glyph \{ display: none; \}/, 'with the panel glyph put away')
 })
 
-test('the collapsed state is remembered under one key, and restored before the first paint of the tree', () => {
-  /** A panel a reader put away that comes back by itself is the kind of forgetfulness a reader stops trusting. */
-  assert.match(page, /const SIDEBAR_COLLAPSED_KEY = 'heddle\.layout\.collapsed\.v1'/, 'the key is stable and versioned')
-  assert.match(page, /localStorage\.setItem\(SIDEBAR_COLLAPSED_KEY/, 'the state is written')
-  assert.match(page, /localStorage\.getItem\(SIDEBAR_COLLAPSED_KEY\)/, 'and read back on load')
-  assert.match(page, /setSidebarCollapsed\(localStorage\.getItem\(SIDEBAR_COLLAPSED_KEY\) === 'true', \{ persist: false \}\)/, 'without writing on the read')
+test('the collapsed state is not remembered, so a reload cannot hide the tree', () => {
+  /**
+   * The owner's report decided this: the state *was* remembered, and a reader who collapsed the panel once came back
+   * to a rail with no tree and nothing on screen to say the tree had been put away rather than lost. DSH does not
+   * remember it either, and the measurement is in SESSION_UI.md. The width is the preference; the collapse is a look.
+   */
+  assert.doesNotMatch(page, /heddle\.layout\.collapsed/, 'no storage key for the collapsed state')
+  assert.doesNotMatch(page, /setItem\(SIDEBAR_COLLAPSED_KEY/, 'and nothing written when it changes')
+  assert.match(page, /\/\*\* Every visit starts wide[\s\S]*?setSidebarCollapsed\(false\)/, 'a load puts the panel back')
 })
 
 test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the panel first", () => {
@@ -107,4 +111,24 @@ test('crossing the tablist is an arrow-key gesture, and only inside the ring', (
   assert.match(page, /keyEvent\.key === 'ArrowRight'/, 'right crosses')
   assert.match(page, /keyEvent\.key === 'ArrowLeft'/, 'and left crosses back')
   assert.match(page, /button\.tabIndex = button\.dataset\.view === view \? 0 : -1/, 'with one tab in the Tab order')
+})
+
+test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
+  /**
+   * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as
+   * static markup — no tree, no listeners, every browser check failing on a page that looked like a page. The build
+   * copies the file and the daemon serves it, so nothing between the editor and the browser parses it. This does: it
+   * is the cheapest possible guard on the one file whose syntax failure takes everything with it.
+   */
+  const extracted = /<script type="module">([\s\S]*?)<\/script>/.exec(page)
+  assert.ok(extracted !== null, 'the page has a module script')
+  const directory = join(repoRoot, '.heddle-tmp')
+  mkdirSync(directory, { recursive: true })
+  const scratch = join(directory, 'page-module-guard.mjs')
+  writeFileSync(scratch, extracted[1])
+  try {
+    execFileSync(process.execPath, ['--check', scratch], { stdio: 'pipe' })
+  } finally {
+    rmSync(scratch, { force: true })
+  }
 })

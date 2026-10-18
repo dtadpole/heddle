@@ -222,7 +222,13 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(collapsed.treeVisible, false, 'the tree is put away')
     assert.equal(collapsed.gutterVisible, false, 'and the divider with it, because a rail has no width to drag')
     assert.equal(collapsed.searchVisible, true, 'while the rail keeps a search control')
-    assert.equal(collapsed.stored, 'true', 'and the choice is remembered')
+    /**
+     * The state is **not** remembered, and that is copied from DSH rather than improved: its rail comes back wide on a
+     * reload. The owner's report is why — the remembered version left a reader with a rail and no tree, unable to tell
+     * that the tree had been put away rather than lost. The tree is the thing being protected here, so the assertion
+     * is that a reload brings it back, not that a key was written.
+     */
+    assert.equal(await browser.evaluate('localStorage.getItem("heddle.layout.collapsed.v1")'), null, 'nothing is written about the collapse')
 
     /**
      * The rail's top control is the **app's own icon**, which is what DSH's is: measured at 36×36, at (10, 18), named
@@ -254,32 +260,40 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(icon.toggleBox, '36x36', 'which is the rail control DSH uses')
     assert.equal(icon.glyphShown, false, 'with the panel glyph put away')
 
-    /** Remembered across a reload — better than DSH, which brings the wide panel back, and consistent with the width. */
+    /** A reload puts the panel back — DSH's behaviour, and the fix for the owner's report of a missing tree. */
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.getElementById("sidebar-toggle") !== null', 20_000), 'the page came back')
-    assert.equal(
-      await browser.evaluate(`Math.round(document.querySelector('aside').getBoundingClientRect().width)`),
-      56,
-      'the rail is still collapsed after a reload',
+    assert.ok(
+      (await browser.evaluate(`Math.round(document.querySelector('aside').getBoundingClientRect().width)`)) > 100,
+      'the panel is wide again after a reload',
+    )
+    assert.ok(
+      await browser.evaluate(`getComputedStyle(document.getElementById('tree')).display !== 'none'`),
+      'and the tree is on screen, which is what a remembered rail had taken away',
     )
 
-    /** The chord, which is DSH's own: `Alt+Meta+B`. */
-    const chord = JSON.parse(
+    /**
+     * The chord, which is DSH's own: `Alt+Meta+B`. It **toggles** — pressed while wide it collapses, pressed again it
+     * opens — so both directions are read, because a chord bound to only one of them is a control that can put the
+     * panel away and not bring it back.
+     */
+    const chordOnce = JSON.parse(
       await browser.evaluate(`(() => {
         document.getElementById('sidebar-toggle').focus()
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', altKey: true, metaKey: true, bubbles: true }))
-        const aside = document.querySelector('aside')
-        const toggle = document.getElementById('sidebar-toggle')
-        return JSON.stringify({
-          width: Math.round(aside.getBoundingClientRect().width),
-          label: toggle.getAttribute('aria-label'),
-          stored: localStorage.getItem('heddle.layout.collapsed.v1')
-        })
+        return JSON.stringify({ width: Math.round(document.querySelector('aside').getBoundingClientRect().width), label: document.getElementById('sidebar-toggle').getAttribute('aria-label') })
       })()`),
     )
-    assert.ok(chord.width > 100, `the chord opens the panel again (${chord.width})`)
-    assert.equal(chord.label, 'Collapse sidebar', 'with the control naming the new action')
-    assert.equal(chord.stored, 'false', 'and the state written back')
+    assert.equal(chordOnce.width, 56, 'the chord collapses the panel from the keyboard')
+    assert.equal(chordOnce.label, 'Open sidebar', 'with the control naming the new action')
+    const chordTwice = JSON.parse(
+      await browser.evaluate(`(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', altKey: true, metaKey: true, bubbles: true }))
+        return JSON.stringify({ width: Math.round(document.querySelector('aside').getBoundingClientRect().width), label: document.getElementById('sidebar-toggle').getAttribute('aria-label') })
+      })()`),
+    )
+    assert.ok(chordTwice.width > 100, `and opens it again (${chordTwice.width})`)
+    assert.equal(chordTwice.label, 'Collapse sidebar', 'naming the action back')
   } finally {
     browser.close()
     server.kill()
