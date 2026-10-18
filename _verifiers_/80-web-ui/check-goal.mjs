@@ -251,11 +251,15 @@ test('the model starts a goal through its tool, and a person drives it from the 
     assert.match(await browser.evaluate('document.getElementById("tree-note").textContent'), /exhausted/, 'the bar says the goal has no rounds left')
     assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.phase, 'blocked')
 
-    // Complete then clear: a blocked goal can still be finished and removed.
+    // Completing hides the dock, as DSH's does; the durable goal is still there until it is cleared.
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="complete"]\').click()')
-    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "complete"', 10_000)
-    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="clear"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
+    const completedByBar = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+    assert.equal(completedByBar.phase, 'complete', 'the record survives the dock that hid it')
+    await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'clear', goal_id: completedByBar.id, revision: completedByBar.revision }),
+    })
     const afterClear = await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)
     assert.equal(afterClear.body.goal, null, `the cleared goal is gone (status ${afterClear.status}, body ${JSON.stringify(afterClear.body).slice(0, 200)})`)
 
@@ -313,10 +317,13 @@ test('the model starts a goal through its tool, and a person drives it from the 
     )
 
     await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="complete"]\').click()')
-    await browser.waitFor('document.getElementById("goal-bar").dataset.phase === "complete"', 10_000)
-    assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.phase, 'complete')
-    await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="clear"]\').click()')
     await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
+    const completedSecond = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+    assert.equal(completedSecond.phase, 'complete', 'the second goal completed and its dock went away')
+    await api(server.url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'clear', goal_id: completedSecond.id, revision: completedSecond.revision }),
+    })
 
     // A stale revision is refused with a code, so a client can tell "it moved" from "it is gone".
     const stale = await api(server.url, cookie, '/api/goal', {
@@ -474,6 +481,17 @@ test('an active goal is visible in the chat window, live, without a reload', asy
         return JSON.stringify({ border: s.borderStyle, radius: s.borderRadius, gap: s.gap, h: Math.round(r.height) })
       })()`))
       assert.equal(dockStyle.border, 'none', 'the dock has no border, like DSH\'s')
+      /**
+       * DSH derives its dock width from the composer card rather than from its content; the owner asked for the
+       * visible bar to follow the input area, so the two boxes must share their width and left edge.
+       */
+      const align = JSON.parse(await browser.evaluate(`(() => {
+        const b = document.getElementById('goal-bar').getBoundingClientRect()
+        const c = document.getElementById('composer-card').getBoundingClientRect()
+        return JSON.stringify({ barX: Math.round(b.x), barW: Math.round(b.width), cardX: Math.round(c.x), cardW: Math.round(c.width) })
+      })()`))
+      assert.ok(Math.abs(align.barW - align.cardW) <= 1, `the dock follows the input area's width (bar ${align.barW} vs card ${align.cardW})`)
+      assert.ok(Math.abs(align.barX - align.cardX) <= 1, `and is aligned to it (bar ${align.barX} vs card ${align.cardX})`)
       assert.equal(dockStyle.radius, '12px', 'and DSH\'s 12px radius')
       assert.equal(dockStyle.gap, '10px', 'and its 10px gap')
       assert.ok(dockStyle.h <= 40, 'the row stays a single composer-height row')
@@ -516,13 +534,17 @@ test('an active goal is visible in the chat window, live, without a reload', asy
       assert.equal(paused.running, 'false')
       assert.equal(paused.runningHidden, true, 'a paused goal is not running')
 
-      // Clearing it removes the indicator live, with no reload anywhere in this test.
-      const pausedGoal = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      // Completing it is another live edge: the dock goes away rather than becoming a tombstone over the composer.
+      await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="complete"]\').click()')
+      await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
+      const completed = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal
+      assert.equal(completed.phase, 'complete', 'the record survives the dock that hid it')
       await api(server.url, cookie, '/api/goal', {
         method: 'POST',
-        body: JSON.stringify({ session, action: 'clear', goal_id: pausedGoal.id, revision: pausedGoal.revision }),
+        body: JSON.stringify({ session, action: 'clear', goal_id: completed.id, revision: completed.revision }),
       })
-      await browser.waitFor('document.getElementById("goal-bar").hidden === true', 10_000)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(await browser.evaluate('document.getElementById("goal-bar").hidden'), true, 'and clearing it changes nothing visually, because it was already gone')
     } finally {
       await browser.close()
     }

@@ -60,3 +60,27 @@ the old code):
 Everything else is either **match** (phrase, phrase typography, objective ellipsis, button box 28×28 radius 999, gap 10, dock radius 12, no border, placement above the composer) or **kept with a reason** (the round count as accessible text and title instead of DSH's info popover; the complete verb, which Heddle's dock must offer because it is the person's only goal surface). **No fix rows remain**, which is the evidence-based stop the skill asks for.
 
 Every verb is an **icon button** — pause/resume, complete, edit and clear are 28px round buttons with an inline 14px SVG and an accessible name (`Pause goal`, `Resume goal`, `Complete goal`, `Edit goal`, `Clear goal`); the person never reads a text verb in the dock.
+
+## Completed state
+
+Measured on DSH's own session (which had just completed its goal): the dock is **gone** — no phrase, no goal
+buttons, nothing above the composer. Heddle matched it by hiding the indicator when the durable phase is
+`complete`; the record survives, and since a new goal replaces a complete one, nothing is lost by not offering
+a clear action. `Active` (armed or disarmed), `Paused` and `Blocked` keep their dock, because each of those is a
+current intent or needs the person. The part 9 tests judge this as a live edge: pressing complete must hide the
+dock without a reload.
+
+## Width: the dock follows the composer, not its content
+
+DSH's dock CSS derives its width from the composer rather than from its text:
+`width: calc(100% - 2*var(--dsh-composer-side-clearance) - 2*var(--dsh-composer-dock-inset))`,
+`max-width: calc(var(--dsh-composer-card-max-width) - 2*var(--dsh-composer-dock-inset))`, `margin: 0 auto`, with
+`--dsh-composer-dock-inset: 8px`, `--dsh-composer-side-clearance: 16px` and
+`--dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px)` measured live. Heddle's bar was
+`width: fit-content` (660px) centred inside a 796px composer card: narrower than the input and not aligned to
+its edges. It now takes the composer card's own width formula (`min(calc(100% - 8px), calc(var(--chat-column) +
+32px))`, `margin: 0 auto`), so the bar's left and right edges are the input's — measured after the fix at
+796px, x aligned to the card, and asserted by the part 9 test. Kept difference, recorded: DSH's **visible inner
+pill** still hugs its content inside that composer-width dock (its measured pill was 680px inside a 929px
+dock); the owner asked for the visible bar itself to follow the input area, so Heddle fills the composer width
+and aligns to it.
