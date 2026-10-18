@@ -459,3 +459,41 @@ visible on the deployed page, not only in a scripted check.
   after a reload.
 - **stop:** the full measurement yields no further fix row; the remaining difference (DSH's decode-only
   denominator) is recorded above with the measurement that forced the re-cut.
+
+## Footer-dialog loop — cycle 1: the three surfaces measured
+
+**The report.** Every element of DSH's dock opens a detail surface; heddle's three elements are inert.
+
+**Measured, live at `127.0.0.1:8080`** (one session, three clicks):
+
+| Trigger | Surface | Content measured | Box / style |
+|---|---|---|---|
+| time pill | **Session statistics** | `LLM time 210m27s` · `Tool time 665m53s` · `Avg time to first token (TTFT) 2.3s` · `Tokens per second (TPS) 252 tok/s` | 300×159, `rgba(67,69,74,.45)`, radius 16, padding 16, `12px/18px`, #cfd3d6, hairline ring + soft shadow |
+| usage pill | **Token usage** | title carries the exact total (`1,079,960,760 tok`); rows `Cache hit 99.6%` · `Uncached input 4,325,662 tok` · `Cached input 1,074,084,608 tok` · `Output 1,550,490 tok` | same 300×159 surface |
+| context gauge | context panel | `61%` · `of context used` · `~612K / 1M` · `System prompt ~2K` · `Tool definitions ~10.3K` · `Messages ~516K` | 264×142, padding 12, `12px/20px`; the summary is a segmented bar above the rows |
+
+Rows are the reference's own formulas: LLM time = per-step request→message; tool time = dispatch→result;
+average TTFT = ttftMs / ttftSteps; TPS = decodeTokens / decodeMs; the usage rows are the exact buckets; the
+context panel is the pressure projection's used/window plus a three-segment breakdown.
+
+**Heddle today.** The dock's elements are spans, not buttons; no popover/dialog primitive exists in the page;
+`projectSessionStats` carries turns, steps, usage buckets, last prompt size and generation spans, but **not**
+LLM/tool time or TTFT; the usage buckets and exact totals are available; the context breakdown is **not** in
+the API (the page only receives the last prompt size and the window). So the work is one shared detail surface
+plus two new folds (llm/tool/TTFT) and, where a breakdown is unavailable, honest blanks.
+
+**Brainstorm:** (a) one dialog primitive + three content renderers — **chosen** (the reference uses one panel
+style for all three); (b) three bespoke inline panels — rejected: three placements and three close behaviours to
+drift; (c) `<dialog>` element with the native modal — rejected for now: the reference is a non-modal popover
+that closes on a second click/outside and must not trap focus; (d) port DSH's exact backdrop blur/tints —
+deferred to the cycle that measures them precisely. Backend: fold `llmMs` (round request→done), `toolMs`
+(call→result) and `ttftMs`/`ttftSteps` (request→first token) in the same pass that folds usage; expose the
+context breakdown only if the context service has one, otherwise omit those rows rather than invent them.
+
+**Plan (next cycles):** extend `projectSessionStats` with the three timing folds + unit tests; add the shared
+popover to the page with the measured content for all three triggers, closing on outside/trigger click and
+Escape; add a browser contract that clicks each element, asserts every row and its formatting (durations, exact
+token grouping, percentages) and that it closes; live-check at 8082; then land on main via the deployment
+checkout and run `96-deployment`.
+
+**Stop note:** this cycle is measurement and planning only — the implementation cycles follow.
