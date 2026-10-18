@@ -1151,13 +1151,18 @@
     opacity: .5; transition: opacity .12s ease;
   }
   #attach:hover, #attach[aria-expanded='true'], #attach:focus-visible { opacity: 1; outline: none; }
-  /** The access chip: read, not chosen — the sandbox mode the server actually runs under. */
+  /**
+   * The access-mode chip, DSH's permission select measured on 2026-10-17.
+   *
+   * 153×28, 13px/20 at weight 500, `#cfd3d6`, radius 8, `0 4px 0 8px`, a 4px gap, a 14px shield glyph and a
+   * 14px chevron. The reference's own element is a `button` with a pointer cursor; this page's read-out chip
+   * was a static span with a `::before` circle, which is one of the things making it a control changes.
+   */
   #access {
-    flex: none; display: inline-flex; align-items: center; gap: .35rem; height: 28px;
-    padding: 0 .5rem; font-size: 13px; line-height: 1; background: none;
-    color: #cfd3d6; border: 0; border-radius: var(--radius); cursor: default;
+    flex: none; display: inline-flex; align-items: center; gap: 4px; height: 28px;
+    padding: 0 4px 0 8px; font-size: 13px; font-weight: 500; line-height: 20px;
+    background: none; color: #cfd3d6; border: 0; border-radius: 8px; cursor: pointer;
   }
-  #access::before { content: ''; width: 11px; height: 11px; border: 1.3px solid currentColor; border-radius: 50%; opacity: .8; }
   /**
    * The session-statistics dock under the card — DSH's own dock, measured on 2026-10-17.
    *
@@ -1167,6 +1172,60 @@
    * yet (they need timing facts heddle does not record), so these are spans — the same shape and type, without
    * a control that would open nothing.
    */
+
+  #access:hover:not(:disabled), #access[aria-expanded='true'] { background: rgba(255, 255, 255, .08); }
+  /** A disabled chip reports the default mode until a session is open, or while a change is in flight. */
+  #access:disabled { cursor: default; opacity: .55; }
+  #access:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #access .mode-icon, #access .chevron { flex: none; width: 14px; height: 14px; }
+  #access .chevron { opacity: .8; }
+  #access[aria-busy='true'] .chevron { opacity: .35; }
+  /**
+   * The mode menu: the reference's 16px radius, 4px inset and 34px rows, floated in **viewport coordinates**
+   * because the chip sits at the bottom of the window.
+   */
+  #access-menu {
+    position: fixed; z-index: 40; min-width: 167px; padding: 4px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: var(--shadow-menu);
+  }
+  #access-menu[hidden] { display: none; }
+  #access-menu button {
+    display: flex; align-items: center; gap: .5rem; width: 100%; height: 34px; padding: 0 .5rem;
+    font: inherit; font-size: 13px; line-height: 1; text-align: left;
+    color: var(--text); background: none; border: 0; border-radius: 12px; cursor: pointer;
+  }
+  #access-menu button:hover, #access-menu button:focus-visible { background: rgba(255, 255, 255, .08); outline: none; }
+  #access-menu button .mode-icon { flex: none; width: 14px; height: 14px; }
+  #access-menu button .label { flex: 1 1 auto; white-space: nowrap; }
+  #access-menu button .check { flex: none; width: 14px; height: 14px; }
+  #access-menu button[aria-checked='false'] .check { visibility: hidden; }
+  /** The full-access risk gate: the reference's 440px card over a dimmed page. */
+  #access-dialog { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 1rem; background: rgba(0, 0, 0, .45); }
+  #access-dialog[hidden] { display: none; }
+  #access-dialog .card {
+    width: min(92vw, 440px); padding: 20px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; box-shadow: var(--shadow-menu);
+  }
+  #access-dialog .head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+  #access-dialog h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  #access-dialog #access-dialog-close {
+    flex: none; width: 24px; height: 24px; padding: 0; font-size: 18px; line-height: 1;
+    color: var(--text-2); background: none; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  #access-dialog #access-dialog-close:hover { background: var(--hover); color: var(--text); }
+  #access-dialog .risk { margin: .8rem 0 0; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  #access-dialog .ack { display: flex; align-items: center; gap: .5rem; margin: 1rem 0 0; font-size: 13px; color: var(--text); cursor: pointer; }
+  #access-dialog .ack input { flex: none; width: 16px; height: 16px; accent-color: var(--accent); }
+  #access-dialog .actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.2rem; }
+  #access-dialog .actions button {
+    height: 36px; padding: 0 .9rem; font: inherit; font-size: 14px; border-radius: 12px; cursor: pointer;
+  }
+  #access-cancel { background: none; color: var(--text); border: 1px solid var(--border); }
+  #access-cancel:hover { background: var(--hover); }
+  #access-enable { background: var(--text); color: #0f1115; border: 0; }
+  #access-enable:disabled { opacity: .45; cursor: default; }
+  /** The status line under the card: only what the page can actually know. */
   #composer-status {
     display: flex; justify-content: center; align-items: center; gap: .75rem;
     width: fit-content; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
@@ -1952,11 +2011,17 @@
       <div id="prompt-tools">
         <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" title="Insert a file path">+</button>
         <!--
-          What sandbox mode this server runs under. It **reports** the mode; DSH's own access control opens a menu to change
-          it, which this UI has no mechanism for — so this is an informational chip rather than a control, and
-          `data-inert` says so to the inventory check that looks for dead buttons.
+          The access mode this session runs under, and the control that changes it. DSH's permission select:
+          a shield glyph, the mode's name and a chevron, opening a menu whose current entry carries a check.
+          The mode is a **session** fact (one `permission/mode` event in its log), so while no session is open
+          the chip reports the deployment default and is disabled; once a session is selected it shows and
+          changes that session's own mode.
         -->
-        <button type="button" id="access" data-inert="true" aria-label="Access mode" title="the sandbox mode this server runs under">Access</button>
+        <button type="button" id="access" aria-haspopup="menu" aria-expanded="false" aria-label="Access mode" title="the sandbox mode this session runs under" disabled>
+          <svg class="mode-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M6.42 1.68c.72-.28 1.44-.38 2.16-.38s1.44.1 2.16.38l4.52 1.7v3.3c0 4.06-2.95 5.94-5.51 6.92-2.56-.98-5.51-2.86-5.51-6.92v-3.3z"/><path d="m5.26 6.6h5.48M5.26 9.87h3.06M10.03 13.22l1.1.76 2.6-2.9"/></svg>
+          <span id="access-label">Access</span>
+          <svg class="chevron" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6.5 8 10.5l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <div id="model-seat">
           <button type="button" id="model-trigger" aria-haspopup="menu" aria-expanded="false" title="the model that answers this session">
             <span id="model-label">model</span>
@@ -1988,6 +2053,26 @@
     </span>
   </div>
   <div id="attach-menu" role="menu" aria-label="Insert a file path" hidden></div>
+  <!--
+    The access menu and the full-access risk gate. Both live outside the form and above the card: the menu
+    belongs in viewport coordinates (it opens upward from a chip at the bottom), and the gate is a modal asked
+    once, before the one transition that removes the file boundary.
+  -->
+  <div id="access-menu" role="menu" aria-label="the access mode this session runs under" hidden></div>
+  <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" hidden>
+    <div class="card">
+      <div class="head">
+        <h2 id="access-dialog-title">Enable Full access?</h2>
+        <button type="button" id="access-dialog-close" aria-label="Close">×</button>
+      </div>
+      <p class="risk">Full access reduces confirmation steps and lets the agent perform more actions directly, including sensitive operations, file changes, or external commands. Only use it when you trust the current task.</p>
+      <label class="ack"><input type="checkbox" id="access-risk"><span>I understand the risks and want to continue</span></label>
+      <div class="actions">
+        <button type="button" id="access-cancel">Cancel</button>
+        <button type="button" id="access-enable" disabled>Enable Full access</button>
+      </div>
+    </div>
+  </div>
 </div>
 </main>
 <script type="module">
@@ -3557,6 +3642,8 @@ async function showSession(id) {
   updateStatusBar()
   current = id
   paintEmptyState()
+  /** The access chip follows the session too: unknown until this session's own record has been read. */
+  applySessionAccess(null)
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
@@ -3580,6 +3667,7 @@ async function showSession(id) {
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
        */
       current = null
+      applySessionAccess(null)
       const title = document.getElementById('session-title')
       if (title !== null) title.textContent = 'No session'
       const branch = document.getElementById('session-branch')
@@ -3597,6 +3685,8 @@ async function showSession(id) {
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
     updateStatusBar()
+    /** The session's own access mode, which is what the chip must show after a reload. */
+    applySessionAccess(body.permission?.mode ?? null)
     /** The header follows the conversation, the way DSH's does. */
     const titleCell = document.getElementById('session-title')
     const branchCell = document.getElementById('session-branch')
@@ -3715,6 +3805,17 @@ events.addEventListener('session', (message) => {
   if (event.type === 'assistant/chunk' && event.chunk.usage !== undefined) {
     liveUsage = addUsage(liveUsage, event.chunk.usage)
     updateStatusBar()
+  }
+  /**
+   * A mode changed anywhere — this page, another window, the CLI — is read from the one event stream rather than
+   * polled, so the two controls cannot show different modes for the same session.
+   */
+  if (event.type === 'permission/mode') {
+    if (typeof event.mode === 'string') {
+      accessMode = event.mode
+      renderAccess()
+    }
+    return
   }
   if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') add('assistant', event.chunk.text)
   else if (event.type === 'assistant/chunk' && event.chunk.type === 'reasoning-delta') add('reasoning', event.chunk.text)
@@ -4623,6 +4724,8 @@ async function runTurn(text, key) {
         if (target === null) {
           current = payload.session
           adoptSession(payload.session)
+          /** The created session's mode record is what the chip must show; it did not exist a moment ago. */
+          void fetchSessionAccess(payload.session)
           /** A Stop pressed before the session existed lands now. */
           if (stopRequested) {
             stopRequested = false
@@ -5038,31 +5141,273 @@ document.addEventListener('keydown', (keyEvent) => {
 })
 
 /**
- * The access chip: the sandbox mode the server runs under, read from `/api/status`.
+ * The access mode: a **session** fact, and the control that changes it.
  *
- * The mode is fixed when the server constructs its sandbox, so this is a read-out rather than a control —
- * which is exactly why it is worth showing: a person should not have to guess whether the agent can write.
+ * DSH's permission select, measured on 2026-10-17: a shield glyph, the mode's name, a chevron and a menu whose
+ * current entry carries a check. Its three-entry menu and its risk gate are copied; two things are deliberately
+ * better than the reference — every entry is a `menuitemradio` with `aria-checked`, and the chip carries
+ * `aria-haspopup`/`aria-expanded`, none of which DSH's own control exposes.
+ *
+ * The mode itself is recorded in the session's append-only log as one `permission/mode` event, so:
+ *
+ * - a reload comes back to it (`GET /api/sessions/<id>` carries it);
+ * - another window, or the same one, sees a change through the `session/event` stream;
+ * - selecting a session reads **that session's** mode, never the server default;
+ * - a change is **pending** until the server answers, and a failed request leaves the label where it was, so
+ *   the control cannot report access it did not get.
  */
 function accessTitle(mode) {
   if (mode === 'read-only') return 'Read only'
   if (mode === 'danger-full-access') return 'Full access'
   return 'Workspace write'
 }
+
+/** The closed vocabulary, narrowest first. */
+const ACCESS_MODES = ['read-only', 'workspace-write', 'danger-full-access']
+/** The reference's shield body, traced from its menu on 2026-10-17. */
+const ACCESS_SHIELD = 'M6.42 1.68c.72-.28 1.44-.38 2.16-.38s1.44.1 2.16.38l4.52 1.7v3.3c0 4.06-2.95 5.94-5.51 6.92-2.56-.98-5.51-2.86-5.51-6.92v-3.3z'
+/** One glyph per mode: a check, a checked shield with lines, and an alert shield — the reference's own icons. */
+const ACCESS_GLYPHS = {
+  'read-only': [ACCESS_SHIELD, 'M5.09 8.14 7.18 10.24 11.51 5.61'],
+  'workspace-write': [ACCESS_SHIELD, 'M5.26 6.6h5.48', 'M5.26 9.87h3.06', 'M10.03 13.22l1.1.76 2.6-2.9'],
+  'danger-full-access': [ACCESS_SHIELD, 'M8 4.39v5.5', 'M8 10.81v1'],
+}
+
+const accessMenu = document.getElementById('access-menu')
+const accessLabel = document.getElementById('access-label')
+const accessDialog = document.getElementById('access-dialog')
+const accessRisk = document.getElementById('access-risk')
+const accessEnable = document.getElementById('access-enable')
+/** The mode the chip shows; `null` means no session is open and the deployment default is reported. */
+let accessMode = null
+/** The deployment default, read once from `/api/status`. */
+let accessDefaultMode = 'workspace-write'
+/** Whether a change is in flight, which is the control's pending state. */
+let accessPending = false
+
+/** One mode's glyph, built as DOM so the page never assembles markup from a string. */
+function accessGlyph(mode) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('class', 'mode-icon')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  for (const d of ACCESS_GLYPHS[mode]) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', d)
+    svg.append(path)
+  }
+  return svg
+}
+
+/** Draw the chip and its menu from the state above. One renderer, so the two cannot disagree. */
+function renderAccess() {
+  const mode = accessMode ?? accessDefaultMode
+  const title = accessTitle(mode)
+  accessLabel.textContent = title
+  accessButton.title =
+    current === null
+      ? `the sandbox mode this server runs under by default (${mode}); open a session to change it`
+      : `the sandbox mode this session runs under: ${mode}`
+  /** DSH names the control `Access mode, current <value>`: the kind and the value, because either alone lies. */
+  accessButton.setAttribute('aria-label', `Access mode, current: ${title}`)
+  accessButton.setAttribute('aria-expanded', String(!accessMenu.hidden))
+  accessButton.disabled = accessPending || current === null
+  if (accessPending) accessButton.setAttribute('aria-busy', 'true')
+  else accessButton.removeAttribute('aria-busy')
+  renderAccessMenu()
+}
+
+function renderAccessMenu() {
+  const mode = accessMode ?? accessDefaultMode
+  accessMenu.replaceChildren()
+  for (const name of ACCESS_MODES) {
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.setAttribute('role', 'menuitemradio')
+    item.setAttribute('aria-checked', String(name === mode))
+    item.dataset.mode = name
+    const label = document.createElement('span')
+    label.className = 'label'
+    label.textContent = accessTitle(name)
+    const check = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    check.setAttribute('class', 'check')
+    check.setAttribute('viewBox', '0 0 16 16')
+    check.setAttribute('width', '14')
+    check.setAttribute('height', '14')
+    check.setAttribute('fill', 'none')
+    check.setAttribute('stroke', 'currentColor')
+    check.setAttribute('stroke-width', '1.4')
+    check.setAttribute('stroke-linecap', 'round')
+    check.setAttribute('stroke-linejoin', 'round')
+    check.setAttribute('aria-hidden', 'true')
+    const tick = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    tick.setAttribute('d', 'M3.4 8.3 6.3 11.2 12.6 4.9')
+    check.append(tick)
+    item.append(accessGlyph(name), label, check)
+    item.addEventListener('click', () => chooseAccessMode(name))
+    accessMenu.append(item)
+  }
+}
+
+/**
+ * Place the menu in **viewport coordinates**, above the chip when there is room.
+ *
+ * The chip sits at the bottom of the window, so the reference's menu opens upward; a floating surface inside a
+ * scrolling ancestor would be clipped, which is the failure the parity audit's occlusion check exists for.
+ */
+function positionAccessMenu() {
+  accessMenu.hidden = false
+  const chip = accessButton.getBoundingClientRect()
+  const menu = accessMenu.getBoundingClientRect()
+  const left = Math.max(8, Math.min(chip.left, window.innerWidth - menu.width - 8))
+  const above = chip.top - menu.height - 4
+  accessMenu.style.left = `${Math.round(left)}px`
+  accessMenu.style.top = `${Math.round(above >= 8 ? above : chip.bottom + 4)}px`
+}
+
+function openAccessMenu() {
+  if (accessButton.disabled) return
+  renderAccessMenu()
+  positionAccessMenu()
+  accessButton.setAttribute('aria-expanded', 'true')
+}
+
+function closeAccessMenu() {
+  if (accessMenu.hidden) return
+  accessMenu.hidden = true
+  accessButton.setAttribute('aria-expanded', 'false')
+}
+
+/** A menu choice: the mode already in effect just closes it; anything wider is written only after the server says so. */
+function chooseAccessMode(name) {
+  closeAccessMenu()
+  if (name === (accessMode ?? accessDefaultMode)) return
+  if (name === 'danger-full-access') {
+    openAccessGate()
+    return
+  }
+  void changeAccessMode(name)
+}
+
+/** The risk gate in front of full access. Its own state is reset each time it opens. */
+function openAccessGate() {
+  accessRisk.checked = false
+  accessEnable.disabled = true
+  accessDialog.hidden = false
+  accessRisk.focus()
+}
+
+function closeAccessGate() {
+  if (accessDialog.hidden) return
+  accessDialog.hidden = true
+  accessButton.focus()
+}
+
+/**
+ * Ask the server to change this session's mode, and **only** its answer changes the label.
+ *
+ * The confirmation token is sent only from the gate's Enable button, which is only enabled after the risk has
+ * been acknowledged; the server refuses an unconfirmed escalation independently, so neither half alone can
+ * widen access. A failure reports its reason in the panel's note and leaves the chip on the old mode.
+ */
+async function changeAccessMode(mode, confirm) {
+  if (accessPending) return
+  if (current === null) {
+    setNote('open a session before changing its access mode')
+    return
+  }
+  accessPending = true
+  renderAccess()
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(current)}/permission`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode, ...(confirm !== undefined ? { confirm } : {}) }),
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      setNote(body.error ?? `could not change the access mode (${response.status})`)
+      return
+    }
+    accessMode = typeof body.mode === 'string' ? body.mode : mode
+    setNote('')
+  } catch (error) {
+    setNote(`could not change the access mode: ${(error && error.message) || error}`)
+  } finally {
+    accessPending = false
+    renderAccess()
+  }
+}
+
+/** The mode a selected session recorded, or `null` while no session is open. */
+function applySessionAccess(mode) {
+  accessMode = typeof mode === 'string' ? mode : null
+  renderAccess()
+}
+
+/** Read one session's mode, for the paths that adopt an id without a `showSession` fetch (a turn that created it). */
+async function fetchSessionAccess(id) {
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`)
+    if (!response.ok) return
+    const body = await response.json()
+    if (current === id) applySessionAccess(body.permission?.mode ?? null)
+  } catch {
+    // A mode that cannot be read leaves the chip on what it had; the turn itself still works.
+  }
+}
+
 async function loadStatus() {
   try {
     const response = await fetch('/api/status')
     if (!response.ok) return
     const body = await response.json()
     const mode = body?.sandbox?.mode
-    if (typeof mode !== 'string') return
-    accessButton.textContent = accessTitle(mode)
-    accessButton.title = `the sandbox mode this server runs under: ${mode}`
-    /** DSH names this control `Access mode, current <value>`; a name of only "Access mode" hides the value it shows. */
-    accessButton.setAttribute('aria-label', `Access mode, current: ${accessTitle(mode)}`)
+    if (typeof mode === 'string') accessDefaultMode = mode
   } catch {
     // A status the page cannot read must not stop the composer from being one.
   }
+  renderAccess()
 }
+
+accessButton.addEventListener('click', (clickEvent) => {
+  clickEvent.stopPropagation()
+  if (accessMenu.hidden) openAccessMenu()
+  else closeAccessMenu()
+})
+accessRisk.addEventListener('change', () => {
+  accessEnable.disabled = !accessRisk.checked
+})
+document.getElementById('access-cancel').addEventListener('click', closeAccessGate)
+document.getElementById('access-dialog-close').addEventListener('click', closeAccessGate)
+accessEnable.addEventListener('click', () => {
+  if (!accessRisk.checked || accessPending) return
+  closeAccessGate()
+  void changeAccessMode('danger-full-access', 'full-access')
+})
+/** Any click outside the menu dismisses it, as the reference's popup shell does. */
+document.addEventListener('click', (clickEvent) => {
+  if (accessMenu.hidden) return
+  if (!accessMenu.contains(clickEvent.target) && clickEvent.target !== accessButton) closeAccessMenu()
+})
+document.addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key !== 'Escape') return
+  if (!accessDialog.hidden) {
+    closeAccessGate()
+    return
+  }
+  if (!accessMenu.hidden) closeAccessMenu()
+})
+window.addEventListener('resize', () => {
+  if (!accessMenu.hidden) positionAccessMenu()
+})
 
 /**
  * The model seat: which backend answers this session.
