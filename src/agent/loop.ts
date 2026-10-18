@@ -83,6 +83,13 @@ export interface TurnResult {
   readonly events: number
   /** Rounds of model-plus-tools this turn took. */
   readonly rounds: number
+  /**
+   * Why the turn stopped before its answer was complete, when it did.
+   *
+   * The loop already collected these reasons for the transcript; a caller that says "the turn stopped" must
+   * be able to say why, which is why the same list travels on the result and on the completion event.
+   */
+  readonly ended?: readonly string[]
   /** What the last context preparation was, so a caller can report the budget. */
   readonly context?: { readonly estimatedTokens: number; readonly thresholdTokens: number; readonly pruned: number; readonly compacted: boolean }
   /**
@@ -445,6 +452,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   }
   ctx.session.store.append(options.session, {
     type: 'assistant/completed',
+    ...(ended.length > 0 ? { ended } : {}),
     text,
     reasoning,
     finishReason,
@@ -462,6 +470,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     events: ctx.session.store.count(options.session) - started,
     rounds,
     context: lastContext,
+    ...(ended.length > 0 ? { ended } : {}),
     ...(usage !== undefined ? { usage } : {}),
   }
 }
