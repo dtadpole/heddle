@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { decodeFrame, encodeFrame } from '../../cdp.mjs'
-import { browserPath, stateDir } from '../../chrome.mjs'
+import { browserPath, releaseChromeOutput, stateDir } from '../../chrome.mjs'
 import { keyDescription, parseKey } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
@@ -299,4 +299,18 @@ test('a named session maps to a directory of its own, and an unnamed one to the 
 /** The browser binary can be named explicitly, which is what a machine without the default path needs. */
 test('an explicit browser path wins over discovery', () => {
   assert.equal(browserPath('/definitely/not/a/browser'), '/definitely/not/a/browser')
+})
+
+
+test('closing a stopped Chrome releases only its owned output streams', () => {
+  const calls = []
+  const child = {
+    stdout: { destroy: () => calls.push('stdout') },
+    stderr: { destroy: () => calls.push('stderr') },
+    kill: () => { throw new Error('output release must not signal a process') },
+  }
+  releaseChromeOutput(child)
+  assert.deepEqual(calls, ['stdout', 'stderr'])
+  releaseChromeOutput(undefined)
+  releaseChromeOutput({ stdout: null, stderr: null })
 })

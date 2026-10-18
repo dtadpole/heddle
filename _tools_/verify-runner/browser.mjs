@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { releaseChromeOutput } from '../browser-use/chrome.mjs'
 import { browserAvailable as toolBrowserAvailable, browserPath, openBrowser as openToolBrowser } from '../browser-use/lib.mjs'
 
 /**
@@ -72,7 +73,7 @@ export async function openBrowser(options = {}) {
     },
     /** Evaluate an expression and return its value. */
     evaluate: (expression, timeoutMs = 10_000) => page.evaluate(expression, { timeoutMs }),
-    /** Wait for an expression to become truthy; `true` when it did, `false` on timeout. */
+    /** Wait for an expression to become truthy; resolve true or throw on timeout. */
     waitFor: (expression, timeoutMs = 15_000) => page.waitForExpression(expression, timeoutMs),
     /** Save a screenshot and return its path. */
     async screenshot(path) {
@@ -93,6 +94,8 @@ export async function openBrowser(options = {}) {
       } catch {
         // A browser that is already gone is the state this wants.
       }
+      // Helpers may retain inherited pipe descriptors after the main browser is killed.
+      releaseChromeOutput(browser.running?.child)
       browser.connection?.close()
       await browser.close()
       // Chrome keeps writing its profile while it exits, so a single rm loses the race (ENOTEMPTY).

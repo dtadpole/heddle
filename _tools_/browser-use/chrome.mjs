@@ -216,6 +216,7 @@ async function startOnce(executable, options) {
     return running
   } catch (error) {
     child.kill('SIGKILL')
+    releaseChromeOutput(child)
     throw error
   }
 }
@@ -270,6 +271,19 @@ export async function removeProfile(dir) {
 }
 
 /**
+ * Release this launch's output pipes once its browser has been stopped.
+ *
+ * Chrome helpers can outlive the browser and inherit its stdout/stderr descriptors. Waiting for their
+ * EOF leaves Node's ChildProcess streams alive indefinitely, even after the browser exits. Destroying
+ * our read ends does not kill unrelated Chrome processes or change browser signalling; it releases the
+ * handles owned by this launch. Kept synchronous for callers closing a browser before server cleanup.
+ */
+export function releaseChromeOutput(child) {
+  child?.stdout?.destroy()
+  child?.stderr?.destroy()
+}
+
+/**
  * Stop a browser, politely when it answers and by signal when it does not.
  *
  * `Browser.close` is what flushes the profile and lets a page's `beforeunload` run, so it is tried
@@ -293,6 +307,7 @@ export async function stopChrome(running) {
     await Promise.race([exited, timer])
   }
   if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  releaseChromeOutput(child)
   if (running.profile !== undefined && running.temporaryProfile === true) await removeProfile(running.profile)
 }
 

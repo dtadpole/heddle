@@ -25,3 +25,7 @@ node --test _tools_/browser-use/_tests_/component-rules/unit.test.mjs
   [`_tools_/browser-use/_verifiers/`](../../_verifiers/INDEX.md), which drives a real browser and keeps
   the project's verdict contract.
 - **The surface's behaviour.** The coverage test asserts which tools exist, not that they work.
+
+Chrome output cleanup is tested without a browser: `releaseChromeOutput` destroys only this launch's
+read streams and does not signal unrelated processes. A helper retaining inherited descriptors must
+not keep a finished verifier alive.
