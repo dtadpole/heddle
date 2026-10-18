@@ -118,6 +118,33 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
 
+### The squashed session menu (2026-10-17)
+
+**Report.** The session dropdown menu was squished.
+
+**Research.** Measured **in its opened state** on a fresh server: the menu was 160x72 with four items of **20x16** each —
+the width of an icon, with its label clipped away. DSH's own menu item, read from its sheet, is `width: 100%`,
+`min-height: 34px`, `padding: 6px 8px`, `gap: 6px`, radius 12px, with a **16px** glyph; its container is `position: fixed`,
+`min-width: 96px`, `padding: 4px`, `z-index: 70`.
+
+**Understand.** A mechanism, not a value: the row-action rule `#tree .row-tools button` was a **descendant** selector, so
+it also sized the buttons inside the menu that lives in the same slot. The closed menu looked fine because its items are
+hidden.
+
+**Plan.** Scope the action rule to the row's own buttons (`> .menu-wrap > button`, `> .session-actions > button`) and give
+every menu item one shared rule with DSH's numbers. Rejected: patching each per-area menu rule — there are four, and the
+descendant selector would have kept finding new victims.
+
+**Verify.** After the change, measured in the opened state: items **152x34**, glyph **16x16**, menu 160x144, labels
+unclipped. The inventory check now asserts, for every menu this page draws, each item's box, its label clipping and its
+glyph box, so a squashed item cannot ship again. Part 7 is 40 checks and the unit suite 310, all green.
+
+**Coverage.** Opened and measured: the session row's menu (the reported one), View options, the session header's More
+actions. Not measured this cycle: the workspace row's menu and the model/attach menus — the shared rule covers them, but
+their opened boxes were not asserted.
+
+**Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
+
 ### The control chrome, measured from DSH's own sheet (2026-10-17)
 
 The owner reported the row's icon buttons as a little too small and with a background unlike the reference. Both were

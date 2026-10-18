@@ -2991,6 +2991,12 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
             cursor: style.cursor,
             expectedCursor: disabled || inert ? 'default' : separator ? 'col-resize' : typing ? 'text' : 'pointer',
             hitTest: centre === null ? null : centre === element || element.contains(centre),
+            atCentre: centre === null ? null : {
+              tag: centre.tagName.toLowerCase(),
+              id: centre.id,
+              cls: String(centre.className).slice(0, 40),
+              label: centre.getAttribute('aria-label'),
+            },
             clipped: clips(element),
             disabled,
             /** A control the UI reveals on hover is deliberately not hit-testable while it is invisible. */
@@ -3008,11 +3014,20 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           const rect = menu.getBoundingClientRect()
           const style = getComputedStyle(menu)
           const items = [...menu.querySelectorAll('button')]
+          const box = (element) => { const own = element.getBoundingClientRect(); return [Math.round(own.width), Math.round(own.height)] }
           const report = {
             position: style.position,
             background: style.backgroundColor,
             insideViewport: rect.left >= 0 && rect.top >= 0 && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight,
-            items: items.map((item) => ({ label: (item.textContent || '').trim().slice(0, 30), glyph: item.querySelector('svg') !== null })),
+            menuBox: [Math.round(rect.width), Math.round(rect.height)],
+            items: items.map((item) => ({
+              label: (item.textContent || '').trim().slice(0, 30),
+              glyph: item.querySelector('svg') !== null,
+              glyphBox: item.querySelector('svg') === null ? null : box(item.querySelector('svg')),
+              box: box(item),
+              /** A label that overflows its item is how a squashed item announces itself. */
+              clipped: item.scrollWidth > item.clientWidth + 1,
+            })),
           }
           document.dispatchEvent(new MouseEvent('click', { bubbles: true })); await wait(150)
           return report
@@ -3107,6 +3122,17 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
       assert.equal(menu.background, 'rgb(35, 35, 36)', `the ${name} menu has an opaque surface`)
       assert.ok(menu.items.length > 0, `the ${name} menu has items`)
       assert.ok(menu.items.every((item) => item.glyph === true), `every ${name} item carries a glyph\nsaw: ${JSON.stringify(menu.items)}`)
+      /**
+       * An opened menu is measured **item by item**: DSH's own `._item` is full width, `min-height: 34px`, with a 16px
+       * glyph. The squashed menu this cycle fixed measured 20×16 per item — one descendant selector had also sized the
+       * items — and no closed-state assertion could have seen it.
+       */
+      for (const item of menu.items) {
+        assert.ok(item.box[1] >= 34, `the ${name} item is at least DSH's 34px tall\nsaw: ${JSON.stringify(item)}`)
+        assert.ok(item.box[0] > 100, `and fills the menu's width\nsaw: ${JSON.stringify(item)}`)
+        assert.equal(item.clipped, false, `with its label unclipped\nsaw: ${JSON.stringify(item)}`)
+        assert.deepEqual(item.glyphBox, [16, 16], `and a 16px glyph, as DSH's items have\nsaw: ${JSON.stringify(item)}`)
+      }
     }
 
     /** The row's controls are DSH's `._actionButton`: 20×16, no background. */
