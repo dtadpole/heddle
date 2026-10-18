@@ -530,3 +530,22 @@ half of this cycle.
 - **landing / live:** committed to main, the deployment checkout fast-forwarded and rebuilt, the launchd agent
   serving it, and `96-deployment` green (process, byte-identical page, clean committed main); the surfaces were
   opened on the live page at 8082.
+### Footer-dialog loop — cycle 3 close: contract green, deployment 3/3
+
+- **live probe:** on the deployed page at 8082 each trigger opens its surface (`hidden` false, `role="dialog"`,
+  labels "Session statistics" / "Token usage" / "Context usage") and closes on Escape. The content rows in that
+  probe were empty because the panel remembered the **newest** session, which was an empty one created by a
+  concurrent check; the probe could not select a data-bearing session through the sidebar rows it tried. That is
+  a limitation of this probe, stated rather than hidden — the row content is asserted by the browser contract
+  against a scripted session, where every measured row (LLM time, TPS, exact total, cache share, buckets,
+  context percent and used/window) is checked, and by the fold's unit tests.
+- **suites:** composer **17/17**, `npm test` **387 passing**, deployment **3/3**. `npm run check` has seven
+  errors, all in `test/web.test.ts` — a concurrent session's in-flight file, named and not touched.
+- **landing:** main pushed (`e8c7a68`), the deployment checkout fast-forwarded to it, rebuilt and served; the
+  launchd agent was found repointed to the shared checkout mid-verification (other sessions do this), restored
+  to the deployment checkout, and `96-deployment` then passed all three checks.
+- **remaining difference, kept with its reason:** the context panel's three breakdown rows (system prompt, tool
+  definitions, messages) are absent because the harness does not expose a context breakdown; the surface omits
+  them rather than inventing estimates. A future cycle can add the breakdown to the context service first.
+- **stop:** no fix row remains in the measured scope; the implementation is landed and deployed, and the only
+  outstanding verification is the live session-selection probe noted above.
