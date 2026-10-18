@@ -382,3 +382,37 @@ where an endpoint declares no window but its model list reports one and the gaug
   that is declared or provider-discovered, and blank where neither exists. No figure is estimated.
 - **stop:** the full measurement now produces no fix row beyond the recorded divergences (the dialogs, the
   decode-time rate, the wall-time blank after a reload). The loop stops here with that evidence.
+
+## tok/s durability loop — cycle 1: the rate lives only in the page's memory
+
+**The report.** The composer footer has no `tok/s`. Measured on the live page: after a reload the rate cell
+is empty (`tokens: ''`) while turns, steps, total, cache share and context share all render.
+
+**The reference, measured.** DSH's dock at `127.0.0.1:8080` printed `44 turns 2654 steps · 253 tok/s`; after a
+**reload** it printed `44 turns 2655 steps · 253 tok/s` — the rate survives because it is a projection of the
+session's own log. Its bundle states the same fold this session's `dsh-session-stats` projection uses: per
+round, `decodeMs += messageTime − firstTokenTime` and `decodeTokens += usage.outputTokens`, and the pill divides
+one by the other. The conditions are exact: the round must have streamed a first token **and** reported output
+tokens; otherwise neither end is counted.
+
+**Why heddle is blank.** The page derives the rate from `lastTurnUsage / lastTurnSeconds`, both page state set
+only when the page itself sent the turn and both reset on `showSession`. A reload has neither, so the phrase
+disappears — a missing **mechanism**, not a missing value: nothing in the folded stats carries decode timing.
+
+**The data is in the log (measured).** A real session's `session.jsonl` carries `model/request` and
+`assistant/chunk` events with `at` timestamps, and providers' done frames carry `usage.outputTokens` (samples
+found in two sessions, e.g. `{"inputTokens": 2134, "outputTokens": 1}` and a tool round with
+`outputTokens: 230`). So first-token → done gaps and reported tokens are both derivable from the durable record.
+
+**Brainstorm:** (a) keep the page's turn memory and also store it in `localStorage` — rejected: a second,
+non-durable copy that disagrees across windows; (b) approximate the rate from the turn's wall time — rejected:
+that is the current approximation, and it is exactly what cannot survive a reload; (c) fold
+`decodeMs`/`decodeTokens` per round from the event log and let the page divide — **chosen**, matching DSH's
+formula and conditions; (d) ask providers for decode time — no provider reports it on these routes; (e) reuse
+the ledger's per-record `durationMs − ttftMs` — considered, but the stats fold is the natural home and the
+ledger's record shape is for display, not for the projection; the ledger is the instrument that proved the
+timestamps exist.
+
+**Step back.** The objective holds and narrows usefully: no provider change, no new event — the projection
+gained a fold and the page will divide what it already receives. The landing rule applies: the rate must be
+visible on the deployed page, not only in a scripted check.

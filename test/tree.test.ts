@@ -428,7 +428,7 @@ test('sessions inside one folder order by the time they were last written to, ne
         JSON.stringify({ id, log: `/logs/${id}`, cwd: join(root, '_tools_/some-tool'), createdAt: created }),
       )
     }
-    const labelsFor = (sessions: readonly { readonly id: string }[]) =>
+    const labelsFor = (sessions: readonly SessionMeta[]) =>
       (tree(join(root, '_tools_/some-tool'), { roots: [{ path: root, title: 'fixture' }], sessions }).children ?? [])
         .filter((child) => child.kind === 'session')
         .map((child) => child.label)
