@@ -1,7 +1,7 @@
 ---
 title: Full loop goal
-version: 1.4.0
-description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → deliver → verify → fix for a stated number of cycles, then merges the branch into main and verifies the running deployment before claiming the job done — with each cycle's evidence required before it counts, and the delivered surface, not a spawned copy of it, as the instrument.
+version: 1.5.0
+description: How to turn a large job into a goal that runs research (rendered-reference gate, then brainstorm) → understand (then step back) → plan → implement → deliver → verify → fix for a stated number of cycles, then merges the branch into main and verifies the running deployment before claiming the job done — with the coverage matrix filled before the first fix, every number carrying its node and CSS-rule provenance, and the delivered surface, not a spawned copy of it, as the instrument.
 grounded_in:
   - owner statement 2026-10-17 that a big job should be set up as a goal that researches, understands, plans, implements, verifies, fixes and loops three times
   - owner statement 2026-10-17 that each loop should include a brainstorm in the research phase, and should step back and broaden the scope where applicable
@@ -11,6 +11,12 @@ grounded_in:
     the owner never saw: the browser check had spawned its own server, and the address the owner opened was served
     by a daemon running another checkout's build
   - owner statement 2026-10-17 that a worktree branch may carry the initial verification, but the job is not done until the code is merged to main and the actual deployment is verified working
+  - owner statement 2026-10-18 asking why the full-loop goal keeps missing things (not enough research, brainstorming,
+    context checking or thoroughness) and to amend it so it works more reliably
+  - the goal-dock rounds of 2026-10-17/18, where six differences were found by the owner rather than by the loop: a
+    missing live refresh, a pseudo-element surface read as transparent, a negative margin attributed to the wrong
+    node, a width relation literalised from an instruction, a completed-state behaviour nobody had enumerated, and
+    icon buttons that the source showed but the implementation ignored
 ---
 
 # Full loop goal
@@ -33,6 +39,16 @@ is not the finish line either: the job is done only when the branch is merged in
 owner actually uses is verified serving that build, with a `landed:` line recording the merge and the deployment
 evidence. Both rules exist because the loop missed each once: every suite green while the owner's URL showed the old
 page, and a green branch about to be called done before it was in `main`.
+
+**v1.5 adds the rendered-reference gate.** The loop kept missing things not because it researched too little but
+because it researched the wrong *artifact* and assembled its matrix after the fact. Source code can only hypothesise;
+the rendered DOM decides. Every number used in code must name the node it came from and the CSS rule it came from,
+pseudo-elements and stacking are measured explicitly, the state matrix is derived from the data model's own state
+machine rather than a generic list, the anatomy inventory is built from the live DOM before the first fix, and the
+owner's phrasing is translated into the reference's measured *relation* instead of being literalised. The table of
+misses that produced these rules is near the end of this file. The rule that has not changed: a cycle counts only
+when its evidence is in the document and the suites are green — and now also when the matrix cell it fixes was
+declared before the fix.
 
 **v1.3 states the round cap.** A goal is created with `max_goal_rounds: 100` unless the owner names another
 number in the request; that is the harness default and it is the number this skill asks for explicitly, because a
@@ -269,3 +285,75 @@ a page response, not more features.
 the loop relies on, [`../../_conventions_/landed-and-deployed/INDEX.md`](../../_conventions_/landed-and-deployed/INDEX.md)
 for the landing rule the closing cycles obey, [`../ui-parity-audit/INDEX.md`](../ui-parity-audit/INDEX.md) for the measurement-heavy
 sibling skill, and [`../INDEX.md`](../INDEX.md) for the skills folder.
+
+## The rendered-reference gate
+
+This section exists because of six misses in the goal-dock rounds that the owner found and the loop did not. Read
+it before cycle 1 of any visual or behavioural parity job; it is the precondition for the matrix being trustworthy.
+The matrix's dimensions are [`ui-parity-audit`](../ui-parity-audit/INDEX.md)'s; this gate is what makes its cells
+something the loop can trust.
+
+### Build one instrument, commit it, and make it fail loudly
+
+- **One committed probe, not a new `/tmp` script per round.** Write `measure-<surface>.mjs` once, with a fixed JSON
+  schema, and run it against **both** sides; save it with the round's evidence (the instance's `_context_` folder).
+  Ad-hoc probes are how the dock was measured at four different times in four different ways.
+- **Locate nodes structurally, and fail on a missing node.** A probe that prints `null` and continues is how a card
+  "measurement" became a guess. If the selector misses, the probe exits non-zero and says what it looked for. In the
+  goal-dock rounds a probe climbed from transcript text to a dock-shaped ancestor (wrong node, `y = -7289`) and
+  another silently found no composer card at all; both were treated as data.
+- **One schema, both sides.** The same script and the same keys for the reference and for this project, so a
+  difference is a diff, not a recollection.
+
+### Every number carries its provenance
+
+- **Name the node and the rule.** A measurement is `(selector, computed/rect value, CSS rule that produced it)`.
+  A rule from another module is inadmissible: the −9px overlap came from applying `_7yHdaG_dock`'s negative
+  margin (the *input dock container*) to the goal bar (`.nLMEza_bar`). The classes looked related; the nodes were not.
+- **Pseudo-elements are real surfaces.** Measure them explicitly (`getComputedStyle(el, '::before')` and `'::after'`)
+  before concluding a surface is transparent: the dock's visible fill was `::before { background: rgba(67,69,74,.45);
+  backdrop-filter: blur(40px) saturate(1.5) }` while the element itself was transparent.
+- **Stacking and hit-testing are traits.** Record `z-index`, `isolation`, the paint order, and whether a hit-test
+  at the element's centre returns it — overlap and covering are invisible in a stylesheet read.
+- **Source may only hypothesise.** When the JS/CSS read and the rendered measurement disagree, the rendered one
+  decides for this revision, and the disagreement is written in the ledger. The owner's phrasing is a **direction**,
+  not a literal spec: "follow the input area's width" became equality (796) when the reference's relation was
+  card − 32px (680 inside 712); translate the phrase into the measured relation, and when the two conflict, state
+  both and choose with a reason.
+
+### Fill the matrix before the first fix
+
+- **The state matrix comes from the data model's state machine.** For the goal dock that is phase × activation ×
+  runtime (active/paused/blocked/complete × armed/disarmed × running) plus degraded cells (error, disabled, long
+  text, empty, no session, narrow width, light/dark, hover/focus). The completed-state dock was never enumerated
+  until the owner asked; a generic "states: idle, hover, focus" list does not contain it.
+- **The anatomy inventory comes from the live DOM.** List every part and its kind before measuring boxes: glyph,
+  phrase, objective, count, actions (**icon or text**), hover surface, disabled mark, error line. The icon-vs-text
+  difference was visible in the reference's own CSS (`.nLMEza_iconBtn`) yet the first build used text buttons.
+- **A cell is measured or declared before its fix.** Each row ends `match / fixed / kept with a reason / not
+  measured and why`. A fix cannot precede its row: the order is matrix → row → fix → same-metric re-measure.
+- **Liveness is a cell.** Anything that "appears" or "updates" is judged as an **event from a fresh page** (no
+  reload, no cache): the missing live refresh was invisible to a test that reloaded the page before asserting.
+
+### Re-measure the same metric, numerically, in the same round
+
+- **Before → after numbers in the ledger.** "I set the values" is not evidence; the surface was declared fixed
+  while it still carried a 92% fill from an earlier guess. Each fix re-runs the committed probe on both sides and
+  records the two numbers; a fix without its after-number is still a fix row.
+- **The delivered surface is the second instrument** (see *Deliver* above): the probe on the owner's URL, after a
+  restart, pinned by a marker.
+
+### The misses that made these rules (2026-10-17/18, goal dock)
+
+| Miss | Root cause | Mechanism now |
+|---|---|---|
+| Indicator never appeared while a goal ran (owner found it) | liveness was not a matrix cell; verification reloaded the page first | "Liveness is a cell"; the live-edge part 9 test |
+| The visible surface read as transparent | only the element was measured, not `::before` | pseudo-elements measured explicitly; surface values in the ledger |
+| The dock overlapped the input | a rule from the *input dock container* was attributed to the bar | provenance rule: node + rule, foreign modules inadmissible |
+| Bar too wide after "follow the input area" | the instruction was literalised instead of translated into the reference's relation | translate instructions to measured relations; record both when they conflict |
+| Completed goal kept its dock | the state matrix was never derived from the state machine | the matrix is derived from the data model; filled before the first fix |
+| Text verbs where the reference had icon buttons | anatomy taken from partial JS reading, not the live DOM | anatomy inventory from the live DOM before measuring boxes |
+| Four ad-hoc probes, two of which measured the wrong node | no committed instrument, silent nulls | one committed probe, fixed schema, fail-loud node lookup |
+
+The loop's job is not to be lucky about what the owner notices next; it is to have already looked. These rules are
+how "already looked" is made checkable.
