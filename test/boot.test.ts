@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { settle } from '../src/boot.ts'
@@ -36,4 +38,17 @@ test('settle gives up at its deadline and reports what is still unsettled', asyn
   const pending = await settle(fakeCtx([1]) as never, 60)
   assert.deepEqual([...pending], ['row-0'])
   assert.ok(Date.now() - started >= 50, 'it waited for the deadline rather than returning at once')
+})
+
+test('the daemon plist names the profile, so a wrong working directory cannot hide it', () => {
+  /**
+   * **A served page is not evidence that the profile loaded.** Measured three times in one session: a `heddle web`
+   * process started from another directory booted no base layer and no project patch, so the workspace plugin was
+   * absent and the panel said so — while the source, the build and the checks were all correct. The agent now names
+   * `--config <checkout>/cordis.yml`, which keeps the profile a property of the installation rather than of the shell
+   * that happened to start it.
+   */
+  const template = readFileSync(join(import.meta.dirname, '..', '_tools_', 'web-daemon', 'heddle-web.plist.template'), 'utf8')
+  assert.match(template, /<string>--config<\/string>\s*<string>@REPO@\/cordis\.yml<\/string>/, 'the profile is passed explicitly')
+  assert.match(template, /<key>WorkingDirectory<\/key>\s*<string>@REPO@<\/string>/, 'and the checkout is still the working directory')
 })

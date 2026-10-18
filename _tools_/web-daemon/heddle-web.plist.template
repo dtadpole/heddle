@@ -26,9 +26,18 @@
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>@PORT@</string>
+    <string>--config</string>
+    <string>@REPO@/cordis.yml</string>
   </array>
 
-  <!-- The working directory is what makes the default profile load: the tree is found beside the run. -->
+  <!--
+    The working directory is the checkout, and the profile is named **explicitly** so it does not depend on it.
+
+    Measured: a `heddle web` process started from another directory (a shell whose cwd was the home directory) loaded
+    no base layer, hence no project patch, so the workspace plugin was absent and the panel said the profile did not
+    load it — three times in one session, and each time the live page looked like a UI bug rather than a mis-started
+    daemon. A layer and its neighbors are a unit; naming `cordis.yml` beside this checkout makes that unit explicit.
+  -->
   <key>WorkingDirectory</key>
   <string>@REPO@</string>
 
