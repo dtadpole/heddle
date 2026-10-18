@@ -227,7 +227,20 @@ test('an html document is previewed as a page, and nothing in it can act', async
     await browser.goto(server.url)
     await browser.waitFor('document.querySelectorAll("#tree .row").length > 0', 20_000)
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500))
-    await browser.evaluate(`(() => { const row = [...document.querySelectorAll('#tree .row')].find((x) => x.querySelector('.label').textContent === ${JSON.stringify(work.split('/').pop() ?? '')}); if (row) row.click() })()`)
+    /**
+     * Open the workspace's folder — **idempotently**.
+     *
+     * A row toggles: clicking it opens a closed branch and closes an open one. The page now opens the first workspace on
+     * a first visit (measured from DSH, which arrives with a branch open), so the old unconditional click closed the
+     * branch it meant to open and the file was not in the tree. The intent is "make it visible", so the click happens
+     * only when the branch says it is closed.
+     */
+    await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find((x) => x.querySelector('.label').textContent === ${JSON.stringify(work.split('/').pop() ?? '')})
+      if (row === undefined) return false
+      if (row.closest('li').getAttribute('aria-expanded') === 'false') row.click()
+      return true
+    })()`)
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500))
     const clicked = await browser.evaluate(`(() => { const row = [...document.querySelectorAll('#tree .row')].find((x) => x.querySelector('.label').textContent === 'page.html'); if (row === undefined) return false; row.click(); return true })()`)
     assert.ok(clicked, 'the page is in the tree')
@@ -310,7 +323,12 @@ test('a click in the left panel opens the one preview, rendered for its type and
 
     await browser.goto(server.url)
     await browser.waitFor('document.querySelectorAll("#tree .row").length > 0', 20_000)
-    await browser.evaluate('document.querySelector("#tree .row").click()')
+    /** The same idempotent open: the first workspace may already be open, and a click would close it. */
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').getAttribute('aria-expanded') === 'false') row.click()
+      return true
+    })()`)
     await browser.waitFor('document.querySelectorAll("#tree .row").length > 1', 20_000)
 
     const openFile = async (name) => {
