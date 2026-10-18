@@ -90,6 +90,8 @@ if (targets.length === 0) {
 
 const PROMPT_COUNT = 'Count from 1 to 30 in words, one number per line, with no introduction.'
 const PROMPT_TINY = 'Reply with the single word ok.'
+/** A prompt that makes a thinking-capable model reason before answering, for the visibility claim. */
+const PROMPT_REASONING = 'A train leaves at 14:07 and travels 63 km at 42 km/h, waits 11 minutes, then returns at 55 km/h. Work through the timing step by step, then state the arrival time.'
 
 const PROBE_TOOL = Object.freeze({
   name: 'probe_echo',
@@ -130,6 +132,8 @@ async function call(endpoint, model, request) {
     failure,
     textDeltas: text.length,
     reasoningDeltas: reasoning.length,
+    reasoningChars: reasoning.reduce((total, delta) => total + delta.text.length, 0),
+    reasoningSample: reasoning.slice(0, 2).map((delta) => delta.text.slice(0, 60)),
     toolCalls,
     done: done.length,
     finish: done[0]?.finishReason ?? null,
@@ -138,6 +142,21 @@ async function call(endpoint, model, request) {
     lastTextMs: text.length > 0 ? Math.round(text.at(-1).at) : null,
     spanMs: text.length > 1 ? Math.round(text.at(-1).at - text[0].at) : 0,
   }
+}
+
+/**
+ * A call with one retry.
+ *
+ * Measured 2026-10-18: a validation run failed one model on a transient plugboard 5xx; a gate that flakes on a
+ * provider's bad second is a gate people learn to ignore. A transient failure is retried once; the recording keeps
+ * how many attempts it took, so a run that needed two is visible rather than indistinguishable.
+ */
+async function callRetrying(endpoint, model, request, attempts = 2) {
+  let recording = await call(endpoint, model, request)
+  for (let attempt = 2; attempt <= attempts && recording.failure !== undefined; attempt += 1) {
+    recording = { ...(await call(endpoint, model, request)), attempts: attempt }
+  }
+  return recording
 }
 
 /** The streaming claim: several text deltas, a completed turn, real characters. */
@@ -149,15 +168,22 @@ function streamingVerdict(recording) {
   return { ok: true, ...recording }
 }
 
-/** The reasoning claim, one result per declared level: the route must accept the level it was sent. */
-async function reasoningVerdict(endpoint, model, levels) {
+/**
+ * The reasoning claim: every declared level must be accepted by the route, and — for the Claude family, whose
+ * summarized thinking is the thing a person sees — the thinking text must actually arrive.
+ *
+ * Measured 2026-10-18: with `thinking: { type: 'adaptive' }` alone the route streamed one *empty* thinking delta,
+ * so the transcript and page had nothing to show; the adapter now asks for `display: 'summarized'`, and this check
+ * keeps that true for every configured Claude model.
+ */
+async function reasoningVerdict(endpoint, model, levels, apiType) {
   const recorded = []
   for (const level of levels) {
     if (level.value === null) {
       recorded.push({ id: level.id, name: level.name, value: null, ok: true, note: 'declares no wire value; nothing is sent' })
       continue
     }
-    const recording = await call(endpoint, model.id, {
+    const recording = await callRetrying(endpoint, model.id, {
       messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT_TINY }] }],
       maxOutputTokens: MINIMUM_OUTPUT_TOKENS,
       reasoningEffort: level.id,
@@ -166,12 +192,25 @@ async function reasoningVerdict(endpoint, model, levels) {
     recorded.push({ id: level.id, name: level.name, value: level.value, ok, ...(ok ? {} : { error: recording.failure ?? 'the stream ended without a done chunk' }) })
   }
   const failure = recorded.find((entry) => entry.ok !== true)
-  return { ok: failure === undefined, levels: recorded, ...(failure === undefined ? {} : { error: `level '${failure.id}' — ${failure.error}` }) }
+  if (failure !== undefined) return { ok: false, levels: recorded, error: `level '${failure.id}' — ${failure.error}` }
+  if (apiType !== 'claude') return { ok: true, levels: recorded }
+  const visibleLevel = levels.find((level) => level.id === 'max') ?? levels.at(-1)
+  const visible = await callRetrying(endpoint, model.id, {
+    messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT_REASONING }] }],
+    maxOutputTokens: 512,
+    ...(visibleLevel !== undefined && visibleLevel.value !== null ? { reasoningEffort: visibleLevel.id } : {}),
+  })
+  const reading = { deltas: visible.reasoningDeltas, chars: visible.reasoningChars, sample: visible.reasoningSample }
+  if (visible.failure !== undefined) return { ok: false, levels: recorded, visible: reading, error: `visible reasoning call failed — ${visible.failure}` }
+  if (reading.chars === 0) {
+    return { ok: false, levels: recorded, visible: reading, error: 'the declared reasoning is not visible: the route streamed no thinking text' }
+  }
+  return { ok: true, levels: recorded, visible: reading }
 }
 
 /** The tool-call claim: a streamed call to the probe tool, named correctly, in a completed turn. */
 async function toolsVerdict(endpoint, model) {
-  const recording = await call(endpoint, model.id, {
+  const recording = await callRetrying(endpoint, model.id, {
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Call probe_echo with the value hello, then reply done.' }] }],
     tools: [PROBE_TOOL],
     maxOutputTokens: 64,
@@ -186,11 +225,16 @@ async function toolsVerdict(endpoint, model) {
 }
 
 async function validateModel(target, endpoint, model) {
-  const streaming = streamingVerdict(await call(endpoint, model.id, {
+  const streaming = streamingVerdict(await callRetrying(endpoint, model.id, {
     messages: [{ role: 'user', content: [{ type: 'text', text: PROMPT_COUNT }] }],
-    maxOutputTokens: 128,
+    /**
+     * Room for reasoning and the answer: a DeepSeek reasoning turn spends its output budget on
+     * `reasoning_content` first (measured: 126-128 reasoning deltas), and a 128-token cap left 0-1 text
+     * deltas — the check would have judged the budget, not the stream.
+     */
+    maxOutputTokens: 1024,
   }))
-  const reasoning = await reasoningVerdict(endpoint, model, model.levels)
+  const reasoning = await reasoningVerdict(endpoint, model, model.levels, target.apiType)
   const tools = await toolsVerdict(endpoint, model)
   return {
     endpoint: target.name,

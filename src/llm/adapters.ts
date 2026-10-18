@@ -654,7 +654,17 @@ export function anthropicCall(
      * 2026-10-17 against the Meta Vertex route — so the effort is sent the way that route names it.
      */
     ...(effort !== undefined && effort.value !== null
-      ? { thinking: { type: 'adaptive' }, output_config: { effort: effort.value } }
+      ? {
+          /**
+           * Adaptive thinking is what this route asked for, and `display: 'summarized'` is what makes its
+           * reasoning **visible**. Measured 2026-10-18 on the live Meta Vertex route: `{ type: 'adaptive' }` alone
+           * opens a thinking block but streams one empty `thinking_delta` (0 characters), so neither the transcript
+           * nor the page has anything to show; with `display: 'summarized'` the same answer streamed 34 thinking
+           * deltas / 392 characters before its 76 text deltas.
+           */
+          thinking: { type: 'adaptive', display: 'summarized' },
+          output_config: { effort: effort.value },
+        }
       : {}),
   }
 

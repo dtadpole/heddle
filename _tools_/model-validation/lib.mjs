@@ -180,6 +180,9 @@ export function judge(cache, config) {
         if (seen === undefined) failures.push(`${target.name}/${model.id}: reasoning level '${level.id}' has no validation entry`)
         else if (seen.ok !== true) failures.push(`${target.name}/${model.id}: reasoning level '${level.id}' — ${seen.error ?? 'not passing'}`)
       }
+      if (target.apiType === 'claude' && !(Number(result.reasoning?.visible?.chars ?? 0) > 0)) {
+        failures.push(`${target.name}/${model.id}: reasoning is not visible — ${result.reasoning?.visible?.error ?? 'the recorded run streamed no thinking text'}`)
+      }
       if (result.tools?.ok !== true) {
         failures.push(`${target.name}/${model.id}: tool call — ${result.tools?.error ?? 'not passing'}`)
       }

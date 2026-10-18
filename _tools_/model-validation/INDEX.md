@@ -16,7 +16,7 @@ endpoint nobody called is an endpoint nobody knows works.
 
 | Format | Kinds | Streaming | Reasoning | Tool call |
 |---|---|---|---|---|
-| claude | `anthropic-vertex` | publisher `streamRawPredict` SSE → ≥2 text deltas and a `done` chunk | every declared level sent as adaptive thinking + `output_config.effort`; the route must accept it | a streamed `tool_use` call to `probe_echo` |
+| claude | `anthropic-vertex` | publisher `streamRawPredict` SSE → ≥2 text deltas and a `done` chunk | every declared level sent as adaptive thinking + `output_config.effort`; the route must accept it, **and the summarized thinking must actually arrive** (measured: adaptive thinking without a summarized display streams one empty delta, so the page has nothing to show) | a streamed `tool_use` call to `probe_echo` |
 | codex | `openai-responses` | Responses SSE (`response.output_text.delta`) → ≥2 deltas and completion | every declared level sent as `reasoning.effort` | a streamed `function_call` to `probe_echo` |
 | deepseek | `openai-chat` | Chat Completions SSE → ≥2 deltas and a `done` chunk | every declared level sent as `reasoning_effort` | a streamed `tool_calls` entry to `probe_echo` |
 
@@ -51,6 +51,23 @@ and the interaction, because the reader's next act is to fix that pair.
 [`_verifiers_/98-model-endpoints`](../../_verifiers_/98-model-endpoints/INDEX.md) judges the record: a configuration
 edit changes the fingerprint, so it goes stale and the verifier fails until this tool is run again. That is the
 "whenever a new endpoint or model type is configured" mechanism.
+
+## Defects the matrix has found
+
+- **A declared level the route rejects.** `meta-codex`'s `gpt-6.1-sol-ptu` listed `ultra`; the route answers `400
+  Invalid value: 'ultra'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'`. The
+  level was removed from the machine's configuration, and the per-level acceptance check is what found it.
+- **Reasoning that is configured but invisible.** `meta-claude`'s adaptive thinking without
+  `thinking.display: 'summarized'` opened a thinking block and streamed one empty `thinking_delta` — 0 characters
+  for the transcript and the page. The adapter now asks for the summarized display, and the Claude row of this
+  matrix fails if a configured model streams no visible thinking text.
+- **Budgets that judged the budget instead of the claim.** A reasoning call asked for 8 output tokens (the Codex
+  route's minimum is 16), and the streaming call asked for 128 — a DeepSeek reasoning turn spent all 128 on
+  `reasoning_content` and produced 0-1 text deltas. The tiny call now asks for the route minimum, and the streaming
+  call budgets reasoning plus the answer.
+- **A transient provider second.** One run failed a model on a plugboard 5xx; a gate that flakes on a provider's
+  bad second is a gate people learn to ignore, so every call is retried once and the recording keeps the attempt
+  count.
 
 ## What it costs
 

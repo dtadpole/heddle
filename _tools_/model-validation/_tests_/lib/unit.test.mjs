@@ -47,7 +47,11 @@ const passingResult = (endpoint, apiType, model, levels) => ({
   apiType,
   model,
   streaming: { ok: true, textDeltas: 4, chars: 20, done: 1, spanMs: 50 },
-  reasoning: { ok: true, levels: levels.map((level) => ({ id: level.id, value: level.value, ok: true, ...(level.value === null ? { note: 'no wire value' } : {}) })) },
+  reasoning: {
+    ok: true,
+    levels: levels.map((level) => ({ id: level.id, value: level.value, ok: true, ...(level.value === null ? { note: 'no wire value' } : {}) })),
+    visible: { deltas: 4, chars: 120, sample: ['thinking'] },
+  },
   tools: { ok: true, toolCalls: [{ name: 'probe_echo', arguments: '{"value":"hello"}' }] },
 })
 
@@ -137,6 +141,19 @@ test('a fresh passing record judges true; a missing, stale or failing record doe
   const failingTools = cacheFor(configured)
   failingTools.results[resultKey('claude', 'claude')].tools = { ok: false, error: 'no probe_echo tool call' }
   assert.match(judge(failingTools, configured).failures.join(' '), /claude\/claude: tool call — no probe_echo/)
+
+  /**
+   * The Claude family's reasoning must be **visible**: measured 2026-10-18, a route asked for adaptive thinking
+   * without a summarized display streamed one empty thinking delta, so the page had nothing to show. A record for
+   * a Claude endpoint that reports no thinking text is therefore a failure, while the other families may
+   * legitimately not disclose theirs.
+   */
+  const invisibleClaude = cacheFor(configured)
+  invisibleClaude.results[resultKey('claude', 'claude')].reasoning.visible = { deltas: 1, chars: 0 }
+  assert.match(judge(invisibleClaude, configured).failures.join(' '), /claude\/claude: reasoning is not visible/)
+  const invisibleDeepSeek = cacheFor(configured)
+  invisibleDeepSeek.results[resultKey('chat', 'chat-small')].reasoning.visible = { deltas: 0, chars: 0 }
+  assert.equal(judge(invisibleDeepSeek, configured).ok, true, 'a non-Claude family is not required to disclose its reasoning text')
 })
 
 test('the tiny reasoning call respects the smallest output a Responses route accepts', () => {

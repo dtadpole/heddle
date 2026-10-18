@@ -207,7 +207,17 @@ test('an anthropic-vertex call asks for adaptive thinking and the level’s effo
     models: [{ id: 'claude-opus-5-5', reasoning: { levels: [{ id: 'high', name: 'High', value: 'high' }] } }],
   }
   const call = anthropicCall(target, requestFor({ endpoint: 'claude', reasoningEffort: 'high' }))
-  assert.deepEqual(call.body.thinking, { type: 'adaptive' }, 'budget_tokens was refused by the live route; adaptive is what it asked for')
+  /**
+   * `display: 'summarized'` is what makes the thinking **visible**. Measured 2026-10-18 on the live route: with
+   * `{ type: 'adaptive' }` alone the stream opened a thinking block and sent one empty `thinking_delta` (0
+   * characters), so the transcript and the page had nothing to show; with `display: 'summarized'` the same answer
+   * streamed 34 thinking deltas / 392 characters before its 76 text deltas.
+   */
+  assert.deepEqual(
+    call.body.thinking,
+    { type: 'adaptive', display: 'summarized' },
+    'budget_tokens was refused by the live route; adaptive with a summarized display is what it accepts and shows',
+  )
   assert.deepEqual(call.body.output_config, { effort: 'high' }, 'and the effort travels there rather than in a thinking budget')
   const plain = anthropicCall(target, requestFor({ endpoint: 'claude' }))
   assert.equal('thinking' in plain.body, false, 'no selection sends no thinking directive')
