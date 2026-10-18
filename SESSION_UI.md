@@ -1,9 +1,9 @@
 ---
 title: Session UI, as DSH does it
-version: 1.0.0
+version: 1.1.0
 description: What DSH's session management looks like in use, what Heddle does today, and the plan to close the gap.
 level: L2
-status: draft
+status: unverified
 grounded_in:
   - source: DSH 0.2.0-rc.2 driven in a browser on 2026-10-17, session list and row actions observed directly
   - source: Heddle's own Web UI on the same day, same checks performed
