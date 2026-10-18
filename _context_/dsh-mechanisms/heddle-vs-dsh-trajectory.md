@@ -265,3 +265,46 @@ Two DSH semantics are therefore **not established**, and are recorded as such:
   control by its original label toggles the wrong state (the crossed counts above). The fix is to find the
   control by position or `aria-pressed` and to reset between the two toggles. Heddle's own collapse is stable
   and measured (turns 15→6→15).
+
+## Final report — what agrees, what was fixed, what is unknown
+
+Measured with both artifacts pinned (DSH 0.2.0-rc.2 at `127.0.0.1:8080`; heddle's built server, marker-checked,
+rebuilt and restarted before judging) and with the ui-comparison procedure: idle → hover → hover-left → selected
+→ details open → five tabs → scroll positions → collapse toggles → search → narrow/wide viewports.
+
+### Agreement (numbers in part 9 assertions)
+
+| Area | Result |
+|---|---|
+| table geometry | 30px rows, 122px event column, 12px/-apple-system, one row per event and per call |
+| kind tags | 19px tall, 10px/650, 0.35px tracking, `0 5px` padding, 4px radius, DSH's measured colours |
+| selected row | 14% white; idle rows transparent |
+| hovered row | **transparent — DSH paints no row hover**, now so does heddle (trusted CDP pointer assertion) |
+| details pane | 441/440px wide, five tabs at 34px/13px400, six-section accordion, Schema section, SF Mono payload, 24px/500/20px headings, drag-resize with double-click reset |
+| toolbar / search / lanes | 28px bar, 8px 20px buttons, 149×18 search, 51px±5 lane strip, 10px/400 labels in DSH's muted colour |
+| tabs | Summary/Payload/Result/Schema/Timing in the same order, same labels |
+
+### Deliberate differences (recorded, not defects)
+
+- **JSON tree vs highlighted JSON**: DSH renders payload/parameters as a collapsible JSON tree; heddle renders
+  tested, syntax-highlighted JSON. A tree is a new renderer to maintain, and the payloads are small.
+- **Hierarchy links**: DSH links a call to its assistant message; heddle's rows are not nested, so the link
+  would point at the row the reader is in.
+- **Virtualisation**: DSH keeps ~34 DOM rows at every scroll position; heddle renders the whole ledger.
+  Windowed rendering plus scroll anchoring and paginated history is a feature, not a paint fix — **owner's call**.
+- **Responsive sidebar**: at 1000px DSH collapses its sidebar to a 35px rail and keeps an 815px content column;
+  heddle keeps its 352px sidebar and squeezes the content to 522px. A shell behaviour, **owner's call**.
+- **Search semantics**: DSH keeps its rows under a nonsense term (find/jump/highlight model) while heddle
+  filters them. One probe cannot establish DSH's model; recorded as unestablished rather than mismatched.
+- **Collapse counts on DSH**: its controls flip between "Collapse"/"Expand", so the label-based probe crossed
+  states; DSH's counts are not trustworthy yet, heddle's own are stable (15→6→15).
+
+### Unknown list (never filled in from plausibility)
+
+1. DSH's search model (find/jump/highlight vs filter) — needs a real term and a read for highlight element,
+   `aria-activedescendant` or a scroll jump.
+2. DSH's collapse counts — needs an `aria-pressed`/position-based control finder.
+3. DSH's table header row — no `thead`/`th` and no "Event"/"Content" labels found in the DOM.
+4. DSH's SYSTEM / COMPACTED tag colours — those rows were outside the rendered window in every scan.
+5. DSH's row hover on a *selected* row, and the timeline drag-focus dimming — not measured.
+6. heddle's calls-collapse on a session that actually has call rows — the measured session had none.
