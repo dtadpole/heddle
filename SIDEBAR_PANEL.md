@@ -330,6 +330,27 @@ unit contracts pin the `--tree-depth` wiring and the row padding formula.
 the group's box edge and the group no longer has one; the tree's shape is still readable from the indentation, and the
 reference draws no guides either.
 
+## After the loop — parallel roots, a dynamic pin, and no ad hoc group
+
+Three more owner reports, each a small fact with a large visual effect.
+
+**The three projects were nesting, not parallel.** `treeList.replaceChildren(...tops.map(nodeRow))` passes the array
+index as `nodeRow`'s second argument, which is now its **depth** — so the three roots were drawn at depth 0, 1 and 2,
+each indented 14 pixels more than the last and reading as children of the first. Measured: the roots' content started
+at 12, 26 and 40. The callback is explicit now (`tops.map((node) => nodeRow(node))`), and the roots all start at 12.
+
+**The pin was a fixed asset on every row.** It is a **tail slot with `:empty` collapsing it**, so an unpinned row pays
+nothing for it and the age is the tail's only child; a pinned row draws the reference's 16-pixel marker with its 14-pixel
+glyph at the right edge, and hovering swaps the tail to the controls in place. Measured on a store-pinned session:
+slot 16×16 with a glyph, and 0 wide with `display: none` on every unpinned row.
+
+**The "ad hoc" group is gone.** The owner removed it: the tree is the one list. The `details#history`/`#adhoc` markup,
+its CSS and its render block are deleted, the row selector no longer names it, and the three verifier files that kept a
+dead `#adhoc` selector helper had it removed. A session in a folder that is not registered as a workspace is no longer
+reachable from the panel — recorded here as the consequence of the removal.
+
+Screenshot: [`_context_/sidebar-panel/parallel-roots.png`](_context_/sidebar-panel/parallel-roots.png).
+
 **lessons:** a scrollbar is geometry as well as paint. The measurable facts are `offsetWidth - clientWidth`,
 `scrollbar-gutter` and the end padding — and the first attempt failed on a property (`scrollbar-width: thin`) whose
 only effect was to switch the mechanism off, which is why the new contract asserts its **absence**.

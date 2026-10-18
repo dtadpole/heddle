@@ -1239,29 +1239,7 @@
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
   /** DSH's state word: the muted body type, before the name, smaller than it. */
   #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
-  /**
-   * The pinned badge: an **accent chip beside the name**, drawn only on a pinned row.
-   *
-   * It takes no space on any other row — the right-hand slot keeps the age and the hover controls and nothing else — and
-   * its tint makes the state readable at rest rather than a faint glyph. It is not interactive: the row's own pin
-   * control (in the hover tools, and the menu item) is where the state is changed.
-   */
-  #tree .pin-mark {
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    border-radius: 6px;
-    color: var(--accent);
-    background: color-mix(in oklab, var(--accent) 16%, transparent);
-    pointer-events: none;
-    transition: opacity .12s ease;
-  }
-  #tree .pin-mark svg { width: 14px; height: 14px; }
-  /** Hovering shows the filled pin control itself, so the badge stands down rather than duplicating it beside the name. */
-  #tree li:hover > .row .pin-mark, #tree li:focus-within > .row .pin-mark { opacity: 0; }
+
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
    * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a

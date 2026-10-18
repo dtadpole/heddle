@@ -39,6 +39,12 @@ and the conversation beside it are unchanged.
 its content starting at the panel's 12-pixel inset and indenting 14 pixels per level, and the 5-pixel scrollbar at the
 panel's right edge.
 
+## After the loop (second batch)
+
+`parallel-roots.png` — the live panel at 1200×760: the workspace roots are parallel (all start at the same 12 pixels),
+the tree fills the panel's width, the session row's age is the right tail's only child (the pinned slot collapses when
+empty), and there is no "ad hoc" group at the bottom.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

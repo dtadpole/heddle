@@ -391,23 +391,10 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
 })
 
 /**
- * The sessions a reader can click, in the left panel's "ad hoc" group.
- *
- * The panel became a **folder-bound tree** — a session row exists for an instance of a type folder — so the
- * flat `#sessions` list these checks were written against is gone. What replaced it marks a session row with
- * `data-kind="session"`. The group is opened first, because a collapsed `details` renders nothing to click.
+ * The sessions a reader can click live in the left panel's workspace tree. The old "ad hoc" group was removed
+ * on 2026-10-17 — the tree is the one list — so this file keeps no selector for it; the checks below open the
+ * session they need through the API, which is where the store is the contract.
  */
-const SESSION_ROW = '#adhoc li[data-kind="session"]'
-
-/** Open the left panel's session group and return how many rows it holds. */
-async function openSessionGroup(browser) {
-  return browser.evaluate(`(() => {
-    const group = document.getElementById('history')
-    if (group) group.open = true
-    return document.querySelectorAll('${SESSION_ROW}').length
-  })()`)
-}
-
 
 /** Whether this build serves a Web UI at all. */
 async function supportsWeb() {

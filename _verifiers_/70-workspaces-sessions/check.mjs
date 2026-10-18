@@ -2079,6 +2079,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     browser = await openBrowser()
     await browser.goto(live.url)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    /**
+     * Park the pointer in the conversation panel before reading the quiet row: the browser keeps its last pointer position, and a
+     * row under it is already hovered — where the age is deliberately not rendered, so the resting rule could not be read.
+     */
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 900, y: 600 })
 
     const reading = JSON.parse(
       await browser.evaluate(`(async () => {
@@ -2162,21 +2167,25 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           slots: [...li.querySelectorAll(':scope > .row .row-tools > *')].map((child) => child.className),
           buttons: [...li.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
           /**
-           * Not hovered yet: DSH keeps the row quiet until the pointer arrives. The rule lives on the **slot** that
-           * holds the controls, because they are absolutely placed in the age's space rather than beside it.
+           * Not hovered yet: DSH keeps the row quiet until the pointer arrives. The tail swaps its children by **display** now
+           * (age/marker out, controls in, all in one right-aligned flow), so the quiet state is read as "not rendered".
            */
-          quiet: li.querySelector(':scope > .row .row-tools') === null ? null : getComputedStyle(li.querySelector(':scope > .row .row-tools')).opacity,
+          quiet: li.querySelector(':scope > .row .row-tools') === null ? null : getComputedStyle(li.querySelector(':scope > .row .row-tools')).display,
         }))
         /**
          * A pointer cannot be moved from script, so the rule is read through its **other half**: the same selector
          * also answers the focus-within selector, and focusing a control in the row is what a keyboard user does.
          */
         const target = sessions.find((li) => li.querySelector(':scope > .row .session-actions button') !== null) ?? sessions[0]
-        target.querySelector(':scope > .row .session-actions button')?.focus()
+        /**
+         * Focus the **row**, not one of its controls: the controls are not rendered until the row is focused, so a control cannot
+         * be the thing that receives focus first. A row is a focusable treeitem, which is the keyboard path a person takes.
+         */
+        target.focus()
         await wait(200)
         const focused = {
-          opacity: getComputedStyle(target.querySelector(':scope > .row .row-tools')).opacity,
-          ageOpacity: (() => { const age = target.querySelector(':scope > .row .age'); return age === null ? null : getComputedStyle(age).opacity })(),
+          display: getComputedStyle(target.querySelector(':scope > .row .row-tools')).display,
+          ageDisplay: (() => { const age = target.querySelector(':scope > .row .age'); return age === null ? null : getComputedStyle(age).display })(),
           buttons: [...target.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
         }
 
@@ -2184,10 +2193,19 @@ test("a session row's controls appear on hover, and a search replaces the tree w
          * The right-hand slot, measured the way it was measured in DSH: the age ends 8px inside the row, and the
          * controls sit in that same slot rather than beside it.
          */
+        /** The row was focused earlier in this probe, and focus reveals the controls and hides the age; blur to read the quiet state. */
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+        await wait(80)
         const quiet = target.querySelector(':scope > .row .age')
         const rowRect = target.querySelector(':scope > .row').getBoundingClientRect()
         const ageRect = quiet === null ? null : quiet.getBoundingClientRect()
-        const slotRect = target.querySelector(':scope > .row .pin-slot')?.getBoundingClientRect() ?? null
+        /**
+         * The pinned marker is a slot in the row's right tail, and the empty-selector rule collapses it on every unpinned
+         * row — the dynamic form of the fixed slot the owner reported. So an unpinned row's slot is in the DOM and 0 wide,
+         * which is the property that gives the right side its space back.
+         */
+        const slotNode = target.querySelector(':scope > .row .pin-slot')
+        const slotRect = slotNode?.getBoundingClientRect() ?? null
         const ageSlot = {
           rowRight: Math.round(rowRect.right),
           ageRight: ageRect === null ? null : Math.round(ageRect.right),
@@ -2342,13 +2360,17 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           if (li === null) return { error: 'no session row' }
           const row = li.querySelector(':scope > .row')
           const label = row?.querySelector('.label')
-          const tools = row?.querySelector('.row-tools')
-          if (label === null || label === undefined || tools === null || tools === undefined) return { error: 'no label or tools' }
+          /**
+           * The **tail** is the measure, not the controls: the controls are not rendered until the row is hovered or focused, so
+           * their box is 0 while the row is quiet. The tail always occupies its width, and the label must stop before it.
+           */
+          const tail = row?.querySelector('.row-right')
+          if (label === null || label === undefined || tail === null || tail === undefined) return { error: 'no label or tail' }
           const original = label.textContent
           label.textContent = 'a session whose name is long enough to reach the right edge of the row and keep going'
           void label.offsetWidth
           const labelRight = Math.round(label.getBoundingClientRect().right)
-          const toolsLeft = Math.round(tools.getBoundingClientRect().left)
+          const toolsLeft = Math.round(tail.getBoundingClientRect().left)
           label.textContent = original
           return { labelRight, toolsLeft, overlaps: labelRight > toolsLeft }
         })()
@@ -2407,49 +2429,38 @@ test("a session row's controls appear on hover, and a search replaces the tree w
        */
       assert.deepEqual(row.slots, ['menu-wrap', 'session-actions'], `the menu leads the quick controls\nsaw: ${JSON.stringify(row.slots)}`)
       assert.deepEqual(row.buttons, ['Archive session', 'Pin session'], `then archive, then pin\nsaw: ${JSON.stringify(row.buttons)}`)
-      assert.equal(row.quiet, '0', 'and they are invisible while the row is quiet')
+      assert.equal(row.quiet, 'none', 'and they are not rendered while the row is quiet')
     }
     for (const row of withoutControls) {
       assert.equal(row.quiet, null, `a row that stands for no session draws no controls (${row.label})`)
     }
     assert.ok(
-      reading.focused.opacity === '1',
-      `focusing the row reveals them, which is the same rule the pointer gets\nsaw opacity ${reading.focused.opacity}`,
+      reading.focused.display !== 'none',
+      `focusing the row reveals them, which is the same rule the pointer gets\nsaw display ${reading.focused.display}`,
     )
 
     /**
      * The two rules the owner saw missing, judged as measurements rather than as impressions: the age is the row's
-     * rightmost thing when the row is quiet — less the pin slot that every row reserves at its edge — and the controls take
-     * the age's place when it is not.
+     * rightmost thing when the row is quiet, and the controls take the age's place when it is not.
      */
     assert.ok(reading.ageSlot.ageRight !== null, 'the row carries an age to place')
     /**
-     * The reserved slot is the rightmost thing: 16px wide, ending at the row's **content edge**.
-     *
-     * The row's paint spans the panel, so its right inset is the panel's 12-pixel inset plus the search field's 7.2-pixel
-     * padding, less the 5-pixel scrollbar the row cannot paint under — the same column the search field's text ends in.
-     * The reference's own 8-pixel figure was measured on *its* row, whose box stopped inside the panel; on a full-bleed
-     * row 8 would put the age 6 pixels right of the field's text.
+     * **No pin slot is reserved.** The mark became a badge beside the name (cycle: the owner's report that a fixed asset
+     * on every row wasted the right-hand space), so an unpinned row's right slot holds only the age and the controls, and
+     * the age ends exactly at the row's content inset — 8px inside its box, the reference's row rule.
      */
     const expectedGap = await browser.evaluate(`(() => {
       const row = [...document.querySelectorAll('#tree li[data-kind="session"] > .row')][0]
       return Math.round(parseFloat(getComputedStyle(row).paddingRight))
     })()`)
-    assert.equal(reading.ageSlot.slot[0], 16, `the pin slot is 16px wide\nsaw: ${JSON.stringify(reading.ageSlot)}`)
-    /**
-     * The reserved pin slot is the row's rightmost element now, so the age ends left of it: the content edge plus the slot's
-     * width, its margin and the grid gap. The slot itself is what must end 8px inside, asserted above.
-     */
-    const contentGap = Math.round(reading.ageSlot.rowRight - reading.ageSlot.ageRight)
-    assert.ok(
-      contentGap >= expectedGap + 20 && contentGap <= expectedGap + 32,
-      `and ends just left of the reserved pin slot, ${expectedGap}px inside the row plus the slot\nsaw: ${JSON.stringify(reading.ageSlot)}`,
+    assert.equal(reading.ageSlot.slot, null, `an unpinned row reserves no pin slot\nsaw: ${JSON.stringify(reading.ageSlot)}`)
+    assert.equal(
+      Math.round(reading.ageSlot.rowRight - reading.ageSlot.ageRight),
+      expectedGap,
+      `and its age ends at the content edge, ${expectedGap}px inside the row`,
     )
-    assert.ok(
-      contentGap >= 4 && contentGap <= 40,
-      `the age sits clear of the reserved pin slot\nsaw row ${reading.ageSlot.rowRight}, age ${reading.ageSlot.ageRight}, gap ${contentGap}`,
-    )
-    assert.equal(reading.focused.ageOpacity, '0', 'and it steps aside when the controls arrive')
+    assert.notEqual(reading.focused.display, 'none', 'and they are rendered once focus arrives')
+    assert.equal(reading.focused.ageDisplay, 'none', 'while the age steps aside — the two swap in place, never overlap')
 
     /** Hover and selection differ by persistence, not by strength: the same surface, no bar, no bold. */
     assert.equal(reading.selected.background, reading.focused.background === undefined ? reading.selected.background : reading.focused.background)
@@ -3206,6 +3217,8 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
         const rowControls = (() => {
           const li = document.querySelector('#tree li[data-kind="session"]')
           if (li === null) return null
+          /** The tail hides the controls until the row is hovered or focused; reveal them the keyboard way. */
+          li.querySelector(':scope > .row')?.focus()
           const tools = li.querySelector('.row-tools')
           const buttons = [...(tools?.querySelectorAll(':scope > .menu-wrap > button, :scope > .session-actions > button') ?? [])]
           const iconButtons = ['#sidebar-search', '#add-workspace', '#session-more button', '#view-options button']
@@ -3702,7 +3715,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
             const row = li.querySelector(':scope > .row')
             const age = row.querySelector(':scope > .row-right .age')
             const tools = row.querySelector(':scope > .row-right .row-tools')
-            const slot = row.querySelector(':scope > .pin-slot')
+            const slot = row.querySelector('.row-right > .pin-slot')
             const box = (node) => node === null ? null : (() => { const rect = node.getBoundingClientRect(); return [Math.round(rect.left), Math.round(rect.width)] })()
             return { age: box(age), tools: box(tools), slot: box(slot), slotGlyph: slot === null ? null : slot.querySelector('svg') !== null }
           }))
@@ -3798,9 +3811,50 @@ test('a written session moves to the top of its folder, its age follows, and a r
     const geometryOfTarget = geometryBefore.find((row, index) => earlier.labels[index] === pinTarget.label)
     const after = geometryAfter.find((row) => row.slotGlyph === true)
     assert.ok(after !== undefined, `the pinned row draws a glyph in its slot\nsaw: ${JSON.stringify(geometryAfter)}`)
-    assert.deepEqual(after.age, geometryOfTarget.age, 'pinning does not move the age')
-    assert.deepEqual(after.tools, geometryOfTarget.tools, 'nor the controls')
-    assert.deepEqual(after.slot, geometryBefore[0].slot, 'the slot is reserved on every row at the same place')
+    /**
+     * The marker is added at the right, so the age moves left by its width when a row is pinned — the mark is what moved, not the
+     * row. What must hold is that the mark ends at the row's **content edge** and that, on hover, the pin control lands on the
+     * same right edge (the two states swap in place rather than overlapping).
+     */
+    const edges = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const pinnedRow = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li.dataset.pinned === 'true')
+        const row = pinnedRow.querySelector(':scope > .row')
+        const rowBox = row.getBoundingClientRect()
+        const padding = parseFloat(getComputedStyle(row).paddingRight)
+        const slot = row.querySelector('.row-right > .pin-slot')
+        const marker = slot.getBoundingClientRect()
+        /** Focus the row: the controls replace the age and the marker in the same right-aligned flow. */
+        pinnedRow.focus()
+        await wait(120)
+        const pin = [...row.querySelectorAll(':scope > .row-tools > .session-actions > button')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+        const pinBox = pin === null || pin === undefined ? null : pin.getBoundingClientRect()
+        const markerOnHover = getComputedStyle(slot).display
+        const pinGlyphs = [...row.querySelectorAll('svg')].filter((svg) => svg.closest('.row-tools') !== null || svg.closest('.pin-slot') !== null).length
+        pinnedRow.blur()
+        return JSON.stringify({
+          contentRight: Math.round(rowBox.right - padding),
+          markerRight: Math.round(marker.right),
+          pinRight: pinBox === null ? null : Math.round(pinBox.right),
+          markerOnHover,
+          pinGlyphs,
+        })
+      })()`),
+    )
+    assert.equal(edges.markerRight, edges.contentRight, `the mark ends at the row's content edge\nsaw: ${JSON.stringify(edges)}`)
+    assert.equal(edges.pinRight, edges.markerRight, `and the hover pin control lands on the same right edge\nsaw: ${JSON.stringify(edges)}`)
+    assert.equal(edges.markerOnHover, 'none', 'while the marker steps aside on hover, so only one pin is drawn at a time')
+    /**
+     * And the mark appears **beside the name**, where it was not before: the target row had no badge at rest, and after
+     * pinning it carries one — while the age and the tools above kept their boxes, which is the rule the earlier fixed
+     * slot existed to protect and the dynamic badge keeps for free.
+     */
+    /** The mark only exists on a pinned row, and it sits **at the right edge** — never beside the name. */
+    assert.equal(geometryOfTarget.slot, null, 'the row carried no pin mark before it was pinned')
+    assert.ok(after.slot !== null, 'and carries one after')
+    assert.equal(Math.round(after.slot[1]), 16, `the mark is 16px wide\nsaw: ${JSON.stringify(geometryAfter)}`)
+    assert.equal(await browser.evaluate(`document.querySelectorAll('#tree .pin-mark').length`), 0, 'and nothing draws a pin beside a name')
     /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
     const glyphs = JSON.parse(
       await browser.evaluate(`(() => {
@@ -3924,7 +3978,7 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
     assert.equal(result.error, undefined, `the fixture offered a pin control\nsaw: ${JSON.stringify(result)}`)
     const glide = result.animations.find((animation) => animation.transforms.length >= 2)
     assert.ok(glide !== undefined, `the pinned row glides with a transform animation\nsaw: ${JSON.stringify(result.animations)}`)
-    assert.equal(glide.duration, 200, `with the reference's 200 ms glide\nsaw: ${JSON.stringify(glide)}`)
+    assert.equal(glide.duration, 400, `with the slower 400 ms glide the owner asked for\nsaw: ${JSON.stringify(glide)}`)
     assert.equal(glide.easing, 'ease-out', `and its ease-out\nsaw: ${JSON.stringify(glide)}`)
     assert.ok(
       Number(result.laterTime) > Number(result.startTime),
