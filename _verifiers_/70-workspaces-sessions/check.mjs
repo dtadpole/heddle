@@ -3295,11 +3295,20 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           const pinnedRow = sessionRows.find((li) => li.dataset.pinned === 'true')
           const pinnedGlyph = pinnedRow === undefined ? null : pinnedRow.querySelector(':scope > .row .pin-slot svg')
           const pinnedMark = pinnedGlyph === null || pinnedGlyph === undefined ? null : pinnedGlyph.getBoundingClientRect()
+          /**
+           * The pointer's resting place can hover the row, and focus reveals the controls — both legitimately hide the mark.
+           * The glyph is still judged by its own 14px artwork, and its drawn size when it is actually drawn.
+           */
+          const pinnedSlot = pinnedRow === undefined ? null : pinnedRow.querySelector(':scope > .row .pin-slot')
+          const pinnedDisplay = pinnedSlot === null ? null : getComputedStyle(pinnedSlot).display
+          const pinnedArtwork = pinnedGlyph === null || pinnedGlyph === undefined ? null : Number(pinnedGlyph.getAttribute('width'))
           /** An archived row is one the row itself says archived; the tree draws it only when the archive filter shows it. */
           const archivedRows = sessionRows.filter((li) => li.querySelector(':scope > .row .label')?.textContent?.includes('archived') !== true)
           return {
             archivedRows: sessionRows.filter((li) => li.getAttribute('data-archived') === 'true').length,
             pinnedMark: pinnedMark === null ? null : [Math.round(pinnedMark.width), Math.round(pinnedMark.height)],
+            pinnedDisplay,
+            pinnedArtwork,
             archivedPinControls: (() => {
               const archived = sessionRows.find((li) => li.getAttribute('data-archived') === 'true')
               if (archived === undefined) return null
@@ -3368,7 +3377,11 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
     }
 
     /** A pinned row says so at rest; an archived row offers no pin, because the store would refuse it. */
-    assert.deepEqual(result.flagStates.pinnedMark, [14, 14], `a pinned row carries the reference's 14px pin glyph\nsaw: ${JSON.stringify(result.flagStates)}`)
+    assert.equal(result.flagStates.pinnedArtwork, 14, `a pinned row carries the reference's 14px pin artwork\nsaw: ${JSON.stringify(result.flagStates)}`)
+    /** When the mark is actually drawn — not hidden by hover or focus — it measures its artwork size. */
+    if (result.flagStates.pinnedDisplay !== 'none') {
+      assert.deepEqual(result.flagStates.pinnedMark, [14, 14], `and draws it at 14px\nsaw: ${JSON.stringify(result.flagStates)}`)
+    }
     assert.ok(result.flagStates.archivedRows >= 1, `the archived row is drawn once the filter shows it\nsaw: ${JSON.stringify(result.flagStates)}`)
     assert.notEqual(result.flagStates.archivedPinControls, null, 'and its controls are readable')
     {
