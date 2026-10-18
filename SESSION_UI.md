@@ -150,6 +150,19 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### A thin tail, centred on the head (2026-10-17)
+
+The owner asked twice more: thinner, and **in the middle of the pin head**. Measured on the reference artwork: its filled needle leaves
+the head about **1.8 units off** the head's centre line, and is about **0.95 units** thick — the asymmetry is in the reference itself.
+So the head stays the reference's path exactly, and the tail is drawn as a **0.9-unit round-capped stroke** from the head's geometric
+centre (the bounding-box centre of that path, 7.85, 7.22) outward along the same down-left direction. The head paints over the shaft's
+first units, so the joint needs no seam.
+
+Measured after the change: the shaft's line passes within **0.003 units** of the head's centre (dead centre), its stroke is **0.9**
+against the head outline's 1, and its tip reaches **1.46 units** below the head. The check now judges the two shapes **by role** — the
+filled head and the stroked tail — and asserts the tail is thinner than the head's outline and sits on its centre line, so neither
+property can regress silently.
+
 ### A thinner pin tail (2026-10-17)
 
 The tail was still thicker than the reference's. The shape was not the difference: the needle path **inherited the SVG root's

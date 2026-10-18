@@ -2272,46 +2272,51 @@ test("a session row's controls appear on hover, and a search replaces the tree w
             session: (() => { const row = document.querySelector('#tree li[data-kind="session"] > .row'); return row === null ? null : Math.round(row.getBoundingClientRect().height) })(),
             workspace: (() => { const row = document.querySelector('#tree li[data-kind="workspace"] > .row'); return row === null ? null : Math.round(row.getBoundingClientRect().height) })(),
           },
-          /** The live state: the same attribute the stream sets while an answer arrives. */
+          /**
+           * The live state, measured on the **element the stylesheet targets**: the owner's implementation moved the shimmer off
+           * the answer's pseudo-element band and onto the **words of a running process row's title** — the rule on
+           * details.turn with a running state, its summary title, a 105-degree clipped-text gradient named heddle-row-shimmer. A
+           * synthetic row is attached for the measurement and removed after it, so the claim is about the rule rather than about
+           * whichever turns a fixture happens to contain.
+           */
           live: (() => {
-            const turn = document.querySelector('#log .turn.assistant')
-            if (turn === null) return { error: 'no assistant turn to measure' }
-            const before = getComputedStyle(turn, '::before')
-            const previous = turn.getAttribute('data-state')
-            turn.setAttribute('data-state', 'running')
-            /** Force the style recalculation, or the pseudo-element's computed style can be the one from before. */
-            void turn.offsetHeight
-            /**
-             * Snapshot the values before restoring the state. A CSSStyleDeclaration from getComputedStyle is LIVE: read after
-             * the attribute is put back, every property reports the settled state, which made this probe measure
-             * animation-name none on a rule that was working.
-             */
-            const live = getComputedStyle(turn, '::before')
-            const running = {
-              animationName: live.animationName,
-              animationDuration: live.animationDuration,
-              maskImage: live.maskImage || live.webkitMaskImage || '',
-              content: live.content,
-            }
-            turn.setAttribute('data-state', previous ?? 'settled')
-            return {
-              restingAnimation: before.animationName,
+            const log = document.getElementById('log')
+            if (log === null) return { error: 'no log to measure' }
+            const probe = document.createElement('details')
+            probe.className = 'turn'
+            probe.dataset.state = 'running'
+            probe.style.position = 'absolute'
+            probe.style.visibility = 'hidden'
+            const summary = document.createElement('summary')
+            const title = document.createElement('span')
+            title.className = 'title'
+            title.textContent = 'a running row'
+            summary.append(title)
+            probe.append(summary)
+            log.append(probe)
+            const running = getComputedStyle(title)
+            const snapshot = {
               animationName: running.animationName,
-              duration: running.animationDuration,
-              mask: running.maskImage,
-              debug: {
-                className: turn.className,
-                state: turn.getAttribute('data-state'),
-                stateBefore: previous,
-                matchesRunning: turn.matches(".turn.assistant[data-state='running']"),
-                afterContent: getComputedStyle(turn, '::after').content,
-                tag: turn.tagName,
-                parent: turn.parentElement === null ? null : turn.parentElement.id + '.' + turn.parentElement.className,
-                rulePresent: [...document.styleSheets].some((sheet) => {
-                  try { return [...sheet.cssRules].some((rule) => (rule.cssText || '').includes('shimmer')) } catch (error) { return false }
-                }),
-                content: running.content,
-              },
+              animationDuration: running.animationDuration,
+              clip: running.webkitBackgroundClip || running.backgroundClip,
+              backgroundImage: running.backgroundImage,
+            }
+            probe.remove()
+            /**
+             * And the band is gone from the answer body: the reference's shimmer is for a text label, and a first pass here copied
+             * its mask as a full-row overlay, which the owner saw as a flashing ribbon across the answer.
+             */
+            const answer = document.querySelector('#log .turn.assistant')
+            const band = answer === null ? null : getComputedStyle(answer, '::before')
+            return {
+              animationName: snapshot.animationName,
+              duration: snapshot.animationDuration,
+              clip: snapshot.clip,
+              mask: snapshot.backgroundImage,
+              answerBandAnimation: band === null ? null : band.animationName,
+              rulePresent: [...document.styleSheets].some((sheet) => {
+                try { return [...sheet.cssRules].some((rule) => (rule.cssText || '').includes('shimmer')) } catch (error) { return false }
+              }),
             }
           })(),
           userTurn: (() => {
@@ -2542,10 +2547,12 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      * (`mask-image: linear-gradient(105deg, ...)` driven by a `shimmer-sweep` keyframe), not only a caret. The runtime sets
      * `data-state="running"` while deltas land; the same attribute is set here to measure the state it produces.
      */
-    assert.match(String(reading.chrome.live.animationName), /heddle-shimmer-sweep/, `a running row sweeps\nsaw: ${JSON.stringify(reading.chrome.live)}`)
-    assert.equal(reading.chrome.live.duration, '1.6s', 'for a slow sweep')
-    assert.notEqual(reading.chrome.live.mask, 'none', 'masked to its 105-degree gradient')
-    assert.equal(reading.chrome.live.restingAnimation, 'none', 'and a settled row does not animate')
+    assert.match(String(reading.chrome.live.animationName), /heddle-row-shimmer/, `a running row shimmers its words\nsaw: ${JSON.stringify(reading.chrome.live)}`)
+    assert.equal(reading.chrome.live.duration, '1.5s', 'for a slow sweep with its delay')
+    assert.equal(reading.chrome.live.clip, 'text', 'clipped to the glyphs rather than painted as a band')
+    assert.notEqual(reading.chrome.live.mask, 'none', 'over a 105-degree gradient of the words')
+    assert.equal(reading.chrome.live.answerBandAnimation, 'none', 'and the answer body itself carries no band')
+    assert.equal(reading.chrome.live.rulePresent, true, 'the shimmer rule is in the sheet')
 
     /**
      * **The user's turn**, measured from DSH's own chat on 2026-10-17: a right-aligned bubble that hugs its text — its box
@@ -3893,13 +3900,29 @@ test('a written session moves to the top of its folder, its age follows, and a r
         const markerPaths = [...markerSvg.querySelectorAll('path')].map((path) => {
           const box = path.getBBox()
           const style = getComputedStyle(path)
-          return { w: Math.round(box.width * 100) / 100, h: Math.round(box.height * 100) / 100, bottom: Math.round((box.y + box.height) * 100) / 100, painted: style.fill !== 'none', stroke: style.stroke }
+          const round = (value) => Math.round(value * 100) / 100
+          return { w: round(box.width), h: round(box.height), bottom: round(box.y + box.height), painted: style.fill !== 'none', filled: style.fill !== 'none', stroke: style.stroke, strokeWidth: style.strokeWidth }
         })
+        /** The head is the filled polygon; the tail is the stroked line. Their roles are what the assertions read. */
+        const headPath = markerSvg.querySelector('path[fill]')
+        const tailPath = [...markerSvg.querySelectorAll('path')].find((path) => getComputedStyle(path).fill === 'none')
+        const headBox = headPath === null ? null : headPath.getBBox()
+        const headCenter = headBox === null ? null : { x: headBox.x + headBox.width / 2, y: headBox.y + headBox.height / 2 }
+        const tailLine = (() => {
+          if (tailPath === null || headCenter === null) return null
+          const length = tailPath.getTotalLength()
+          const start = tailPath.getPointAtLength(0)
+          const end = tailPath.getPointAtLength(length)
+          const vx = end.x - start.x
+          const vy = end.y - start.y
+          const distance = Math.abs((headCenter.x - start.x) * vy - (headCenter.y - start.y) * vx) / Math.hypot(vx, vy)
+          return { fromCentre: Math.round(distance * 1000) / 1000 }
+        })()
         const marker = {
           color: getComputedStyle(slot).color,
           weight: getComputedStyle(markerSvg).strokeWidth,
-          filled: markerPaths.filter((path) => path.painted).length,
           paths: markerPaths,
+          tailLine,
         }
         pinnedRow.focus()
         await wait(150)
@@ -3917,28 +3940,35 @@ test('a written session moves to the top of its folder, its age follows, and a r
       })()`),
     )
     assert.notEqual(ink.marker.color.toLowerCase(), ink.accent, `the mark is not the accent ink\nsaw: ${JSON.stringify(ink)}`)
-    assert.equal(ink.marker.filled, 2, `the mark paints solid: both artwork paths filled\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.marker.paths.filter((path) => path.filled).length, 1, `the mark paints a solid head\nsaw: ${JSON.stringify(ink.marker)}`)
     assert.equal(ink.marker.weight, '1px', `at the reference's Regular 1px stroke\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.color, ink.marker.color, `the hover pin control keeps the same ink\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.weight, ink.marker.weight, `and the same weight\nsaw: ${JSON.stringify(ink)}`)
-    assert.equal(ink.hovered.filled, 2, `and stays solid\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.hovered.filled, 1, `and stays solid (its filled head)\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.markerDisplay, 'none', 'with the marker swapped out, so one icon is drawn')
     /**
      * The artwork has a **head and a tail**: the needle path must paint (a non-zero box) and reach below the body. A cubic path
      * whose commands were compacted into one coordinate pair each is invalid and paints nothing — measured, that is exactly why
      * the pin's thin tail was missing while its head showed.
      */
-    assert.equal(ink.marker.paths.length, 2, `the mark is the two-path pin artwork\nsaw: ${JSON.stringify(ink.marker)}`)
-    const [pinBody, pinNeedle] = ink.marker.paths
-    assert.ok(pinBody.w > 1 && pinBody.h > 1, `the pin's body paints\nsaw: ${JSON.stringify(pinBody)}`)
-    assert.ok(pinNeedle.w > 1 && pinNeedle.h > 1, `the pin's tail paints (a broken path paints nothing)\nsaw: ${JSON.stringify(pinNeedle)}`)
-    assert.equal(pinNeedle.bottom > pinBody.bottom, true, `and its tail reaches below the body, so the pin reads as a pin\nsaw: ${JSON.stringify(ink.marker.paths)}`)
-    /**
-     * The tail is **fill only**: a stroke inherited from the SVG root would draw the needle at its own width plus an outline,
-     * about twice as thick — the owner's "the tail can be thinner". The body keeps its stroke (that is the reference's artwork).
-     */
-    assert.equal(pinNeedle.stroke, 'none', `the tail carries no stroke of its own\nsaw: ${JSON.stringify(pinNeedle)}`)
-    assert.notEqual(pinBody.stroke, 'none', 'while the head keeps the reference artwork stroke')
+    assert.equal(ink.marker.paths.length, 2, `the mark is the pin artwork's two shapes\nsaw: ${JSON.stringify(ink.marker)}`)
+    const pinHead = ink.marker.paths.find((path) => path.filled === true)
+    const pinTail = ink.marker.paths.find((path) => path.filled === false)
+    assert.ok(pinHead !== undefined, `the pin's head is a filled shape\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    assert.ok(pinHead.w > 1 && pinHead.h > 1, `and it paints\nsaw: ${JSON.stringify(pinHead)}`)
+    assert.ok(pinTail !== undefined, `the pin's tail is the stroked shape\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    assert.ok(pinTail.w > 1 && pinTail.h > 1, `and it paints (a broken path paints nothing)\nsaw: ${JSON.stringify(pinTail)}`)
+    assert.equal(pinTail.bottom > pinHead.bottom, true, `its tail reaches below the head, so the pin reads as a pin\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    /** **Thinner**: the tail's own stroke is narrower than the head's outline. */
+    assert.ok(
+      parseFloat(pinTail.strokeWidth) < parseFloat(pinHead.strokeWidth),
+      `the tail is thinner than the head's outline\nsaw: ${JSON.stringify({ tail: pinTail.strokeWidth, head: pinHead.strokeWidth })}`,
+    )
+    /** **Centred**: the tail's line passes through the head's centre within half a unit. */
+    assert.ok(
+      ink.marker.tailLine !== null && ink.marker.tailLine.fromCentre < 0.5,
+      `the tail sits on the head's centre line\nsaw: ${JSON.stringify(ink.marker.tailLine)}`,
+    )
     /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
     const glyphs = JSON.parse(
       await browser.evaluate(`(() => {
@@ -4040,11 +4070,23 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
           if (animations.length > 0) break
           await wait(8)
         }
-        /** The animation's own clock is the honest in-flight measure: a rendered transform can be sampled before its first frame. */
-        const glideAnimation = moveRow() === null ? null : moveRow().getAnimations()[0] ?? null
-        const startTime = glideAnimation === null ? null : glideAnimation.currentTime
-        await wait(90)
-        const laterTime = glideAnimation === null ? null : glideAnimation.currentTime
+        /**
+         * In flight: the row's **rendered transform must change** while the glide runs. The row is re-queried every turn, because
+         * a tree re-read can replace the element mid-flight and a held detached animation's clock read 0 through the whole window.
+         */
+        const startFrame = moveRow() === null ? null : getComputedStyle(moveRow()).transform
+        let midFrame = null
+        for (let attempt = 0; attempt < 80; attempt += 1) {
+          const li = moveRow()
+          if (li !== null) {
+            const frame = getComputedStyle(li).transform
+            if (frame !== 'none' && frame !== startFrame) {
+              midFrame = frame
+              break
+            }
+          }
+          await wait(16)
+        }
         await wait(500)
         const settled = {
           transform: getComputedStyle(document.querySelector('#tree li[data-row-key="' + key + '"]')).transform,
@@ -4053,10 +4095,13 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
           glyphFilled: (() => {
             const li = document.querySelector('#tree li[data-row-key="' + key + '"]')
             const button = [...li.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
-            return button === undefined ? null : button.querySelectorAll('path[fill]').length >= 2
+            if (button === undefined) return null
+            /** Solid: a filled head; and the tail is present as the stroked shape. */
+            const paths = [...button.querySelectorAll('svg path')]
+            return paths.filter((path) => getComputedStyle(path).fill !== 'none').length === 1 && paths.some((path) => getComputedStyle(path).fill === 'none' && getComputedStyle(path).stroke !== 'none')
           })(),
         }
-        return JSON.stringify({ beforeOrder, key, animations, startTime, laterTime, settled })
+        return JSON.stringify({ beforeOrder, key, animations, startFrame, midFrame, settled })
       })()`),
     )
     assert.equal(result.error, undefined, `the fixture offered a pin control\nsaw: ${JSON.stringify(result)}`)
@@ -4065,8 +4110,8 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
     assert.equal(glide.duration, 400, `with the slower 400 ms glide the owner asked for\nsaw: ${JSON.stringify(glide)}`)
     assert.equal(glide.easing, 'ease-out', `and its ease-out\nsaw: ${JSON.stringify(glide)}`)
     assert.ok(
-      Number(result.laterTime) > Number(result.startTime),
-      `the row is in flight while the animation runs\nsaw: ${JSON.stringify({ startTime: result.startTime, laterTime: result.laterTime })}`,
+      result.midFrame !== null && result.midFrame !== result.startFrame,
+      `the row is in flight while the animation runs\nsaw: ${JSON.stringify({ startFrame: result.startFrame, midFrame: result.midFrame })}`,
     )
     assert.equal(result.settled.transform, 'none', `and settles at its resting position\nsaw: ${JSON.stringify(result.settled)}`)
     assert.equal(result.settled.order[0], result.beforeOrder[1], `with the pinned row at the top\nsaw: ${JSON.stringify(result.settled)}`)
