@@ -259,17 +259,58 @@ Cycle 2 — a vision route is found by what it publishes, and a request's images
               _verifiers_/80-web-ui/check-composer.mjs — a vision route that only *publishes* its modalities and a
               text-only one that publishes `["text"]`, both without configuration;
               the deployed address — the same red-square probe answers a colour after the change.
-  changed:    pending — the cycle is at its plan.
-  delivered:  pending.
-  evidence:   pending.
-  reds:       none yet.
-  coverage:   to visit: discovery for chat and responses rows, missing/failed model list, configured override, parser
-              variants, count budget, byte budget, oldest-first order, the deployed address.
-  invariants: a text-only route never receives image content; the declared configuration wins over discovery; a
-              provider failure during discovery degrades to text, never fails the turn; the budget is deterministic for
-              the same request; no image's bytes are altered by offloading — the reference and placeholder are stable.
-  landed:     pending.
-  lessons:    pending.
+  changed:    src/llm/model-info.ts — one cached model-list body shared by the context-window and modality
+              readers, with the modality parser and the rule that a failed read is not cached;
+              src/llm/service.ts — lazy capability discovery for image-bearing requests (declared configuration
+              wins; a successful answer is cached, a failed one is retried), and withDiscoveredModalities();
+              src/llm/attachments.ts — the request image budget (20 images / 20 MiB encoded), oldest-first
+              offload with DSH's deterministic placeholder;
+              test/model-info.test.ts, test/attachments.test.ts, test/model-discovery.test.ts — failing-first
+              tests for the parser, discovery, override, budget and the retry;
+              _verifiers_/80-web-ui/check-composer.mjs — two published-modality checks (a discovered vision
+              route and a published text-only route), both without any configuration.
+  delivered:  landed on main as merge 56e9b69 (the retry fix f0168d4/354c9cf included) and deployed from
+              /Users/zhenc/heddle-deploy with the launchd agent running that checkout's dist/cli.js (PID 16271
+              at the time of the measurement); _verifiers_/96-deployment is 3/3. At http://127.0.0.1:8082/ the
+              same red-square probe that answered `NO IMAGE` before the change answered `red` twice in a row
+              (cycle-2-after.json), and the composer path showed `red-square.png`, `PNG 132 B`, a clean draft,
+              the same stored path recorded as the message's image block, and the answer `red`
+              (cycle-2-e2e.json, cycle-2-landed-8082.png).
+  evidence:   failing first: the new unit tests failed on the missing exports; the published-vision browser
+              check failed with `[image omitted because this model accepts text only; ...]` in the recorded
+              provider request until the stream resolved the discovered modalities; the retry test failed on
+              its second turn until both caches stopped remembering a failed read. Unconfigured discovery is
+              covered in both shapes the providers use (chat and responses) and both answers (image and text).
+              Final: `npx tsc --noEmit` clean, `npm test` 415/415, the full composer verifier 22/22, and
+              96-deployment 3/3; the before/after probes are the files beside this document.
+  reds:       (1) the merge of the two sessions' `ended` changes produced duplicate identifiers, so main did not
+              build; fixed in f0168d4 on main by keeping the later documented field and one write per place.
+              (2) the shared deployment checkout was written by another session's install.sh between merge and
+              measurement, so 96-deployment caught the agent running the shared checkout's cli; the deploy
+              checkout's install.sh and a check of the plist + live PID restored it — the race is real and the
+              verifier is what sees it. (3) the deployed address itself found a code red: after one transient
+              /models failure the endpoint was remembered as text-only and every later image turn got the
+              placeholder (probe answered NO IMAGE repeatedly); fixed in 354c9cf by caching only an answer, and
+              the deployed probe then answered `red` twice.
+  coverage:   visited: discovery for chat and responses rows; the declared configuration winning; the parser's
+              field spellings; a failed read degrading to text and being retried; a successful read being
+              reused; count budget and byte budget; oldest-first order; a text-only route never receiving an
+              offload; files untouched; the deployed address before and after.
+              Not yet visited (cycle 3): transcript cards for an attached image, several images in one message,
+              editing a queued message that carries attachments, per-model budget declarations.
+  invariants: the declared configuration wins over discovery; a text-only route never receives image content; a
+              failed capability read never fails the turn and is retried; a successful one is read once per
+              endpoint; the budget is deterministic for the same request and replaces only image parts; the
+              stored reference and its digest are unchanged by offloading.
+  landed:     merge 56e9b69 (main; includes f0168d4 and 354c9cf), deployment checkout /Users/zhenc/heddle-deploy
+              built and served, agent PID 16271, 96-deployment 3/3, owner address answered `red` for the
+              red-square probe and through the composer path.
+  lessons:    (1) a capability lookup is not a value to remember when it fails: at the owner's address one
+              provider hiccup silently disabled images for the life of the process, and only the address showed
+              it. (2) the deployment checkout is shared; another session's install.sh can repoint the agent
+              between merge and measurement, so measure the plist and the live PID, not the intent. (3) two
+              sessions fixing the same red produced duplicate identifiers on main — verify the landed main with
+              tsc, not only the branch.
 ```
 
 ## Cycle status
@@ -277,7 +318,7 @@ Cycle 2 — a vision route is found by what it publishes, and a request's images
 | Cycle | Aim | Phase | Evidence committed | Landed |
 |---|---|---|---|---|
 | 1 | delivery mechanism: typed user content + DSH projection + provider mapping + pending cards | completed | test/attachments.test.ts, test/server-attachments.test.ts, check-composer (5 attachment checks) | e50b257, deployed at 9eef059 |
-| 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload | implement in progress | — | — |
+| 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload | completed | test/model-info.test.ts, test/model-discovery.test.ts, check-composer (2 published-modality checks) | 56e9b69, deployed and observed |
 | 3 | transcript cards, several images, queue-edit attachments; full matrix re-measure at the owner's address | pending | — | — |
 
 ## Read next

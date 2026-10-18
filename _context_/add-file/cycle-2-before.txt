@@ -1,0 +1,14 @@
+cycle-2 measured: the same red-square probe at the owner's address before capability discovery
+
+When: 2026-10-18T05:13:39-07:00, deployed build 2fcfb1c (cycle 1), owner's page http://127.0.0.1:8082/
+Command: PROBE_ATTACHMENT=/Users/zhenc/.heddle/uploads/2026-10-18T05-13-39-157Z-red-square.png \
+  node .heddle-tmp/attachments/probe-turn.mjs
+Prompt: "Look at the attached image. If you cannot see an image or its content, reply exactly: NO IMAGE.
+Otherwise reply with the dominant color in one lowercase word."
+Observed (event: done): {"status":200,"answer":"NO IMAGE","finishReason":"stop"}
+
+The provider itself answers "red" for the same PNG sent as image content (a direct wire probe through the
+owner's plugboard route on the same day), and the stored red-square.png is a 64x64 solid-red PNG — so the
+answer "NO IMAGE" is the placeholder reaching the model, not the image.
+
+After the change (cycle-2-after.json): {"status":200,"answer":"red","finishReason":"stop"}
