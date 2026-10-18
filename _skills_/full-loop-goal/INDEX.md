@@ -1,11 +1,12 @@
 ---
 title: Full loop goal
-version: 1.2.0
+version: 1.3.0
 description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → verify → fix for a stated number of cycles, with each cycle's evidence required before it counts.
 grounded_in:
   - owner statement 2026-10-17 that a big job should be set up as a goal that researches, understands, plans, implements, verifies, fixes and loops three times
   - owner statement 2026-10-17 that each loop should include a brainstorm in the research phase, and should step back and broaden the scope where applicable
   - the goal reentrancy convention, which this procedure relies on for surviving restarts
+  - owner statement 2026-10-17 that a goal's round cap defaults to 100 unless the owner names another number
 ---
 
 # Full loop goal
@@ -18,6 +19,13 @@ what a round must contain.
 understanding — plus the mechanisms in the second half. The rule that has not changed: a cycle counts only
 when its evidence is in the document and the suites are green.
 
+**v1.3 states the round cap.** A goal is created with `max_goal_rounds: 100` unless the owner names another
+number in the request; that is the harness default and it is the number this skill asks for explicitly, because a
+goal built by this procedure is the case the default was chosen for. The two budgets are different things and
+both are stated up front: **three cycles** is what the work should need, **a hundred rounds** is the hard stop
+that makes the driver block loudly if it does not converge. A request that says "loop five times" or "allow 200
+rounds" overrides the relevant one, and the override is written into the objective so a restart inherits it.
+
 ## Before cycle 1: frame the job
 
 - **Done is measured.** Write what "finished" would be *measured as*: the reference behaviour, the assertion
@@ -25,6 +33,10 @@ when its evidence is in the document and the suites are green.
 - **Name the instruments.** The reference at its address, the browser, the check runner, the commands whose
   output is evidence. A cycle that has to rediscover its instruments spends its budget on setup.
 - **Budget the cycles explicitly** (three is a default) and say what a cycle is in your own words.
+- **Name the round cap.** Create the goal with `max_goal_rounds: 100`, which is the harness default, unless the
+  owner asked for a different number. Say which number was used in the document: the cap is what turns "still
+  working" into a **block** that a person can see, and a goal that quietly runs out of rounds is
+  indistinguishable from one that finished.
 - **Take the baseline.** Measure the job's starting state now; without a before, a later "it matches" is an
   opinion.
 

@@ -248,3 +248,22 @@ test('an active goal is armed again in a new process, because pushing survives a
   const reopenedPaused = new GoalService(new Context(), pausedStore)
   assert.equal(reopenedPaused.get(pausedHandle)?.activation, 'disarmed', 'a paused goal is not runnable after a restart')
 })
+
+test('a goal created without a cap gets the default, and the default is 100', async () => {
+  /**
+   * The default is a **decision**, so it is asserted rather than left to the constructor. It was 256 — DSH's own
+   * default, copied when this subsystem mirrored theirs — and the owner set it to 100 on 2026-10-17: a goal that has
+   * not converged after a hundred rounds will not be converged by the hundred-and-first, and the cap is what makes
+   * the driver block loudly rather than spend a night on one objective.
+   *
+   * A caller that names a number still wins, which is the other half of "unless the owner overrides it".
+   */
+  /** Two sessions, because a create is refused while another goal is live in the same one. */
+  const { goals, sessions, handle } = await service()
+  const implicit = goals.create(handle, { objective: 'no cap named' })
+  assert.equal(implicit.maxGoalRounds, 100, 'the default is 100')
+
+  const second = sessions.create({ cwd: root })
+  const named = goals.create(second, { objective: 'a cap named', maxGoalRounds: 7 })
+  assert.equal(named.maxGoalRounds, 7, 'an explicit cap is kept')
+})

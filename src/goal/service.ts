@@ -109,12 +109,20 @@ export interface FoldedGoal {
 
 /** Configuration of the goal service. */
 export interface Config {
-  /** Round cap used when `create` does not name one — DSH's own default. */
+  /**
+   * Round cap used when `create` does not name one.
+   *
+   * **100**, and a round is one automatic continuation of a goal. It was 256 — DSH's own default, copied when this
+   * subsystem mirrored theirs — and the owner lowered it on 2026-10-17: a goal that has not converged after a hundred
+   * rounds is not going to be converged by the hundred-and-first, and the cap is what makes the driver **block**
+   * loudly instead of spending a night on one objective. A caller that knows better still names its own number, and
+   * a person can raise it with `update_goal`.
+   */
   readonly defaultMaxGoalRounds?: number
 }
 
 export const Config: Schema<Config> = Schema.object({
-  defaultMaxGoalRounds: Schema.number().default(256),
+  defaultMaxGoalRounds: Schema.number().default(100),
 })
 
 /** The operations a snapshot change may record. `clear` has its own tombstone shape. */
@@ -317,7 +325,7 @@ export class GoalService extends Service {
   constructor(ctx: Context, store: SessionStore, config: Config = {}) {
     super(ctx, 'goal')
     this.store = store
-    this.defaultMaxGoalRounds = config.defaultMaxGoalRounds ?? 256
+    this.defaultMaxGoalRounds = config.defaultMaxGoalRounds ?? 100
   }
 
   /** The current goal, or `undefined` when none is current. */

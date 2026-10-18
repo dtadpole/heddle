@@ -76,7 +76,7 @@ export function goalTools(goals: GoalService): ToolDefinition[] {
           type: 'object',
           properties: {
             objective: { type: 'string', description: 'The concrete completion objective inferred from the direct human request.' },
-            max_goal_rounds: { type: 'integer', description: 'Optional cap on automatic continuation rounds.' },
+            max_goal_rounds: { type: 'integer', description: 'Optional cap on automatic continuation rounds. Defaults to 100; name a number only when the owner asked for one.' },
           },
           required: ['objective'],
           additionalProperties: false,
