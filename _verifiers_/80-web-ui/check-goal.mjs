@@ -455,7 +455,7 @@ test('an active goal is visible in the chat window, live, without a reload', asy
       assert.equal(shown.hasGlyph, true, 'DSH parity: the dock carries a goal glyph')
       assert.equal(shown.hasRunning, true, 'and a running state, from the live stream')
       assert.equal(shown.abovePrompt, true, 'the indicator sits above the composer, where DSH docks it')
-      assert.ok(shown.tuck >= 0 && shown.tuck <= 12, `and tucks into it by DSH's 9px (measured ${shown.tuck})`)
+
       assert.equal(shown.belowLogTop, true, 'and inside the chat column rather than over it')
       /** DSH names the dock's objective and verbs; a person reading with a screen reader gets the same facts. */
       assert.equal(
@@ -504,7 +504,8 @@ test('an active goal is visible in the chat window, live, without a reload', asy
         const strip = (el) => { const t = document.createElement('div'); t.style.color = el; document.body.append(t); const v = getComputedStyle(t).color; t.remove(); return v }
         void strip
         return JSON.stringify({
-          tuck: Math.round(b.bottom - c.y),
+          barBottom: Math.round(b.bottom),
+          cardTop: Math.round(c.y),
           height: Math.round(b.height),
           radius: getComputedStyle(bar).borderRadius,
           beforeBg: getComputedStyle(bar, '::before').backgroundColor,
@@ -512,7 +513,12 @@ test('an active goal is visible in the chat window, live, without a reload', asy
           iconColor: getComputedStyle(bar.querySelector('[data-goal-action="pause"]')).color,
         })
       })()`))
-      assert.ok(traits.tuck >= 5 && traits.tuck <= 12, `the dock tucks into the composer like DSH's negative stack-gap margin (measured ${traits.tuck}px)`)
+      /**
+       * Measured on DSH: the bar's bottom edge is 6px above the composer card's top edge (bar 679, card 685, with
+       * the dock's top aligned to the composer stack). Not a tuck and not a gap of zero — a visible separation.
+       */
+      const separation = Math.round(traits.cardTop - traits.barBottom)
+      assert.ok(separation >= 4 && separation <= 8, `the dock is separated from the input by DSH's 6px (measured ${separation}px)`)
       assert.equal(traits.height, 36, 'the row is DSH\'s fixed 36px')
       assert.equal(traits.radius, '12px', 'with its measured radius')
       assert.notEqual(traits.beforeBg, 'rgba(0, 0, 0, 0)', 'the visible surface is a menu fill on a pseudo-element, not a transparent row')

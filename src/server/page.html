@@ -561,8 +561,8 @@
    * + 3px); the glyph and the verbs are tertiary-label coloured, the phrase is the primary label, and the
    * objective is the dimmed label.
    */
-  #goal-bar { position: relative; isolation: isolate; display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); height: 36px; margin: 0 auto -9px; padding: 4px 5px 4px 12px; border: 0; border-radius: 12px; background: transparent; box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; font-size: 13px; line-height: 24px; }
-  #goal-bar::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: color-mix(in oklab, var(--composer) 92%, transparent); backdrop-filter: blur(20px) saturate(1.2); pointer-events: none; }
+  #goal-bar { position: relative; isolation: isolate; display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); height: 36px; margin: 0 auto 6px; padding: 4px 5px 4px 12px; border: 0; border-radius: 12px; background: transparent; box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; font-size: 13px; line-height: 24px; }
+  #goal-bar::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: rgba(67, 69, 74, 0.45); backdrop-filter: blur(40px) saturate(1.5); pointer-events: none; }
   #goal-bar[hidden] { display: none; }
   #goal-glyph { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: none; color: color-mix(in oklab, currentColor 70%, transparent); }
   #goal-phase { font-size: 13px; font-weight: 500; white-space: nowrap; flex: none; color: var(--text); }

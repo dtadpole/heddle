@@ -102,3 +102,24 @@ Extracted live from DSH's stylesheet (14 `.nLMEza_` rules — the GoalBar module
 | error | a 12/20 red line replaces the objective inside the row | shown as a note under the composer | **kept with a reason**: the refusal note is shared by other actions (the check already judges it at `#tree-note`), and moving it into the dock is a behaviour change with its own claim |
 | inline editor | `objectiveInput`: 26px, 0.5px border, radius-sm, focus border business colour | an `edit` icon that opens a browser prompt | **kept with a reason**: recorded in the earlier round; the dock's anatomy matches, the editing interaction is a separate change |
 | hidden states | home: no dock; session with a goal: dock; **complete**: gone (measured) | hidden with no session, hidden when complete, shown for active/paused/blocked | **fixed** (complete was this round's other change) |
+
+## Separation from the input (the overlap the owner reported)
+
+DSH's geometry, measured live in a session with a visible dock:
+
+| Box | y | height | bottom |
+|---|---|---|---|
+| dock (`nLMEza_dock`) and bar (`nLMEza_bar`) | 643 | 36 | 679 |
+| composer card (`uV2eYG_card`) | 685 | 98 | 783 |
+| input editor inside the card | 693 | 36 | 729 |
+
+So the bar's bottom edge sits **6px above the composer card's top edge**: the dock's top aligns with the
+composer stack's top, the card begins 6px below the bar, and nothing overlaps. Heddle had been given a −9px
+bottom margin (a misreading of DSH's negative stack-gap margin, which applies to the input dock container and
+resolves to this 6px gap), so its dock sat over the input's top edge — the overlap the owner saw. Heddle now
+uses a 6px bottom margin: measured bar bottom to card top = 6px, and the part 9 test asserts a separation
+between 4 and 8px.
+
+The same measurement corrected the surface: DSH's `::before` is `rgba(67, 69, 74, 0.45)` with
+`backdrop-filter: blur(40px) saturate(1.5)`; Heddle had used a 92% composer fill at blur 20, which read as
+opaque. Heddle now uses DSH's measured values.
