@@ -214,6 +214,7 @@ test('the workspaces region spans the panel and carries the reference\'s scrollb
   assert.match(page, /#tree \{ padding-inline: 12px calc\(12px - 5px\); \}/, 'the rows are inset inside the pane, which keeps the scrollbar at the panel edge')
   assert.match(page, /#search-results \{ padding-inline: 12px calc\(12px - 5px\); \}/, 'and the search results take the same inset, so a search does not shift the list edges')
   assert.match(page, /#search-results \.hit \{[^}]*padding: \.3rem \.5rem;[^}]*border-radius: 12px;/s, 'with each hit using the row padding and rounding')
+  assert.match(page, /#tree \.row:focus-visible \{[^}]*outline: 2px solid color-mix\(in oklab, var\(--text\) 45%, transparent\);[^}]*outline-offset: -2px;/s, 'and a focused row draws its ring inside its own box, in the panel ink')
   assert.match(page, /#tree ul\[role='group'\] \{ padding-left: 0; \}/, 'while a group no longer narrows the rows below it')
   assert.match(page, /function nodeRow\(node, depth = 0\)/, 'nodeRow carries the depth')
   assert.match(page, /group.append\(nodeRow\(child, depth \+ 1\)\)/, 'and passes one more to each child')

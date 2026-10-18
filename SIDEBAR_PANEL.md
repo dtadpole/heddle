@@ -480,6 +480,62 @@ selected state under search (a hit is a button, not a treeitem) was not measured
 **invariants:** the pane still spans the panel with its 5px scrollbar at the edge; tree rows and search hits share one
 inset (asserted); their content column is the search field's text column; the 14px depth indent is unchanged.
 
+## Cycle 3: the keyboard's ring, and the states the inset must survive
+
+**measured:** the reference's own focus treatment could not be read — its tree items do not become `document.activeElement`
+through `focus()` (measured: `focused: false`), so there is no reference ring to copy; its hover, however, is **instant**
+(`transition: all 0s`), which heddle already matches. Heddle's rows **are** focusable (`tabIndex = 0`), and the platform's
+default ring is what a keyboard user saw.
+
+**measured, ours (pre-fix):** a row at **12→340**, focused from the keyboard (`:focus-visible` true), drew the UA's
+`outline: auto 1px`, `outline-offset: 0`, colour `rgb(153, 200, 255)` — painting at **11→341**, outside the row's box, in
+the browser's blue. The one row state that must not break the 12-pixel gutter was the only one painting into it.
+
+**brainstorm:**
+
+1. **A solid 2px ring offset inward (`-2px`), in the panel's 45% ink.** *Chosen:* the ring's outer edge becomes the row's
+   own box, it follows the 12px radius, and it is the same focus treatment the other focusable controls in the panel use
+   (`details.turn > summary`, `.column-grip`, `#minimap-hit` — all 45% ink) with the one change the inset requires.
+2. **Keep the platform ring and accept the overhang.** *Discarded:* it paints into the gutter and uses a colour from
+   outside the panel's palette; the rule this cycle exists for is that every row state stops at the inset.
+3. **`outline: none` and change the background instead.** *Discarded:* then focus wears the same 8% tint as hover and
+   selection, three states on one signal.
+4. **A box-shadow ring.** *Discarded:* equivalent geometry, but it cannot follow the border-radius as the outline does.
+
+**understand:** the inset is a property of the row's box; the UA ring is drawn *outside* that box, so any row state that
+paints outside it breaks the design. The fix belongs to the row's focus rule, not to the list's padding.
+
+**step back:** one rule, one state, no geometry change; the ring's row box stays 12→340.
+
+**changed:** `src/server/page.html` — `#tree .row:focus-visible`.
+
+**evidence,** same probe, keyboard modality first:
+
+| Run | box | outline | ring |
+|---|---|---|---|
+| without the rule | 12→340 | `auto 1px`, offset 0, `rgb(153,200,255)` | 11→341 |
+| with the rule | 12→340 | `solid 2px`, offset −2px, `oklab(0.98 … / 0.45)` | 12→340 (inside the box) |
+
+The states the inset had to survive were measured in the same pass: a **short list** (1 row, no overflow) still reserves
+the 5px gutter and the row is 12→340; the **rail** collapses (`collapsed`) and restores (`expanded`) with the row back at
+12→340; **hover**, **selected with the pointer away** and **search hits** all paint on the 12→340 box (cycles 1–2);
+the row's only motion is instant, as the reference's is.
+
+Screenshot: [`_context_/sidebar-panel/focused-row.png`](_context_/sidebar-panel/focused-row.png) — a focused workspace
+row whose ring sits inside the row's own 12→340 box.
+
+**reds:** none in part 11; the suite is green (part 7 45/45, npm test 428/428, linter 0 errors).
+
+**coverage:** the four row states (rest, hover, selected, keyboard focus), the short list, the rail and two viewport
+widths are read. Not measured: the reference's keyboard ring (it exposes none to `focus()`), and a row focused *while the
+list scrolls* — neither changes the claim.
+
+**invariants:** the pane spans the panel with its 5px scrollbar at the edge; row boxes are 12→340 in every state; the
+focus ring stays inside; the content column is the search field's text column; the depth indent is 14px.
+
+**lessons:** a state that paints **outside** the box is the one that can break an inset that every other state respects —
+and the platform's default focus ring is such a state. Every state of an object needs measuring, not just the pointer's.
+
 **lessons:** a second list inside one scroller is not a second design; it is the same row shape in another state. And a
 comparison that does not pin the served build can spend a cycle measuring a page nobody rebuilt.
 

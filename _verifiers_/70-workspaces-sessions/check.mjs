@@ -3892,7 +3892,8 @@ test('a written session moves to the top of its folder, its age follows, and a r
         /** Both artwork paths are measured, because a malformed path paints nothing: the pin's thin tail disappeared that way once. */
         const markerPaths = [...markerSvg.querySelectorAll('path')].map((path) => {
           const box = path.getBBox()
-          return { w: Math.round(box.width * 100) / 100, h: Math.round(box.height * 100) / 100, bottom: Math.round((box.y + box.height) * 100) / 100, painted: getComputedStyle(path).fill !== 'none' }
+          const style = getComputedStyle(path)
+          return { w: Math.round(box.width * 100) / 100, h: Math.round(box.height * 100) / 100, bottom: Math.round((box.y + box.height) * 100) / 100, painted: style.fill !== 'none', stroke: style.stroke }
         })
         const marker = {
           color: getComputedStyle(slot).color,
@@ -3931,7 +3932,13 @@ test('a written session moves to the top of its folder, its age follows, and a r
     const [pinBody, pinNeedle] = ink.marker.paths
     assert.ok(pinBody.w > 1 && pinBody.h > 1, `the pin's body paints\nsaw: ${JSON.stringify(pinBody)}`)
     assert.ok(pinNeedle.w > 1 && pinNeedle.h > 1, `the pin's tail paints (a broken path paints nothing)\nsaw: ${JSON.stringify(pinNeedle)}`)
-    assert.ok(pinNeedle.bottom > pinBody.bottom, `and its tail reaches below the body, so the pin reads as a pin\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    assert.equal(pinNeedle.bottom > pinBody.bottom, true, `and its tail reaches below the body, so the pin reads as a pin\nsaw: ${JSON.stringify(ink.marker.paths)}`)
+    /**
+     * The tail is **fill only**: a stroke inherited from the SVG root would draw the needle at its own width plus an outline,
+     * about twice as thick — the owner's "the tail can be thinner". The body keeps its stroke (that is the reference's artwork).
+     */
+    assert.equal(pinNeedle.stroke, 'none', `the tail carries no stroke of its own\nsaw: ${JSON.stringify(pinNeedle)}`)
+    assert.notEqual(pinBody.stroke, 'none', 'while the head keeps the reference artwork stroke')
     /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
     const glyphs = JSON.parse(
       await browser.evaluate(`(() => {

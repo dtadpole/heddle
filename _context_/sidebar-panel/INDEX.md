@@ -58,6 +58,12 @@ column. The scrollable pane keeps the panel's full width; only the items are nar
 results. The page also states its own build in `meta[name=heddle-page]` (the file's sha256), which is how a stale
 served build is told apart from a missing feature.
 
+## Row states
+
+`focused-row.png` — a workspace row focused from the keyboard at 1200×800: the 2px ring is drawn inside the row's own
+12→340 box in the panel's ink, so the focus state respects the same inset as hover and selection. The cycle also
+measured the short list (gutter reserved, no bar) and the rail's collapse/expand.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

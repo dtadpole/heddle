@@ -1258,6 +1258,18 @@
   }
   #tree .row:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
   /**
+   * **The keyboard's ring stays inside the row**, drawn in the panel's own ink rather than the platform's blue.
+   *
+   * Measured before this rule: a row focused from the keyboard matched `:focus-visible` and the UA's `outline: auto 1px`
+   * painted outside the row's box — 11→341 for a row at 12→340 — so the one state that must not break the row's inset
+   * was the only one painting into the 12-pixel gutter, in a colour unrelated to the panel. A negative offset puts the
+   * 2px ring inside the row's own 12px radius; the mix is the same 45% ink the other focusable controls use.
+   */
+  #tree .row:focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--text) 45%, transparent);
+    outline-offset: -2px;
+  }
+  /**
    * The selected row, and it has to be visible *while* the pointer is elsewhere: a tint alone is what
    * hover already draws, so the selection carries a left accent bar and a bolder name as well.
    */
@@ -8143,6 +8155,12 @@ function kindIcon(kind, open = false) {
       'M6.05285 9.47511C6.27284 9.16094 6.70586 9.08458 7.02003 9.30457C7.3342 9.52455 7.41055 9.95757 7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
     )
     needle.setAttribute('fill', 'currentColor')
+    /**
+     * The needle is **fill only** — no stroke. The reference's artwork leaves the tail unstroked, while this SVG root carries
+     * `stroke: currentColor`, which the needle inherited: the tail was drawn at its own width **plus a 1-unit outline**, about
+     * twice as thick as the reference's. The owner asked for a thinner tail; this is the difference, not a new shape.
+     */
+    needle.setAttribute('stroke', 'none')
     if (kind === 'pin-fill') {
       body.setAttribute('fill', 'currentColor')
       body.setAttribute('stroke', 'currentColor')
