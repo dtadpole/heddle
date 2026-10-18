@@ -1640,6 +1640,15 @@
   #composer-status .stat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #composer-status .stat-sep { margin: 0 6px; color: inherit; }
   #composer-status .stat-context { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 8px; font-size: 13px; line-height: 20px; }
+  /**
+   * The dock's elements are buttons, so they must look like it: the reference's own context trigger takes a
+   * hover wash and the secondary label colour, and its expanded state keeps it. Same wash for all three, so a
+   * person can see that the row is interactive before clicking it.
+   */
+  #composer-status [data-stat-pill] { transition: background-color .12s ease, color .12s ease; }
+  #composer-status [data-stat-pill]:hover, #composer-status [data-stat-pill][aria-expanded='true'] { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+  #composer-status [data-stat-pill]:hover .stat-sep, #composer-status [data-stat-pill][aria-expanded='true'] .stat-sep { color: inherit; }
+  #composer-status [data-stat-pill]:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   #composer-status .stat-ring-track { fill: none; stroke: var(--border-strong); stroke-width: 2; }
   #composer-status .stat-ring-fill { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; }
   #composer-status [hidden] { display: none; }
