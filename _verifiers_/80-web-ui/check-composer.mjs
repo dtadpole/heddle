@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { evidencePath, chatDouble, fixtureDir, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The composer's submission gestures and the queue buffer, judged in a browser.
@@ -1072,7 +1072,7 @@ test('the + menu adds a file as a pending card, and the draft stays clean', asyn
     await browser.evaluate('document.querySelector("#attach-cards .attach-remove").click()')
     assert.ok(await browser.waitFor('document.getElementById("attach-cards").hidden === true', 10_000), 'removing the file hides the row')
 
-    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-1-cards.png')
+    const evidence = evidencePath('cycle-1-cards.png')
     mkdirSync(dirname(evidence), { recursive: true })
     await browser.screenshot(evidence)
   } finally {
@@ -1140,7 +1140,7 @@ test('the File action stays available while the workspace tree is open', async (
     assert.equal(await browser.evaluate('window.__filePickerClicks'), 1, 'and choosing it still asks for the picker')
     assert.equal(await browser.evaluate('document.getElementById("attach-menu").hidden'), true, 'and closes the menu')
 
-    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-2-file-inside-folder.png')
+    const evidence = evidencePath('cycle-2-file-inside-folder.png')
     mkdirSync(dirname(evidence), { recursive: true })
     await browser.screenshot(evidence)
   } finally {
@@ -1179,7 +1179,7 @@ test('a file larger than ten megabytes is accepted as a pending card', async (co
     assert.equal(card.draft, '', 'the draft stays clean')
     assert.equal(statSync(card.path).size, bytes, 'the stored copy is the whole eleven megabytes')
 
-    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-4-large-file.png')
+    const evidence = evidencePath('cycle-4-large-file.png')
     mkdirSync(dirname(evidence), { recursive: true })
     await browser.screenshot(evidence)
   } finally {
@@ -1340,7 +1340,7 @@ test('a pending image is delivered to a vision route as image content', async (c
     assert.match(String(block.path), /[/\\]uploads[/\\]/, 'and the stored reference, not the bytes')
     assert.ok(!JSON.stringify(recorded).includes('base64'), 'the log holds no encoded bytes')
 
-    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-1-delivery.png')
+    const evidence = evidencePath('cycle-1-delivery.png')
     mkdirSync(dirname(evidence), { recursive: true })
     await browser.screenshot(evidence)
   } finally {

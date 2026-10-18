@@ -100,3 +100,12 @@ and decoding, session listing, JSON extraction, fingerprints and `skipUnless`.
 [`_verifiers_/INDEX.md`](../../_verifiers_/INDEX.md) for the verifications and the contract they keep,
 [`browser-use/INDEX.md`](../browser-use/INDEX.md) for the browser the page checks drive, and
 [`_tests_/INDEX.md`](_tests_/INDEX.md) for both suites.
+
+## Runtime browser evidence
+
+`evidencePath(name)` allocates a distinct screenshot destination under
+`.heddle-tmp/verifier-evidence/<run>/<allocation>/`. The parent exists before capture. Each allocation
+preserves earlier observations, including allocations with the same filename. Names cannot contain
+directory components. Browser checks must not overwrite the historical screenshots in `_context_`:
+that dirties the committed deployment checkout while it is being verified. This mechanism needs no
+browser; taking a screenshot still runs headless as described by each verifier.

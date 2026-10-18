@@ -52,6 +52,24 @@ export function fixtureDir(label) {
   return dir
 }
 
+/**
+ * Allocate a unique runtime evidence path without rewriting historical, committed artifacts.
+ *
+ * Browser verifiers used to overwrite `_context_` screenshots on every run. That changed the deployment
+ * checkout while judging it, and made the clean-main check fail even after all functional assertions
+ * passed. Evidence belongs to this run, stays under the checkout's ignored runtime directory, and is
+ * never shared with another process or reused by a second allocation.
+ */
+export function evidencePath(name) {
+  if (typeof name !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
+    throw new Error('an evidence name must be a filename without directory components')
+  }
+  scratchCounter.value += 1
+  const dir = join(scratchRoot, 'verifier-evidence', runToken, String(scratchCounter.value))
+  mkdirSync(dir, { recursive: true })
+  return join(dir, name)
+}
+
 /** An isolated home for one check, so its sessions and config are its own. */
 export function isolatedHome(label) {
   return fixtureDir(`home-${label}`)

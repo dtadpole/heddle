@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
 import { zstdCompressSync } from 'node:zlib'
 
 import {
+  evidencePath,
+  scratchRoot,
   fingerprint,
   hasDependency,
   listFiles,
@@ -140,4 +142,30 @@ test('a check that cannot judge says so instead of returning quietly', () => {
   assert.deepEqual(skipped, ['no browser'])
   assert.equal(skipUnless(context, true, 'no browser'), true)
   assert.equal(skipped.length, 1, 'a judged check skips nothing')
+})
+
+
+test('runtime evidence allocations are unique, under the ignored checkout root and do not rewrite old files', () => {
+  const first = evidencePath('panel.png')
+  const second = evidencePath('panel.png')
+  try {
+    assert.notEqual(first, second, 'a second measurement gets its own path')
+    const rel = relative(scratchRoot, first)
+    assert.ok(rel.startsWith(`verifier-evidence${sep}`), 'evidence stays inside the checkout runtime folder')
+    assert.ok(!rel.startsWith('..'), 'and never escapes to historical context or host scratch')
+    assert.ok(existsSync(dirname(first)), 'the screenshot parent already exists')
+    assert.ok(!existsSync(first), 'allocation does not create or overwrite the artifact')
+    writeFileSync(first, 'earlier measurement')
+    writeFileSync(second, 'later measurement')
+    assert.equal(readFileSync(first, 'utf8'), 'earlier measurement', 'a later measurement preserves the first')
+  } finally {
+    rmSync(dirname(first), { recursive: true, force: true })
+    rmSync(dirname(second), { recursive: true, force: true })
+  }
+})
+
+test('evidence names cannot introduce directory traversal or absolute paths', () => {
+  for (const name of ['', '../old.png', '/tmp/panel.png', 'folder/panel.png', 'folder\\panel.png', '..']) {
+    assert.throws(() => evidencePath(name), /filename without directory components/, name)
+  }
 })

@@ -11,7 +11,7 @@ grounded_in:
 Instance of [`_tests_`](../INDEX.md). Holds [`unit.test.mjs`](unit.test.mjs) for
 [`lib.mjs`](../../lib.mjs), the library every check imports: how a transcript is found and decoded in either store
 layout, how sessions are listed, how a JSON document is taken from a noisy stream, how a directory is
-fingerprinted, and what `skipUnless` reports.
+fingerprinted, what `skipUnless` reports, and how per-run evidence paths preserve earlier artifacts.
 
 The rule it guards is the quiet one: a helper that reads the wrong file turns a check into a claim about
 nothing.

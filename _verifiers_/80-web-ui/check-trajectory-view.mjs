@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { evidencePath, fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The Trajectory area, judged where the owner will look at it: in a browser.
@@ -203,7 +203,7 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(draggingAffordance.grip, '1', 'and the grip')
     assert.equal(draggingAffordance.gripWidth, '2.5px', 'the grip is the reference’s 2.5px')
     assert.equal(draggingAffordance.gripRadius, '9999px', 'rounded, as the reference draws it')
-    await browser.screenshot(join(repoRoot, '_context_', 'dsh-mechanisms', 'heddle-split-bar.png'))
+    await browser.screenshot(evidencePath('heddle-split-bar.png'))
     const split = JSON.parse(
       await browser.evaluate(`(() => {
         const gutter = document.getElementById('gutter-left')
@@ -463,7 +463,7 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.match(schema.body, /Parameters/, 'and shows its parameter schema')
     assert.match(schema.body, /"type"/, 'with the schema itself as JSON')
     // A second screenshot, of the tool inspector itself, because the Schema tab is the feature this adds.
-    await browser.screenshot(join(repoRoot, '_context_', 'dsh-mechanisms', 'heddle-trajectory-schema.png'))
+    await browser.screenshot(evidencePath('heddle-trajectory-schema.png'))
 
 
 
@@ -578,7 +578,7 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
       strip.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: rect.left + 1, pointerId: 3 }))
     })()`)
     assert.ok(await browser.waitFor("document.querySelector('#tr-table tbody tr[data-kind=tool] .tr-result') !== null", 10_000), 'the tool row shows its result again')
-    const evidence = join(repoRoot, '_context_', 'dsh-mechanisms', 'heddle-trajectory.png')
+    const evidence = evidencePath('heddle-trajectory.png')
     await browser.screenshot(evidence)
     assert.ok(true, `a screenshot of the result is at ${evidence}`)
   } finally {
