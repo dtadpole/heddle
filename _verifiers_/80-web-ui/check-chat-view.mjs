@@ -1539,10 +1539,15 @@ test('a thinking row shimmers only while it is thinking, and turns solid when th
    * tool-call chunk settles it. This drives a multi-round turn and watches the live rows: at least one moment has a
    * settled thinking row while the turn is still running, and after the turn nothing is running or animating.
    */
-  const steps = (work) => [
-    ...Array.from({ length: 20 }, (_, index) => ({
+  const steps = () => [
+    /**
+     * Each round sleeps in the shell, which makes the turn long enough to observe **deterministically**: a turn of
+     * twenty instant rounds can finish before one poll, and a check that observes nothing cannot say the thinking
+     * row settled mid-turn.
+     */
+    ...Array.from({ length: 12 }, (_, index) => ({
       reasoning: `thinking about round ${index + 1}`,
-      toolCall: { name: 'list_dir', arguments: { path: work } },
+      toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } },
     })),
     { text: 'all rounds done' },
   ]
@@ -1566,7 +1571,7 @@ test('a thinking row shimmers only while it is thinking, and turns solid when th
       snapshots.push(snapshot)
       if (!snapshot.running && snapshot.rows > 0 && snapshot.tools > 0) break
       if (!snapshot.running && snapshot.reasoning.length > 0) break
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      await new Promise((resolve) => setTimeout(resolve, 50))
     }
     const during = snapshots.filter((snapshot) => snapshot.running)
     assert.ok(during.length > 0, 'the turn was observed while it was running')

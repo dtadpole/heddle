@@ -196,31 +196,43 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
     await press(browser, { key: 'Enter' })
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("first")', 10_000), 'the message was sent')
     assert.equal(server.double.requests.length, 1, 'and the endpoint was asked once, without a second gesture')
+    /**
+     * An idle send is DSH's `placement: 'transcript'`, not a queue entry: the dock must stay empty while its turn
+     * runs. It used to hold the message marked `Sending…` until the whole turn ended — the owner's nit.
+     */
+    assert.equal(await browser.evaluate('document.getElementById("queue").hidden'), true, 'an idle send never appears in the dock')
 
     /**
      * A turn is running, so plain Enter queues and the dock appears. The header counts what is waiting and
      * starts **closed**, which is DSH's `QueueDock`: a count for more than one row, one row drawn directly.
      *
-     * The row **being delivered counts too** — it stays in the dock with a `Sending…` status until its turn
-     * ends, which is what DSH does with a local submission whose host row has not arrived yet, and it is why
-     * the two presses below read as three.
+     * The dock counts what **waits**, not what runs: DSH's local echo lives only until the host has the message,
+     * and here a queued message is retired as soon as its turn is accepted.
      */
-    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the queue is shown while the turn runs')
     await type(browser, 'second')
     await press(browser, { key: 'Enter' })
     await type(browser, 'third')
     await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the queue is shown once a message waits')
     const dock = JSON.parse(
       await browser.evaluate(`JSON.stringify({
         header: (document.querySelector('#queue .header') || {}).textContent || '',
         status: (document.querySelector('#queue .status') || {}).textContent || '',
         listHidden: (document.querySelector('#queue .list') || {}).hidden,
-        label: document.getElementById('send').getAttribute('aria-label')
+        label: document.getElementById('send').getAttribute('aria-label'),
+        placeholder: document.querySelector('textarea').placeholder,
+        rows: document.querySelectorAll('#queue .row').length
       })`),
     )
-    assert.match(dock.header, /3 queued messages/, `the header says how many are in the dock (${dock.header})`)
+    assert.match(dock.header, /2 queued messages/, `the header says how many are waiting, not how many were sent (${dock.header})`)
     assert.equal(dock.listHidden, true, 'and the rows are folded away until asked for')
+    assert.equal(dock.status, '', 'nothing in the dock says Sending…: a row is retired when its turn is accepted')
     assert.equal(dock.label, 'Queue message', 'the arrow says what pressing it will do while a turn runs')
+    /**
+     * While messages wait and the draft is empty, DSH's placeholder says what the accelerated chord will do
+     * (`placeholder.steerQueue`), which is its `canSteerQueue` condition in words.
+     */
+    assert.match(dock.placeholder, /Cmd\/Ctrl\+Enter steers all queued messages/, `the placeholder offers the steered queue (${dock.placeholder})`)
     /**
      * The dock is **attached** to the composer: what is waiting belongs to the thing it waits for, so the
      * panel's bottom edge meets the card's top edge rather than floating above it.
@@ -243,12 +255,7 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
 
     /** The header is the disclosure, so opening it shows the rows — one per message in the dock. */
     await browser.evaluate('document.querySelector("#queue .header").click()')
-    assert.equal(await browser.evaluate('document.querySelectorAll("#queue .row").length'), 3, 'opening the header shows every row')
-    assert.equal(
-      await browser.evaluate('(document.querySelector("#queue .status") || {}).textContent || ""'),
-      'Sending…',
-      'and the one being delivered says so',
-    )
+    assert.equal(await browser.evaluate('document.querySelectorAll("#queue .row").length'), 2, 'opening the header shows every waiting row')
 
     /**
      * The accelerated chord goes **next**, not last: DSH resolves Ctrl/Cmd+Enter to the opposite delivery
@@ -271,8 +278,9 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
     /** The arrow button is the same gesture as Enter, which is DSH's rule for its primary action. */
     await type(browser, 'by button')
     await browser.evaluate('document.getElementById("send").click()')
-    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("by button")', 15_000), 'the arrow sends the draft')
-    assert.equal(server.double.requests.length, 5, 'and that was one more turn')
+    const before = server.double.requests.length
+    await browser.waitFor('document.getElementById("log").innerText.includes("by button")', 15_000)
+    assert.equal(server.double.requests.length, before + 1, 'and that was one more turn')
   } finally {
     browser.close()
     await server.close()
@@ -289,13 +297,13 @@ test('Ctrl+Enter on an empty draft sends everything still queued, in order', asy
 
     await type(browser, 'running')
     await press(browser, { key: 'Enter' })
-    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the first turn is running')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === true', 10_000), 'the first turn is running')
     for (const text of ['queued one', 'queued two', 'queued three']) {
       await type(browser, text)
       await press(browser, { key: 'Enter' })
     }
     const waiting = await browser.evaluate('document.querySelector("#queue .header").textContent')
-    assert.match(waiting, /4 queued messages/, `three wait behind the one being delivered (${waiting})`)
+    assert.match(waiting, /3 queued messages/, `the three that wait are what the dock counts (${waiting})`)
 
     /** The empty draft is the point: the chord means "send the queue", not "send this draft". */
     await type(browser, '')
@@ -306,17 +314,17 @@ test('Ctrl+Enter on an empty draft sends everything still queued, in order', asy
     assert.ok(order.every((at) => at !== -1), `every queued message was sent (${log})`)
     assert.deepEqual([...order].sort((left, right) => left - right), order, 'in FIFO order')
     /**
-     * Every message reached the model, which is the claim — not a request count.
+     * Every message reached the model, which is the claim — not a request count and not the dock.
      *
-     * A message sent while the turn is still running is **steered into it**, so several share one model call;
-     * the count therefore depends on whether the first turn was still open when the chord fired, which is a
-     * race this check was previously measuring by accident. What must hold either way is that each queued
-     * message was actually asked.
+     * A message sent while the turn is still running is **steered into it**, so several share a model call; the
+     * dock empties when the steer is accepted, which can be before the model has been asked again. So the wait is
+     * on the double's own request log: each message must eventually appear in a request body.
      */
-    const asked = server.double.requests.map((entry) => entry.body).join('\n')
-    for (const text of ['queued one', 'queued two', 'queued three']) {
-      assert.ok(asked.includes(text), `the model was asked '${text}'`)
-    }
+    const asked = () => server.double.requests.map((entry) => entry.body).join('\n')
+    assert.ok(
+      await until(() => ['queued one', 'queued two', 'queued three'].every((text) => asked().includes(text)), 20_000),
+      `the model was asked every queued message (${asked().slice(-400)})`,
+    )
   } finally {
     browser.close()
     await server.close()
@@ -346,7 +354,7 @@ test('a steered message is answered by the running turn, and a steer with nothin
 
     await type(browser, 'the first question')
     await press(browser, { key: 'Enter' })
-    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the turn is running')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === true', 10_000), 'the turn is running')
     assert.ok(await until(() => server.double.requests.length === 1), 'one model call is in flight')
 
     await type(browser, 'answer this too')

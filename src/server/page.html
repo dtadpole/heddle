@@ -5363,8 +5363,18 @@ function sessionRunning() {
 function turnInFlight() {
   return queueOf().some((item) => item.status === 'sending')
 }
+/**
+ * Turn starts this page made with a transcript placement that the stream has not yet announced.
+ *
+ * The stream's own start signal is `model/request`, which lands after the server has created the session and
+ * assembled the context; without this a second message typed in that window would be treated as an idle send and
+ * start a **second writer** on the same log. It also keeps the dock honest: a send that is already running is not
+ * queued, so the next message waits.
+ */
+let directTurnPending = 0
+
 function anyRunning() {
-  return turnInFlight() || sessionRunning()
+  return directTurnPending > 0 || turnInFlight() || sessionRunning()
 }
 
 /**
@@ -5409,7 +5419,39 @@ function submitDraft(gesture) {
     void deliverSteered(text, attachments)
     return
   }
+  /**
+   * DSH's `placement: 'transcript'` — a submission while nothing runs becomes a message in the conversation, not a
+   * queue row. It used to go through the dock and sit there marked `Sending…` until its whole turn ended, which is
+   * the owner's nit: idle sends are not queueing, so they must not look like they are.
+   */
+  if (!anyRunning()) {
+    void sendNow(text, attachments)
+    return
+  }
   enqueue(text, 'queue', attachments)
+}
+
+/**
+ * Send one message as its own turn, without the dock — DSH's transcript placement.
+ *
+ * A refusal gives the words back to the composer when it is untouched, which is the same rule the pump applies to a
+ * queued row; the message was never recorded, so restoring it cannot duplicate anything.
+ */
+async function sendNow(text, attachments = []) {
+  directTurnPending += 1
+  renderComposerState()
+  try {
+    await runTurn(text, composerKey, attachments)
+  } catch (error) {
+    if (field.value.trim() === '') field.value = text
+    growComposer()
+    add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+  } finally {
+    directTurnPending -= 1
+    renderComposerState()
+    /** The turn this page started just ended: now a message that was waiting behind it can go. */
+    void pumpQueue()
+  }
 }
 
 /** Add one message to the wait: at the end for an ordinary submit, at the front for a steer that could not land. */
@@ -5672,6 +5714,13 @@ async function pumpQueue(key = composerKey) {
     for (;;) {
       const item = queue.find((entry) => entry.status === 'pending')
       if (item === undefined) break
+      /**
+       * The queue drains at a **turn boundary**, which is DSH's host rule: one writer on a session's log, so a
+       * waiting message must not start a second turn beside one already running. `turn/completed` calls this pump
+       * again, so a message that waits here is sent the moment the turn it waits for ends.
+       */
+      const waitingFor = key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE ? composerKey : key
+      if (runningSessions.has(waitingFor) || (waitingFor === composerKey && directTurnPending > 0)) break
       item.status = 'sending'
       renderQueue()
       /**
@@ -5762,7 +5811,7 @@ async function sendTurn(body) {
   }
 }
 
-async function runTurn(text, key, attachments = []) {
+async function runTurn(text, key, attachments = [], onAccepted) {
   liveTurns += 1
   updateStatusBar()
   const startedAt = performance.now()
@@ -5794,6 +5843,12 @@ async function runTurn(text, key, attachments = []) {
     const detail = await response.text().catch(() => '')
     throw new Error(detail.trim().replace(/\s+/g, ' ').slice(0, 300) || `the server refused it (${response.status})`)
   }
+  /**
+   * Accepted: the message is in the log and the turn is running. DSH retires a local submission echo when the host
+   * lists it; here the accepted response **is** that moment, so a queued row stops saying "Sending…" and leaves the
+   * dock now rather than at the end of the turn (measured: a long turn kept the row in the dock for minutes).
+   */
+  onAccepted?.()
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -5959,6 +6014,14 @@ function renderComposerState() {
    */
   stopButton.hidden = !running
   sendButton.hidden = running
+  /**
+   * DSH's `placeholder.steerQueue`: while a turn runs and messages wait, an empty draft says what the accelerated
+   * chord would do — "Cmd/Ctrl+Enter steers all queued messages". That is `canSteerQueue` in its own words.
+   */
+  const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
+  field.placeholder = canSteerQueue
+    ? 'Cmd/Ctrl+Enter steers all queued messages'
+    : 'Message or run a task, / commands, @ files or sessions'
   updateSendDisabled()
   updateStatusBar()
 }
