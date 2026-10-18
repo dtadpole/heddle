@@ -111,3 +111,18 @@ legend row) and giving each of the three lanes 15px.
 - DSH tool-row internals (name/args/result grid): measured later, beside heddle's, in batch C/D.
 - heddle's live page could not be re-measured through the proxy during this round (it served "No session"
   after the restart); the assertions in the part 9 check measure the same build on its own fixture server.
+
+## Structural notes from DSH's accessibility tree (2026-10-17)
+
+The a11y snapshot names what CSS cannot: the toolbar controls are **"Use actual duration"**, **"Collapse
+turns"** and **"Collapse calls"** (heddle labels them Duration/Turns/Calls — same functions, shorter labels);
+the search field is "Search trajectory"; the timeline region is "Trajectory timeline" with "Load earlier
+history" and the three lanes Input/Model/Tools. The details pane's separator is a real `separator` with
+`orientation=vertical` and description **"Drag to resize. Double-click to reset."**; its Summary sections are
+Hierarchy (with an "Assistant Message" button), Status, Payload (a JSON tree with Expand), Result, Schema
+(the tool name, its description, a "Parameters" heading and a JSON tree) and Timing (Started with a unix
+timestamp button, Duration). Heddle's details separator now carries the same stated gestures and resets on
+double-click, asserted in part 9.
+
+Still unknown: DSH's table header row (no `thead`/`th` in the DOM, and no "Event"/"Content" labels were found
+by text) and the SYSTEM/COMPACTED tag colours (those rows were outside the rendered window in every scan).

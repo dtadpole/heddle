@@ -2739,6 +2739,12 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
     details.style.width = clamped + 'px'
     resize.setAttribute('aria-valuenow', String(Math.round(clamped)))
   }
+  // DSH's separator says "Drag to resize. Double-click to reset." — a gesture a reader can discover.
+  resize.title = 'Drag to resize. Double-click to reset.'
+  resize.addEventListener('dblclick', () => {
+    details.style.width = ''
+    resize.removeAttribute('aria-valuenow')
+  })
   resize.addEventListener('pointerdown', (pointerEvent) => {
     pointerEvent.preventDefault()
     const startX = pointerEvent.clientX
