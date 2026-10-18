@@ -184,7 +184,7 @@ centred on the card (card centre 777, dock centre 776.5 at the measured window).
   reference's `12px/20px` pills, `#adb2b8`, `999px` radius, `1px 8px` padding, `12px` dock gap and a dock top
   flush with the card's bottom edge; a second turn proves the total is cumulative (`2.1K tok`); a provider
   that reports no usage leaves the rate, total, cache phrase and context share blank and hides their items.
-  The whole composer suite is 12/12 green.
+  The whole composer suite is 12/12 green. The screenshot of the built page with a scripted provider (`prompt_tokens 1000, cached 800, output 50`, window 2000) is [heddle-stats-dock.png](_context_/dsh-mechanisms/heddle-stats-dock.png): the dock prints the reference's three figures in one row under the card.
 - **reds / divergences kept:** the dialogs; the wall-time rate; and the reference's `pill` hover affordance
   (its pills are buttons). Each is recorded rather than half-built.
 - **lessons:** a stats dock is judged by its **blank state** as much as by its numbers — the first contract
