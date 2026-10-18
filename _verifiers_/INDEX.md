@@ -47,6 +47,13 @@ Today every browser-driven verifier here runs **headless**; the window is judged
 was opened. That is deliberate: the repository's verifications judge heddle, and none of them claims anything
 about a window; a check that needs one belongs beside the thing whose window it is.
 
+## Current verification evidence
+
+[`completion-evidence.md`](../_tools_/verify-runner/completion-evidence.md) records the 2026-10-18 sweep: all 17 verifier
+instances exit `0`, with 211 checks passed and no failures or skips. It states the tested revisions,
+independent unit/component/type/build checks, browser mode and supervised restart evidence. The older
+measurement below is historical rather than a current test count.
+
 ## Where each stands, 2026-10-11
 
 **112 checks, 0 failures, 0 unjudged**, measured by running every verifier after `npm run build` on

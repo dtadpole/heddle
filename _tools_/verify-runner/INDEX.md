@@ -109,3 +109,10 @@ preserves earlier observations, including allocations with the same filename. Na
 directory components. Browser checks must not overwrite the historical screenshots in `_context_`:
 that dirties the committed deployment checkout while it is being verified. This mechanism needs no
 browser; taking a screenshot still runs headless as described by each verifier.
+
+## Whole-harness verification record
+
+[`completion-evidence.md`](completion-evidence.md) records the 2026-10-18 complete verifier sweep,
+its exact counters and tested revisions, separate unit/component/type/build checks, headless browser
+mode and the supervised restart/deployment recheck. It belongs beside the shared runner, not as an
+extra loose file inside the `_verifiers_` type folder.
