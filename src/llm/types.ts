@@ -53,6 +53,16 @@ export interface GenerateRequest {
   /** Upper bound on generated tokens, which is also what keeps a probe cheap. */
   readonly maxOutputTokens?: number
   readonly temperature?: number
+  /**
+   * The reasoning level to ask for, as an **id** the endpoint's model declares.
+   *
+   * It is the id rather than the provider's wire value because the wire value belongs to the adapter:
+   * `reasoning_effort` for a Chat Completions route, `reasoning.effort` for a Responses one, and
+   * adaptive thinking plus `output_config.effort` for an Anthropic publisher route. The adapter resolves
+   * the id through `reasoningLevelFor` and sends **that model's declared value**, so a level the catalogue
+   * does not hold can never be displayed and silently not sent.
+   */
+  readonly reasoningEffort?: string
   /** Ask the transport to stream; adapters that must stream ignore `false`. */
   readonly stream?: boolean
   /** Opaque identity carried through the waterfall for logging and retries. */
@@ -85,6 +95,50 @@ export type Chunk =
       readonly usage?: TokenUsage
     }
 
+/**
+ * One model type an endpoint offers.
+ *
+ * The owner's shape (2026-10-17): an endpoint is configured once in the user's own
+ * `~/.heddle/heddle.json`, and the **model types it offers** are listed under it. `name` is what a person
+ * reads (a provider's `DeepSeek-V4.1-Flash` rather than its id `deepseek-flash`), and `reasoning` is present
+ * only when that exact model publishes levels — which is what makes the selector show an effort control for
+ * the models that have one and no control for the models that do not.
+ */
+export interface ModelOption {
+  /** The model id sent on the wire. */
+  readonly id: string
+  /** The name a person reads; the id when absent, so a catalogue entry cannot render blank. */
+  readonly name?: string
+  /**
+   * The reasoning levels this model offers.
+   *
+   * On the model rather than only on the endpoint because a route can serve a thinking model beside a
+   * non-thinking one. An endpoint-level block is the default for its models (see `ReasoningLevels`).
+   */
+  readonly reasoning?: ReasoningLevels
+}
+
+/**
+ * One reasoning level: an id, a name, and the value the provider's wire expects.
+ *
+ * `value: null` is a level that is real and displayed but sends no parameter — the provider's own default,
+ * which is what a `Default` row means in DSH's effort pane. A non-null value is sent verbatim in the parameter
+ * the endpoint's kind uses, so what the page displays is what the provider receives; the value never reaches
+ * the page's payload because only the adapter needs it.
+ */
+export interface ReasoningLevel {
+  readonly id: string
+  readonly name: string
+  readonly value: string | number | null
+}
+
+/** The levels a model offers, and the one it uses when nobody chose. */
+export interface ReasoningLevels {
+  /** The level used when a session has recorded none. Absent means the provider's default. */
+  readonly default?: string
+  readonly levels: readonly ReasoningLevel[]
+}
+
 /** What an adapter is told about its endpoint. */
 export interface EndpointConfig {
   /** Stable name a request addresses this endpoint by. */
@@ -95,6 +149,23 @@ export interface EndpointConfig {
   readonly baseUrl: string
   /** The endpoint's default model id. */
   readonly model?: string
+  /**
+   * The model types this endpoint offers, as the user configured them.
+   *
+   * Optional so every endpoint written before the two-tier selector existed keeps working: an endpoint with
+   * only `model` offers that single model (`offeredModels` normalises both shapes), and one with neither
+   * offers nothing rather than inventing a name. The endpoint's `model` stays the default when this list is
+   * present and nobody chose.
+   */
+  readonly models?: readonly (ModelOption | string)[]
+  /**
+   * Reasoning levels that apply to every model of this endpoint which does not declare its own.
+   *
+   * The convenient half of the configuration: a route that serves several models with the same effort ladder
+   * declares it once here. A model's own `reasoning` **replaces** this rather than merging, because a merged
+   * ladder would offer a level the model never declared.
+   */
+  readonly reasoning?: ReasoningLevels
   /** The cloud project a publisher route is addressed under. Required by `anthropic-vertex`. */
   readonly project?: string
   /** The region of that project's endpoint, for example `global`. Required by `anthropic-vertex`. */
@@ -137,6 +208,50 @@ export interface EndpointConfig {
   readonly proxy?: string
   /** Milliseconds before a request is abandoned. */
   readonly timeoutMs?: number
+}
+
+/**
+ * The model types an endpoint offers, normalised from both configuration shapes.
+ *
+ * A string entry is an id with no display name, so `models: ['a', 'b']` and
+ * `models: [{ id: 'a' }, { id: 'b' }]` mean the same thing. An endpoint with no `models` offers its single
+ * `model`; one with neither offers nothing. The order is the user's declaration order, because that is the
+ * order the menu shows and a re-ordering nobody asked for is how a selector becomes hard to find things in.
+ */
+export function offeredModels(endpoint: EndpointConfig): readonly ModelOption[] {
+  const declared = endpoint.models
+  if (declared !== undefined) {
+    return declared
+      .map((entry) => (typeof entry === 'string' ? { id: entry } : entry))
+      .filter((entry) => typeof entry.id === 'string' && entry.id.trim().length > 0)
+  }
+  return endpoint.model !== undefined && endpoint.model.length > 0 ? [{ id: endpoint.model }] : []
+}
+
+/** The catalogue entry a model id names, or `undefined` when the endpoint does not offer it. */
+export function modelOptionOf(endpoint: EndpointConfig, modelId: string | undefined): ModelOption | undefined {
+  if (modelId === undefined) return undefined
+  return offeredModels(endpoint).find((model) => model.id === modelId)
+}
+
+/**
+ * The levels a model offers: its own block, else the endpoint's, else none.
+ *
+ * `modelId` absent means "the model a call would use", which is the endpoint's default — a request that
+ * names no model still has an effort ladder to show, and reading it from the endpoint is what makes that so.
+ */
+export function reasoningLevelsFor(endpoint: EndpointConfig, modelId?: string): ReasoningLevels | undefined {
+  const model = modelOptionOf(endpoint, modelId ?? endpoint.model)
+  return model?.reasoning ?? endpoint.reasoning
+}
+
+/** One declared level of one model, by id. */
+export function reasoningLevelFor(
+  endpoint: EndpointConfig,
+  modelId: string | undefined,
+  effortId: string,
+): ReasoningLevel | undefined {
+  return reasoningLevelsFor(endpoint, modelId)?.levels.find((level) => level.id === effortId)
 }
 
 /** A provider backend: one wire shape, one endpoint. */

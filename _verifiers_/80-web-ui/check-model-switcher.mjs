@@ -3,39 +3,74 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, isolatedHome, removeDir, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, isolatedHome, removeDir, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
- * The LLM switcher, judged in a browser against two real doubles.
+ * The model selector, judged in a browser against DSH's measured control.
  *
- * The claim is the owner's: a session's model can be switched from the bottom of the chat panel. Every part of
- * that sentence is judged here, and each one has a failure mode a screenshot would not show:
+ * The owner's claim (2026-10-17) has three parts, and each is judged here where a screenshot cannot:
  *
- * - **the list is the server's**, so a page cannot offer a backend the run does not have — and it must be
- *   drawn by the page rather than by a native `<select>`, because an endpoint a session recorded that the
- *   configuration no longer holds still has to be named;
- * - **choosing one asks that backend**, which is measured where it happens: one double receives the next
- *   turn and the other receives nothing;
- * - **the choice is recorded on the session**, which is what a reload is: the second `goto` has no page
- *   memory at all, and the seat has to come back to the same endpoint from the server's answer alone.
+ * - **two tiers, configured by the user in `~/.heddle/`**: an endpoint, and the model types it offers. The page
+ *   only draws what `/api/endpoints` describes, so the menu's groups are endpoints and its options are models;
+ * - **the reference is DSH's `conversation.input.model`**, measured on 2026-10-17: a 28px two-span trigger
+ *   (model + effort caption), a two-level menu (root `Model`/`Effort` rows; model list grouped with sticky
+ *   headings and search above four entries), fixed placement above and right-aligned with a 12px clamp, keyboard
+ *   roving and Escape/back, focus restored without a ring after a selection;
+ * - **a reasoning level is shown only when it is enforced**: the level exists only where the endpoint's model
+ *   declares it, its wire value is what the adapter sends, and the turn's request body is where that is measured.
  *
- * The two doubles are the two endpoints, which is DSH's shape: `conversation.input.model` offers the backends
- * the host knows, and selecting one binds it to **this session** rather than to the harness.
+ * The two endpoints are local doubles so "which backend answered" and "what effort was sent" are countable facts.
+ * Every number in an assertion below is a `getBoundingClientRect`/`getComputedStyle` reading of the served page;
+ * the reference numbers and the fields this check deliberately does not judge are in
+ * `_context_/dsh-mechanisms/dsh-model-selector.md`.
  */
 
-const CAPABILITY = 'the Web UI'
+const CAPABILITY = 'the model selector in the Web UI'
 
-/** Two endpoints, each its own local double, so which one answered is a countable fact. */
-async function startServer(label) {
-  const home = isolatedHome(`switcher-${label}`)
-  const work = fixtureDir(`switcher-${label}-work`)
-  const one = await chatDouble({ content: 'answer from one' })
-  const two = await chatDouble({ content: 'answer from two' })
+/** Two endpoints whose answers are distinguishable, and which record what they were asked. */
+async function startServer(label, options = {}) {
+  const home = isolatedHome(`model-switcher-${label}`)
+  const work = fixtureDir(`model-switcher-${label}-work`)
+  const one = options.toolFirst === true
+    ? await toolThenPlainDouble('answer from one', options.holdOpenMs ?? 1400)
+    : await plainDouble('answer from one')
+  const two = await plainDouble('answer from two')
   const config = writeJson(join(home, 'heddle.json'), {
     default: 'double-one',
     endpoints: [
-      { name: 'double-one', kind: 'openai-chat', baseUrl: one.baseUrl, model: 'model-one', stream: true },
-      { name: 'double-two', kind: 'openai-chat', baseUrl: two.baseUrl, model: 'model-two', stream: true },
+      {
+        name: 'double-one',
+        kind: 'openai-chat',
+        baseUrl: one.baseUrl,
+        model: 'model-one',
+        capabilities: ['chat', 'stream'],
+        models: [
+          { id: 'model-one', name: 'Model One' },
+          { id: 'model-one-pro', name: 'Model One Pro' },
+        ],
+      },
+      {
+        name: 'double-two',
+        kind: 'openai-chat',
+        baseUrl: two.baseUrl,
+        model: 'model-two',
+        capabilities: ['chat', 'stream'],
+        models: [
+          {
+            id: 'model-two',
+            name: 'Model Two',
+            reasoning: {
+              default: 'high',
+              levels: [
+                { id: 'low', name: 'Low', value: 'low' },
+                { id: 'high', name: 'High', value: 'high' },
+                { id: 'max', name: 'Max', value: 'max' },
+              ],
+            },
+          },
+          { id: 'model-two-lite', name: 'Model Two Lite' },
+        ],
+      },
     ],
   })
   const child = await startCli(
@@ -46,6 +81,7 @@ async function startServer(label) {
     one,
     two,
     url: child.url,
+    work,
     close: async () => {
       child.kill()
       await one.close()
@@ -53,6 +89,90 @@ async function startServer(label) {
       removeDir(home)
       removeDir(work)
     },
+  }
+}
+
+/** An SSE chat double that records each request body and answers with one text delta. */
+async function plainDouble(content) {
+  const { createServer } = await import('node:http')
+  const requests = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      requests.push({ url: request.url ?? '', body })
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
+  const address = server.address()
+  const port = typeof address === 'object' && address !== null ? address.port : 0
+  return {
+    baseUrl: `http://127.0.0.1:${port}/d`,
+    requests,
+    close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
+  }
+}
+
+/**
+ * A double whose **first** answer is a tool call, held open for `holdOpenMs`, and whose later answers are text.
+ *
+ * The hold is what makes a turn observably running while a person switches the model: a tool round gives the
+ * loop a second model call, and that second call is where "the switch landed on the turn's next step" is measured
+ * rather than assumed.
+ */
+async function toolThenPlainDouble(content, holdOpenMs) {
+  const { createServer } = await import('node:http')
+  const requests = []
+  let count = 0
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      count += 1
+      requests.push({ url: request.url ?? '', body, at: Date.now() })
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      const first = count === 1
+      const finish = () => {
+        if (first) {
+          response.write(
+            `data: ${JSON.stringify({
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      { index: 0, id: 'call-1', type: 'function', function: { name: 'list_dir', arguments: '{"path":"."}' } },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            })}\n\n`,
+          )
+        } else {
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`)
+        }
+        response.write('data: [DONE]\n\n')
+        response.end()
+      }
+      if (first) setTimeout(finish, holdOpenMs)
+      else finish()
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
+  const address = server.address()
+  const port = typeof address === 'object' && address !== null ? address.port : 0
+  return {
+    baseUrl: `http://127.0.0.1:${port}/d`,
+    requests,
+    close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
   }
 }
 
@@ -89,9 +209,9 @@ function startCli(args, options) {
         if (!settled) {
           settled = true
           child.kill('SIGKILL')
-          reject(new Error(`the server printed no URL within 15s\n${output}`))
+          reject(new Error(`the server printed no URL within 20s\n${output}`))
         }
-      }, 15_000)
+      }, 20_000)
     })()
   })
 }
@@ -104,110 +224,566 @@ async function cookieFor(url) {
   return cookie.split(';')[0]
 }
 
-test('a session can be switched to another endpoint, and the switch survives a reload', async (context) => {
-  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  const server = await startServer('switch')
-  const browser = await openBrowser({ width: 1280, height: 900 })
+/**
+ * One trusted key event the page can act on, through the protocol the browser wrapper exposes.
+ *
+ * `Enter` carries its carriage-return text, because a `rawKeyDown` with no text does not run a focused button's
+ * default activation — measured while writing this check: the drill never happened and focus stayed on the row.
+ */
+async function press(browser, key) {
+  const descriptions = {
+    Enter: { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
+    Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+    Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+  }
+  const description = descriptions[key]
+  if (description === undefined) throw new Error(`no key description for ${key}`)
+  const common = {
+    key: description.key,
+    code: description.code,
+    windowsVirtualKeyCode: description.keyCode,
+    nativeVirtualKeyCode: description.keyCode,
+  }
+  await browser.send('Input.dispatchKeyEvent', {
+    type: description.text === undefined ? 'rawKeyDown' : 'keyDown',
+    ...common,
+    ...(description.text === undefined ? {} : { text: description.text, unmodifiedText: description.text }),
+  })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+}
+
+/** Type text into whatever holds page focus, the way a keyboard would. */
+async function typeText(browser, text) {
+  await browser.send('Input.insertText', { text })
+}
+
+/**
+ * Collect the page's own errors from the moment the document is created.
+ *
+ * Installed before `goto` because a module that throws on load leaves a page that still renders markup — measured
+ * on 2026-10-17, when a concurrent edit left every behaviour missing while the screen looked like a page.
+ */
+async function watchErrors(browser) {
+  await browser.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `window.__pageErrors = []
+      addEventListener('error', (event) => window.__pageErrors.push(String(event.message)))
+      addEventListener('unhandledrejection', (event) => window.__pageErrors.push(String(event.reason)))`,
+  })
+}
+
+/** The page's own errors, as the injected watcher recorded them. */
+async function pageErrors(browser) {
+  const collected = await browser.evaluate(`JSON.stringify(window.__pageErrors ?? [])`)
+  return JSON.parse(collected)
+}
+
+/** Wait for a node-side fact (a double's request, usually) to become true. */
+async function until(predicate, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate() && Date.now() < deadline) await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+  return predicate()
+}
+
+/** The page-side readings this check asserts on, named once so every test reads the same surface. */
+const SEAT = `document.getElementById('model-trigger')`
+const SEAT_READ = `(() => {
+  const trigger = ${SEAT}
+  const style = getComputedStyle(trigger)
+  const rect = trigger.getBoundingClientRect()
+  return {
+    aria: trigger.getAttribute('aria-label'),
+    title: trigger.getAttribute('title'),
+    text: trigger.innerText.replace(/\\n/g, '|'),
+    spans: [...trigger.querySelectorAll('span')].map((node) => ({
+      id: node.id,
+      text: node.innerText,
+      hidden: node.hidden === true,
+      color: getComputedStyle(node).color,
+    })),
+    box: [Math.round(rect.width), Math.round(rect.height)],
+    font: style.fontSize + '/' + style.lineHeight,
+    padding: style.padding,
+    gap: style.gap,
+    radius: style.borderRadius,
+    color: style.color,
+    cursor: style.cursor,
+    background: style.backgroundColor,
+    boxShadow: style.boxShadow,
+    disabled: trigger.disabled,
+    expanded: trigger.getAttribute('aria-expanded'),
+    busy: trigger.getAttribute('aria-busy'),
+    selectionFocus: trigger.hasAttribute('data-selection-focus'),
+  }
+})()`
+const MENU_READ = `(() => {
+  const menu = document.getElementById('model-menu')
+  const rect = menu.getBoundingClientRect()
+  const trigger = ${SEAT}.getBoundingClientRect()
+  const style = getComputedStyle(menu)
+  return {
+    hidden: menu.hidden,
+    role: menu.getAttribute('role'),
+    aria: menu.getAttribute('aria-label'),
+    box: [Math.round(rect.width), Math.round(rect.height)],
+    at: [Math.round(rect.left), Math.round(rect.top)],
+    rightAligned: Math.abs(rect.right - trigger.right) <= 1,
+    above: Math.round(trigger.top - rect.bottom),
+    position: style.position,
+    radius: style.borderRadius,
+    padding: style.padding,
+    maxHeight: style.maxHeight,
+    zIndex: style.zIndex,
+    shadow: style.boxShadow,
+    cells: [...menu.querySelectorAll('[role="menuitem"]')].map((cell) => {
+      const cellRect = cell.getBoundingClientRect()
+      return {
+        text: cell.innerText.replace(/\\n/g, '|'),
+        box: [Math.round(cellRect.width), Math.round(cellRect.height)],
+        font: getComputedStyle(cell).fontSize + '/' + getComputedStyle(cell).lineHeight,
+        radius: getComputedStyle(cell).borderRadius,
+        valueColor: getComputedStyle(cell.querySelector('.cell-value')).color,
+      }
+    }),
+    headings: [...menu.querySelectorAll('.model-group-heading')].map((heading) => ({
+      text: heading.innerText,
+      font: getComputedStyle(heading).fontSize + '/' + getComputedStyle(heading).lineHeight,
+      weight: getComputedStyle(heading).fontWeight,
+      color: getComputedStyle(heading).color,
+      box: [Math.round(heading.getBoundingClientRect().width), Math.round(heading.getBoundingClientRect().height)],
+    })),
+    options: [...menu.querySelectorAll('[role="menuitemradio"]')].map((option) => ({
+      text: option.innerText,
+      checked: option.getAttribute('aria-checked'),
+      disabled: option.disabled,
+      box: [Math.round(option.getBoundingClientRect().width), Math.round(option.getBoundingClientRect().height)],
+      font: getComputedStyle(option).fontSize + '/' + getComputedStyle(option).lineHeight,
+      radius: getComputedStyle(option).borderRadius,
+      padding: getComputedStyle(option).padding,
+      check: option.querySelector('.option-check svg') === null
+        ? null
+        : (() => {
+            const box = option.querySelector('.option-check svg').getBoundingClientRect()
+            return [Math.round(box.width), Math.round(box.height)]
+          })(),
+    })),
+    search: menu.querySelector('input[role="searchbox"]') === null
+      ? null
+      : (() => {
+          const input = menu.querySelector('input[role="searchbox"]')
+          return { placeholder: input.placeholder, font: getComputedStyle(input).fontSize }
+        })(),
+    active: document.activeElement === null ? null : document.activeElement.getAttribute('role') ?? document.activeElement.id,
+  }
+})()`
+
+/** Open the menu from the seat with a click on the trigger. */
+async function openMenu(browser) {
+  await browser.evaluate(`${SEAT}.click()`)
+  await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 5000)
+}
+
+/** Click one of the menu's root cells (`Model` or `Effort`). */
+async function drill(browser, label) {
+  await browser.evaluate(
+    `[...document.querySelectorAll('#model-menu [role="menuitem"]')].find((cell) => cell.innerText.startsWith(${JSON.stringify(label)})).click()`,
+  )
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+}
+
+/** Click one of the open pane's options by its visible name. */
+async function choose(browser, text) {
+  await browser.evaluate(
+    `[...document.querySelectorAll('#model-menu [role="menuitemradio"]')].find((option) => option.innerText === ${JSON.stringify(text)}).click()`,
+  )
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
+}
+
+/** The session records the server would hand a reload. */
+async function sessionsOf(server) {
+  const cookie = await cookieFor(server.url)
+  return (await (await fetch(new URL('/api/sessions', server.url), { headers: { cookie } })).json())
+}
+
+test('the seat and its two-level menu are DSH’s measured control', async (context) => {
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('anatomy')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
   try {
+    await watchErrors(browser)
     await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.getElementById("model-label") !== null', 20_000), 'the panel is up')
+    assert.ok(await browser.waitFor(`document.getElementById('model-trigger') !== null`, 20_000), 'the composer is up')
+    assert.ok(
+      await browser.waitFor(`document.getElementById('model-trigger').getAttribute('aria-label').includes('Model One')`, 10_000),
+      'the endpoint catalogue reached the seat',
+    )
 
     /**
-     * The seat starts on the endpoint the run nominated, which is what `selectWorkspace`-style defaults mean:
-     * a page that opened on the first row of the list would ignore `--endpoint` and the configuration.
+     * The trigger: DSH measured 189x28 at 13px/20px, padding 0 4px 0 8px, gap 4, radius 8, `#cfd3d6` text, and a
+     * second span for the effort in `rgb(129,133,140)`. The width follows the label; the rest is the control.
      */
-    assert.equal(
-      await browser.evaluate('document.getElementById("model-label").textContent'),
-      'double-one · model-one',
-      'the seat shows the endpoint the run nominated',
-    )
+    const seat = await browser.evaluate(SEAT_READ)
+    assert.equal(seat.aria, 'Select model, current Model One', 'the accessible name carries the control and its value')
+    assert.equal(seat.title, 'Model One', 'and the title is the visible label')
+    assert.equal(seat.text, 'Model One', 'no effort span for a model that declares no levels')
+    assert.deepEqual(seat.box, [94, 28], 'DSH’s 28px-tall trigger')
+    assert.equal(seat.font, '13px/20px', 'DSH’s trigger type')
+    assert.equal(seat.padding, '0px 4px 0px 8px', 'DSH’s trigger inset')
+    assert.equal(seat.gap, '4px', 'and its span gap')
+    assert.equal(seat.radius, '8px', 'and its radius')
+    assert.equal(seat.color, 'rgb(207, 211, 214)', 'the model span is the secondary text colour')
+    assert.equal(seat.cursor, 'pointer', 'the trigger is a control, so its cursor is a hand')
+    assert.equal(seat.spans.find((span) => span.id === 'model-effort').hidden, true, 'the effort span exists but is hidden')
 
-    /** The menu holds every configured endpoint, with the current one marked, and it is drawn by the page. */
-    await browser.evaluate('document.getElementById("model-trigger").click()')
-    const menu = JSON.parse(
-      await browser.evaluate(`JSON.stringify(Array.from(document.querySelectorAll('#model-menu button')).map((item) => ({
-        text: item.textContent,
-        checked: item.getAttribute('aria-checked')
-      })))`),
+    /** Hover paints DSH's 8% surface and clearing the pointer removes it. */
+    const at = await browser.evaluate(
+      `(() => { const r = ${SEAT}.getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }) })()`,
     )
-    const names = menu.map((item) => item.text)
-    assert.ok(names.some((text) => text.startsWith('double-one')), `the list names the endpoints (${names.join(', ')})`)
-    assert.ok(names.some((text) => text.startsWith('double-two')), 'all of them, not only the default')
-    assert.equal(menu.find((item) => item.text.startsWith('double-one')).checked, 'true', 'the current one is marked')
+    const point = JSON.parse(at)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' })
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    const hover = await browser.evaluate(`getComputedStyle(${SEAT}).backgroundColor`)
+    assert.match(hover, /0\.08/, 'hover shows the reference’s 8% surface')
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'none' })
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    assert.equal(await browser.evaluate(`getComputedStyle(${SEAT}).backgroundColor`), 'rgba(0, 0, 0, 0)', 'and it clears')
 
-    /** Choosing one takes effect: the next turn is answered by the other double, and only by it. */
-    await browser.evaluate(`Array.from(document.querySelectorAll('#model-menu button')).find((item) => item.textContent.startsWith('double-two')).click()`)
-    assert.equal(
-      await browser.evaluate('document.getElementById("model-label").textContent'),
-      'double-two · model-two',
-      'the seat shows the new choice at once',
-    )
-    await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'who answers?'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); return true })()`)
-    assert.ok(
-      await browser.waitFor('document.getElementById("log").innerText.includes("answer from two")', 20_000),
-      'the chosen endpoint answered the turn',
-    )
-    assert.equal(server.two.requests.length, 1, 'the chosen double was asked')
-    assert.equal(server.one.requests.length, 0, 'and the previous endpoint was not')
+    /** Focus draws DSH's 2px ring in this theme's accent, as a box-shadow and not an outline. */
+    await browser.evaluate(`${SEAT}.focus()`)
+    const ring = await browser.evaluate(`getComputedStyle(${SEAT}).boxShadow`)
+    assert.match(ring, /0px 0px 0px 2px/, 'focus-visible is a 2px box-shadow ring')
+    assert.match(ring, /rgb\(38, 148, 254\)/, 'in the page’s accent colour (this theme’s blue, not DSH’s)')
 
-    /**
-     * The choice is on the session, not only in the page. Read it over the API — the same record the tree and
-     * a listing read — and then **reload**, which throws away every variable on the page: a switch that lived
-     * only in memory would come back to the default here.
-     */
-    const cookie = await cookieFor(server.url)
-    const sessions = await (await fetch(new URL('/api/sessions', server.url), { headers: { cookie } })).json()
-    const newest = sessions[0]
-    assert.equal(newest?.endpoint, 'double-two', `the session records the endpoint it was switched to (${JSON.stringify(newest)})`)
+    await openMenu(browser)
+    const menu = await browser.evaluate(MENU_READ)
+    assert.equal(menu.role, 'menu', 'the root pane is a menu')
+    assert.equal(menu.aria, 'Model and reasoning effort', 'and says what the two rows are for')
+    assert.equal(menu.position, 'fixed', 'the menu is in viewport coordinates, so no scrolling ancestor can clip it')
+    assert.equal(menu.radius, '16px', 'DSH’s menu radius')
+    assert.equal(menu.padding, '4px', 'and its 4px inset')
+    assert.notEqual(menu.shadow, 'none', 'and its elevation')
+    assert.ok(menu.rightAligned, 'the menu is right-aligned to the trigger')
+    assert.equal(menu.above, 8, 'and opens 8px above it, as DSH places it')
+    assert.equal(menu.cells.length, 1, 'a model without levels has no Effort row')
+    assert.equal(menu.cells[0].text, 'Model|Model One', 'the Model row shows the current model')
+    assert.deepEqual(menu.cells[0].box, [232, 34], 'a root row is 34px tall')
+    assert.equal(menu.cells[0].font, '13px/20px', 'and DSH’s row type')
+    assert.equal(menu.cells[0].radius, '12px', 'and its 12px radius')
+    assert.equal(menu.cells[0].valueColor, 'rgb(173, 178, 184)', 'the value is the muted colour DSH uses')
 
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.getElementById("model-label") !== null', 20_000), 'the panel came back')
-    assert.ok(
-      await browser.waitFor('document.getElementById("model-label").textContent.startsWith("double-two")', 10_000),
-      'and the seat came back to the recorded endpoint rather than to the default',
-    )
+    await drill(browser, 'Model')
+    const modelPane = await browser.evaluate(MENU_READ)
+    assert.equal(modelPane.role, 'group', 'the model pane is a group of grouped lists, as DSH’s is')
+    assert.equal(modelPane.search.placeholder, 'Search models…', 'more than four models shows search')
+    assert.equal(modelPane.search.font, '12px', 'the search field is DSH’s 12px')
+    const headingTexts = modelPane.headings.map((heading) => heading.text)
+    assert.ok(headingTexts.includes('double-one'), `the first endpoint heads its group (${headingTexts.join(', ')})`)
+    assert.ok(headingTexts.includes('double-two'), 'and so does the second — that is the second tier')
+    assert.equal(modelPane.headings[0].font, '11px/16px', 'a group heading is DSH’s 11/16')
+    assert.equal(modelPane.headings[0].weight, '500', 'at weight 500')
+    assert.equal(modelPane.headings[0].color, 'rgb(173, 178, 184)', 'in the muted colour')
+    assert.deepEqual(modelPane.headings[0].box, [232, 22], 'and 22px tall')
+    const names = modelPane.options.map((option) => option.text)
+    for (const name of ['Model One', 'Model One Pro', 'Model Two', 'Model Two Lite']) {
+      assert.ok(names.includes(name), `the pane offers ${name} (${names.join(', ')})`)
+    }
+    const checked = modelPane.options.filter((option) => option.checked === 'true')
+    assert.deepEqual(checked.map((option) => option.text), ['Model One'], 'exactly the current model is marked')
+    assert.ok(checked[0].check !== null, 'and it carries a check')
+    assert.deepEqual(checked[0].check, [14, 14], 'DSH’s 14px check')
+    const option = modelPane.options.find((entry) => entry.text === 'Model One Pro')
+    assert.deepEqual(option.box, [232, 34], 'an option is 34px tall')
+    assert.equal(option.font, '13px/18px', 'and DSH’s 13/18 type')
+    assert.equal(option.radius, '12px', 'with a 12px radius')
+    assert.equal(option.padding, '5px 7px', 'and DSH’s 5/7 inset')
+    await browser.screenshot(join(server.work, 'model-switcher-model-pane.png'))
+
+    /** Escape leaves the drilled pane first, then closes; focus returns to the trigger. */
+    await press(browser, 'Escape')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    assert.equal(await browser.evaluate(`${SEAT}.getAttribute('aria-expanded')`), 'true', 'the first Escape goes back to the root pane')
+    await press(browser, 'Escape')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    assert.equal(await browser.evaluate(`document.getElementById('model-menu').hidden`), true, 'the second closes')
+    assert.equal(await browser.evaluate(`document.activeElement === ${SEAT}`), true, 'and focus returns to the seat')
+
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
   } finally {
     browser.close()
     await server.close()
   }
 })
 
-test('the switcher refuses an endpoint the run does not have', async (context) => {
+test('choosing a model type and an effort is recorded, sent, and survives a reload', async (context) => {
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('record')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`document.getElementById('model-trigger') !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+
+    /**
+     * A first turn creates the session, because a choice made before one exists travels with the turn that creates
+     * it rather than being posted — the model seat is a per-session record, and there is no session to record on
+     * yet. Everything after this is a switch on a session that exists.
+     */
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'first'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from one')`, 20_000), 'the first endpoint answered')
+    assert.ok(await until(() => server.one.requests.length === 1), 'the session exists and has a record')
+
+    /**
+     * Select the second endpoint's reasoning-capable model. DSH records the model's **default effort** with the
+     * model, so the seat immediately reads model + effort and the record names both.
+     */
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    await choose(browser, 'Model Two')
+    const afterModel = await browser.evaluate(SEAT_READ)
+    assert.equal(afterModel.aria, 'Select model, current Model Two, reasoning effort High', 'the seat shows the new model and its default effort')
+    assert.equal(afterModel.title, 'Model Two · High', 'the title joins the two with DSH’s separator')
+    assert.equal(afterModel.text, 'Model Two|High', 'the label is two spans, not one joined string')
+    assert.equal(afterModel.expanded, 'false', 'the menu closed on the selection')
+    assert.equal(await browser.evaluate(`document.activeElement === ${SEAT}`), true, 'and focus came back to the seat')
+    assert.equal(await browser.evaluate(`getComputedStyle(${SEAT}).boxShadow`), 'none', 'without a focus ring')
+    const effortSpan = afterModel.spans.find((span) => span.id === 'model-effort')
+    assert.equal(effortSpan.hidden, false, 'the effort span is visible')
+    assert.equal(effortSpan.color, 'rgb(129, 133, 140)', 'and painted in DSH’s caption tone')
+    const record = (await sessionsOf(server))[0]
+    assert.equal(record?.endpoint, 'double-two', 'the session records the endpoint')
+    assert.equal(record?.model, 'model-two', 'and the model type')
+    assert.equal(record?.reasoningEffort, 'high', 'and the level it shows, so a reload re-derives the same seat')
+
+    /** The Effort row appears for a model that declares levels, and its pane is the declared ladder. */
+    await openMenu(browser)
+    const root = await browser.evaluate(MENU_READ)
+    assert.deepEqual(root.cells.map((cell) => cell.text), ['Model|Model Two', 'Effort|High'], 'the root pane now has both rows')
+    await drill(browser, 'Effort')
+    const effortPane = await browser.evaluate(MENU_READ)
+    assert.deepEqual(effortPane.options.map((option) => option.text), ['Low', 'High', 'Max'], 'the pane offers exactly the declared levels')
+    assert.deepEqual(effortPane.options.filter((option) => option.checked === 'true').map((option) => option.text), ['High'], 'with the current one marked')
+    await browser.screenshot(join(server.work, 'model-switcher-effort-pane.png'))
+    await choose(browser, 'Low')
+    const afterEffort = await browser.evaluate(SEAT_READ)
+    assert.equal(afterEffort.aria, 'Select model, current Model Two, reasoning effort Low', 'the seat follows the level at once')
+    assert.equal((await sessionsOf(server))[0]?.reasoningEffort, 'low', 'and the session records it')
+
+    /** A turn is answered by the chosen endpoint with the chosen model and the declared wire value. */
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'who answers?'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the chosen endpoint answered')
+    assert.ok(await until(() => server.two.requests.length === 1), 'the chosen double was asked once')
+    assert.equal(server.one.requests.length, 1, 'and the previous endpoint was asked only for the creating turn')
+    const asked = JSON.parse(server.two.requests[0].body)
+    assert.equal(asked.model, 'model-two', 'the request names the chosen model')
+    assert.equal(asked.reasoning_effort, 'low', 'and sends the level’s wire value, which is what “shown” has to mean')
+
+    /**
+     * Reload, which throws every variable on the page away: the seat has to come back from the server's record
+     * alone. This is the same claim the API-level assertion makes, read through the control this time.
+     */
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(
+      await browser.waitFor(`document.getElementById('model-trigger').getAttribute('aria-label').includes('Model Two, reasoning effort Low')`, 10_000),
+      'the seat came back to the recorded model and level',
+    )
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('the menu is keyboard-operable and a selection restores focus without a ring', async (context) => {
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('keyboard')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+    await browser.evaluate(`${SEAT}.focus()`)
+    await openMenu(browser)
+
+    /** Tab from the trigger enters the root pane; Enter drills; the model pane focuses its search field. */
+    await press(browser, 'Tab')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('role')`), 'menuitem', 'Tab enters the root rows')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('role')`), 'searchbox', 'Enter drills into the model list and focuses search')
+    await typeText(browser, 'pro')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    assert.deepEqual(
+      await browser.evaluate(`JSON.parse(JSON.stringify([...document.querySelectorAll('#model-menu [role="menuitemradio"]')].map((option) => option.innerText)))`),
+      ['Model One Pro'],
+      'typing filters the list',
+    )
+    assert.equal(
+      await browser.evaluate(`document.querySelectorAll('#model-menu [role="menuitemradio"][data-highlighted]').length`),
+      1,
+      'with the first result highlighted',
+    )
+    await press(browser, 'ArrowDown')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400))
+    const picked = await browser.evaluate(SEAT_READ)
+    assert.equal(picked.aria, 'Select model, current Model One Pro', 'the highlighted result is selected by Enter')
+    assert.equal(picked.selectionFocus, true, 'selection focus is marked, so the ring stays off until blur')
+    assert.equal(picked.boxShadow, 'none', 'and no ring is painted')
+
+    /** Escape in a drilled pane goes back; Escape on the root closes; focus stays on the seat. */
+    await openMenu(browser)
+    await press(browser, 'Tab')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    await press(browser, 'Escape')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    assert.equal(await browser.evaluate(`${SEAT}.getAttribute('aria-expanded')`), 'true', 'Escape leaves the drilled pane')
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('role')`), 'menuitem', 'handing focus back to the root row')
+    await press(browser, 'Escape')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+    assert.equal(await browser.evaluate(`document.getElementById('model-menu').hidden`), true, 'Escape on the root closes')
+    assert.equal(await browser.evaluate(`document.activeElement === ${SEAT}`), true, 'and focus lands on the seat')
+
+    /** Choosing an effort from the keyboard: Tab to the Effort row, Enter, arrow, Enter. */
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    await choose(browser, 'Model Two')
+    await openMenu(browser)
+    await press(browser, 'Tab')
+    await press(browser, 'ArrowDown')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+    assert.equal(await browser.evaluate(`document.activeElement.innerText.startsWith('Effort')`), true, 'arrows reach the Effort row')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('role')`), 'menuitemradio', 'Enter drills into the levels')
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('aria-checked')`), 'true', 'with the current level focused')
+    await press(browser, 'ArrowDown')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400))
+    assert.equal(
+      await browser.evaluate(`${SEAT}.getAttribute('aria-label')`),
+      'Select model, current Model Two, reasoning effort Max',
+      'arrows move the level and Enter selects it',
+    )
+
+    /** A mousedown outside closes the menu, which is DSH's dismissal rule. */
+    await openMenu(browser)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 40, y: 40, button: 'none' })
+    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 40, button: 'left', clickCount: 1 })
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 40, y: 40, button: 'left', clickCount: 1 })
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    assert.equal(await browser.evaluate(`document.getElementById('model-menu').hidden`), true, 'a click outside dismisses the menu')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a switch made while a turn runs lands on that turn’s next step', async (context) => {
+  /**
+   * DSH's running-turn rule, measured on 2026-10-17: the seat stays enabled while a turn streams, and the switch
+   * takes effect on a later step of the same turn (not merely on the next turn). The first double answers with a
+   * tool call held open long enough to switch; the loop's second model call must then reach the second endpoint.
+   */
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('running', { toolFirst: true, holdOpenMs: 1400 })
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    await watchErrors(browser)
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'do it'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('stop').hidden === false`, 10_000), 'the turn is running')
+    const running = await browser.evaluate(SEAT_READ)
+    assert.equal(running.disabled, false, 'the seat stays enabled during a running turn, as DSH’s does')
+    assert.equal(running.busy, null, 'and is not marked busy: only a pending selection is')
+
+    await openMenu(browser)
+    const menu = await browser.evaluate(MENU_READ)
+    assert.equal(menu.hidden, false, 'the menu opens while the turn runs')
+    assert.equal(menu.cells.every((cell) => cell.text.length > 0), true, 'with its rows drawn')
+    await browser.screenshot(join(server.work, 'model-switcher-running-menu.png'))
+    await drill(browser, 'Model')
+    await choose(browser, 'Model Two')
+    assert.equal(
+      await browser.evaluate(`${SEAT}.getAttribute('aria-label')`),
+      'Select model, current Model Two, reasoning effort High',
+      'the seat answers the switch at once',
+    )
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the same turn ends with the new endpoint’s answer')
+    assert.ok(await until(() => server.one.requests.length === 1), 'the first step asked the first endpoint')
+    assert.ok(await until(() => server.two.requests.length === 1), 'the next step asked the second')
+    assert.equal(JSON.parse(server.two.requests[0].body).model, 'model-two', 'with the newly chosen model')
+    assert.equal((await sessionsOf(server))[0]?.endpoint, 'double-two', 'and the session records the switch')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a model or a level the endpoint does not declare is refused, and nothing is recorded', async (context) => {
   /**
    * The route is the only place a name from a browser reaches the store, so it is validated there rather than
-   * trusted. This is judged over HTTP rather than in the browser because it is the route's rule: a typo must be
-   * refused **without** being recorded, or every following turn of that session fails with a name nobody
-   * chose.
+   * trusted. The refusals are distinct: an unconfigured endpoint, a model the endpoint does not offer, a level the
+   * model does not declare, and a level on a model that offers none. Recorded instead, each would fail every
+   * following turn of the session with a name nobody chose — and the seat would have shown a control for a value
+   * the provider never receives.
    */
-  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
   const server = await startServer('refuse')
   try {
     const cookie = await cookieFor(server.url)
-    const created = await fetch(new URL('/api/folders/session', server.url), {
+    /**
+     * A scratch home has no registered workspace root, so the folder route cannot mint a session here — a turn
+     * does, and it is the same session the panel would show afterwards.
+     */
+    const turn = await fetch(new URL('/api/turn', server.url), {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ folder: process.cwd() }),
-    }).then((response) => response.json())
-    const id = created.session?.id ?? created.session
-    assert.ok(typeof id === 'string' && id.length > 0, `a session exists to switch (${JSON.stringify(created)})`)
-
-    const refused = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, server.url), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ endpoint: 'no-such-endpoint' }),
+      body: JSON.stringify({ prompt: 'a session to switch' }),
     })
-    assert.equal(refused.status, 400, 'an endpoint the run does not have is refused')
-    const sessions = await (await fetch(new URL('/api/sessions', server.url), { headers: { cookie } })).json()
-    assert.notEqual(sessions.find((session) => session.id === id)?.endpoint, 'no-such-endpoint', 'and nothing was recorded')
+    assert.equal(turn.status, 200, 'a turn starts a session')
+    await turn.text()
+    const sessions = await sessionsOf(server)
+    const id = sessions[0]?.id
+    assert.ok(typeof id === 'string' && id.length > 0, `a session exists to switch (${JSON.stringify(sessions[0] ?? null)})`)
+    const switchTo = (body) =>
+      fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, server.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      })
 
-    const allowed = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, server.url), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ endpoint: 'double-two' }),
-    })
-    assert.equal(allowed.status, 200, 'a configured endpoint is accepted')
-    const switched = await allowed.json()
-    assert.equal(switched.endpoint, 'double-two', 'and the answer is the session record')
+    const unknownEndpoint = await switchTo({ endpoint: 'no-such-endpoint' })
+    assert.equal(unknownEndpoint.status, 400, 'an endpoint the run does not have is refused')
+    const unknownModel = await switchTo({ endpoint: 'double-two', model: 'model-z' })
+    assert.equal(unknownModel.status, 400, 'a model the endpoint does not offer is refused')
+    assert.match((await unknownModel.json()).error, /model-z/, 'naming the model that was asked for')
+    const unknownEffort = await switchTo({ endpoint: 'double-two', model: 'model-two', reasoningEffort: 'ghost' })
+    assert.equal(unknownEffort.status, 400, 'a level the model does not declare is refused')
+    assert.match((await unknownEffort.json()).error, /ghost/, 'naming the level that was asked for')
+    const noLevels = await switchTo({ endpoint: 'double-one', model: 'model-one-pro', reasoningEffort: 'low' })
+    assert.equal(noLevels.status, 400, 'a model that declares no levels cannot be given one')
+    assert.match((await noLevels.json()).error, /no reasoning/i, 'in a sentence that says why')
+    const after = await sessionsOf(server)
+    const session = after.find((entry) => entry.id === id)
+    assert.notEqual(session?.endpoint, 'no-such-endpoint', 'and nothing invalid was recorded')
+    assert.equal(session?.reasoningEffort, undefined, 'including the refused level')
+
+    const accepted = await switchTo({ endpoint: 'double-two', model: 'model-two', reasoningEffort: 'max' })
+    assert.equal(accepted.status, 200, 'a declared selection is accepted')
+    const record = await accepted.json()
+    assert.equal(record.endpoint, 'double-two', 'and the answer is the session record')
+    assert.equal(record.model, 'model-two', 'with the model')
+    assert.equal(record.reasoningEffort, 'max', 'and the level')
   } finally {
     await server.close()
   }

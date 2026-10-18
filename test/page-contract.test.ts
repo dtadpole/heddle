@@ -188,6 +188,8 @@ test("the page's module parses, because one syntax error leaves the whole UI wit
    */
   const extracted = /<script type="module">([\s\S]*?)<\/script>/.exec(page)
   assert.ok(extracted !== null, 'the page has a module script')
+  const module = extracted[1]
+  assert.ok(module !== undefined, 'the module script has a body')
   const directory = join(repoRoot, '.heddle-tmp')
   mkdirSync(directory, { recursive: true })
   const scratch = join(directory, 'page-module-guard.mjs')
@@ -197,4 +199,37 @@ test("the page's module parses, because one syntax error leaves the whole UI wit
   } finally {
     rmSync(scratch, { force: true })
   }
+})
+
+test('the model seat keeps the two tiers, the effort caption and the record that make it DSH’s control', () => {
+  /**
+   * Removal detectors for the parts a rewrite silently drops. The behaviour — the two-level menu, the keyboard, the
+   * record and its reload — is judged in `_verifiers_/80-web-ui/check-model-switcher.mjs`; a page whose markup lost
+   * one of these still renders and stops being the control the check names:
+   *
+   * - the trigger's **two spans**, because the effort is a caption beside the model, not a joined string;
+   * - the menu's name, because `Model and reasoning effort` is what announces the two rows;
+   * - the **reasoning effort sent with a turn**, because a level that is displayed and not posted is the
+   *   unenforced value the owner forbade;
+   * - the **effort row built only for a model that declares levels**, because a control there would offer a value
+   *   the adapter refuses to send.
+   */
+  assert.match(page, /id="model-seat"/, 'the seat exists')
+  assert.match(page, /id="model-trigger"[^>]*aria-haspopup="menu"[^>]*aria-controls="model-menu"/, 'the trigger is a menu button that names its menu')
+  assert.match(page, /<span id="model-label">/, 'the model label is its own span')
+  assert.match(page, /<span id="model-effort" hidden>/, 'and the effort is a second, hidden-until-declared span')
+  assert.match(page, /<span id="model-spinner" hidden>/, 'with a pending marker for a selection being recorded')
+  assert.match(page, /id="model-menu" role="menu" aria-label="Model and reasoning effort"/, 'the menu names both tiers')
+  assert.match(page, /function buildRootPane\(\)/, 'the root pane is built where the two levels are drawn')
+  assert.match(page, /if \(effort\.name !== undefined\) modelMenu\.append/, 'the Effort row exists only for a model that declares levels')
+  assert.match(page, /function buildModelPane\(\)/, 'the model tier is its own pane')
+  assert.match(page, /function buildEffortPane\(\)/, 'and the effort tier is its own pane')
+  assert.match(page, /\.model-group-heading/, 'the model pane groups by endpoint, as DSH groups by provider')
+  assert.match(page, /reasoningEffort: effort\.id/, 'a turn sends the level the seat shows')
+  assert.match(
+    page,
+    /applySessionModel\(body\.endpoint \?\? null, body\.model \?\? null, body\.reasoningEffort \?\? null\)/,
+    'a reload reads the recorded level with the endpoint and model',
+  )
+  assert.match(page, /placeModelMenu\(\)/, 'the menu is placed by script rather than by a css ancestor')
 })

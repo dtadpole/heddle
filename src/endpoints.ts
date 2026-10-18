@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 
-import type { EndpointConfig } from './llm/types.ts'
+import type { EndpointConfig, ModelOption, ReasoningLevels } from './llm/types.ts'
+import { offeredModels, reasoningLevelsFor } from './llm/types.ts'
 
 /**
  * Endpoint definitions and how they are resolved.
@@ -172,6 +173,16 @@ export function describeEndpoint(endpoint: EndpointConfig): Record<string, unkno
     kind: endpoint.kind,
     baseUrl: endpoint.baseUrl,
     ...(endpoint.model !== undefined ? { model: endpoint.model } : {}),
+    /**
+     * The two-tier catalogue: every model type this endpoint offers, with the name a person reads and the
+     * effort levels it declares. The levels travel **by id and name only** — the wire value is the adapter's
+     * business and never needs to reach a page, and a payload that cannot carry it cannot leak it.
+     *
+     * `models` is always present, even as an empty list, because the page's model pane draws its groups from
+     * this field: an endpoint with no model must read as "offers nothing", not as "this endpoint is old".
+     */
+    models: offeredModels(endpoint).map((model) => describeModel(endpoint, model)),
+    ...(endpoint.reasoning !== undefined ? { reasoning: describeReasoning(endpoint.reasoning) } : {}),
     ...(endpoint.project !== undefined ? { project: endpoint.project } : {}),
     ...(endpoint.region !== undefined ? { region: endpoint.region } : {}),
     ...(endpoint.proxy !== undefined ? { proxy: endpoint.proxy } : {}),
@@ -184,4 +195,55 @@ export function describeEndpoint(endpoint: EndpointConfig): Record<string, unkno
     ...(endpoint.apiKeyFile !== undefined ? { credentialFile: endpoint.apiKeyFile } : {}),
     ...(endpoint.headers !== undefined ? { headers: Object.keys(endpoint.headers) } : {}),
   }
+}
+
+/** One model type as a page reads it: id, display name, and effort ids/names. */
+function describeModel(endpoint: EndpointConfig, model: ModelOption): Record<string, unknown> {
+  /**
+   * A model without a block of its own inherits the endpoint's, because that is the ladder a request for it
+   * would be checked against — a page that showed no effort control there would hide a level the route accepts.
+   */
+  const reasoning = model.reasoning ?? endpoint.reasoning
+  return {
+    id: model.id,
+    name: model.name ?? model.id,
+    ...(reasoning !== undefined ? { reasoning: describeReasoning(reasoning) } : {}),
+  }
+}
+
+/** The effort ladder a page may show, without the provider's wire values. */
+function describeReasoning(reasoning: ReasoningLevels): Record<string, unknown> {
+  return {
+    ...(reasoning.default !== undefined ? { default: reasoning.default } : {}),
+    levels: reasoning.levels.map((level) => ({ id: level.id, name: level.name })),
+  }
+}
+
+/**
+ * Why a selection a page asked for is not one this endpoint offers, or `null` when it is.
+ *
+ * The route is the one place a name from a browser reaches the store, so it is checked here rather than
+ * trusted: an unvalidated model or effort would be recorded and then sent to the provider on every following
+ * turn, failing each of them with a name nobody chose. The message names what was asked and what is declared,
+ * because the page shows the server's own sentence where the person made the choice.
+ *
+ * `model` absent means the endpoint's default model, which is what the menu selects when a session has never
+ * named one; `effort` absent means "whatever the model uses by default" and is always acceptable.
+ */
+export function selectionProblem(endpoint: EndpointConfig, model?: string, effort?: string): string | null {
+  const offered = offeredModels(endpoint)
+  const chosen = model !== undefined && model.length > 0 ? model : endpoint.model
+  if (model !== undefined && model.length > 0 && !offered.some((entry) => entry.id === model)) {
+    const names = offered.map((entry) => entry.id)
+    return `no model named '${model}' on endpoint '${endpoint.name}'; configured: ${names.length > 0 ? names.join(', ') : '(none)'}`
+  }
+  if (effort === undefined || effort.length === 0) return null
+  const levels = reasoningLevelsFor(endpoint, chosen)
+  if (levels === undefined) {
+    return `model '${chosen ?? '(none)'}' on endpoint '${endpoint.name}' declares no reasoning effort levels`
+  }
+  if (!levels.levels.some((level) => level.id === effort)) {
+    return `no reasoning effort named '${effort}' for model '${chosen ?? '(none)'}' on endpoint '${endpoint.name}'; declared: ${levels.levels.map((level) => level.id).join(', ')}`
+  }
+  return null
 }

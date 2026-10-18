@@ -1,5 +1,5 @@
 import { anthropicUsage, openaiChatUsage, openaiResponsesUsage, type TokenUsage } from './usage.ts'
-import { ModelError, type Adapter, type Chunk, type GenerateRequest } from './types.ts'
+import { ModelError, reasoningLevelFor, reasoningLevelsFor, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest } from './types.ts'
 
 /**
  * The two wire shapes this project speaks, plus the scripted one the checks use.
@@ -14,6 +14,38 @@ import { ModelError, type Adapter, type Chunk, type GenerateRequest } from './ty
 interface SseEvent {
   readonly event?: string
   readonly data: string
+}
+
+/**
+ * Resolve the reasoning level a request names into the wire value its model declares.
+ *
+ * Three rules live here once rather than in each adapter:
+ *
+ * - the level is looked up on the model that will actually answer (`request.model`, else the endpoint's own);
+ * - an id the catalogue does not declare is a **loud** `ModelError`, because silently dropping it would display a
+ *   control the provider never received — the one thing the task forbids;
+ * - a level whose value is `null` is real but sends nothing, which is how a `Default` row says "the provider's own
+ *   default" without inventing a parameter.
+ *
+ * The returned `value` is the provider's own vocabulary (`low`, `high`, a budget number) and is sent verbatim by
+ * the adapter whose kind knows where its route expects it.
+ */
+function reasoningValue(
+  endpoint: EndpointConfig,
+  request: GenerateRequest,
+): { readonly value: string | number | null } | undefined {
+  const id = request.reasoningEffort
+  if (id === undefined || id.length === 0) return undefined
+  const model = request.model ?? endpoint.model
+  const level = reasoningLevelFor(endpoint, model, id)
+  if (level === undefined) {
+    const declared = reasoningLevelsFor(endpoint, model)?.levels.map((entry) => entry.id).join(', ') ?? '(none)'
+    throw new ModelError(
+      `'${endpoint.name}' does not offer reasoning effort '${id}' for model '${model ?? '(none)'}'; declared: ${declared}`,
+      { endpoint: endpoint.name, code: 'UNSUPPORTED_REASONING_EFFORT' },
+    )
+  }
+  return { value: level.value }
 }
 
 /**
@@ -110,6 +142,7 @@ export function openAiChatAdapter(
   request: GenerateRequest,
   signal?: AbortSignal,
 ): AsyncIterable<Chunk> {
+  const effort = reasoningValue(endpoint, request)
   const body = {
     model: request.model ?? endpoint.model,
     messages: request.messages.map(toChatMessage),
@@ -125,6 +158,8 @@ export function openAiChatAdapter(
       ? { max_tokens: request.maxOutputTokens ?? endpoint.maxOutputTokens }
       : {},
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+    /** Chat Completions names the level `reasoning_effort`; verified against a live DeepSeek route on 2026-10-17. */
+    ...(effort !== undefined && effort.value !== null ? { reasoning_effort: effort.value } : {}),
   }
 
   const streaming = endpoint.stream ?? request.stream ?? false
@@ -248,6 +283,7 @@ export function openAiResponsesAdapter(
   request: GenerateRequest,
   signal?: AbortSignal,
 ): AsyncIterable<Chunk> {
+  const effort = reasoningValue(endpoint, request)
   const body = {
     model: request.model ?? endpoint.model,
     input: request.messages.map((message) => ({
@@ -258,6 +294,8 @@ export function openAiResponsesAdapter(
     })),
     store: false,
     stream: true,
+    /** The Responses shape nests the level under `reasoning.effort`; the route's own error names the values. */
+    ...(effort !== undefined && effort.value !== null ? { reasoning: { effort: effort.value } } : {}),
     ...(request.tools && request.tools.length > 0
       ? {
           tools: request.tools.map((tool) => ({
@@ -407,6 +445,7 @@ export function anthropicCall(
     .filter((text) => text.length > 0)
     .join('\n\n')
   const maxTokens = request.maxOutputTokens ?? endpoint.maxOutputTokens ?? DEFAULT_MAX_TOKENS
+  const effort = reasoningValue(endpoint, request)
 
   const body: Record<string, unknown> = {
     anthropic_version: ANTHROPIC_VERTEX_VERSION,
@@ -424,6 +463,14 @@ export function anthropicCall(
         }
       : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+    /**
+     * The publisher route for the models configured here refuses `thinking.type: enabled` with
+     * "use thinking.type.adaptive and output_config.effort to control thinking behavior" — measured
+     * 2026-10-17 against the Meta Vertex route — so the effort is sent the way that route names it.
+     */
+    ...(effort !== undefined && effort.value !== null
+      ? { thinking: { type: 'adaptive' }, output_config: { effort: effort.value } }
+      : {}),
   }
 
   return {

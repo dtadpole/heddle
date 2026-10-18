@@ -1,0 +1,269 @@
+---
+title: DSH model selector — measured reference and Heddle's port
+version: 1.0.0
+description: What DSH's composer model seat renders and does, measured in a live browser state by state, and what Heddle implements beside it, with the two-tier endpoint → model configuration the owner asked for.
+grounded_in:
+  - source: browser
+    detail: DSH at http://127.0.0.1:8080/ driven with _tools_/browser-use on 2026-10-17, 1280x913 viewport, trusted Input.dispatchMouseEvent/Input.dispatchKeyEvent, getComputedStyle and getBoundingClientRect
+  - source: owner statements 2026-10-17 that the model selector is configured in the user's home under ~/.heddle/, is user-specific, and is a two-tier system of endpoints and the model types each endpoint offers
+  - source: live model catalogs on 2026-10-17: plugboard /d/models (deepseek-flash, deepseek-v4-pro; effort low/high/max, default high), plugboard /x/models?client_version=1.0.0 (nine gpt slugs), and the Meta Vertex publisher route for claude-opus-5-5 (adaptive thinking + output_config.effort low/medium/high/xhigh/max)
+---
+
+# DSH model selector — measured reference
+
+This is the loop document of the `feat/model-selector` workstream: the measurements, the discarded candidates, the
+plan and the per-cycle evidence. The loop runs three cycles; a cycle counts only when its evidence is here and the
+suites are green.
+
+## Cycle 1 — measure the reference, understand the two tiers, plan the port
+
+### Measured
+
+Instrument: `openPage()` from `_tools_/browser-use/lib.mjs`, viewport 1280×1000/913, DSH 0.2.0-rc.2 at
+`http://127.0.0.1:8080/`, page title `[feat] context-mgmt — DeepSeek Harness`, `@deepseek-ai/dsh-client-ui-model-selection`
+rev `49ff9275592d`. UI strings and class names cross-checked against the installed client bundle
+(`.../dsh-client-ui-model-selection/lib/client.js`), which is cited only for the mechanism the browser cannot tell apart
+(hidden panes), never for a number.
+
+#### The seat (trigger)
+
+| Property | DSH value | How |
+|---|---|---|
+| accessible name | `Select model, current DeepSeek-V41-Flash, reasoning effort High` | `aria-label` |
+| title | `DeepSeek-V41-Flash · High` | `title` |
+| visible text | two spans: `DeepSeek-V41-Flash` + `High` (not one string, not a `·`) | `innerText` = `DeepSeek-V41-Flash\nHigh` |
+| box | **189×28**, at (849, 846) in the session state | `getBoundingClientRect` |
+| typography | `13px/20px`, weight 400 | `getComputedStyle` |
+| model span | colour `rgb(207,211,214)` `#cfd3d6`, `flex-shrink: 1` | computed |
+| effort span | colour `rgb(129,133,140)` `#81858c`, **`flex-shrink: 1000`** (it is the part that ellipsizes first) | computed |
+| background | transparent | computed |
+| padding / gap / radius | `0px 4px 0px 8px` / `4px` / `8px` | computed |
+| hover | background `rgba(255,255,255,0.08)`, colour unchanged | trusted pointer in, then out; clears on leave |
+| focus-visible | `box-shadow: rgb(122,170,255) 0 0 0 2px`, no outline | `focus()` |
+| cursor | `pointer` | computed |
+| disabled | only when the session is locked (`locked`), never for a running turn | measured while a turn streamed: `disabled=false` |
+| arms | `aria-haspopup="menu"`, `aria-expanded` true/false, `aria-busy` (only a pending selection), `aria-controls` when open | attributes |
+| icon | a hidden 16px data icon (`display: none` in this profile) plus a chevron that rotates 180° on open (`transition: transform .12s`) | computed |
+
+#### The menu — two levels
+
+Root pane (`role=menu`, `aria-label="Model and reasoning effort"`), fixed, portaled to `body`:
+
+| Property | DSH value |
+|---|---|
+| placement | above the trigger, right-aligned: `x = trigger.right − menu.width`, `y = trigger.top − 8 − menu.height`, clamped to a **12px** margin on both axes and re-placed on scroll/resize |
+| box (root) | **248×76** at (791, 762); model pane **328×368** (grown by content, capped `max-height: 360px`) |
+| surface | transparent element; a child material paints `rgba(67,69,74,0.45)` + `backdrop-filter: blur(40px) saturate(1.5)`; shadow `0 0 0 .5px rgba(255,255,255,.16), 0 3px 8px rgba(0,0,0,.04), 0 0 20px rgba(0,0,0,.05)`; radius 16px |
+| padding / z-index | `4px` / `1100` |
+| sizes | `min-width: min(240px, 100vw−32px)`, `max-width: min(420px, 100vw−32px)`, `max-height: min(360px, 100vh−96px)` |
+| overflow | the surface is `hidden`; the inner groups list scrolls |
+
+Root rows are `role=menuitem`, **240×34**, radius 12, padding `0 8px`, font `13px/20px`:
+
+| Row | Label span | Value span | Right |
+|---|---|---|---|
+| `Model` | colour `#f9fafb` | current model name, colour `rgb(173,178,184)` `#adb2b8`, text-align right, flex 1 | 12×12 chevron |
+| `Effort` | same | current effort name, same value style | 12×12 chevron |
+
+The Effort row **exists only when the selected model publishes reasoning metadata** (`reasoning !== undefined` in the
+client); a model with no effort levels has no Effort row at all. Hover/focus = background `rgba(255,255,255,0.08)`.
+
+Model pane: a `role=searchbox` search row (shown only when the catalogue is **larger than four** entries) above a scrolling
+`role=menu` list. The list is **provider-grouped**: a sticky heading per provider, then its models.
+
+| Part | Measured |
+|---|---|
+| search row | 320×25; input 306×15, font `12px`, placeholder `Search models…`, padding `5px 7px`; a 24×24 clear button appears with a query |
+| group heading | 315×22, font `11px/16px`, weight 500, colour `#adb2b8`, padding `4px 7px 2px`, radius 12, `position: sticky; top: 0`; transparent at rest, `rgba(48,49,54,0.94)` **only while pinned by scrolling** |
+| model option | 315×34, radius 12, padding `5px 7px`, name `13px/18px`, a 14×14 check glyph at the right when selected; `aria-checked`; disabled only while a selection is pending |
+| option state | hover/focus/highlight `rgba(255,255,255,0.08)`; the selected row itself has **no** background |
+| list | scroll container 320×330, scrollHeight 607 for 15 models in 4 groups |
+| ordering | DeepSeek Account first, then DeepSeek Official, then the rest in catalogue order |
+
+Effort pane: a flat `role=menu` of `role=menuitemradio` rows, same option geometry (240×34), one checked, with a
+`Default` row when the model declares no default. Measured catalogue for `deepseek-flash`: `Off`, `Low`, `High`, `Max`,
+`High` checked.
+
+#### Keyboard and focus
+
+- Opening: focus stays on the trigger; the menu is placed.
+- `Tab` from the trigger focuses the first root row; `Tab` cycles rows; `Tab` past the last row leaves the menu (measured:
+  next focus was the brand button, i.e. no focus trap).
+- `ArrowDown`/`ArrowUp` move focus between rows of the open pane (roving focus); in the model pane with search, arrows
+  cycle the highlighted result while the search input keeps focus.
+- `Enter` on the `Model` cell drills into the model pane and focuses the **search input** (catalogue > 4) or the checked
+  model. `Enter` in search selects the highlighted model.
+- `Escape` from a drilled pane returns to the root pane and hands focus back to the cell that opened it; `Escape` on the
+  root closes the menu and focuses the trigger. `Shift+Tab` is the same as `Escape`.
+- After a selection the trigger is focused again **without a focus ring** (`data-selection-focus` suppresses it until blur).
+- Clicking outside (mousedown) closes the menu.
+
+#### What selecting does
+
+- Selecting a model writes a durable per-session event: `{"type":"model/selection","data":{"provider","model","reasoningEffort"}}`
+  in the session log (measured in `~/.dsh/sessions/.../session.v4.jsonl.zstd`, seq 27–30), and the trigger updates at once.
+  A `model/selection` is `pending` until a `request/header` confirms it as `lastUsed`; a reload restores
+  `pending ?? lastUsed`. Measured: selected `deepseek-flash` + effort `max`, reloaded → trigger `DeepSeek-V41-Flash · Max`.
+- A provider/model change (not an effort-only change) appends a model-switch **notice** to the next request's context.
+- Selecting the value already in effect closes the menu without writing.
+- While a selection is pending the trigger shows a spinner in place of the chevron and `aria-busy="true"`; the rows of the
+  value being committed show a spinner in place of the check.
+
+#### Running turn
+
+Measured with a turn streaming (`Stop` in the composer): the trigger stayed **enabled** (`disabled=false`,
+`aria-busy=false`, no spinner), the root menu opened, both cells were enabled and the model pane listed every option
+enabled. DSH applies a concurrent switch to a **later step** of the same turn (the agent assembles the selection before each
+request) rather than refusing the switch.
+
+### The two tiers the owner asked for
+
+The owner's steer (2026-10-17): the selector is **user-specific configuration in `~/.heddle/`**; the user configures an
+**endpoint** and the **model types that endpoint offers** (`plugboard/d`, `plugboard/x`, Meta internal models), and the
+repository holds only the schema and the invocation logic. DSH's provider group in the model pane is the same tier:
+a provider owns a list of models. DSH's catalogue is host-side; Heddle's is the user's `~/.heddle/heddle.json`.
+
+### Brainstorm — candidates and the discards
+
+1. **Keep the one-level endpoint menu and add an effort row.** Smallest change. Discarded: it keeps Heddle's
+   `endpoint · model` label and its flat list, so the two-tier configuration the owner asked for has nowhere to show; and
+   it cannot present two models on one endpoint.
+2. **Two-level menu (root Model/Effort cells, model pane grouped by endpoint) — chosen.** It is exactly what DSH renders,
+   maps one-to-one onto endpoint → model types, and its effort pane can be omitted per model.
+3. **A native `<select>` per tier (endpoint, then model).** Discarded: a native select cannot show a check mark, a group
+   heading or a measurement, and it silently drops a recorded endpoint the configuration no longer holds — the reason the
+   existing menu is drawn by the page.
+4. **A separate "Providers" settings page that lists models, with the composer showing a flat list.** Discarded: it moves
+   the selection away from the composer (DSH keeps it at the point of use) and needs a second surface to keep in sync.
+5. **Effort as a free-text config string sent verbatim.** Discarded: displaying a value the adapter does not send is the
+   "unenforced value" the task forbids. Effort levels are per-model config with an explicit per-level wire value.
+
+### Understand — what the mechanism is, and what Heddle already has
+
+- DSH's selection is a **durable session event** read by a projection; Heddle's is a **meta record** (`setModel`), and its
+  append-only log is not touched. Heddle already has the route (`/api/sessions/<id>/model`), the store write and the
+  page menu; what is missing is the second tier (models per endpoint), the effort pane, and the request plumbing that
+  makes an effort real.
+- The model layer already has the seam DSH uses: `model/request` is a waterfall over every model call, and the loop puts
+  the `sessionId` in the request. A listener can therefore make a switch take effect on a later step of a running turn,
+  which is DSH's running-turn behaviour.
+- `EndpointConfig` is read from `$HEDDLE_CONFIG`, `$HEDDLE_HOME/heddle.json` or `~/.heddle/heddle.json`, so the user's
+  two-tier catalogue belongs there; the repository's `src/endpoints.ts` and `src/local-config.ts` hold the schema and an
+  example, never a URL, model or key.
+
+### Step back
+
+The objective still stands; the evidence **widened** it in one place: Heddle's `model` is one id per endpoint, so the
+two-tier ask is a **config-schema change** (models per endpoint) and not only a rendering change. It also **narrowed**
+one danger: reasoning effort is only honest where the provider's own wire parameter was verified, so the config declares
+per-level wire values and the adapter sends them per endpoint kind; an endpoint with no reasoning block renders no effort
+row. Goal edited to carry the owner's steer (revision 3).
+
+### Plan
+
+1. `src/llm/types.ts` — `ModelOption` (`id`, `name?`, optional per-model `reasoning`), `ReasoningLevels`
+   (`default?`, `levels: {id, name, value}[]`), endpoint-level `reasoning` as the default for its models; `models?` on
+   `EndpointConfig`; `reasoningEffort?` on `GenerateRequest`; pure `offeredModels` / `reasoningLevelsFor` /
+   `reasoningWireValue` helpers.
+2. `src/endpoints.ts` — `describeEndpoint` reports `models` with display names and effort **ids and names only** (the wire
+   value never reaches a page); backward compatible: an endpoint with only `model` offers that one model.
+3. `src/llm/adapters.ts` — each kind sends the level's wire value in its own parameter: `reasoning_effort` (openai-chat),
+   `reasoning: {effort}` (openai-responses), `thinking: {type:'adaptive'} + output_config: {effort}` (anthropic-vertex,
+   verified live against the Meta Vertex route; `budget_tokens` was refused with "use adaptive"), scripted ignores it; an
+   unknown level is a loud `ModelError`, never silently dropped.
+4. `src/session/store.ts` — `reasoningEffort` joins `endpoint`/`model` in `SessionMeta`, replaced with them in `setModel`,
+   carried by fork/subagent, recorded on `model/request`; `src/server/web.ts` validates it against the chosen model and
+   resolves it for a turn (request, then record).
+5. `src/server/web.ts` — `model/request` listener: the session's recorded selection overrides every model call of a turn,
+   so a concurrent switch lands on the next step.
+6. `src/server/page.html` — DSH's seat anatomy (model span + effort span + chevron), the two-level menu with the measured
+   geometry and states, search above four models, sticky endpoint headings, keyboard and focus behaviour, fixed clamped
+   placement, pending spinner; the page sends `reasoningEffort` with a turn.
+7. Tests first: unit tests for every helper and adapter body, then the browser contract in
+   `_verifiers_/80-web-ui/check-model-switcher.mjs` (two doubles, record + reload, effort on the wire, running-turn
+   switch, keyboard, no effort row where nothing is enforced).
+8. `~/.heddle/heddle.json` — user-specific two-tier catalogue: `claude-opus` → five verified Claude models; `plugboard-ds`
+   → `deepseek-flash`, `deepseek-v4-pro` with low/high/max (live-verified `reasoning_effort`); `plugboard-cx` → seven
+   `gpt-6.1-sol`-family models with low/medium/high/xhigh/max (live-verified values from the route's own refusal message).
+9. Docs: this file; `SESSION_UI.md`'s composer row and `dsh-input-area.md`'s model line updated at the end.
+
+### Coverage matrix (cycle 1)
+
+| State / dimension | DSH | Heddle before | Verdict |
+|---|---|---|---|
+| seat idle label | model + effort spans, colours 207/129 | one `endpoint · model` span | fix |
+| seat geometry | 189×28, 13/20, padding 0 4 0 8, radius 8, gap 4 | 219×28, 13/13, padding 0 8, radius 8, gap 4.8 | fix |
+| hover / focus | bg 8% white / 2px accent ring | bg 8% white / **no ring** | fix focus |
+| title and accessible name | label + `·`; `…, reasoning effort <name>` | title = prose sentence; name without effort | fix |
+| menu root | 2 cells, 34 high, value right, 12px chevrons | one flat list | fix |
+| menu model tier | grouped by provider, sticky 11/16 headings | flat endpoint rows | fix |
+| menu effort tier | only for a model with reasoning | absent | add |
+| menu placement | fixed, above, right-aligned, 12px clamp, scroll re-place | absolute, above, right-aligned, z 5 | fix |
+| menu surface | radius 16, glass material, 1100 | radius 8, solid, z 5 | fix |
+| option geometry | 315×34, radius 12, padding 5 7, 13/18 | 262×29, radius 4.8, padding 4.8 7.2, 12.8/19.2 | fix |
+| option states | hover/focus/highlight 8%, check 14×14, no selected bg | ✓ before pseudo-element | fix |
+| search | >4 models, 12px, placeholder, clear, empty state | absent | add |
+| keyboard | arrows, Tab, Escape back/close, focus restore, selection-focus | Tab only; no arrows; Escape+focus | fix |
+| selection record | `model/selection` event, provider/model/effort | meta endpoint/model | extend |
+| reload survival | ✓ | ✓ endpoint/model | extend |
+| running turn | seat stays enabled, later step uses it | seat enabled, next turn only | fix (waterfall) |
+| effort control | per model catalogue | no effort concept | add, provider-grounded only |
+| content stress | 15 models / 4 groups / scroll | 6 endpoints, no scroll | test |
+| stale endpoint | not applicable (host catalogue) | kept in menu with `not configured` | keep |
+| voice input | present | no substrate | keep absent |
+| model-switch transcript notice | user-role notice on model change | not recorded | keep absent (meta record is the session's record) |
+
+## Cycle 1 — evidence
+
+```
+Cycle 1 — the two-tier backend and DSH's two-level control
+  measured:   DSH http://127.0.0.1:8080, 1280x913, model-selection client rev 49ff9275592d, 2026-10-17:
+              trigger 189x28 13/20 padding 0 4 0 8 gap 4 radius 8 #cfd3d6 + #81858c effort span shrink 1000;
+              hover 8% surface; focus 2px #7aaaff ring; title "Model · Effort"; aria "... reasoning effort ...";
+              root menu 248x76 fixed right-aligned 8px above, radius 16, padding 4, z 1100, 34px rows radius 12,
+              value #adb2b8 + 12px chevron; model pane 328x368 grouped by provider, sticky 22px 11/16 500
+              headings, search above four entries (12px), 34px options radius 12 padding 5 7, 14px check,
+              selected row unbackgrounded; effort pane Off/Low/High/Max with High checked; Escape/back/Tab/
+              arrows/focus-restore-without-ring; running turn: seat enabled, options enabled, switch lands on a
+              later step; selection is a durable per-session model/selection event (seq 27-30) and a reload
+              restores pending ?? lastUsed.
+  brainstorm: 1 keep one-level + effort row (discarded: no room for tier 2); 2 two-level root Model/Effort +
+              endpoint-grouped model pane (chosen); 3 native selects (discarded: no check/group/measure, drops a
+              stale recorded endpoint); 4 a separate providers settings page (discarded: selection moves away
+              from the point of use); 5 free-text effort sent verbatim (discarded: displays an unenforced value).
+  step back:  widened — heddle's one model id per endpoint means the ask is a config-schema change too
+              (endpoint.models with per-model reasoning). Narrowed — effort only where the provider's wire
+              parameter was verified (reasoning_effort on /d, reasoning.effort on /x, adaptive thinking +
+              output_config.effort on the Meta Vertex route; budget_tokens was refused). Goal revised to v3.
+  changed:    src/llm/types.ts (ModelOption, ReasoningLevel(s), endpoint.models/reasoning, request.reasoningEffort,
+              offeredModels/reasoningLevelsFor/reasoningLevelFor); src/endpoints.ts (describeEndpoint models with
+              ids/names/effort ids only; selectionProblem); src/llm/adapters.ts (per-kind wire mapping, loud
+              UNSUPPORTED_REASONING_EFFORT); src/agent/loop.ts (reasoningEffort on every request + model/request);
+              src/session/store.ts (SessionMeta.reasoningEffort; setModel replaces endpoint/model/level together;
+              fork/subagent/definition carry it); src/session/service.ts; src/session/definition.ts;
+              src/agent/subagent.ts; src/server/web.ts (route validates model and level; turn resolves endpoint,
+              model, level by the same ladder and filters undeclared levels; GET session carries the level; the
+              model/request waterfall applies the session's current record to every call of a running turn);
+              src/server/page.html (DSH's seat anatomy and two-level menu, grouped model pane, search, effort pane,
+              placement/clamp, keyboard, pending state); test/model-effort.test.ts; test/model-switcher.test.ts;
+              test/page-contract.test.ts; _verifiers_/80-web-ui/check-model-switcher.mjs.
+  evidence:   failing first — node --test test/model-effort.test.ts failed on the missing exports/behaviour before
+              the code existed, and the new browser check run against the pre-change build (worktree at d446e67,
+              same doubles and config) failed 5/5: seat shape, model+effort recording, keyboard, running switch,
+              refusals. After the change: 5/5 pass; unit suite 321/321; npm run check clean.
+  reds:       none left in this workstream. One pre-existing red on main was fixed on the way: page-contract's
+              module guard indexed the regex capture without narrowing (`extracted[1]`, TS2532 under
+              noUncheckedIndexedAccess); it is another session's committed line, fixed with an explicit assert.
+  coverage:   measured — idle seat, hover, hover-left, focus, root menu, model pane, effort pane, keyboard
+              (Tab/arrows/Enter/Escape/outside mousedown), selection, reload, running turn, small-viewport clamp,
+              no-effort model, long catalogue (search). Not measured — the pending-selection spinner (the route
+              answers too fast to observe reliably), a model-switch transcript notice (deliberately absent), voice
+              input (no substrate). Both named in the coverage table below.
+  invariants: the composer still submits and streams (check-composer green); the model menu opens fixed so no
+              scrolling ancestor clips it (position + clamp asserted); send/stop untouched; the page module still
+              parses (page-contract guard); the attach and row menus are separate surfaces and their checks pass.
+  lessons:    (1) a focusout handler that closes a menu must decide on a microtask, because a re-render removes the
+              focused row and reports no related target — the first keyboard drill closed the menu instead of
+              entering it; (2) a filtered list needs its own highlight index space, not the catalogue's; (3) a
+              protocol Enter needs its carriage-return text or a focused button never activates.
+```

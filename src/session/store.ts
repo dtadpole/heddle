@@ -90,6 +90,14 @@ export interface SessionMeta {
   readonly cwd: string
   readonly endpoint?: string
   readonly model?: string
+  /**
+   * The reasoning level the session runs with, when its model declares levels.
+   *
+   * Part of the same selection as `endpoint` and `model`, replaced with them in one write: a level belongs to
+   * the model that declared it, so carrying one across a model switch would ask a provider for a level its
+   * model never offered. Absent means the model's own default.
+   */
+  readonly reasoningEffort?: string
   readonly title?: string
   readonly turns: number
   /** Held at the top of its branch. A reading preference, but one a person sets and expects to persist. */
@@ -449,6 +457,7 @@ export class SessionStore {
       readonly cwd?: string
       readonly endpoint?: string
       readonly model?: string
+      readonly reasoningEffort?: string
       readonly title?: string
       readonly parentSession?: SessionId
       readonly origin?: 'subagent'
@@ -473,6 +482,7 @@ export class SessionStore {
           cwd,
           ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
           ...(options.model !== undefined ? { model: options.model } : {}),
+          ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
           ...(options.title !== undefined ? { title: options.title } : {}),
           ...(options.parentSession !== undefined ? { parentSession: options.parentSession } : {}),
           ...(options.origin !== undefined ? { origin: options.origin } : {}),
@@ -578,6 +588,7 @@ export class SessionStore {
       ...(meta?.cwd !== undefined ? { cwd: meta.cwd } : {}),
       ...(meta?.endpoint !== undefined ? { endpoint: meta.endpoint } : {}),
       ...(meta?.model !== undefined ? { model: meta.model } : {}),
+      ...(meta?.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}),
       ...(attribution.title !== undefined ? { title: attribution.title } : {}),
       ...(attribution.parentSession !== undefined ? { parentSession: attribution.parentSession } : {}),
       ...(attribution.origin !== undefined ? { origin: attribution.origin } : {}),
@@ -609,15 +620,21 @@ export class SessionStore {
    * endpoint for a model it may not serve. The caller validates the endpoint against the model service; this
    * layer records what it is told.
    */
-  setModel(id: SessionId, selection: { readonly endpoint: string; readonly model?: string }): SessionMeta | null {
+  setModel(
+    id: SessionId,
+    selection: { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string },
+  ): SessionMeta | null {
     const current = this.list().find((meta) => meta.id === id)
     if (current === undefined) return null
     const endpoint = selection.endpoint.trim()
     if (endpoint.length === 0) return null
     const model = selection.model?.trim()
+    const reasoningEffort = selection.reasoningEffort?.trim()
     const next: SessionMeta = { ...current, endpoint }
     if (model !== undefined && model.length > 0) (next as { model?: string }).model = model
     else delete (next as { model?: string }).model
+    if (reasoningEffort !== undefined && reasoningEffort.length > 0) (next as { reasoningEffort?: string }).reasoningEffort = reasoningEffort
+    else delete (next as { reasoningEffort?: string }).reasoningEffort
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
@@ -970,6 +987,7 @@ export class SessionStore {
     request: {
       readonly endpoint: string
       readonly model?: string
+      readonly reasoningEffort?: string
       readonly messages: number
       readonly tools: readonly string[]
       readonly estimatedTokens?: number

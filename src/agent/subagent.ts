@@ -57,12 +57,15 @@ export interface SubagentResult {
   readonly depth: number
 }
 
-/** A parent's delegation depth and endpoint/model, read from its own session record. */
-export function parentFacts(meta: SessionMeta | undefined): { readonly depth: number; readonly endpoint?: string; readonly model?: string } {
+/** A parent's delegation depth and selection, read from its own session record. */
+export function parentFacts(
+  meta: SessionMeta | undefined,
+): { readonly depth: number; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } {
   return {
     depth: meta?.delegationDepth ?? 0,
     ...(meta?.endpoint !== undefined ? { endpoint: meta.endpoint } : {}),
     ...(meta?.model !== undefined ? { model: meta.model } : {}),
+    ...(meta?.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}),
   }
 }
 
@@ -117,7 +120,7 @@ export async function delegateSubagent(
   if (text.length === 0) throw new SubagentError('a delegation needs a prompt', 'SUBAGENT_EMPTY_PROMPT')
 
   const parentMeta = deps.store.list().find((meta) => meta.id === parent.id)
-  const { depth, endpoint, model } = parentFacts(parentMeta)
+  const { depth, endpoint, model, reasoningEffort } = parentFacts(parentMeta)
   const childDepth = depth + 1
   const maxDepth = limits.maxDepth ?? 2
   if (childDepth > maxDepth) {
@@ -139,6 +142,7 @@ export async function delegateSubagent(
     cwd,
     ...(endpoint !== undefined ? { endpoint } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     parentSession: parent.id,
     origin: 'subagent',
     delegationDepth: childDepth,
@@ -166,6 +170,7 @@ export function subagentRunner(ctx: Context): SubagentDeps['run'] {
       endpoint,
       prompt,
       ...(meta?.model !== undefined ? { model: meta.model } : {}),
+      ...(meta?.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}),
       ...(signal !== undefined ? { signal } : {}),
     })
   }

@@ -83,7 +83,14 @@ export class SessionService extends Service {
   }
 
   /** Open the session a run continues, or start one. */
-  start(options: { readonly resume?: SessionId; readonly cwd?: string; readonly endpoint?: string; readonly model?: string; readonly title?: string } = {}): SessionHandle {
+  start(options: {
+    readonly resume?: SessionId
+    readonly cwd?: string
+    readonly endpoint?: string
+    readonly model?: string
+    readonly reasoningEffort?: string
+    readonly title?: string
+  } = {}): SessionHandle {
     if (options.resume !== undefined) {
       const existing = this.store.open(options.resume)
       if (existing === null) throw new Error(`no session '${options.resume}' under ${this.store.root}`)
@@ -93,6 +100,7 @@ export class SessionService extends Service {
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
       ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
       ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
       ...(options.title !== undefined ? { title: options.title } : {}),
     })
   }
@@ -107,7 +115,7 @@ export class SessionService extends Service {
    */
   createAt(
     branch: string,
-    options: { readonly title?: string; readonly endpoint?: string; readonly model?: string } = {},
+    options: { readonly title?: string; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } = {},
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
     const taken = existingSessionNames(canonical)
@@ -119,6 +127,7 @@ export class SessionService extends Service {
       ...(options.title !== undefined ? { title: options.title } : {}),
       ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
       ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
     })
     return { handle, definition }
   }
@@ -159,6 +168,7 @@ export class SessionService extends Service {
       taken: existingSessionNames(source.cwd),
       ...(source.endpoint !== undefined ? { endpoint: source.endpoint } : {}),
       ...(source.model !== undefined ? { model: source.model } : {}),
+      ...(source.reasoningEffort !== undefined ? { reasoningEffort: source.reasoningEffort } : {}),
     })
     return { handle, definition }
   }
@@ -203,7 +213,7 @@ export class SessionService extends Service {
    */
   openAt(
     folder: string,
-    options: { readonly fresh?: boolean; readonly endpoint?: string; readonly model?: string; readonly title?: string } = {},
+    options: { readonly fresh?: boolean; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string; readonly title?: string } = {},
   ): SessionHandle {
     const canonical = canonicalPath(folder)
     if (options.fresh !== true) {
@@ -217,6 +227,7 @@ export class SessionService extends Service {
       cwd: canonical,
       ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
       ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
       ...(options.title !== undefined ? { title: options.title } : {}),
     })
   }
@@ -269,7 +280,10 @@ export class SessionService extends Service {
    * caller may not touch and the switcher is an ordinary caller. The route validates the name against the
    * model service before it lands here; this records the decision the session made.
    */
-  setModel(id: SessionId, selection: { readonly endpoint: string; readonly model?: string }): SessionMeta | null {
+  setModel(
+    id: SessionId,
+    selection: { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string },
+  ): SessionMeta | null {
     return this.store.setModel(id, selection)
   }
 
