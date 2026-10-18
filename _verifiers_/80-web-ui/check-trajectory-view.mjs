@@ -138,7 +138,7 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
 
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
-    // The split bar, judged by its the reference feel and by actually resizing: a 6px band with a grip that
+    // The split bar, judged by the reference's feel and by actually resizing: a 6px band with a grip that
     // appears on drag, a real width change, a double-click reset and arrow keys.
     // The panes fill the window: no outer frame, no gap, and the divider overlays the boundary.
     const fill = JSON.parse(

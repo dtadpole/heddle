@@ -695,7 +695,7 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
-   * The reference is the reference's `nav[aria-label="Conversation minimap"]`, read while it ran: one 12px row per
+   * The measured element is `nav[aria-label="Conversation minimap"]` on the reference, read while it ran: one 12px row per
    * message, a 12px bar whose thickness encodes the message's size, resting opacities of 0.33 (user) and 0.267
    * (assistant), the visible window brightened with feathered edges, and on hover a ±4-row swell reaching opacity 1
    * and `scaleX` 2.1 / `scaleY` 1.5, with a 300×81 `#242424` preview card to the left of the rail.
@@ -785,7 +785,7 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     )
     assert.deepEqual(shape.roleCounts, { user: 8, assistant: 8 }, `and only the person's and the answer's roles (${JSON.stringify(shape.roleCounts)})`)
     /**
-     * **No chat scrollbar.** the reference's transcript paints its scrollbar transparent (6px in the box model, stable
+     * **No chat scrollbar.** The reference's transcript paints its scrollbar transparent (6px in the box model, stable
      * gutter) so nothing slides over the text; heddle was on the platform overlay bar, which appeared on every
      * scroll — the owner's distraction. The rail scrubs, so the bar is redundant: measure that the scroller reports
      * no scrollbar at rest, and the same after a scroll.
