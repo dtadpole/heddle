@@ -1,6 +1,6 @@
 ---
 title: UI parity audit
-version: 2.0.0
+version: 2.1.0
 description: How to compare this UI against a running reference so that nothing is missed twice — a coverage matrix, a DOM-derived inventory instead of a remembered list, adversarial content, occlusion checks, and the ledger of every miss already paid for.
 grounded_in:
   - owner statement 2026-10-17 that a cursor which does not become a hand, a hidden ellipsis under a long name, a clipped menu and icon-less menu items are exactly the misses a thorough comparison must prevent, and that the procedure itself has to be improved rather than each miss fixed alone
@@ -42,6 +42,7 @@ the miss this skill exists to prevent.
 | states | idle, hover, hover-left, focus, selected, disabled, live |
 | **content stress** | long, empty, unicode, many items, deep nesting, zero rows |
 | **occlusion** | is it fully visible? clipped by an ancestor? under another layer? hit-testable at its centre? |
+| **control chrome** | the box of a **control**: its size and hit area, its padding and radius, its background and its hover surface, and the size of the glyph inside it. The reference usually has **more than one class** — a small row-action button and a larger icon button — and each must be matched by its own class |
 | cursor | is every clickable thing a hand, and does a disabled one keep the arrow |
 | order | controls in a row, items in a menu, a tab order |
 | names | visible text and accessible name, **verbatim** from the reference |
@@ -69,6 +70,22 @@ how "the row is a hand but the controls inside it are arrows" gets caught by con
 Before measuring, say what the thing is made of. A list row: kind mark, state word, badge, label, age, hover controls.
 A menu: trigger, surface, sections, items, and each item's icon, label, shortcut and current-state mark. A tab ring:
 tablist, tabs, selection mark, focus ring. Naming the parts is what makes an icon-less item or a missing age visible.
+
+### 2b. Match each control to its **class**, and measure the rendered box
+
+A control's size is not one number: the reference has a **row action button** and an **icon button**, and a UI that
+matches one class and uses its numbers for the other is wrong on both. Measure, for every control class:
+
+- the **rendered box** (`getBoundingClientRect`), never the `width` you wrote in a rule — a later rule with a higher
+  specificity can override it, and a selector that does not match renders at whatever else applies;
+- its **background** in idle and hover (the reference may have none, with hover changing only the text colour);
+- the **glyph** size inside it;
+- the row's own hover surface separately, because the control sits on it.
+
+Measured on 2026-10-17 from DSH's own sheet: its row action button is **20×16, radius 4px, no background, hover changes
+the colour only**; its icon button is **28×28 with a 15px glyph and a hover surface**. Both numbers were in its CSS the
+whole time; this UI shipped a 24px icon button and a 20×20 action button with a hover patch because nobody compared the
+rendered boxes to the reference's two classes.
 
 ### 3. Measure per element, per property — with integrity rules
 
@@ -164,6 +181,7 @@ Every miss appends a row. The ledger is the skill's memory, and a new session re
 | A `getComputedStyle` declaration read after restoring the state | reported `animation-name: none` on a working rule | snapshot every value before changing the state back |
 | A `const` declared after its first use (TDZ) | threw for every session row; branches rendered and sessions vanished | declare a wrapper before anything appends to it; capture page errors in probes |
 | A check clicked tree levels blindly | a blind click closes an open level; the fixture "lost" its rows | idempotent navigation and explicit precondition errors |
+| The row's action buttons were "a bit too small" and had a background of their own | I had read DSH's `rowActions` rule in the research and never compared **our control's box** to it; our rule was also overridden by a higher-specificity `#workspaces-row > button` | every reference value noted in research becomes a **measured assertion** or an explicit not-measured row; measure `getBoundingClientRect`, not the rule you wrote |
 | A backtick inside a page-script template literal, seven times | a syntax error and a debugging round each time | the check file's header states it; none of those comments use backticks |
 
 ## The inventory probe
@@ -202,6 +220,9 @@ element with the properties that have been missed before: cursor, hit-test, clip
       name: element.getAttribute('aria-label') ?? (element.textContent || '').trim().slice(0, 28),
       cursor: style.cursor,
       box: [Math.round(rect.width), Math.round(rect.height)],
+      background: style.backgroundColor,
+      hoverBackground: null,
+      glyph: (() => { const svg = element.querySelector('svg'); if (svg === null) return null; const size = svg.getBoundingClientRect(); return [Math.round(size.width), Math.round(size.height)] })(),
       disabled: element.disabled === true || element.getAttribute('aria-disabled') === 'true',
       hitTest: centre === null ? null : centre === element || element.contains(centre),
       clipped: clips(element),
@@ -217,6 +238,10 @@ What to do with it:
 - **`hitTest` false** on a control that looks clickable → something is over it or it is clipped.
 - **`clipped` true** → the element is cut by an ancestor; float it or give the ancestor room.
 - **`visible` false but present** → it is hidden by state; make sure the state is the one you meant to measure.
+- **`box` not the reference's class size** → the control is a member of a class you have not matched yet; note the reference's
+  two classes (row action and icon button) and compare each separately.
+- **`background` not the reference's** → a control that draws its own patch on a row or a panel is visible as a second
+  surface; the reference's hover may change only the text colour.
 - Compare the two lists **by anatomy**: an element present on the reference and absent here is a whole part missing,
   which is a stronger finding than any property.
 

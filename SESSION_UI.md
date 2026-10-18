@@ -118,6 +118,20 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
 
+### The control chrome, measured from DSH's own sheet (2026-10-17)
+
+The owner reported the row's icon buttons as a little too small and with a background unlike the reference. Both were
+true, and both numbers had been sitting in DSH's stylesheets since the first audit:
+
+| Class | DSH, from its sheet | This UI before | This UI now |
+|---|---|---|---|
+| **row action button** (`._actionButton`) | **20×16**, radius 4px, **no background**, hover changes the label colour only | 20×20 with a 12% hover patch, inside a row-tools slot that painted a `--sidebar` patch behind everything | 20×16, transparent, hover colour-only, no patch behind the slot |
+| **icon button** (`._iconButton`, sidebar and panel actions) | **28×28**, 15px glyph, hover background | the size of its text (~24px), no hover surface | 28×28, `flex: none`, hover surface `--hover` |
+
+The size miss had a second layer worth recording: a class rule setting 28px was being overridden by
+`#workspaces-row > button { width: 24px }`, whose `id + element` specificity wins. The rendered box is the only honest
+measurement; the rule you wrote is a hypothesis about it.
+
 ## The three reported defects (2026-10-17)
 
 The owner reported three things after the cursor fix, and each had a different cause:
@@ -442,6 +456,23 @@ workspace the tree draws. With no workspace it says so instead of doing nothing.
 
 The workspaces row's controls were also unstyled `<button>`s: the `+` painted as a platform chip (a grey fill and a
 2-pixel border) beside a `…` that painted nothing. They are icon buttons with no chrome now, in both states.
+
+## The empty state, which the panel did not have
+
+DSH's home is a designed surface: a centred mark and heading above the composer. Heddle had an empty column under a
+header that said `No session`, which reads as a panel that failed to load rather than one waiting for input. It now
+shows an invitation painted from the panel's own state — the chat view with `current === null` — with the mark, the
+heading `Start a conversation`, and the chord the primary action is bound to in a `<kbd>`.
+
+Two states are judged every run: on a fresh panel (a workspace, no sessions) the invitation is shown and the
+conversation's column is put away under it; after the primary action starts a session it gives way and the column is
+back. Measured: the section takes the column's height (1048×611 in the 1400-wide window), the heading is 16.8px at
+weight 600, and the hint is the muted `--text-3` at 14px.
+
+The work also found a defect next to it: opening a session id that no longer exists left `current` pointing at nothing,
+so the header said `No session`, the column was empty and the invitation stayed hidden. A failed read now releases the
+pointer, restores the header, and paints the invitation — "there is nothing open here" is a state the panel should be
+able to say.
 
 ## Read next
 

@@ -753,6 +753,34 @@
    */
   #session-head { display: flex; align-items: baseline; gap: .6rem; padding: 14px 16px 0; min-width: 0; }
   #session-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /**
+   * The empty state: a centred hero, DSH's shape for a panel with no conversation in it.
+   *
+   * It takes the column's height and centres its content, so the composer stays where it always is — a reader who has
+   * just arrived sees an invitation and the same input box, not a blank page under a header that says "No session".
+   */
+  #empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: .55rem;
+    text-align: center;
+    padding: 2rem 1.5rem;
+    min-height: 0;
+  }
+  #empty-state img { width: 28px; height: 28px; opacity: .9; }
+  #empty-state h3 { margin: 0; font-size: 1.05rem; font-weight: 600; letter-spacing: .01em; }
+  #empty-state p { margin: 0; max-width: 32rem; color: var(--text-3); font-size: .875rem; line-height: 1.55; }
+  #empty-state kbd {
+    font-family: var(--font-code, ui-monospace, monospace);
+    font-size: .8em;
+    padding: .1rem .3rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+  }
   #session-branch { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #ledger .when, #ledger .usage { opacity: .55; font-size: .76rem; }
   #ledger .usage.provider { color: #2fa36b; opacity: .9; }
@@ -851,11 +879,25 @@
   #tree .row-right { display: inline-grid; grid-auto-flow: column; grid-template-areas: 'slot'; place-items: center end; flex: none; margin-left: auto; }
   #tree .row-right > .age, #tree .row-right > .row-tools { grid-area: slot; }
   #tree .row-tools {
-    display: inline-flex; align-items: center; gap: 2px;
+    display: inline-flex; align-items: center; gap: 6px;
     opacity: 0; pointer-events: none; transition: opacity .12s ease;
-    /** Its own surface, so no row text can ever read through the icons if a future layout brings them close. */
-    background: var(--sidebar); border-radius: 6px; padding-left: 4px;
+    /**
+     * **No surface of its own.** Measured from DSH: its row actions sit directly on the row — transparent buttons over the
+     * row's own hover tint — while an earlier version here drew a `--sidebar` patch behind them, which read as a second
+     * background on a hovered or selected row. The slot reserves the width, so nothing ever shows through.
+     */
+    background: none;
   }
+  /**
+   * The row's action buttons, measured from DSH's own sheet: its `._actionButton` is **20×16**, radius 4px, with **no
+   * background at all** — hover only lifts the colour from secondary to primary. The 26px centre-to-centre step in its
+   * row is a 20px button plus a 6px gap, which the slot keeps.
+   */
+  #tree .row-tools button {
+    width: 20px; height: 16px; padding: 0; border-radius: 4px;
+    display: inline-grid; place-items: center; background: none; border: 0; color: var(--text-3);
+  }
+  #tree .row-tools button:hover { color: var(--text); }
   /** The slot's children are one level deeper than the row now, so these are descendant selectors. */
   #tree li:hover > .row .row-tools,
   #tree li:focus-within > .row .row-tools,
@@ -886,6 +928,23 @@
   .menu { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 40; }
   /** A section name inside a menu, as DSH's View options has for its `WorkSpace` group. */
   .menu .menu-heading { padding: .3rem .5rem .1rem; font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; opacity: .55; }
+  /**
+   * The **icon buttons** around the panels, measured from DSH's `._iconButton`: a **28×28** box with a 15px glyph and the
+   * panel's hover surface behind it. This UI left them at the size of their text, which read as "a bit too small" beside
+   * the reference's. They are one class, so the sidebar's search and add, the view options and the session's more-actions
+   * all agree.
+   */
+  #sidebar-search, #add-workspace, #session-head .menu-wrap > button, #view-options .menu-wrap > button {
+    width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center;
+    /** A flex child shrinks unless told not to; measured at 24px in a crowded header until this line. */
+    flex: none;
+    border-radius: var(--radius); background: none; border: 0; color: var(--text-3);
+  }
+  #sidebar-search:hover, #add-workspace:hover,
+  #session-head .menu-wrap > button:hover, #view-options .menu-wrap > button:hover,
+  #sidebar-search[aria-expanded='true'], #session-head .menu-wrap > button[aria-expanded='true'], #view-options .menu-wrap > button[aria-expanded='true'] {
+    background: var(--hover); color: var(--text);
+  }
   #session-head .menu-wrap { position: relative; display: inline-flex; margin-left: auto; }
   #session-head .menu { position: absolute; right: 0; top: 1.4rem; z-index: 6; display: flex; flex-direction: column; min-width: 12rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); }
   #session-head .menu[hidden] { display: none; }
@@ -958,6 +1017,11 @@
     display: block; width: 100%; box-sizing: border-box;
     border: 0; outline: none; background: transparent; color: var(--text);
     /**
+     * The cursor is the accent, which is what DSH's editor shows: its caret is
+     * `rgb(122,170,255)`, the same colour as its primary action, not the text colour.
+     */
+    caret-color: var(--accent);
+    /**
      * DSH's editor, measured: 14px on a **24px** line. agentcloud's composer is 14/21, and the two references
      * disagree on the leading — the input area follows DSH, because that is what this port was asked to model;
      * agentcloud's 21 belongs to agentcloud's own composer, not here.
@@ -1029,8 +1093,13 @@
     border: 0; border-radius: var(--radius-pill);
     background: var(--accent); color: #ffffff; cursor: pointer;
   }
-  #send:hover:not(:disabled), #stop:hover { background: color-mix(in oklab, var(--accent) 82%, #ffffff); }
-  #send:disabled { background: var(--surface-2); color: var(--text-3); opacity: 1; cursor: default; }
+  /** DSH darkens its accent on hover (`#7aaaff` → `#4176e6`); the hue here is this theme's, the move is DSH's. */
+  #send:hover:not(:disabled), #stop:hover { background: color-mix(in oklab, var(--accent) 78%, #000000); }
+  /**
+   * DSH's disabled action is not grey: it keeps the accent and drops to `opacity: .4` (measured on its
+   * composer with a trusted pointer). The colour still says "this is the action", the opacity says "not yet".
+   */
+  #send:disabled { background: var(--accent); color: #ffffff; opacity: .4; cursor: default; }
   /** One action at a time: a turn that can be stopped draws Stop in Send's place. */
   #send[hidden], #stop[hidden] { display: none; }
   /** The attach button: DSH's 28px circled `+`. */
@@ -1038,8 +1107,10 @@
     flex: none; display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
     font-size: 18px; line-height: 1; background: #353638; color: var(--text);
     border: 0; border-radius: var(--radius-pill); cursor: pointer;
+    /** DSH's `+` rests at half opacity and comes to full under the pointer (background unchanged). */
+    opacity: .5; transition: opacity .12s ease;
   }
-  #attach:hover, #attach[aria-expanded='true'] { background: color-mix(in oklab, var(--text) 18%, #353638); }
+  #attach:hover, #attach[aria-expanded='true'], #attach:focus-visible { opacity: 1; outline: none; }
   /** The access chip: read, not chosen — the sandbox mode the server actually runs under. */
   #access {
     flex: none; display: inline-flex; align-items: center; gap: .35rem; height: 28px;
@@ -1185,8 +1256,9 @@
     display: none;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 24px;
+    /** DSH's `._iconButton` is 28×28; this rule sets the size, so it is the one that moves. */
+    width: 28px;
+    height: 28px;
     padding: 0;
     border: none;
     background: none;
@@ -1236,11 +1308,17 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 24px;
+    /**
+     * **28×28**, DSH's `._iconButton` size. This rule has the highest specificity in the header (`id + element`), so it is
+     * the one that decides the size of the panel's icon buttons — an earlier 24px here silently overrode the class rule
+     * above, which is why the buttons measured a size smaller than the reference long after the rule was "fixed".
+     */
+    width: 28px;
+    height: 28px;
+    flex: none;
     padding: 0;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius);
     background: none;
     color: inherit;
     font: inherit;
@@ -1699,6 +1777,20 @@
     <button type="button" role="tab" id="tab-chat" data-view="chat" aria-selected="true" aria-controls="log" tabindex="0">Chat</button>
     <button type="button" role="tab" id="tab-trajectory" data-view="trajectory" aria-selected="false" aria-controls="ledger" tabindex="-1">Trajectory</button>
   </nav>
+
+  <!--
+    The **empty state**, which DSH has and this panel did not: its home centres the mark, a heading and the composer
+    rather than showing an empty column headed "No session". Measured from DSH's home on 2026-10-17 — a centred hero
+    above the composer with the workspace and mode chips between them. Heddle has no mode presets, so its version says
+    the two things a reader can actually do from here: pick a workspace, or press the chord the panel's primary action
+    is bound to.
+  -->
+  <section id="empty-state" hidden>
+    <img src="/favicon.svg" alt="" width="28" height="28">
+    <h3>Start a conversation</h3>
+    <p>Pick a workspace in the left panel and start a session there, or press
+      <kbd>⌥⌘N</kbd> to begin one in the workspace you are looking at.</p>
+  </section>
   <!--
     The goal bar: what the session is working toward, above the conversation rather than inside it.
     It shows the **durable phase** and the **process-local activation** as two facts, because "active but
@@ -2561,6 +2653,23 @@ log.addEventListener(
 )
 window.addEventListener('resize', scheduleMinimap)
 
+/**
+ * Show the empty state when the panel has **nothing to show**, and put it away the moment there is something.
+ *
+ * The condition is the panel's own state rather than a flag someone has to remember to set: a conversation open, a file
+ * being read, or a turn being drawn are all reasons not to invite the reader to start. `current` is the session the
+ * composer will write to; `view` is which panel the ring is showing. The empty state belongs to the chat view with no
+ * session in it, which is the state a first visit actually lands in.
+ */
+function paintEmptyState() {
+  const empty = document.getElementById('empty-state')
+  if (empty === null) return
+  const nothingOpen = view === 'chat' && current === null
+  empty.hidden = !nothingOpen
+  /** The conversation's own column is hidden under the invitation rather than left to draw an empty box. */
+  if (log !== null) log.hidden = nothingOpen || view !== 'chat'
+}
+
 async function showView(next) {
   view = next
   for (const button of document.querySelectorAll('#views button')) {
@@ -2580,6 +2689,7 @@ async function showView(next) {
     await showLedger(current)
     followLedgerTail()
   }
+  paintEmptyState()
 }
 
 /** Read the ledger projection for one session and draw it. */
@@ -3352,6 +3462,7 @@ async function showSession(id) {
   lastTurnUsage = null
   lastTurnSeconds = 0
   current = id
+  paintEmptyState()
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
@@ -3366,7 +3477,22 @@ async function showSession(id) {
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
-    if (!response.ok) return
+    if (!response.ok) {
+      /**
+       * A session that is no longer there is **not** the session being shown.
+       *
+       * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
+       * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
+       * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+       */
+      current = null
+      const title = document.getElementById('session-title')
+      if (title !== null) title.textContent = 'No session'
+      const branch = document.getElementById('session-branch')
+      if (branch !== null) branch.textContent = ''
+      paintEmptyState()
+      return
+    }
     const body = await response.json()
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
@@ -5213,6 +5339,8 @@ function humanBytes(bytes) {
  */
 let fileFetches = 0
 async function showFile(node) {
+  /** A file is something to read; the invitation belongs to the panel with nothing in it. */
+  document.getElementById('empty-state')?.setAttribute('hidden', '')
   const ticket = ++fileFetches
   chooseSelected(node.path)
   /**
@@ -6589,6 +6717,8 @@ document.getElementById('session-search').addEventListener('input', applySearch)
 renderTree().then(() => applySearch())
 renderQueue()
 renderComposerState()
+/** The panel's first word: a conversation, or an invitation to start one. */
+paintEmptyState()
 </script>
 <script>
 /**

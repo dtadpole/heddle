@@ -3025,6 +3025,46 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           menus.sessionRow = await menuReport('#tree li[data-kind="session"] .menu-wrap > button', '#tree')
         }
 
+        /** The row's action buttons: DSH's 20px square box on the row's own surface, with no patch behind them. */
+        const rowControls = (() => {
+          const li = document.querySelector('#tree li[data-kind="session"]')
+          if (li === null) return null
+          const tools = li.querySelector('.row-tools')
+          const buttons = [...(tools?.querySelectorAll(':scope > .menu-wrap > button, :scope > .session-actions > button') ?? [])]
+          const iconButtons = ['#sidebar-search', '#add-workspace', '#session-more button', '#view-options button']
+            .map((selector) => document.querySelector(selector))
+            .filter((button) => button !== null)
+            .map((button) => {
+              const rect = button.getBoundingClientRect()
+              const style = getComputedStyle(button)
+              return {
+                selector: button.id || button.parentElement?.id || 'icon',
+                box: [Math.round(rect.width), Math.round(rect.height)],
+                computed: [style.width, style.height],
+                display: style.display,
+                rules: [...document.styleSheets].flatMap((sheet) => {
+                  try { return [...sheet.cssRules] } catch (error) { return [] }
+                }).filter((rule) => (rule.selectorText ?? '').includes('sidebar-search')).map((rule) => rule.cssText.slice(0, 100)),
+                ancestors: (() => {
+                  const chain = []
+                  let current = button.parentElement
+                  for (let depth = 0; depth < 4 && current !== null; depth += 1) {
+                    const chainStyle = getComputedStyle(current)
+                    chain.push({ tag: current.tagName.toLowerCase(), id: current.id, width: Math.round(current.getBoundingClientRect().width), transform: chainStyle.transform })
+                    current = current.parentElement
+                  }
+                  return chain
+                })(),
+              }
+            })
+          return {
+            toolsBackground: tools === null ? null : getComputedStyle(tools).backgroundColor,
+            boxes: buttons.map((button) => [Math.round(button.getBoundingClientRect().width), Math.round(button.getBoundingClientRect().height)]),
+            backgrounds: buttons.map((button) => getComputedStyle(button).backgroundColor),
+            iconButtons,
+          }
+        })()
+
         /** A long name must not reach the controls: the row's right-hand slot reserves its width. */
         const longName = (() => {
           const li = document.querySelector('#tree li[data-kind="session"]')
@@ -3041,7 +3081,7 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           return { labelRight, toolsLeft, overlaps: labelRight > toolsLeft }
         })()
 
-        return JSON.stringify({ inventory: inventory(), menus, longName, pageErrors: window.__probeErrors ?? [] })
+        return JSON.stringify({ inventory: inventory(), menus, rowControls, longName, pageErrors: window.__probeErrors ?? [] })
       })().then((value) => JSON.stringify(value))`, 30_000),
     )
     const result = JSON.parse(reading)
@@ -3067,6 +3107,17 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
       assert.equal(menu.background, 'rgb(35, 35, 36)', `the ${name} menu has an opaque surface`)
       assert.ok(menu.items.length > 0, `the ${name} menu has items`)
       assert.ok(menu.items.every((item) => item.glyph === true), `every ${name} item carries a glyph\nsaw: ${JSON.stringify(menu.items)}`)
+    }
+
+    /** The row's controls are DSH's `._actionButton`: 20×16, no background. */
+    assert.deepEqual(result.rowControls.boxes, [[20, 16], [20, 16], [20, 16]], `each row control is DSH's 20x16 action button\nsaw: ${JSON.stringify(result.rowControls.boxes)}`)
+    assert.equal(result.rowControls.toolsBackground, 'rgba(0, 0, 0, 0)', `the controls draw no patch of their own\nsaw: ${result.rowControls.toolsBackground}`)
+    assert.deepEqual(result.rowControls.backgrounds, ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)'], 'and each button is transparent')
+
+    /** The panel's icon buttons are DSH's `._iconButton`: 28×28. */
+    assert.ok(result.rowControls.iconButtons.length >= 3, `the panel's icon buttons are measurable\nsaw: ${JSON.stringify(result.rowControls.iconButtons)}`)
+    for (const button of result.rowControls.iconButtons) {
+      assert.deepEqual(button.box, [28, 28], `an icon button is DSH's 28x28\nsaw: ${JSON.stringify(button)}`)
     }
 
     /** A long name ellipsizes before the controls, never underneath them. */
