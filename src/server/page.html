@@ -5868,9 +5868,19 @@ function positionStatPopover() {
   popover.style.left = '0px'
   popover.style.top = '0px'
   const width = popover.offsetWidth
+  const height = popover.offsetHeight
+  /**
+   * The composer sits at the bottom of the window, so a panel placed under its trigger lands off-screen —
+   * measured: an opened surface at y 873 with height 107 in a 960 viewport. The reference puts its panel
+   * **above** the trigger (pill at 787, panel 620..779, an 8px gap), and this follows it, clamping into the
+   * viewport when neither side fits.
+   */
+  const above = rect.top - height - 8
+  let top = above >= 8 ? above : rect.bottom + 8
+  if (top + height > innerHeight - 8) top = Math.max(8, innerHeight - height - 8)
   const left = Math.min(Math.max(8, rect.left), innerWidth - width - 8)
   popover.style.left = `${Math.round(left)}px`
-  popover.style.top = `${Math.round(rect.bottom + 8)}px`
+  popover.style.top = `${Math.round(top)}px`
 }
 
 function renderStatPopover() {
