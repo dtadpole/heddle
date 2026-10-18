@@ -2454,10 +2454,24 @@ export function transcriptTurns(
     openAssistant = -1
     openReasoning = -1
   }
+  /**
+   * A blank-line-only delta between two tokens is a **stream artifact**, not prose.
+   *
+   * Measured 2026-10-18 in the owner's transcript: a build of the server streamed content as `'检测'`, `'\n\n\n'`,
+   * `'器'`, `'\n\n\n'`, … so a sentence rendered with a blank line between every word. A real paragraph break
+   * follows sentence-ending punctuation (or whitespace); a run of two or more newlines wedged between two ordinary
+   * characters is not one, and the fold drops it the same way the live page does.
+   */
+  const isStreamArtifact = (text: string, open: { readonly text: string } | undefined): boolean => {
+    if (open === undefined || !/^\n{2,}$/.test(text)) return false
+    const previous = open.text.slice(-1)
+    return previous !== '' && !/[\s。．.!?！？：:；;，,、）)」』】]/.test(previous)
+  }
   /** Append to the open run when there is one, and otherwise open a new turn for it. */
   const append = (kind: 'assistant' | 'reasoning', text: string, index: number): number => {
     const turn = index >= 0 ? turns[index] : undefined
     if (turn !== undefined) {
+      if (kind === 'assistant' && isStreamArtifact(text, turn)) return index
       turns[index] = { ...turn, text: turn.text + text }
       return index
     }

@@ -387,3 +387,38 @@ test('a user turn folds its attachment blocks into transcript cards', () => {
   assert.equal(turns[0]?.text, 'look at these', 'the bubble keeps only the text parts')
   assert.equal(turns[1]?.attachments, undefined, 'a text-only message carries no attachment field')
 })
+
+test('a stream artifact of blank lines between tokens is not prose', () => {
+  /**
+   * Measured 2026-10-18 in the owner's transcript: a build of the server streamed content as `'检测'`, `'\\n\\n\\n'`,
+   * `'器'`, … so the answer rendered with a blank line between every word. A real paragraph break follows
+   * sentence-ending punctuation or whitespace; blank lines wedged between ordinary characters are dropped while the
+   * rest of the text is kept verbatim.
+   */
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '这' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '\n\n\n' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '正' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '\n\n\n' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '是' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '\n\n\n' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '**' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '抓到' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '了' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '。\n\n' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '下一段' } },
+    { type: 'assistant/completed', text: '', finishReason: 'stop', rounds: 1 },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.ok(answer !== undefined)
+  assert.equal(answer.text, '这正是**抓到了。\n\n下一段', 'the artifact separators are dropped, the prose is kept')
+  /** A paragraph break after punctuation is prose, and stays. */
+  const legit = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '第一段。' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '\n\n' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '第二段。' } },
+  ])
+  assert.equal(legit.find((turn) => turn.kind === 'assistant')?.text, '第一段。\n\n第二段。')
+})

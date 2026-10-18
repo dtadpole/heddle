@@ -2994,6 +2994,19 @@ function add(kind, text, merge = true, label, tool) {
   // false is what history wants, where two consecutive entries of the same kind are two turns.
   //
   if (kind === 'assistant' && merge && last && last.tagName === 'DIV' && last.dataset.kind === 'assistant') {
+    /**
+     * A blank-line-only delta between two tokens is a stream artifact, not prose — the owner's chat showed one line
+     * per word because a server build emitted `'...\n\n\n'` between tokens. A real paragraph break follows
+     * sentence-ending punctuation (or whitespace), so the artifact is dropped here exactly as the transcript fold
+     * drops it.
+     */
+    if (/^\n{2,}$/.test(text)) {
+      const previous = last.textContent.slice(-1)
+      if (previous !== '' && !/[\s。．.!?！？：:；;，,、）)」』】]/.test(previous)) {
+        last.dataset.state = 'running'
+        return
+      }
+    }
     // Only a plain assistant div is merged into. An earlier version merged on `data-kind` alone, so a
     // reasoning block (a `details` whose data-kind is reasoning) was never the target — but the branch
     // still looked for `[data-body]` on whatever the last child was, and a history render passes

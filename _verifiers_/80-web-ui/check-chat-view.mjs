@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -29,6 +30,8 @@ async function startServer(label, steps, options = {}) {
    */
   const { config } = options.failing === true
     ? { config: httpConfig({ home, name: 'bad', baseUrl: 'http://127.0.0.1:9', stream: true }) }
+    : options.doubleUrl !== undefined
+    ? { config: httpConfig({ home, name: 'stream', baseUrl: String(options.doubleUrl), stream: true }) }
     : scriptedConfig({
         home,
         steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
@@ -50,7 +53,7 @@ async function startServer(label, steps, options = {}) {
       join(repoRoot, 'cordis.yml'),
       ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []),
       '--endpoint',
-      options.failing === true ? 'bad' : 'scripted',
+      options.failing === true ? 'bad' : options.doubleUrl !== undefined ? 'stream' : 'scripted',
       '--session-root',
       join(home, 'sessions'),
       ...(options.maxRounds !== undefined ? ['--max-rounds', String(options.maxRounds)] : []),
@@ -1939,5 +1942,47 @@ test('the weaving clock comes from the server: it survives a reload and agrees w
   } finally {
     browser.close()
     await server.close()
+  }
+})
+
+test('a provider that streams blank lines between tokens still reads as prose', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner's "incoming content in separate lines". The live row concatenates deltas verbatim, so when a provider
+   * (or the router in front of it) emits a blank-line-only delta between two tokens — measured 2026-10-18 as
+   * `'检测'`, `'\n\n\n'`, `'器'`, … — the answer shows one word per line. A real paragraph break follows
+   * sentence-ending punctuation or whitespace; blank lines between ordinary characters are a stream artifact and the
+   * page drops them. The double below is exactly that shape.
+   */
+  const chunks = ['检', '\n\n\n', '测', '\n\n\n', '器', '\n\n\n', '抓', '\n\n\n', '到', '\n\n\n', '了', '。', '\n\n', '下一段。']
+  const double = await new Promise((resolve) => {
+    const server = createServer((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+        for (const chunk of chunks) {
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`)
+        }
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+        response.write('data: [DONE]\n\n')
+        response.end()
+      })
+    })
+    server.listen(0, '127.0.0.1', () => resolve({ server, baseUrl: `http://127.0.0.1:${server.address().port}` }))
+  })
+  const server = await startServer('stream-artifact', undefined, { doubleUrl: double.baseUrl })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await sendMessage(browser, 'stream it')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false && document.querySelector("#log .turn.assistant") !== null', 25_000), 'the turn finished')
+    const text = await browser.evaluate('document.querySelector("#log .turn.assistant")?.innerText ?? ""')
+    assert.equal(text, '检测器抓到了。\n\n下一段。', `the artifact separators are gone and the real paragraph stays (${JSON.stringify(text)})`)
+  } finally {
+    browser.close()
+    await server.close()
+    double.server.close()
   }
 })
