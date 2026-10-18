@@ -189,3 +189,38 @@ the committed-main deployment checkout `/Users/zhenc/heddle-deploy`, the deploym
 checkout, the daemon judge passes 3/3, the model-switcher contract passes 5/5, and the owner's URL
 `http://127.0.0.1:8082/` passes the 50-check trusted-click live probe. The `landed:` evidence is this section and
 the screenshot beside it.
+
+## Cycle 5 — the endpoint catalogue grows and sorts (another session's change, deployed here)
+
+```
+Cycle 5 — the sorting and per-model-gateway work is deployed and measured at 8082
+  measured:   another session landed three commits on main while this loop was between rounds — `fb606c0 a model
+              may live on its own gateway, with its own window`, `c8291f8 the endpoint list is ordered by name,
+              not by which layer declared it`, and `932d047 the suite type-checks again`. They were committed in
+              the deployment checkout and pushed (origin/main == deploy main at 932d047), which is the landing
+              half of the rule; the deployment checkout's `dist` had been rebuilt at 23:16 but the **process**
+              had started at 22:56, before the commits, so the deployed backend was old.
+  changed:    the deployment checkout's six verifier-read screenshots were stashed (they are another session's
+              uncommitted evidence, not this loop's), `npm run check` clean, `npm test` 441/441, `npm run build`,
+              then `install.sh` from the clean deployment checkout restarted the agent (PID 75360, 23:24:55) on
+              `dist/cli.js` with the checkout's own `cordis.yml`.
+  evidence:   served `/api/endpoints` is now ordered **meta-claude | meta-codex | plugboard-d | plugboard-x**, by
+              name and after the local exclusion; `meta-claude` carries the five Claude deployments (opus/sonnet
+              5.5/5/4.8) and `meta-codex` carries five Meta deployments whose gateways are per model
+              (gpt-6.1-sol-ptu, gpt-6-luna, gpt-5.6-sol-ptu, gpt-5.6-luna-ptu, gpt-5.5). Two of those declare
+              **no reasoning levels**, so the deployed catalogue now exercises the absent-Effort state live.
+              `_verifiers_/96-deployment` 3/3; `95-web-daemon` 3/3; the model-switcher contract 5/5; the trusted
+              live probe at 8082 passes **55 checks** (up from 50: the probe now reads the served catalogue,
+              asserts the pane's group order is the served order, asserts a no-levels model hides its effort span
+              and removes the Effort row, and expects the switched selection on `meta-claude`).
+              Screenshot `heddle-live-deployed-meta-8082.png` shows the sorted groups and the Meta models at the
+              owner's address.
+  delivered:   http://127.0.0.1:8082/ serves the deployment checkout at main 932d047 (plus this evidence commit),
+              process `/Users/zhenc/heddle-deploy/dist/cli.js`; the endpoint sorting and the per-model gateways are
+              visible and usable in the model menu.
+  reds:       none. The stashed screenshots from the other session are left in `git stash` rather than committed,
+              because they are not this loop's evidence.
+  lessons:    "committed and pushed is not deployed" cuts the other way too: the committing session had rebuilt
+              `dist` but the running process predated it. Reading the process's start time against the commit
+              times is the cheap check that catches it.
+```

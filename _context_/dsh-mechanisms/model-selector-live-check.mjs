@@ -169,6 +169,21 @@ try {
   await browser.evaluate(`${SEAT}.focus()`)
   ok(/0px 0px 0px 2px/.test(await read(browser, `getComputedStyle(${SEAT}).boxShadow`)), 'focus draws the 2px ring')
 
+  /**
+   * The catalogue the server actually serves, read once: its order is what the model pane must show, its model
+   * count is what the search row is about, and one of its models is allowed to declare no levels.
+   */
+  const catalogue = JSON.parse(await read(browser, `fetch('/api/endpoints').then((r) => r.json()).then((body) => JSON.stringify(body.endpoints.map((endpoint) => ({ name: endpoint.name, models: (endpoint.models ?? []).map((model) => ({ id: model.id, name: model.name ?? model.id, levels: (model.reasoning?.levels ?? []).length })) }))))`))
+  const endpointNames = catalogue.map((endpoint) => endpoint.name)
+  const allModels = catalogue.flatMap((endpoint) => endpoint.models)
+  ok(endpointNames.length > 0 && allModels.length > 0, `the served catalogue is non-empty (${endpointNames.length} endpoints, ${allModels.length} models)`)
+  /**
+   * The endpoint order is **served**, not declared: `resolveEndpoints` sorts by name, so the pane's group order is
+   * an end-to-end statement that the sorting reached the browser. A code-unit order is asserted rather than a
+   * locale order for the same reason the implementation uses one.
+   */
+  ok(JSON.stringify([...endpointNames].sort()) === JSON.stringify(endpointNames), `the served endpoint order is by name (${endpointNames.join(', ')})`)
+
   /** 4. The root pane: two rows, fixed placement above and right-aligned. */
   await openMenu(browser)
   const root = await menu(browser)
@@ -183,8 +198,8 @@ try {
   await drill(browser, 'Model')
   const pane = await menu(browser)
   ok(pane.role === 'group', 'the model pane is a group of grouped lists')
-  ok(pane.search === 'Search models…', 'search appears for this catalogue (17 models)')
-  ok(pane.headings.includes('claude-opus') && pane.headings.includes('plugboard-d') && pane.headings.includes('plugboard-x'), `the groups are the configured endpoints (${pane.headings.join(', ')})`)
+  ok(pane.search === 'Search models…', `search appears for this catalogue (${allModels.length} models)`)
+  ok(JSON.stringify(pane.headings) === JSON.stringify(endpointNames), `the pane groups are the served endpoints, in their served order (${pane.headings.join(', ')})`)
   ok(pane.options.some((option) => option.text === 'GPT-6.1-Sol'), 'the plugboard-x model types are offered')
   ok(pane.options.filter((option) => option.checked === 'true').length >= 1, 'exactly the current selection is marked')
   await browser.screenshot(join(out, 'heddle-live-models.png'))
@@ -193,7 +208,7 @@ try {
   await browser.send('Input.insertText', { text: 'gpt-6.1' })
   await sleep(300)
   const filtered = await options(browser)
-  ok(filtered.length === 1 && filtered[0] === 'GPT-6.1-Sol', `typing filters the catalogue (${filtered.join(', ')})`)
+  ok(filtered.length === 2 && filtered.every((text) => /gpt-6\.1/i.test(text)), `typing filters the catalogue to the two 6.1 families (${filtered.join(', ')})`)
   ok((await read(browser, `document.querySelectorAll('#model-menu [role="menuitemradio"][data-highlighted]').length`)) === 1, 'the first match is highlighted')
   await browser.screenshot(join(out, 'heddle-live-search.png'))
   await press(browser, 'Escape')
@@ -218,19 +233,29 @@ try {
   ok((await seat(browser)).aria === 'Select model, current GPT-6.1-Sol, reasoning effort Low', 'choosing an effort updates the seat')
 
   /**
-   * 8. Every model this machine's catalogue offers declares levels, so each has an Effort row.
+   * 8. A model that declares no levels has no effort: the span is hidden, and the root pane has no Effort row.
    *
-   * The *absent* Effort row is a real state and is asserted by the isolated contract in
-   * `_verifiers_/80-web-ui/check-model-switcher.mjs` (its doubles include a model with no levels). On the deployed
-   * catalogue it cannot be exercised: `scripted`/`localhost` were excluded from the selector and every remaining
-   * model — five Claude ids, two DeepSeek ids, seven GPT ids — declares its levels. Asserting that instead keeps the
-   * live probe honest about the catalogue it is actually looking at.
+   * The catalogue now carries such models (the Meta Codex endpoint's `gpt-5.5` and `gpt-5.6-sol-ptu` declare no
+   * reasoning levels), so the state the isolated contract covers with doubles is exercised on the deployed build
+   * too. The selection is then restored to a model with levels, so the rest of the probe still has an effort.
    */
-  const catalogue = JSON.parse(await read(browser, `fetch('/api/endpoints').then((r) => r.json()).then((body) => JSON.stringify(body.endpoints.map((endpoint) => ({ name: endpoint.name, models: (endpoint.models ?? []).map((model) => ({ id: model.id, levels: (model.reasoning?.levels ?? []).length })) }))))`))
-  ok(!catalogue.some((endpoint) => ['scripted', 'localhost'].includes(endpoint.name)), `the local exclusion removed the repository defaults (${catalogue.map((endpoint) => endpoint.name).join(', ')})`)
-  const allModels = catalogue.flatMap((endpoint) => endpoint.models)
-  ok(allModels.length > 0 && allModels.every((model) => model.levels > 0), `every offered model declares its effort levels (${allModels.length} models)`)
-  await press(browser, 'Escape')
+  const noLevels = allModels.find((model) => model.levels === 0)
+  ok(noLevels !== undefined, `the catalogue has a model without declared levels (${noLevels?.name ?? 'none'})`)
+  if (noLevels !== undefined) {
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    await choose(browser, noLevels.name)
+    const plain = await seat(browser)
+    ok(plain.aria === `Select model, current ${noLevels.name}`, `a model without levels shows no effort in the name (${plain.aria})`)
+    ok(plain.effortHidden === true, 'and the effort span is hidden')
+    await openMenu(browser)
+    ok((await menu(browser)).cells.length === 1, 'the root pane has no Effort row for it')
+    await press(browser, 'Escape')
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    await choose(browser, 'GPT-6.1-Sol')
+    ok((await seat(browser)).aria === 'Select model, current GPT-6.1-Sol, reasoning effort High', 'and a model with levels restores both spans')
+  }
 
   /** 9. Keyboard: Tab enters the rows, Enter drills to search, Escape walks back out. */
   await openMenu(browser)
@@ -276,7 +301,7 @@ try {
   /** 11. The record: the switch is on the session, and a reload comes back to it. */
   const record = JSON.parse(await read(browser, `fetch('/api/sessions').then((r) => r.json()).then((list) => JSON.stringify({ total: list.length, newest: list[0] ? { id: list[0].id, endpoint: list[0].endpoint, model: list[0].model, reasoningEffort: list[0].reasoningEffort } : null }))`))
   ok(record.newest !== null, `the session exists (${record.total} sessions)`)
-  ok(record.newest.endpoint === 'claude-opus' && record.newest.model === 'claude-sonnet-5-5', `the running-turn switch is recorded (${record.newest.endpoint}/${record.newest.model})`)
+  ok(record.newest.endpoint === 'meta-claude' && record.newest.model === 'claude-sonnet-5-5', `the running-turn switch is recorded (${record.newest.endpoint}/${record.newest.model})`)
   ok(record.newest.reasoningEffort === 'high', `with the model's declared default level (${record.newest.reasoningEffort})`)
   await browser.goto(url)
   await browser.waitFor(`${SEAT} !== null`, 20_000)
