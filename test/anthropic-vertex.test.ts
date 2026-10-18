@@ -149,8 +149,17 @@ test('text, thinking and a streamed tool call fold into the harness vocabulary',
     { type: 'reasoning-delta', text: 'hmm' },
     { type: 'text-delta', text: 'the ' },
     { type: 'tool-call', id: 'tool-1', name: 'bash', arguments: '{"command":"pwd"}' },
-    { type: 'done', finishReason: 'tool_use', usage: { inputTokens: 12, outputTokens: 7 } },
-  ], 'the stream ends with the assembled call and one done chunk')
+    { type: 'done', finishReason: 'tool_calls', usage: { inputTokens: 12, outputTokens: 7 } },
+  ], 'the stream ends with the assembled call and one done chunk, in the loop\'s word for it')
+
+  /**
+   * The finish reason is the **loop's** word, not Anthropic's.
+   *
+   * This assertion used to pin `tool_use`, which is what the provider says; the agent loop knows only `stop` and
+   * `tool_calls` and reports anything else as a stop notice on the answer, so every healthy Claude turn carried
+   * one — measured 2026-10-18 as `ended: ['round 1: end_turn']`. The provider's word is translated once, in
+   * `canonicalFinishReason`, and `test/finish-reasons.test.ts` drives all three adapters against doubles.
+   */
 })
 
 test('an error event becomes a named failure rather than a silent end', async () => {

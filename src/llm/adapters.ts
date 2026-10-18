@@ -2,6 +2,7 @@ import { anthropicUsage, openaiChatUsage, openaiResponsesUsage, type TokenUsage 
 import {
   ModelError,
   baseUrlFor,
+  canonicalFinishReason,
   reasoningLevelFor,
   reasoningLevelsFor,
   type Adapter,
@@ -243,7 +244,7 @@ export function openAiChatAdapter(
         }
         yield {
           type: 'done',
-          finishReason: choice.finish_reason,
+          finishReason: canonicalFinishReason(choice.finish_reason, calls.size),
           ...(openaiChatUsage(parsed.usage) !== undefined ? { usage: openaiChatUsage(parsed.usage) } : {}),
         }
         return
@@ -396,7 +397,7 @@ function* finishFromChatMessage(json: unknown): Generator<Chunk> {
   }
   yield {
     type: 'done',
-    finishReason: choice?.finish_reason ?? 'stop',
+    finishReason: canonicalFinishReason(choice?.finish_reason, choice?.message?.tool_calls?.length ?? 0),
     ...(openaiChatUsage(answer.usage) !== undefined ? { usage: openaiChatUsage(answer.usage) } : {}),
   }
 }
@@ -559,8 +560,13 @@ export function openAiResponsesAdapter(
  * budget thinking return an empty answer reported as a normal stop.
  */
 export function responsesFinishReason(terminal: string, incompleteReason: string | undefined, toolCalls: number): string {
-  if (terminal === 'response.incomplete') return incompleteReason ?? 'incomplete'
-  return toolCalls > 0 ? 'tool_calls' : 'stop'
+  /**
+   * An incomplete response is cut, and its own `reason` is the useful word — `max_output_tokens` or
+   * `content_filter`. Every other terminal event goes through the shared translation, because `completed` is the
+   * loop's `stop` and a round that asked for tools ended in `tool_calls`.
+   */
+  if (terminal === 'response.incomplete') return canonicalFinishReason(incompleteReason ?? 'incomplete', 0)
+  return canonicalFinishReason('completed', toolCalls)
 }
 
 /** The body version an Anthropic publisher route requires; it is not a header on this shape. */
@@ -747,7 +753,11 @@ export async function* anthropicChunks(
       }
     } else if (type === 'message_delta') {
       const delta = parsed.delta as { stop_reason?: string } | undefined
-      if (typeof delta?.stop_reason === 'string') finishReason = delta.stop_reason
+      /**
+       * Anthropic's words, translated. Its healthy end is `end_turn`, which the loop does not know, so passing it
+       * through put a stop notice on every ordinary Claude answer.
+       */
+      if (typeof delta?.stop_reason === 'string') finishReason = canonicalFinishReason(delta.stop_reason, calls.size)
       const reported = parsed.usage as { output_tokens?: number } | undefined
       if (reported?.output_tokens !== undefined) usage = { ...(usage ?? {}), outputTokens: reported.output_tokens }
     } else if (type === 'message_stop') {

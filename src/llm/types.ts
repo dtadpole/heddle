@@ -122,6 +122,60 @@ export interface GenerateRequest {
   readonly purpose?: string
 }
 
+/**
+ * The two words the agent loop treats as a healthy end.
+ *
+ * `stop` is an answer that finished, `tool_calls` a round that asked for tools and expects another. Everything
+ * else is reported on the answer as a stop reason. That is the whole contract, and it is stated once here because
+ * **each provider has its own vocabulary for the same two facts**: Chat Completions says `stop` and `tool_calls`,
+ * the Responses shape says `completed` regardless, and Anthropic says `end_turn` and `tool_use`.
+ *
+ * Before this existed each adapter passed its provider's word straight through, so every healthy turn on a
+ * Responses or Anthropic route carried a stop notice — measured 2026-10-18 as `ended: ['round 1: completed']` and
+ * `ended: ['round 1: end_turn']` on answers that were entirely fine. A provider's word is not the loop's word,
+ * and the translation belongs in one place rather than in each adapter and again in whatever reads the finish.
+ */
+export const HEALTHY_FINISH_REASONS: readonly string[] = ['stop', 'tool_calls']
+
+/** How each wire shape spells the same three outcomes. */
+const FINISH_ALIASES: Readonly<Record<string, string>> = {
+  // finished
+  stop: 'stop',
+  end_turn: 'stop',
+  stop_sequence: 'stop',
+  completed: 'stop',
+  // asked for tools, so another round is due
+  tool_calls: 'tool_calls',
+  tool_use: 'tool_calls',
+  function_call: 'tool_calls',
+  // cut short
+  length: 'max_output_tokens',
+  max_tokens: 'max_output_tokens',
+  max_output_tokens: 'max_output_tokens',
+  // reported as themselves: a filter is its own reason, not a synonym for either
+  content_filter: 'content_filter',
+  refusal: 'refusal',
+}
+
+/**
+ * The loop's word for a provider's finish reason.
+ *
+ * Three rules, and the third is the one that is easy to miss:
+ *
+ * 1. a known provider spelling becomes the canonical one;
+ * 2. an unknown spelling is passed through unchanged, because reporting what the provider actually said beats
+ *    inventing a category for it;
+ * 3. **a round that produced tool calls ended in `tool_calls`**, whatever the provider called it. The Responses
+ *    shape reports `completed` whether or not it asked for tools, and a round that asked for tools but is called
+ *    a stop ends the loop with its calls unanswered — the model is handed back a result it never asked for on the
+ *    next turn, or nothing at all.
+ */
+export function canonicalFinishReason(raw: string | null | undefined, toolCalls = 0): string {
+  const word = raw === null || raw === undefined || raw.length === 0 ? 'stop' : raw
+  const canonical = FINISH_ALIASES[word] ?? word
+  return toolCalls > 0 && canonical === 'stop' ? 'tool_calls' : canonical
+}
+
 /** One piece of a streamed answer. */
 export type Chunk =
   | { readonly type: 'text-delta'; readonly text: string }
