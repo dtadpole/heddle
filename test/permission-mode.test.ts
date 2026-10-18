@@ -56,7 +56,8 @@ function fixture(options: {
     ...(options.backend !== undefined ? { backend: options.backend } : {}),
   })
   const sessions = new SessionService(new Context(), { root })
-  const approvals = new ApprovalService(new Context(), { mode: 'allow' })
+  const approvalsCtx = new Context()
+  const approvals = new ApprovalService(approvalsCtx, { mode: 'allow' })
   const registry = new ToolRegistry(new Context(), approvals, sandbox, sessions)
   for (const tool of builtinTools(sandbox)) registry.register(tool)
   const handle = sessions.start({ cwd: workspace })
@@ -69,7 +70,7 @@ function fixture(options: {
       return { output: context.mode }
     },
   })
-  return { sandbox, sessions, registry, handle, workspace, seen }
+  return { sandbox, sessions, registry, handle, workspace, seen, approvals, approvalsCtx }
 }
 
 test('the three modes are a closed vocabulary, and a per-call mode outranks the one the sandbox was built with', () => {
@@ -160,23 +161,43 @@ test('a mode belongs to one session and survives a fresh process', () => {
   assert.equal(reopened.effectiveMode(twoAgain, 'workspace-write'), 'workspace-write', 'so the deployment mode still answers for it')
 })
 
-test('every tool call is gated by the session’s mode, and a tool argument cannot widen it', async () => {
-  const { sessions, registry, handle, workspace, seen } = fixture()
+test('every tool call is gated by the session’s mode, and an argument widens it only through an approved one-call grant', async () => {
+  const { sessions, registry, handle, workspace, seen, approvals, approvalsCtx } = fixture()
   sessions.setMode(handle, 'read-only', 'workspace-write')
+  const context = { cwd: workspace, session: handle, log: () => {} }
 
   /**
    * The probe is a tool whose only job is to report the mode it was run under. A `write_file` call is
    * gated where its effect lands; this one is gated where every call is resolved, which is the fact
    * that makes "every tool call" true rather than "every filesystem call".
+   *
+   * The claim changed with the escalation ladder: an argument CAN ask for a wider mode, but only as a
+   * one-call request that a person approves, and never as a plain argument.
    */
-  const gated = await registry.call(
+  const refused = await registry.call(
     'probe_mode',
-    { mode: 'danger-full-access', sandbox_permissions: 'danger-full-access', justification: 'pretend' },
-    { cwd: workspace, session: handle, log: () => {} },
+    { sandbox_permissions: 'workspace-write', justification: 'pretend there is a reason' },
+    context,
   )
-  assert.equal(gated.output, 'read-only', 'the registry resolved the session’s mode, not the argument named in the call')
-  assert.deepEqual(seen, ['read-only'], 'no widening argument reached the tool')
-  assert.equal(sessions.effectiveMode(handle, 'workspace-write'), 'read-only', 'and the call did not change the session')
+  assert.equal(refused.error?.code, 'ESCALATION_REFUSED', 'an escalation with no one to answer is refused')
+  assert.deepEqual(seen, [], 'and the tool never ran')
+  assert.equal(sessions.effectiveMode(handle, 'workspace-write'), 'read-only', 'the session did not move')
+
+  const plain = await registry.call('probe_mode', { mode: 'danger-full-access', sandbox_permissions: undefined }, context)
+  assert.equal(plain.output, 'read-only', 'a plain argument does not widen the call; the gate resolved the session’s mode')
+  assert.deepEqual(seen, ['read-only'], 'and the tool saw exactly that')
+
+  /** With an answerer that grants once, the same request runs the call under the wider mode — and only that call. */
+  approvals.attachAnswerer()
+  approvalsCtx.on('approval/request', (request) => approvals.answer(request.id, 'allowed-once'))
+  const escalated = await registry.call(
+    'probe_mode',
+    { sandbox_permissions: 'workspace-write', justification: 'the task needs it' },
+    context,
+  )
+  assert.equal(escalated.output, 'workspace-write', 'the approved one-call grant is the only way an argument widens the call')
+  assert.deepEqual(seen, ['read-only', 'workspace-write'], 'and the tool ran under the granted mode')
+  assert.equal(sessions.effectiveMode(handle, 'workspace-write'), 'read-only', 'while the session’s own mode never moved')
 
   const withoutSession = await registry.call('probe_mode', {}, { cwd: workspace, log: () => {} })
   assert.equal(withoutSession.output, 'workspace-write', 'a call with no session runs under the deployment mode')

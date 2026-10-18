@@ -1,6 +1,6 @@
 ---
 title: Sandbox
-version: 1.1.0
+version: 1.2.0
 description: The permission sandbox — the per-call policy, the in-process file fence, and the platform backends that confine a shell.
 grounded_in:
   - source: human-authored
@@ -25,6 +25,8 @@ this tree carries.
 | [`policy.ts`](policy.ts) | the mode vocabulary and the one `writableRoots(policy)` the fence and every kernel profile share |
 | [`backend.ts`](backend.ts) | the backend contract, platform selection, the fail-closed `SandboxUnavailableError`, and the runner-failure-before-denial classifier |
 | [`seatbelt.ts`](seatbelt.ts) | the macOS Seatbelt rung — DSH's SBPL profile, a functional probe, and the denial dialect |
+| [`linux.ts`](linux.ts) | the Linux rungs — bubblewrap's profile, Landlock's grants and launcher probe, and DSH's chain order |
+| [`escalation.ts`](escalation.ts) | the one-call wider-retry ladder and the approval ask, checked at execution rather than in a schema |
 | [`paths.ts`](paths.ts) | `canonical` and `contains`, one home for the comparison the fence and the profiles both make |
 
 ## What it is not

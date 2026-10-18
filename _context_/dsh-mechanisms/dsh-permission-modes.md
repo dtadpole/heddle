@@ -345,9 +345,11 @@ and in the closed tool row, and gated on the server as well as in the dialog. Th
 
 - `Auto review EXP` is not offered — heddle has no auto-review integration, and an option that cannot
   do what it says is worse than a missing option.
-- A model-requested one-call escalation (`sandbox_permissions` + a Reject/Allow once approval) is not
-  offered — heddle has no approval prompt a headless run could answer, and the task's rule is that an
-  escalation is an owner action. It stays deferred beside the approval service.
+- ~~A model-requested one-call escalation (`sandbox_permissions` + a Reject/Allow once approval) is not
+  offered — heddle has no approval prompt a headless run could answer.~~ **Built** in the sandbox-backend
+  cycle: the ladder asks through the approval service, the Web UI draws DSH's card over the event stream, a
+  headless run is refused with the sentence that says no one could approve, and a grant applies to one call
+  only. See [`dsh-sandbox-backends.md`](dsh-sandbox-backends.md).
 - The chip's width follows its label rather than being a fixed 153px — the reference's width is also
   a function of its label (`117–153` in the input-area reading), so this is the same rule, not a
   difference.

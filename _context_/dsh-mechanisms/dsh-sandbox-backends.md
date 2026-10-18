@@ -201,7 +201,7 @@ bind), with the probe arbitrating bwrap against a later Landlock rung. Only wort
 Linux machine judges it; the seam and the verifier already exist by then. Landlock stays deferred
 because its launcher is a versioned external binary.
 
-### Phase 3 — per-call escalation and the approval card (separate cycle)
+### Phase 3 — per-call escalation and the approval card (built in this cycle)
 
 Port DSH's widening path only after an approval prompt exists: `sandbox_permissions` +
 `justification` on the mutating tools, the closed ladder, one-call grants, and a page card with
@@ -498,6 +498,113 @@ statement's presence does not widen anything.
 - **A harness note is not a message.** `context/note` with an origin is what keeps the transcript from
   misattributing the harness's words to the person.
 - **Unjudged is a verdict.** A platform whose runner is absent is asserted to fail closed, not pretended to work.
+
+## Cycle 3 — one approved wider retry, and the card that asks
+
+### measured
+
+The reference was read where the ladder lives (`dsh-sandbox/lib/index.js`): `WIDER_MODES` is
+`read-only → workspace-write | danger-full-access` and `workspace-write → danger-full-access`; repeating the effective
+mode returns it **without** approval; `sandbox_permissions` and `justification` travel together and the justification
+must be a non-empty sentence; `approveEscalation` resolves the ask through `ctx.approval` **before** anything
+executes, and the outcome is a one-call grant or a refusal. The card itself was measured earlier in this loop
+([`dsh-permission-modes.md`](dsh-permission-modes.md)): an amber panel reading "Waiting for approval", the model's
+justification verbatim, Reject (ghost) and Allow once (light primary).
+
+### brainstorm
+
+| # | Candidate | Verdict |
+|---|---|---|
+| 1 | Reuse the approval service, with an attached answerer, the event stream and a `POST` answer | **Chosen** — one decision owns both the standing policy and the question; the Web UI already streams and the CLI naturally has no answerer |
+| 2 | A separate escalation service and a second UI channel | **Discarded** — two approval mechanisms would drift, and DSH keeps one shared escalation vocabulary for bash and fs |
+| 3 | Auto-approve the retry when the page is open | **Discarded** — that is the silent widening the whole permission cycle forbids |
+| 4 | Put the prompt inside each tool's implementation | **Discarded** — duplicated choreography; the tool layer owns the schema and the gate, and one ladder keeps bash and the file tools identical |
+| 5 | Record the granted mode as a session event | **Discarded** — a grant applies to one call; persisting it would be a session widening disguised as an escalation |
+| 6 | Resolve the escalation inside the sandbox backend | **Discarded** — DSH's rule, adopted: the backend reports facts and never negotiates permissions |
+
+### understand and step back
+
+The ladder is not a second permission system; it is the same mode vocabulary with one narrower rule: **strictly
+wider, one call, approved first**. That is why it lives in the tool registry's gate rather than in a tool or a
+backend — the gate already resolves the call's mode, and the escalation is a per-call override of exactly that
+value.
+
+The step back added the parts a naive version misses:
+
+- **No answerer means refuse, immediately.** A headless run must not wait for a card nobody can see; the approval
+  service answers `unavailable` and the tool reports DSH's sentence.
+- **The schema is not the ladder.** The fields are advertised only by confining tools on a host that can enforce a
+  wider mode; the ladder itself is checked at execution, where the effective mode is per-call truth.
+- **The grant cannot outlive the call.** The session's mode is read, the override is local to the gate's context,
+  and the session event is untouched — the browser contract asserts the chip and the record still say
+  `workspace-write` after a `danger-full-access` grant.
+- **The card is per session and per question.** The page draws only its own session's question, repaints a pending
+  one after a reload, and the id is the server's so an answer cannot be replayed.
+
+### plan
+
+1. `src/approvals/service.ts` — `request()`/`answer()` with an attached answerer, a bounded wait, and the closed
+   outcome vocabulary; a headless run answers from `unanswered`.
+2. `src/sandbox/escalation.ts` — the wider-mode table, the argument pairing, `approveEscalation` (repeat is free,
+   narrower is invalid, wider asks first), and the refusal sentences.
+3. `src/tools/service.ts` — resolve the escalation at the gate before the call runs, passing the granted mode into
+   this call's context only.
+4. `src/tools/builtin.ts` — advertise `sandbox_permissions`/`justification` on the mutating tools when the host can
+   confine.
+5. `src/server/web.ts` — attach the answerer, broadcast `approval/request` on the event stream, and add
+   `GET /api/approvals` / `POST /api/approvals/<id>`.
+6. `src/server/page.html` — DSH's amber card with the justification verbatim, Reject and Allow once, a reload
+   repaint, and a session filter.
+7. Tests and checks: the ladder and the approval service in `test/sandbox-escalation.test.ts`, the channel in
+   `_verifiers_/75-permission-sandbox/check-escalation.mjs`, and the card in
+   `_verifiers_/80-web-ui/check-approval.mjs`.
+
+### evidence
+
+**Failed first.** With the page's `approval` listener temporarily removed and the tree rebuilt, the browser contract
+reported `verdict 1 — 2 check(s) failed` (`the approval card appears` / `the card appears`); with it restored it is
+green. That is the assertion this cycle exists for.
+
+**After** (measured on this branch):
+
+| Instrument | Before | After |
+|---|---|---|
+| `test/sandbox-escalation.test.ts` | absent | **5 pass** (ladder, outcomes, argument pairing, the approval service, the gate's one-call grant) |
+| `npm test` | 348 pass | **353 pass / 0 fail** |
+| `_verifiers_/75-permission-sandbox/` | 12 checks | **15 checks, all pass** (the 3-test escalation check added) |
+| `_verifiers_/80-web-ui/` | 11 files | **12 files, all pass** (the 2-test approval-card contract added) |
+
+**Measured escalation facts:** an approved retry runs the denied call and the session's permission is still
+`read-only` afterwards; a rejected retry writes nothing and its tool result carries the "rejected" sentence; a CLI
+run with no answerer reports "no one can approve" and writes nothing; in the browser, Allow once runs the call while
+the chip still says `Workspace Write`, and Reject leaves the file absent with the rejection in the transcript.
+
+Screenshots beside this file: [`heddle-sandbox-approval-card.png`](heddle-sandbox-approval-card.png) (the amber
+card over a transcript whose closed row already says `Error: [sandbox: file access denied under workspace-write
+mode]`) and [`heddle-sandbox-refusal.png`](heddle-sandbox-refusal.png) (the same turn after Reject).
+
+### coverage
+
+Visited: the ladder's allowed and refused transitions, argument pairing, the approval service's four outcomes, the
+gate's one-call grant, the HTTP approval routes, the card's appearance/content/answer, the reject path, the
+no-answerer path, and the session-mode invariant after a grant. Not visited: several concurrent questions on one
+session (the page draws one card; the service settles each by id), a multi-day approval timeout, and the Windows
+rung.
+
+### invariants
+
+The standing approval policy (`check()`) still gates every call before the escalation; the session-mode check still
+passes; the shell-confinement and policy-context checks still pass with the new fields advertised; the access chip's
+contract still passes, and the browser contract pins that a one-call grant does not move it.
+
+### lessons
+
+- **The approval is a gate, not a dialog.** The mechanism is "nothing executes before the answer"; the card is how a
+  person answers, and the CLI path proves the gate when no card exists.
+- **A one-call grant must be structurally one call.** Keeping it in the gate's per-call context, rather than in the
+  session, is what makes that true; the browser check asserts the session did not move.
+- **Advertising and enforcing are different layers.** A host that cannot enforce a wider mode must not offer the
+  fields; the unit test pins both sides.
 
 ## Read next
 

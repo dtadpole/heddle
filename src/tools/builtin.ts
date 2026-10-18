@@ -20,9 +20,35 @@ import type { ToolDefinition, ToolResult } from './service.ts'
  * costs, and what it refuses.
  */
 
+/**
+ * The two schema fields DSH advertises on a mutating tool when the composition confines.
+ *
+ * They are the tool layer's, not the sandbox's: the sandbox decides what a mode means, and the tool decides what a
+ * model may ask for and when a person is prompted. They are absent when nothing can confine — an offered escalation
+ * a host cannot enforce would be a prompt whose grant could not run.
+ */
+function escalationFields(sandbox: SandboxService): Record<string, { type: 'string'; description: string; enum?: string[] }> {
+  const targets = sandbox.escalationTargets()
+  if (targets.length === 0) return {}
+  return {
+    sandbox_permissions: {
+      type: 'string',
+      enum: [...targets],
+      description:
+        'The narrowest wider sandbox mode for a one-shot retry of the exact operation the sandbox just denied; the retry asks the user for approval.',
+    },
+    justification: {
+      type: 'string',
+      description:
+        'Required with sandbox_permissions: one sentence for the user explaining why this exact operation needs the wider access. Use the language of the user’s current request.',
+    },
+  }
+}
+
 /** Build the standard tools around one sandbox. */
 export function builtinTools(sandbox: SandboxService, options: { readonly bashTimeoutMs?: number } = {}): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  const escalation = escalationFields(sandbox)
 
   const writeFile: ToolDefinition = {
     spec: {
@@ -34,6 +60,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         properties: {
           path: { type: 'string', description: 'File to write, relative to the workspace or absolute inside it.' },
           content: { type: 'string', description: 'Exact text to write.' },
+          ...escalation,
         },
         required: ['path', 'content'],
         additionalProperties: false,
@@ -103,6 +130,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         properties: {
           command: { type: 'string', description: 'Command line, run through sh -c.' },
           timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
+          ...escalation,
         },
         required: ['command'],
         additionalProperties: false,

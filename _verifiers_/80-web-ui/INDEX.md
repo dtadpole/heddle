@@ -34,6 +34,9 @@ doubles. Nothing here needs a display, so it runs unattended.
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
   extension, and a file's own script tags shown rather than obeyed.
+- [`check-approval.mjs`](check-approval.mjs) — the approval card as a control: it appears when a call asks for a
+  wider mode, carries the model's justification verbatim, Allow once runs the one denied call, Reject leaves it
+  undone, and the session's own mode never moves.
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.

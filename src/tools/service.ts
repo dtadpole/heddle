@@ -2,6 +2,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { SandboxDenial, type SandboxMode, type SandboxService } from '../sandbox/service.ts'
+import { EscalationRefusal, approveEscalation, validateEscalationArgs } from '../sandbox/escalation.ts'
 import type { ToolSpec } from '../llm/types.ts'
 import type { ApprovalService } from '../approvals/service.ts'
 
@@ -206,6 +207,48 @@ export class ToolRegistry extends Service {
     }
 
     /**
+     * An escalation is resolved **before** the call runs, and only for this call.
+     *
+     * DSH's ladder, ported at the one gate every call crosses: a call may carry `sandbox_permissions` and a
+     * `justification`, the ladder is checked at execution (never in the schema), a repeat of the effective mode needs
+     * no approval, and a wider mode asks a person through the approval service. A grant is consumed by this call
+     * only; the session's own mode is untouched. Nothing executes before the answer.
+     */
+    let mode = this.effectiveMode(context.session)
+    const permissions = args.sandbox_permissions
+    const justification = args.justification
+    if (permissions !== undefined || justification !== undefined) {
+      try {
+        validateEscalationArgs(permissions, justification)
+      } catch (error) {
+        return { output: '', error: { code: 'BAD_ARGS', message: (error as Error).message } }
+      }
+      try {
+        mode = await approveEscalation(
+          {
+            tool: name,
+            requestedMode: permissions,
+            effectiveMode: mode,
+            justification,
+            subject: name === 'bash' ? 'command' : 'operation',
+            ...(context.session !== undefined ? { session: context.session.id } : {}),
+          },
+          { request: (options) => this.approvals.request(options) },
+        )
+      } catch (error) {
+        if (error instanceof EscalationRefusal) {
+          context.log(`refused escalation of ${name}: ${error.message}`)
+          return {
+            output: '',
+            error: { code: 'ESCALATION_REFUSED', message: error.message },
+            data: { sandbox: { mode: this.effectiveMode(context.session), denied: false } },
+          }
+        }
+        throw error
+      }
+    }
+
+    /**
      * The access mode is resolved **once, here**, before anything runs.
      *
      * This is the one place every tool call passes through, so it is the only place that can make "every
@@ -217,7 +260,7 @@ export class ToolRegistry extends Service {
      * The mode is never taken from `args`: the model's arguments are not a policy input, so no tool call can
      * name a wider mode for itself.
      */
-    const runContext: ToolRunContext = { ...context, mode: this.effectiveMode(context.session) }
+    const runContext: ToolRunContext = { ...context, mode }
 
     try {
       const result = await tool.run(args, runContext)

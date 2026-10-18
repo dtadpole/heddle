@@ -5,6 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 
 import { SandboxUnavailableError, selectBackend, type ConfinedArgv, type SandboxBackend } from './backend.ts'
+import { ESCALATION_TARGETS } from './escalation.ts'
 import { canonical, contains } from './paths.ts'
 import {
   SANDBOX_MODES,
@@ -161,6 +162,19 @@ export class SandboxService extends Service {
   /** The selected runner's name, or `null` when this host can confine nothing — reported rather than guessed. */
   backendName(): string | null {
     return this.backend?.name ?? null
+  }
+
+  /**
+   * The modes one call may escalate to on this host.
+   *
+   * Empty when nothing can confine: advertising an escalation a host cannot enforce would offer a person a prompt
+   * whose grant could not be executed. DSH advertises the same closed target vocabulary whenever the composition
+   * confines, not only the targets above the deployment default, so a session switched below the default keeps its
+   * lever.
+   */
+  escalationTargets(): readonly SandboxMode[] {
+    if (this.backend === undefined || !this.backend.probe()) return []
+    return [...ESCALATION_TARGETS]
   }
 
   /**
