@@ -545,8 +545,8 @@ test('the composer is the text column plus 32px, and the handle widens both', as
       })()`)
     }
     /**
-     * The default now sits at the ceiling (80–85% of the window, clamped), so the 2× maths is shown by narrowing:
-     * 50px inward is 100px narrower, which is what "both edges move" means.
+     * The default sits at the ceiling (the owner's 80–85% of the screen, clamped), so the 2× maths is shown by
+     * narrowing: 50px inward is 100px narrower, which is what "both edges move" means.
      */
     await drag(-50)
     const dragged = JSON.parse(await widths())
@@ -656,6 +656,44 @@ test('the + menu inserts a workspace file path into the draft', async (context) 
     )
     assert.equal(after.value, join(server.work, 'note.md'), 'the file path lands in the draft')
     assert.equal(after.hidden, true, 'and choosing it closes the menu')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The default column is the **owner's** measure, and DSH's clamp is a difference kept on purpose.
+ *
+ * Measured in DSH at four widths on 2026-10-17, its text column is `clamp(680px, viewArea * .64, 920px)`. The
+ * owner's later instruction for this UI was 80–85% of the screen instead, so the reference's rule was tried,
+ * reverted, and its reason written into the CSS. This contract pins the choice that was actually made: 82.5%
+ * of the window (the midpoint), clamped by the view area's budget and DSH's 640 floor.
+ */
+test('the default column is the owner\u2019s 80-85% of the screen, clamped', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('column-default')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    const measured = JSON.parse(
+      await browser.evaluate(`(() => {
+        const main = document.querySelector('main')
+        const column = Math.round(Number.parseFloat(getComputedStyle(main).getPropertyValue('--chat-column')))
+        const floor = 640
+        const ceiling = Math.max(floor, main.clientWidth - 116 - 48)
+        const wanted = Math.min(ceiling, Math.max(floor, Math.round(window.innerWidth * 0.825)))
+        const card = Math.round(document.getElementById('composer-card').getBoundingClientRect().width)
+        return JSON.stringify({ window: window.innerWidth, floor, ceiling, wanted, column, card, delta: card - column })
+      })()`),
+    )
+    assert.equal(measured.column, measured.wanted, `the default is 82.5% of the window, clamped (${measured.column} vs ${measured.wanted})`)
+    assert.ok(
+      measured.column >= Math.round(measured.window * 0.8) || measured.column === measured.ceiling,
+      'and it is inside the owner\u2019s 80-85% band, or at the clamp that makes the band impossible',
+    )
+    assert.equal(measured.delta, 32, 'the card hangs 16px over each side of the column')
   } finally {
     browser.close()
     await server.close()
