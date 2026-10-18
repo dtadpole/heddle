@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { SessionFlagError, SessionStore } from '../src/session/store.ts'
+import { completedPrefix, inheritsAnswer, SessionFlagError, SessionStore } from '../src/session/store.ts'
 import { forkTitle, titleFrom } from '../src/session/service.ts'
 
 /**
@@ -153,4 +153,54 @@ test('a fork of a fork is a fork of the conversation, not of the first session',
   assert.ok(second !== null)
   const roles = sessions.messages(second).map((message) => message.role)
   assert.equal(roles.filter((role) => role === 'user').length, 2, 'the whole conversation to that point came along')
+})
+
+test('a fork is named the way the reference names it: an existing ordinal is incremented, not appended to', () => {
+  /** DSH's `increasedForkTitle`: `x (1)` becomes `x (2)`, a full-width `x（2）` becomes `x（3）`, and a bare title gains ` (1)`. */
+  assert.equal(forkTitle('a conversation', []), 'a conversation (1)', 'a title without an ordinal gains one')
+  assert.equal(forkTitle('a conversation (1)', []), 'a conversation (2)', 'an ASCII ordinal is incremented in place')
+  assert.equal(forkTitle('a conversation (9)', []), 'a conversation (10)', 'and the number is not a character count')
+  assert.equal(forkTitle('对话（2）', []), '对话（3）', 'a full-width ordinal, as a Chinese title carries, increments in its own form')
+  /** A taken name still steps past it: this store lists titles side by side, so a duplicate is a row nobody can tell apart. */
+  assert.equal(forkTitle('a conversation (19)', ['a conversation (20)']), 'a conversation (21)', 'a taken ordinal steps past itself')
+})
+
+test('a fork inherits the projection cut at the last completed turn, not a dangling half-turn', () => {
+  const at = (seq, type, extra = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
+  const message = (seq, role, text) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
+
+  /** A completed turn followed by a question whose answer never arrived: only the completed part is inherited. */
+  const log = [
+    message(0, 'user', 'first question'),
+    message(1, 'assistant', 'first answer'),
+    at(2, 'turn/completed'),
+    message(3, 'user', 'a question that never got an answer'),
+  ]
+  const cut = completedPrefix(log)
+  assert.deepEqual(cut.map((event) => event.seq), [0, 1, 2], 'the dangling user message is outside the cut')
+
+  /** Two completed turns keep both, and a log with no completion returns whole — the caller decides whether that is forkable. */
+  const twoTurns = [message(0, 'user', 'q1'), message(1, 'assistant', 'a1'), at(2, 'turn/completed'), message(3, 'user', 'q2'), message(4, 'assistant', 'a2'), at(5, 'turn/completed'), message(6, 'user', 'q3')]
+  assert.deepEqual(completedPrefix(twoTurns).map((event) => event.seq), [0, 1, 2, 3, 4, 5], 'both completed turns are inherited')
+  const noCompletion = [message(0, 'user', 'q'), message(1, 'assistant', 'a')]
+  assert.equal(completedPrefix(noCompletion).length, 2, 'a log that never completed a turn is returned whole')
+})
+
+test('a fork is refused on a question with no answer, and allowed on a conversation that was itself forked', () => {
+  const at = (seq, type, extra = {}) => ({ seq, at: '2026-10-17T00:00:00.000Z', type, ...extra })
+  const message = (seq, role, text) => at(seq, 'message', { message: { role, content: [{ type: 'text', text }] } })
+
+  const dangling = [message(0, 'user', 'a question that never got an answer')]
+  assert.equal(inheritsAnswer(dangling), false, 'a recorded question with no answer has nothing to continue')
+
+  const completed = [message(0, 'user', 'q'), message(1, 'assistant', 'a'), at(2, 'turn/completed')]
+  assert.equal(inheritsAnswer(completed), true, 'a completed turn is forkable')
+
+  /** A fork's own log holds copied messages and no chunk events, and it must still be forkable. */
+  const forkedLog = [message(0, 'user', 'q'), message(1, 'assistant', 'a')]
+  assert.equal(inheritsAnswer(forkedLog), true, 'a conversation that was itself forked is forkable')
+
+  /** A question recorded after the last completed turn does not make the session unforkable: the cut drops it. */
+  const withDanglingTail = [message(0, 'user', 'q'), message(1, 'assistant', 'a'), at(2, 'turn/completed'), message(3, 'user', 'later question')]
+  assert.equal(inheritsAnswer(withDanglingTail), true, 'a dangling tail is cut away, not a refusal')
 })

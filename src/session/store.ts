@@ -322,6 +322,42 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
   return content.length === 0 ? null : { role: 'assistant', content }
 }
 
+/**
+ * The events a fork inherits: everything up to the **last completed turn**.
+ *
+ * DSH cuts its fork seed at `latestCompletedPrefixBoundary` and refuses a source with no completed turn. A session here can
+ * hold a user message whose answer never arrived; copying that dangling half-turn would ask the model to continue work it
+ * never saw finish, so the cut excludes it. A log with no `turn/completed` returns as it is — callers decide whether that is
+ * forkable at all (the service refuses it).
+ */
+export function completedPrefix(events: readonly SessionEvent[]): readonly SessionEvent[] {
+  let boundary: number | undefined
+  for (const event of events) {
+    if (event.type === 'turn/completed') boundary = event.seq
+  }
+  if (boundary === undefined) return events
+  return events.filter((event) => event.seq <= boundary)
+}
+
+/**
+ * Whether the conversation a fork would inherit contains an **assistant message**.
+ *
+ * This is the question a fork's refusal turns on: a session whose question was recorded and whose answer never arrived has
+ * nothing to continue, while a session that was itself forked holds copied messages and no assistant chunks — so the test
+ * reads the **projection of the completed prefix**, not the event vocabulary.
+ */
+export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
+  const inherited = completedPrefix(events)
+  const bySeq = indexBySeq(inherited)
+  /** A copied conversation is plain `message` events, which the projection sees as an assistant message. */
+  if (foldSurface(inherited).nodes.some((seq) => deriveMessage(bySeq, seq)?.role === 'assistant')) return true
+  /**
+   * A recorded turn carries `assistant/completed` **beside** its deltas (the server reads deltas for display and the
+   * completed event for the record), so an answer is present when either form is there.
+   */
+  return inherited.some((event) => event.type === 'assistant/completed')
+}
+
 /** Index a log by seq, which every derivation over it wants. */
 export function indexBySeq(events: readonly SessionEvent[]): ReadonlyMap<number, SessionEvent> {
   const bySeq = new Map<number, SessionEvent>()
@@ -549,8 +585,15 @@ export class SessionStore {
       ...(attribution.teamId !== undefined ? { teamId: attribution.teamId } : {}),
       ...(attribution.id !== undefined ? { id: attribution.id } : {}),
     })
-    for (const message of this.deriveMessages(from)) {
-      if (message.role === 'system') continue
+    /**
+     * The fork inherits what the source had **finished**: the projection of the log cut at its last completed turn. A
+     * dangling user message — one whose answer never arrived — is not carried over.
+     */
+    const events = completedPrefix(this.read(from))
+    const bySeq = indexBySeq(events)
+    for (const seq of foldSurface(events).nodes) {
+      const message = deriveMessage(bySeq, seq)
+      if (message === null || message.role === 'system') continue
       this.message(handle, message)
     }
     return handle

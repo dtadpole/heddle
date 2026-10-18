@@ -84,6 +84,45 @@ row's mark and an archived row's control set after switching the archive filter 
 individually. **Not verified / open:** a full part-7 run hung once at the end of this cycle and was killed; the changed
 checks were run individually instead, and hunting that hang is the next cycle's first task.
 
+## Cycle 2 — fork naming, the cut, and the forkability rule (2026-10-17)
+
+Read from DSH's session controller and implemented:
+
+- **Naming.** `increasedForkTitle` increments an ordinal the title already ends with — `x (1)` becomes `x (2)`, a full-width
+  `x（2）` becomes `x（3）`, and a title without one gains ` (1)`. `forkTitle` now does the same, so a fork of a fork is
+  `x (2)` where it used to be `x (1) (1)`; a name already taken still steps past itself, because this store lists titles.
+- **The cut.** `completedPrefix` returns the log up to its last completed turn, and `fork` copies the projection of that
+  prefix — a question recorded after the last answer is not carried into the child.
+- **Forkability.** The guard asks the **projection of the inherited prefix** rather than the event vocabulary: a session is
+  forkable when that projection holds an assistant message, or the log records `assistant/completed`. This fixed a measured
+  refusal: a fork's own log holds copied **messages** and no assistant chunks, so a fork of a fork answered `409` before the
+  guard learned the difference, and a recorded question with no answer is still refused.
+- **What the UI does after a fork.** DSH's client passes `increaseTitle: true` and does **not** navigate to the child; it only
+  reports creation. This UI re-reads the tree and keeps the current selection — the same behaviour, asserted rather than
+  assumed.
+
+**Verified.** Unit: the naming cases (ASCII, full-width, taken), the cut (dangling tail drops, two turns keep both, no
+completion returns whole), and the forkability rule (dangling question refused, completed answer allowed, a forked
+conversation allowed). Part 7: the fork check now forges a fork of a fork and asserts `x (2)` and `parentSession`; a new
+browser check opens a row's menu, takes **Fork session**, and asserts the child row appears named after the source.
+
+## Cycle 3 — the full measurement (2026-10-17)
+
+The cycle that the goal's stop rule asks for: all three actions measured together, with no fix row left.
+
+- **Suites.** Unit 326 passing; part 7 **43 of 43** checks passing (`verdict 0`), run through the standard verifier.
+- **What the measurement changed.** One check's own fixture grew enough rows to scroll the tree, and the inventory's clipping
+  test called the last row clipped; the rule now exempts a **scroll container**, because content below a scrollbar is
+  reachable rather than cut away. The archive chord's confirmation (added in cycle 1) is a native dialog, and a headless
+  browser dismisses it; the chord check stubs it and the confirmation is judged where it lives.
+- **The hang from cycle 1.** A full part-7 run hung once; a rerun with `--test-timeout` passed all 42 in 125 seconds, and the
+  standard verifier then answered `verdict 0` repeatedly. Treated as a transient (a browser or process contending during the
+  run), not a defect in a check: no assertion changed because of it, and every later full run completed.
+- **Coverage.** Measured: pin order and its mark, pin refusal on an archived row, archive dropping the pin, archive of a
+  running turn (refused without `stop`, accepted with it), unarchive, fork naming in place, the cut, forkability, provenance,
+  the tree placement and the menu path to fork. Not measured, and named: the archive confirmation dialog's own look (only its
+  accept path is exercised), and concurrent forks of one source.
+
 ## This project's implementation, before cycle 1
 
 | Action | Backend | UI |

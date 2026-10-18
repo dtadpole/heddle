@@ -2017,6 +2017,21 @@ test('a session forks into a new one named after it, with its conversation and i
     assert.ok(said(source) >= 1, 'the source holds the turn')
     assert.equal(said(copy), said(source), 'and the fork holds the same one')
 
+    /** The child records the session it was cut from — the provenance a reader needs to tell two continuations apart. */
+    const afterFirst = await sessionsOf(h)
+    assert.equal(afterFirst.find((meta) => meta.id === forked.session)?.parentSession, made.session, 'the fork records its parent')
+
+    /**
+     * Forking a **fork** increments the ordinal in place rather than appending another one: DSH's `increasedForkTitle`
+     * turns `x (1)` into `x (2)`, and the version here used to produce `x (1) (1)`.
+     */
+    const second = await (
+      await fetch(new URL(`/api/sessions/${forked.session}/fork`, live.url), { method: 'POST', headers: { cookie } })
+    ).json()
+    const afterSecond = await sessionsOf(h)
+    assert.equal(afterSecond.find((meta) => meta.id === second.session)?.title, `${title} (2)`, `a fork of a fork increments the ordinal in place\nsaw: ${JSON.stringify(afterSecond.map((meta) => [meta.title, meta.id === second.session]))}`)
+    assert.equal(afterSecond.find((meta) => meta.id === second.session)?.parentSession, forked.session, 'and records the fork it came from')
+
     const tree = await (await fetch(new URL(`/api/tree?path=${encodeURIComponent(branch)}`, live.url), { headers: { cookie } })).json()
     const labels = (tree.children ?? []).filter((node) => node.kind === 'session').map((node) => node.label)
     assert.ok(labels.includes(forked.name), 'the tree draws the fork beside its parent')
@@ -2567,6 +2582,11 @@ test('the four session shortcuts act on the selected session, and say so when th
         const rows = () => [...document.querySelectorAll('#tree .row')]
         const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
         const sessions = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.querySelector(':scope > .row > .label')?.textContent)
+        /**
+         * The archive chord goes through the same confirmation the menu does when a turn is running, and a headless browser
+         * dismisses a native dialog by default. The confirmation itself is judged elsewhere; here it is stubbed to accept.
+         */
+        window.confirm = () => true
         /** One press helper, so every chord is dispatched the same way a keyboard would send it. */
         const press = (key, mods) => {
           const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods })
@@ -2619,8 +2639,9 @@ test('the four session shortcuts act on the selected session, and say so when th
 
         /** Archive: the selected row leaves the list. */
         press('a', { altKey: true, metaKey: true })
-        await wait(1800)
+        await wait(2600)
         const archived = sessions()
+        const archiveNote = document.getElementById('tree-note')?.textContent ?? ''
 
         return {
           beforeSelect,
@@ -2629,6 +2650,7 @@ test('the four session shortcuts act on the selected session, and say so when th
           renamed,
           forked,
           archived,
+          archiveNote,
         }
       })().then((value) => JSON.stringify(value))`),
     )
@@ -2649,7 +2671,7 @@ test('the four session shortcuts act on the selected session, and say so when th
     )
     assert.ok(
       !reading.archived.includes('a name from a chord'),
-      `the archive chord put the selected session away\nsaw: ${JSON.stringify(reading.archived)}`,
+      `the archive chord put the selected session away\nsaw: ${JSON.stringify(reading.archived)} note: ${JSON.stringify(reading.archiveNote)}`,
     )
     assert.ok(reading.archived.length >= 1, 'while its fork is still in the list')
 
@@ -3005,12 +3027,30 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
          * this UI has got wrong before — its cursor, whether a hit-test at its centre lands on it, whether an ancestor
          * clips it, and (for menus) whether every item carries a mark.
          */
+        /**
+         * Whether an ancestor **clips** the element's box.
+         *
+         * A **scroll container** is exempt: the tree is a scrolling list, and a row below its visible box is reachable by
+         * scrolling rather than clipped away. The defect this judges is a box that an overflow-hidden ancestor cuts with no
+         * way to reach the rest, which is not what a scrollbar is for. Measured on 2026-10-17: a fixture with enough rows to
+         * scroll reported its last summary as clipped, and the check had to learn the difference.
+         */
         const clips = (element) => {
           const rect = element.getBoundingClientRect()
           let current = element.parentElement
           while (current !== null) {
             const style = getComputedStyle(current)
-            if (/auto|scroll|hidden|clip/.test(style.overflowX + style.overflowY)) {
+            const scrolls =
+              /auto|scroll/.test(style.overflowX + style.overflowY) &&
+              (current.scrollHeight > current.clientHeight + 1 || current.scrollWidth > current.clientWidth + 1)
+            /**
+             * A scroll container ends the walk: its content is reachable by scrolling, so the element's position outside
+             * the visible box is not a clip — and every ancestor **above** the scroller is measuring the scroller's own
+             * box, not the element's, which is how a scrolled-to-the-fold summary was reported as clipped by the panel
+             * behind its list.
+             */
+            if (scrolls) return false
+            if (/hidden|clip/.test(style.overflowX + style.overflowY)) {
               const outer = current.getBoundingClientRect()
               if (rect.left < outer.left - 1 || rect.right > outer.right + 1 || rect.top < outer.top - 1 || rect.bottom > outer.bottom + 1) return true
             }
@@ -3432,6 +3472,77 @@ test('a clipped session title crawls on hover and returns on leave', async (cont
       return JSON.stringify({ left: row.querySelector('.label').scrollLeft })
     })()`))
     assert.equal(shortAfter.left, 0, 'a title that fits does not crawl')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('the menu forks a session from its row, and the child appears in the tree named after it', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-fork-menu')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    await runCli(adminArgs(h, ['--turn', 'a conversation the menu should fork']), { env: h.env, cwd: branch })
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    /** Open the source row's menu through its own button, and take the item a person would take. */
+    const opened = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const ensureOpen = async (text) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rows().find((candidate) => candidate.querySelector('.label')?.textContent === text)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
+        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
+        await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
+        const sessionRow = [...document.querySelectorAll('#tree li[data-kind="session"]')][0]
+        if (sessionRow === undefined) return JSON.stringify({ error: 'no session row' })
+        const sourceLabel = sessionRow.querySelector(':scope > .row .label').textContent
+        const trigger = sessionRow.querySelector(':scope > .row .menu-wrap > button')
+        if (trigger === null) return JSON.stringify({ error: 'no menu trigger' })
+        trigger.click()
+        await wait(300)
+        const item = [...sessionRow.querySelectorAll(':scope > .row .menu button')].find((button) => (button.textContent || '').trim() === 'Fork session')
+        if (item === undefined) return JSON.stringify({ error: 'no fork item' })
+        item.click()
+        await wait(1500)
+        const labels = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .label')].map((label) => label.textContent)
+        return JSON.stringify({ labels, sourceLabel, note: document.getElementById('tree-note')?.textContent ?? document.getElementById('note')?.textContent ?? '' })
+      })()`),
+    )
+    assert.equal(opened.error, undefined, `the row's menu opened\nsaw: ${JSON.stringify(opened)}`)
+    assert.ok(
+      opened.labels.some((label) => label === `${opened.sourceLabel} (1)`),
+      `the forked child appears in the tree, named after the source with its ordinal\nsaw: ${JSON.stringify(opened)}`,
+    )
+    assert.equal(opened.note, '', 'the fork reported nothing wrong')
+    /** The fork is a real session beside its source, not a copy of the row. */
+    assert.ok(opened.labels.includes(opened.sourceLabel), 'and the source row is still there')
   } finally {
     browser?.close()
     live?.kill()

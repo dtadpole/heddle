@@ -6,7 +6,7 @@ import { canonicalPath } from '../paths.ts'
 import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import type { Message } from '../llm/types.ts'
 
-import { SessionStore, defaultSessionRoot, type RecordedMessage, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
+import { inheritsAnswer, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
 
 export * from './store.ts'
 
@@ -52,9 +52,20 @@ export function titleFrom(text: string): string {
  */
 export function forkTitle(base: string, taken: readonly string[]): string {
   const trimmed = base.trim().length > 0 ? base.trim() : 'session'
-  let ordinal = 1
-  while (taken.includes(`${trimmed} (${ordinal})`)) ordinal += 1
-  return `${trimmed} (${ordinal})`
+  /**
+   * DSH's `increasedForkTitle`, read from its session controller: a title that already ends in `(n)` — ASCII or the
+   * full-width `（n）` a Chinese title uses — is incremented **in place**, and only a title without a suffix gains ` (1)`.
+   * The earlier version here always appended, so forking a fork produced `x (1) (1)` where the reference produces `x (2)`.
+   */
+  const ascii = /^(.*?)\((\d+)\)$/u.exec(trimmed)
+  const fullWidth = /^(.*?)（(\d+)）$/u.exec(trimmed)
+  const match = ascii ?? fullWidth
+  const prefix = match?.[1] ?? trimmed
+  let ordinal = match?.[2] === undefined ? 1 : Number(match[2]) + 1
+  /** The reference does not look past the suffix; the store's titles are a list, so a taken name steps past it rather than colliding. */
+  const format = (value: number) => (ascii !== null ? `${prefix}(${value})` : fullWidth !== null ? `${prefix}（${value}）` : `${prefix} (${value})`)
+  while (taken.includes(format(ordinal))) ordinal += 1
+  return format(ordinal)
 }
 
 export class SessionService extends Service {
@@ -127,13 +138,14 @@ export class SessionService extends Service {
      * A fork is cut at the last **completed** turn, as DSH's is: a session with none has nothing to fork from, and a child
      * carrying a half-finished turn would invite the model to continue work it never saw finish.
      *
-     * The check is for a completed answer, not for `turns`. Measured: `turns` counts **user messages** — the store bumps
-     * it when a user message is written — so a session whose question was recorded and whose answer never arrived passed
-     * the old guard and forked a half-finished turn. The part that judges the refusal found the fork answering `200`
-     * where the reference answers `409`.
+     * The question is "does the inherited projection contain an assistant message", not "does the log contain assistant
+     * chunks": a fork's own log holds copied **messages**, never chunks, and keying the refusal on chunks made a fork of a
+     * fork a `409` — measured on 2026-10-17. The same test still refuses a recorded question whose answer never arrived,
+     * which is the case the old guard was added for.
      */
     const sourceHandle = this.store.open(id)
-    if (sourceHandle === null || this.store.lastAnswer(sourceHandle) === '') return { error: 'unavailable' }
+    if (sourceHandle === null) return { error: 'unavailable' }
+    if (!inheritsAnswer(this.store.read(sourceHandle))) return { error: 'unavailable' }
     /** The child records its parent, which is the provenance DSH's header keeps (`parentSession`). */
     const handle = this.store.fork(id, { parentSession: id })
     if (handle === null) return null
