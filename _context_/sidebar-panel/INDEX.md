@@ -20,6 +20,13 @@ produced them; this folder is only the picture a person can look at when the num
 brand, `New session`, the workspaces header and the search field are exactly where they were before the scroll; the
 panel's own scroll is zero. Before the change the same gesture moved the whole panel and took the search with it.
 
+## Cycle 2
+
+`cycle-2-settings.png` — the Settings dialog over the conversation at 1200×800: the Server section (sandbox mode,
+working directory), four Models with `credential set` rather than a credential, the workspace roots, and the line that
+says credentials are never shown. The panel's foot with its `Settings` entry is visible at the bottom edge, below the
+scrolling workspaces region.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

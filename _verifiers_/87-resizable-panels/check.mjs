@@ -397,6 +397,23 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(railAction.labelShown, false, 'with its label put away')
     assert.equal(railAction.background, 'rgba(0, 0, 0, 0)', 'and no fill, which would be the loudest thing left')
 
+    /** The rail keeps the Settings entry too — the gear alone, anchored to the bottom edge, as the reference's rail does. */
+    const railFoot = JSON.parse(
+      await browser.evaluate(`(() => {
+        const button = document.getElementById('settings-open')
+        const box = button.getBoundingClientRect()
+        const aside = document.querySelector('aside').getBoundingClientRect()
+        return JSON.stringify({
+          box: Math.round(box.width) + 'x' + Math.round(box.height),
+          labelShown: getComputedStyle(document.getElementById('settings-label')).display !== 'none',
+          gapToBottom: Math.round(aside.bottom - box.bottom)
+        })
+      })()`),
+    )
+    assert.equal(railFoot.box, '36x36', 'the gear is a 36-pixel control in the rail')
+    assert.equal(railFoot.labelShown, false, 'with its label put away')
+    assert.ok(railFoot.gapToBottom >= 0 && railFoot.gapToBottom <= 24, `anchored to the bottom edge (${railFoot.gapToBottom}px above it)`)
+
     /** A reload puts the panel back — DSH's behaviour, and the fix for the owner's report of a missing tree. */
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.getElementById("sidebar-toggle") !== null', 20_000), 'the page came back')
@@ -483,6 +500,81 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(scrolled.newSession, panel.chrome.newSession, 'nor the primary action')
     assert.equal(scrolled.search, panel.chrome.search, 'nor the search field')
     assert.equal(scrolled.asideScrollTop, 0, 'while the panel itself stayed at zero')
+
+    /**
+     * The **bottom area**: anchored below the region, staying put while the region scrolls, and the entry to Settings.
+     *
+     * Measured from the reference: its settings area is 256×50 at y=757 in an 813-tall column, below the scroller, and it
+     * does not move. Heddle had no bottom area at all; this cycle added it, and the claim is that it is anchored rather
+     * than in flow with the list.
+     */
+    const foot = JSON.parse(
+      await browser.evaluate(`(() => {
+        const aside = document.querySelector('aside')
+        const foot = document.getElementById('panel-foot')
+        const region = document.getElementById('workspace-scroll')
+        return JSON.stringify({
+          asideBottom: Math.round(aside.getBoundingClientRect().bottom),
+          footBottom: Math.round(foot.getBoundingClientRect().bottom),
+          footTop: Math.round(foot.getBoundingClientRect().top),
+          regionBottom: Math.round(region.getBoundingClientRect().bottom),
+          label: document.getElementById('settings-label').textContent.trim(),
+          gapToBottom: Math.round(aside.getBoundingClientRect().bottom - foot.getBoundingClientRect().bottom)
+        })
+      })()`),
+    )
+    assert.equal(foot.label, 'Settings', 'the panel ends with the Settings entry')
+    assert.ok(foot.gapToBottom >= 0 && foot.gapToBottom <= 24, `the foot sits at the panel\'s bottom edge (${foot.gapToBottom}px above it)`)
+    assert.ok(foot.footTop > foot.regionBottom, 'below the workspaces region, not inside it')
+
+    /** Scrolling the region to its end leaves the foot exactly where it was. */
+    const footAfterScroll = await browser.evaluate(`(() => {
+      const region = document.getElementById('workspace-scroll')
+      region.scrollTop = region.scrollHeight
+      region.dispatchEvent(new Event('scroll'))
+      return Math.round(document.getElementById('panel-foot').getBoundingClientRect().top)
+    })()`)
+    assert.equal(footAfterScroll, foot.footTop, 'and it does not move when the list scrolls')
+
+    /**
+     * Settings: the reference's own surface, reduced to the facts this project can state honestly. The dialog must show
+     * the sandbox mode, the configured endpoints and the workspace roots, and it must **not** render a credential — the
+     * endpoint file holds one and `/api/endpoints` answers `credential: "set"` rather than a value.
+     */
+    await browser.evaluate(`document.getElementById('settings-open').click()`)
+    assert.ok(await browser.waitFor('document.getElementById("settings-dialog").open === true', 10_000), 'the Settings entry opens a dialog')
+    const settings = JSON.parse(
+      await browser.evaluate(`(() => {
+        const dialog = document.getElementById('settings-dialog')
+        const text = dialog.innerText
+        const style = getComputedStyle(dialog)
+        return JSON.stringify({
+          modal: dialog.matches(':modal'),
+          title: document.getElementById('settings-title').textContent.trim(),
+          radius: style.borderRadius,
+          server: document.getElementById('settings-server').innerText.replace(/\\s+/g, ' ').trim(),
+          models: document.querySelectorAll('#settings-models .settings-endpoint').length,
+          workspaces: [...document.querySelectorAll('#settings-workspaces .settings-workspace')].map((el) => el.innerText.replace(/\\s+/g, ' ').trim()),
+          note: document.getElementById('settings-note').textContent.trim(),
+          looksLikeASecret: /(sk-[A-Za-z0-9]{8,}|api[_-]?key\\s*[:=]\\s*\\S+|bearer\\s+[A-Za-z0-9._-]{10,})/i.test(text)
+        })
+      })()`),
+    )
+    assert.equal(settings.title, 'Settings', 'the dialog is the settings surface')
+    assert.equal(settings.modal, true, 'and it is modal, so the page behind it is not interactive')
+    assert.equal(settings.radius, '28px', 'rounded like the reference\'s panel')
+    assert.match(settings.server, /Sandbox/, 'it reports the sandbox mode')
+    assert.ok(settings.models >= 1, `with the configured endpoints (${settings.models})`)
+    assert.ok(settings.workspaces.length >= 1, 'the workspace roots')
+    assert.match(settings.note, /never shown/, 'and says that credentials are never rendered')
+    assert.equal(settings.looksLikeASecret, false, 'no credential value appears in the dialog')
+
+    /** `Close` dismisses it, and the chord the reference binds opens it. */
+    await browser.evaluate(`document.getElementById('settings-close').click()`)
+    assert.ok(await browser.waitFor('document.getElementById("settings-dialog").open === false', 5_000), 'Close dismisses the dialog')
+    await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: ',', altKey: true, metaKey: true, bubbles: true }))`)
+    assert.ok(await browser.waitFor('document.getElementById("settings-dialog").open === true', 10_000), 'and the chord opens it again')
+    await browser.evaluate(`document.getElementById('settings-dialog').close()`)
 
     /**
      * The chord, which is DSH's own: `Alt+Meta+B`. It **toggles** — pressed while wide it collapses, pressed again it

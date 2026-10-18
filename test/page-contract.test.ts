@@ -179,6 +179,27 @@ test('the navigation panel is a fixed column, and only its workspaces region scr
   assert.match(page, /body\[data-sidebar='collapsed'\] #workspace-scroll \{ display: none; \}/, 'a rail has no region to scroll')
 })
 
+test('the panel ends with a Settings entry, and the Settings surface never renders a credential', () => {
+  /**
+   * The reference's bottom area is a launcher (`settingsArea` 256×50 at y=757 in an 813-tall column, measured
+   * 2026-10-17) and its `Settings` opens a dialog. Heddle had no bottom area; this cycle added one entry and a
+   * read-only dialog. The page must state what the machine is configured with and must not print a credential: the
+   * endpoint file holds one, and `/api/endpoints` answers `credential: "set"` rather than a value.
+   */
+  assert.match(page, /<div id="panel-foot">/, 'the panel ends with a foot')
+  assert.match(page, /<button id="settings-open" type="button" aria-label="Settings"/, 'holding the Settings entry')
+  assert.match(page, /#panel-foot \{[\s\S]*?flex: none;/, 'which is anchored rather than in flow with the list')
+  assert.match(page, /<dialog id="settings-dialog" aria-labelledby="settings-title">/, 'and it opens a real dialog')
+  assert.match(page, /<h3>Server<\/h3>/, 'with a Server section')
+  assert.match(page, /<h3>Models<\/h3>/, 'a Models section')
+  assert.match(page, /<h3>Workspaces<\/h3>/, 'and the workspace roots')
+  assert.match(page, /Credentials are never shown here/, 'and the line that says credentials are never rendered')
+  assert.match(page, /settingsDialog\.showModal\(\)/, 'shown modally, so Escape and focus containment are the platform\'s')
+  assert.match(page, /if \(clickEvent\.target === settingsDialog\) settingsDialog\.close\(\)/, 'and the backdrop dismisses it')
+  assert.match(page, /\{ key: ',', alt: true, action: 'settings' \}/, 'with the reference\'s chord in the table')
+  assert.match(page, /endpoint\.credential === 'set' \? 'credential set' : 'no credential'/, 'the credential is reported as set or not, never printed')
+})
+
 test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
   /**
    * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as

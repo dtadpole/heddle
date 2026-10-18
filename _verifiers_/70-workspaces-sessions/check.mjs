@@ -3066,7 +3066,29 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
         }).map((element) => {
           const rect = element.getBoundingClientRect()
           const style = getComputedStyle(element)
-          const centre = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          /**
+           * Whether the element's centre is inside every scrollport it lives in.
+           *
+           * Measured on 2026-10-17, after the panel's list became its own scroll region: rows below the fold reported
+           * their centre landing on the newly anchored Settings foot, because elementFromPoint answers for the pixel
+           * where they *would* be, not for the row a reader can see. A control scrolled out of its list is not covered
+           * by what is on top of the list — it is simply not on screen.
+           */
+          const centreVisible = (() => {
+            const x = rect.left + rect.width / 2
+            const y = rect.top + rect.height / 2
+            let node = element.parentElement
+            while (node !== null) {
+              const containerStyle = getComputedStyle(node)
+              if (/auto|scroll/.test(containerStyle.overflowX + containerStyle.overflowY)) {
+                const box = node.getBoundingClientRect()
+                if (x < box.left || x > box.right || y < box.top || y > box.bottom) return false
+              }
+              node = node.parentElement
+            }
+            return true
+          })()
+          const centre = centreVisible ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) : null
           const disabled = element.disabled === true || element.getAttribute('aria-disabled') === 'true'
           const typing = element.tagName === 'INPUT' || element.tagName === 'TEXTAREA'
           /** A separator resizes; a control marked data-inert reports a state rather than acting. */
@@ -3079,6 +3101,7 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
             cursor: style.cursor,
             expectedCursor: disabled || inert ? 'default' : separator ? 'col-resize' : typing ? 'text' : 'pointer',
             hitTest: centre === null ? null : centre === element || element.contains(centre),
+            centreVisible,
             atCentre: centre === null ? null : {
               tag: centre.tagName.toLowerCase(),
               id: centre.id,
@@ -3226,8 +3249,13 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
     const wrongCursors = result.inventory.filter((item) => item.cursor !== item.expectedCursor)
     assert.deepEqual(wrongCursors, [], `every interactive element has the cursor its state promises\nsaw: ${JSON.stringify(wrongCursors)}`)
 
-    /** Nothing a person can actually click is covered by another layer at its own centre. */
-    const covered = result.inventory.filter((item) => item.interactive === true && item.hitTest === false)
+    /**
+     * Nothing a person can actually click is covered by another layer at its own centre.
+     *
+     * Only elements whose centre is on screen in their own scrollport are judged: a row scrolled out of the workspaces
+     * region has no on-screen centre, and asking what is at the pixel it would occupy is a question about the footer.
+     */
+    const covered = result.inventory.filter((item) => item.interactive === true && item.hitTest === false && item.centreVisible !== false)
     assert.deepEqual(covered, [], `no enabled control is covered at its centre\nsaw: ${JSON.stringify(covered)}`)
 
     /** Nothing a person can click is cut by an ancestor's overflow. */
@@ -3543,6 +3571,155 @@ test('the menu forks a session from its row, and the child appears in the tree n
     assert.equal(opened.note, '', 'the fork reported nothing wrong')
     /** The fork is a real session beside its source, not a copy of the row. */
     assert.ok(opened.labels.includes(opened.sourceLabel), 'and the source row is still there')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a written session moves to the top of its folder, its age follows, and a real pin click holds it there', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-order-age-pin')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    /** Two conversations with an answer each, so both have a write time and a turn. */
+    const made = []
+    for (let index = 0; index < 2; index += 1) {
+      const created = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+      made.push(created)
+      await runCli(adminArgs(h, ['--turn', `conversation number ${index + 1}`]), { env: h.env, cwd: branch })
+      await new Promise((done) => setTimeout(done, 20))
+    }
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const sessionsNow = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    const before = await sessionsNow()
+    const older = before.filter((meta) => made.some((one) => one.session === meta.id)).sort((left, right) => String(left.updated).localeCompare(String(right.updated)))[0]
+    assert.ok(older !== undefined, `the older session is known\nsaw: ${JSON.stringify(before)}`)
+
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    /** Expand to the session rows and read their order and their age stamps. */
+    const readRows = async () =>
+      JSON.parse(
+        await browser.evaluate(`(async () => {
+          const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+          const rows = () => [...document.querySelectorAll('#tree .row')]
+          const rowFor = (label) => rows().find((row) => row.querySelector('.label')?.textContent === label)
+          const ensureOpen = async (label) => {
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              const row = rowFor(label)
+              if (row === undefined) { await wait(150); continue }
+              const li = row.closest('li')
+              if (li.dataset.open !== 'true') row.click()
+              await wait(200)
+              if (li.dataset.open === 'true') return true
+            }
+            return false
+          }
+          for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
+          await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
+          await ensureOpen('_tools_')
+          await ensureOpen('some-tool')
+          const sessionRows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+          return JSON.stringify({
+            labels: sessionRows.map((li) => li.querySelector(':scope > .row .label').textContent),
+            stamps: sessionRows.map((li) => li.querySelector(':scope > .row .age')?.dataset.stamp ?? null),
+            ages: sessionRows.map((li) => li.querySelector(':scope > .row .age')?.textContent ?? null),
+          })
+        })()`),
+      )
+    const earlier = await readRows()
+    /**
+     * The order is newest-write first. Rows the store does not know (definitions without a record) carry no stamp; they sort
+     * after the stamped ones, so the stamps read in descending order on their own.
+     */
+    const stamped = earlier.stamps.filter((stamp) => stamp !== null)
+    assert.ok(stamped.length >= 2, `both written sessions carry a stamp\nsaw: ${JSON.stringify(earlier)}`)
+    assert.deepEqual(stamped, [...stamped].sort((left, right) => String(right).localeCompare(String(left))), `rows order by their write time, newest first\nsaw: ${JSON.stringify(earlier)}`)
+
+    /** Write to the older session the way the composer does, and watch the list re-read itself. */
+    const continued = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: older.id, prompt: 'a follow-up that should move this row', folder: branch }),
+    })
+    assert.equal(continued.status, 200, `the follow-up turn runs\n${await continued.clone().text()}`)
+    await continued.text()
+    await new Promise((done) => setTimeout(done, 2500))
+    const later = await readRows()
+    assert.equal(later.labels[0], String(older.title), `the session just written to moved to the top\nsaw: ${JSON.stringify(later)}`)
+    const olderMeta = (await sessionsNow()).find((meta) => meta.id === older.id)
+    assert.equal(later.stamps[0], olderMeta?.updated, `its row age reads the time it was written to\nsaw: ${JSON.stringify({ stamp: later.stamps[0], meta: olderMeta?.updated })}`)
+    assert.notEqual(later.ages[0], earlier.ages.at(-1), 'and the age text is no longer the one it showed before the write')
+
+    /**
+     * Pin through the **row's menu**, with trusted pointer input: reveal the row, open the menu through its own trigger, then
+     * press the Pin item. This is the path a person takes, and it exercises the same handler as the hover button.
+     */
+    const menuTarget = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree li[data-kind="session"]')]
+        const target = rows()[1]
+        const row = target.querySelector(':scope > .row')
+        const rect = row.getBoundingClientRect()
+        await wait(50)
+        const trigger = target.querySelector(':scope > .row .menu-wrap > button')
+        if (trigger === null) return JSON.stringify({ error: 'no menu trigger' })
+        const own = trigger.getBoundingClientRect()
+        return JSON.stringify({ x: Math.round(own.left + own.width / 2), y: Math.round(own.top + own.height / 2), row: { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }, label: target.querySelector(':scope > .row .label').textContent })
+      })()`),
+    )
+    assert.equal(menuTarget.error, undefined, `the second row offers a menu\nsaw: ${JSON.stringify(menuTarget)}`)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: menuTarget.row.x, y: menuTarget.row.y })
+    await new Promise((done) => setTimeout(done, 250))
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: menuTarget.x, y: menuTarget.y })
+    await new Promise((done) => setTimeout(done, 300))
+    const openTrigger = JSON.parse(
+      await browser.evaluate(`(() => {
+        const target = [...document.querySelectorAll('#tree li[data-kind="session"]')][1]
+        const trigger = target.querySelector(':scope > .row .menu-wrap > button')
+        const own = trigger.getBoundingClientRect()
+        return JSON.stringify({ x: Math.round(own.left + own.width / 2), y: Math.round(own.top + own.height / 2) })
+      })()`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: openTrigger.x, y: openTrigger.y })
+    await new Promise((done) => setTimeout(done, 250))
+    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: openTrigger.x, y: openTrigger.y, button: 'left', buttons: 1, clickCount: 1 })
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: openTrigger.x, y: openTrigger.y, button: 'left', buttons: 0, clickCount: 1 })
+    await new Promise((done) => setTimeout(done, 500))
+    const pinItem = JSON.parse(
+      await browser.evaluate(`(() => {
+        const target = [...document.querySelectorAll('#tree li[data-kind="session"]')][1]
+        const item = [...target.querySelectorAll(':scope > .row .menu button')].find((button) => (button.textContent || '').trim().toLowerCase().includes('pin'))
+        if (item === undefined) return JSON.stringify({ error: 'no pin item' })
+        const own = item.getBoundingClientRect()
+        return JSON.stringify({ x: Math.round(own.left + own.width / 2), y: Math.round(own.top + own.height / 2), text: (item.textContent || '').trim() })
+      })()`),
+    )
+    assert.equal(pinItem.error, undefined, `the menu carries the pin item\nsaw: ${JSON.stringify(pinItem)}`)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pinItem.x, y: pinItem.y })
+    await new Promise((done) => setTimeout(done, 250))
+    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pinItem.x, y: pinItem.y, button: 'left', buttons: 1, clickCount: 1 })
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pinItem.x, y: pinItem.y, button: 'left', buttons: 0, clickCount: 1 })
+    await new Promise((done) => setTimeout(done, 1500))
+    const pinned = await readRows()
+    assert.equal(pinned.labels[0], menuTarget.label, `a pressed pin holds the top of its folder\nsaw: ${JSON.stringify({ pinned, menuTarget, pinItem })}`)
+    const pinnedMetas = (await sessionsNow()).filter((meta) => meta.pinned === true)
+    assert.equal(pinnedMetas.length, 1, `and the store records exactly one pin\nsaw: ${JSON.stringify(pinnedMetas)}`)
   } finally {
     browser?.close()
     live?.kill()

@@ -109,3 +109,101 @@ rather than producing a second scrollbar; the page reports no errors (the probe 
 **lessons:** the browser check has to wait for the tree's own fetch before measuring a region whose height depends on
 it — a scroll claim on an empty list passes or fails for the wrong reason.
 
+## Cycle 2 — the bottom area, and what Settings may show
+
+**measured:** the reference's bottom, same session and window. The row is an **anchored block**: `settingsArea`
+256×50 at y=757 in an 813-tall column (6px above the bottom), holding a `Settings` trigger 260×42 with
+`padding: 0 10px 0 8px` and an 8-pixel gap; `Mobile access` sits above it at y=711, and both stay put while the
+workspace list scrolls. Clicking `Settings` opens a **dialog** — `role=dialog`, 800×765, radius 28,
+`rgb(44,44,46)` — with sections `General`, `Models`, `Built-in plugins`, `Agent presets`, and two actions,
+`Open configuration file` and `Close`. Its General section holds the default permission mode, language, appearance,
+font size, work-detail and shortcuts.
+
+Heddle has **no bottom area and no settings surface at all**. What it does have is the data such a surface may show,
+read from its own routes: `/api/status` (sandbox mode and the working directory) and `/api/endpoints` (name, kind,
+base URL, model, capabilities, context window, and `credential: "set"` rather than a value). Configuration lives in
+`~/.heddle/heddle.json`, outside the repository, and a credential must never be rendered.
+
+**brainstorm:**
+
+1. **Anchored bottom row + a native `<dialog>` with read-only sections** — the reference's shape, reduced to the
+   facts this project can state honestly. *Chosen:* it is the smallest surface that answers "where do I look, and
+   what is this machine configured with", and a dialog does not disturb the conversation panel.
+2. **A Settings *view* in the main panel's ring** (Chat / Trajectory / Settings). *Discarded:* the ring is about the
+   session; a settings tab would sit beside a conversation as if it belonged to it, and DSH uses a dialog.
+3. **An expandable settings section inside the panel** under the list. *Discarded:* the panel is 352 pixels wide and
+   an endpoints table needs more; it would also compete with the scroller for height.
+4. **A settings item in the session header's `…` menu.** *Discarded:* the owner asked for a bottom area, and settings
+   are not session actions.
+5. **Bottom row showing status only** (sandbox mode, model) with no dialog. *Discarded:* it does not "allow setting
+   config", which is the request; it would also duplicate the composer's access and model chips.
+
+**understand:** the reference's bottom is a **launcher area** for surfaces that belong to the application rather than
+to a conversation — settings, mobile access, the assistant. Heddle has the launcher's *data* but not its *surfaces*.
+Cycle 2 therefore builds the area and a **read-only** dialog: endpoint configuration, the sandbox mode, the workspace
+roots, and an explicit line that credentials are never shown. Writing configuration from the browser is a feature with
+its own safety question (the file holds credentials, and a write path would need validation, atomicity and an approval
+story) — recorded here, not half-built.
+
+**step back:** the job stays as stated, but "allow setting config" is read as **a place to see and understand the
+configuration** for this cycle; editing is the next feature, named in the document. The reference's tabs are not copied
+because three short sections do not need them yet — recorded as a divergence with its reason, to revisit when a
+writing surface arrives.
+
+**plan:**
+
+- an anchored `#panel-foot` at the end of the aside: `flex: none`, a `Settings` button with a gear glyph and a label,
+  `⌥⌘,` as its chord (the reference's own chord for the same surface).
+- a native `<dialog id="settings-dialog">`: heading `Settings`, a `Close` action, and three sections — **Server**
+  (sandbox mode, working directory), **Models** (one row per endpoint: name, kind, model, capabilities, context
+  window, whether a credential is configured), **Workspaces** (the roots the tree draws, with their paths) — plus the
+  credentials line.
+- the data is fetched when the dialog opens, from `/api/status`, `/api/endpoints` and `/api/tree`.
+- in the collapsed rail the foot shows the gear alone, anchored to the bottom, as the reference's rail does.
+- judged by a browser check (the foot stays put while the region scrolls, the dialog opens with its sections, no
+  credential value is rendered, `Close` and Escape both dismiss it) and by unit contracts for the structure and the
+  chord.
+
+**changed:** `src/server/page.html` — a `#panel-foot` at the end of the aside with a `Settings` trigger, a native
+`<dialog id="settings-dialog">` with `Server` / `Models` / `Workspaces` sections and a credentials line, and the
+reference's `⌥⌘,` chord; `_verifiers_/87-resizable-panels/check.mjs` — the foot's anchoring and the dialog's content;
+`test/page-contract.test.ts` — eleven contracts for the structure, the chord and the credential rule.
+
+**evidence:** measured at 1200×800 with the real machine's configuration.
+
+| | reading |
+|---|---|
+| foot | 328×46, bottom 701 against the panel's 713 (the 12-pixel padding), below the region's bottom at 650 |
+| foot while the region scrolls | top unchanged |
+| rail foot | gear 36×36, label hidden, anchored to the bottom edge |
+| dialog | `open`, `:modal`, 720×593, radius 28px, title `Settings`, focus inside |
+| Server | `Sandbox workspace-write`, `Working directory /Users/zhenc/heddle` |
+| Models | 4 endpoints, each with kind, model, context window, `credential set` / `no credential`, capabilities |
+| Workspaces | the roots with their paths |
+| credentials | the note says they are never shown; no `sk-…`, `api_key: …` or bearer token appears in the dialog text |
+| Close / chord | `Close` sets `open` false, and `⌥⌘,` opens it again |
+
+Screenshot: [`_context_/sidebar-panel/cycle-2-settings.png`](_context_/sidebar-panel/cycle-2-settings.png). The
+assertion that proves it: part 11's foot/dialog block — written after the markup, shown to fail by removing
+`#panel-foot` (the claim then reads `Session`, not `Settings`) and by the credential regex, which fails if a value is
+ever rendered.
+
+**reds:** one, named and not edited under: part 80's `model-switcher` check — "the seat shows the endpoint the run
+nominated" — fails intermittently under a full parallel sweep and passes on its own (measured twice, in both
+directions in the same hour). It belongs to the concurrent session's model-seat and context-window work, not to this
+panel. Everything else in the sweep is green, and a clean `npm run build` before the sweep removes the failures that
+come from a `dist/` half-written by the other session's build (`88` and `90` both passed on a re-run after one).
+
+**coverage:** the reference's **tabs** (`General`, `Models`, `Built-in plugins`, `Agent presets`) are not copied: three
+short sections do not need a tab strip, and this surface is read-only. The reference's `Open configuration file` is not
+copied either — this page has no route that opens a file on the host, and adding one for a credential-bearing file is a
+decision, not a layout. Both are recorded as divergences with their reasons.
+
+**invariants:** the empty state still shows when nothing is open (part 11); the rail still hides the tree and the
+search; the dialog's body scrolls rather than the dialog, so the heading and `Close` stay reachable; Escape closes it
+because it is a native modal dialog.
+
+**lessons:** a settings surface is where a leak would be easiest to make. The assertion that matters is not "the
+endpoint appears" but "no secret-shaped string appears", which is why the check greps the dialog's own text for the
+shapes a key takes.
+

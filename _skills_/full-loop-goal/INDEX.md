@@ -1,7 +1,7 @@
 ---
 title: Full loop goal
 version: 1.4.0
-description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → deliver → verify → fix for a stated number of cycles, with each cycle's evidence required before it counts — and the delivered surface, not a spawned copy of it, is what gets verified.
+description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → deliver → verify → fix for a stated number of cycles, then merges the branch into main and verifies the running deployment before claiming the job done — with each cycle's evidence required before it counts, and the delivered surface, not a spawned copy of it, as the instrument.
 grounded_in:
   - owner statement 2026-10-17 that a big job should be set up as a goal that researches, understands, plans, implements, verifies, fixes and loops three times
   - owner statement 2026-10-17 that each loop should include a brainstorm in the research phase, and should step back and broaden the scope where applicable
@@ -10,6 +10,7 @@ grounded_in:
   - owner statement 2026-10-17 asking "did you verify on localhost:8082?" after a cycle reported a verified Web UI
     the owner never saw: the browser check had spawned its own server, and the address the owner opened was served
     by a daemon running another checkout's build
+  - owner statement 2026-10-17 that a worktree branch may carry the initial verification, but the job is not done until the code is merged to main and the actual deployment is verified working
 ---
 
 # Full loop goal
@@ -22,13 +23,16 @@ what a round must contain.
 understanding — plus the mechanisms in the second half. The rule that has not changed: a cycle counts only
 when its evidence is in the document and the suites are green.
 
-**v1.4 adds the delivery step.** A cycle of a served or installed artifact is not green at "suites green"; it is
-green when **the thing the person opens** is the build just measured. A check that starts its own server, a
-screenshot of a throwaway instance, or a passing unit suite verifies *code*, not *delivery*: it cannot see a stale
-`dist`, a daemon started from another checkout, a service supervisor pointing somewhere else, or a page that a
-browser is serving from cache. The rule is one sentence — **verify the address, not a copy of it** — and the
-mechanisms that make it true are below. This rule exists because the loop missed exactly that: every suite was
-green and the owner's URL still showed the old page.
+**v1.4 adds the delivery step and the landing rule.** A cycle of a served or installed artifact is not green at
+"suites green"; it is green when **the thing the person opens** is the build just measured. A check that starts its
+own server, a screenshot of a throwaway instance, or a passing unit suite verifies *code*, not *delivery*: it cannot
+see a stale `dist`, a daemon started from another checkout, a service supervisor pointing somewhere else, or a page
+that a browser is serving from cache. The rule is one sentence — **verify the address, not a copy of it**.
+Conversely, a worktree and a branch are fine for isolating the work and verifying it initially, but a green branch
+is not the finish line either: the job is done only when the branch is merged into `main` **and** the deployment the
+owner actually uses is verified serving that build, with a `landed:` line recording the merge and the deployment
+evidence. Both rules exist because the loop missed each once: every suite green while the owner's URL showed the old
+page, and a green branch about to be called done before it was in `main`.
 
 **v1.3 states the round cap.** A goal is created with `max_goal_rounds: 100` unless the owner names another
 number in the request; that is the harness default and it is the number this skill asks for explicitly, because a
@@ -168,6 +172,7 @@ Cycle n — <one-line aim>
   reds:       <none | named, with its owner>
   coverage:   <cells visited, cells not visited and why>
   invariants: <what the structural change could have broken, and the assertion that it did not>
+  landed:     <merge commit into main, and the deployment evidence — not "dist is fresh">
   lessons:    <the mechanism that now prevents a repeat>
 ```
 
@@ -192,7 +197,9 @@ will repeat work.
   instrument that would catch that. If there is none, the cycle is not ready to be called green.
 - **One difference per cycle where possible.** A cycle that changes five things cannot say which one worked.
 - **Checkpoint per cycle.** Commit the change, log it, and update the document and the skill **in the same
-  cycle**. The commits and the document are what a later round — or a restart — resumes from.
+  cycle**. The commits and the document are what a later round — or a restart — resumes from. A branch is a
+  checkpoint; **merging to `main` and verifying the deployment are the completion**, and both are recorded in
+  the cycle block's `landed:` line.
 - **A spike is research, not the plan.** When two approaches are plausible, timebox a throwaway spike for
   each; the result is a measurement and a discard note, not a branch to merge half-finished.
 - **A red that belongs to another session gets an owner named.** If a red is another session's in-flight
@@ -207,8 +214,32 @@ will repeat work.
   still paints, nothing overlaps), and the probe reports page errors with the failure. A render that throws
   looks exactly like missing data — that is how a `const` used before its declaration removed every session row
   while the branch still rendered.
-- **Keep the goal active until the last cycle has verified.** Claiming completion is a measurement too, and it
-  goes in the document.
+- **Keep the goal active until the last cycle has verified, landed and deployed.** Claiming completion is a
+  measurement too, and it goes in the document: the merge commit and the deployment evidence are part of what
+  the last cycle must show before the goal is marked complete.
+
+## Where the work lands: branch → main → deployment
+
+A worktree is allowed and often wise: two sessions on one checkout fight over the same files, and a branch gives
+each this loop a private surface. Initial verification — the reference measurements, the failing-first
+assertions, the screenshots — can all run there. What the branch must not do is pretend to be the delivery.
+
+**The job is not done when the branch is green.** It is done when both of these are true and recorded:
+
+1. **Merged into `main`.** The branch is merged (fast-forward or merge, per the repository's practice) after its
+   own suites are green. If `main` carries another session's uncommitted work, do not sweep it into the merge:
+   stage only this loop's hunks, and if that cannot be done cleanly, stop and hand the branch over rather than
+   committing someone else's half-written tree. Record the merge commit.
+2. **The deployment is verified working.** Name the service the owner actually uses, read **which checkout its
+   process runs** (not merely that `dist/` was rebuilt — a daemon still executing an old or other-worktree
+   `dist/cli.js` is the exact failure this rule exists for), confirm the served artifact carries the feature,
+   and observe the user-visible behaviour end to end. A fresh `npm run build` is not a deployment; a running
+   process on a stale checkout and a stale `dist` look identical from the source tree.
+
+A cycle that ends on a green branch without those two is a checkpoint, not a completion: keep the goal active,
+say in the document what is left to land, and let the next round do it. The failure mode is real — a loop
+closed as complete while the owner's page kept serving a different build, and the fix was a plist, a restart and
+a page response, not more features.
 
 ## When to stop, and when to ask
 
@@ -230,5 +261,6 @@ will repeat work.
 ## Read next
 
 [`../../_conventions_/goal-reentrant/INDEX.md`](../../_conventions_/goal-reentrant/INDEX.md) for the reentrancy
-the loop relies on, [`../ui-parity-audit/INDEX.md`](../ui-parity-audit/INDEX.md) for the measurement-heavy
+the loop relies on, [`../../_conventions_/landed-and-deployed/INDEX.md`](../../_conventions_/landed-and-deployed/INDEX.md)
+for the landing rule the closing cycles obey, [`../ui-parity-audit/INDEX.md`](../ui-parity-audit/INDEX.md) for the measurement-heavy
 sibling skill, and [`../INDEX.md`](../INDEX.md) for the skills folder.
