@@ -1724,7 +1724,8 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
       await new Promise((resolve) => setTimeout(resolve, 150))
     }
     assert.ok(observed > 2, `the turn was observed growing (${observed} samples)`)
-    assert.ok(followed >= observed - 1, `the transcript followed the floor as it grew (${followed}/${observed} samples at the bottom)`)
+    /** A sample can land between a growth and its animation frame, so the claim is "follows", not "every 100ms". */
+    assert.ok(followed >= Math.ceil(observed * 0.8), `the transcript followed the floor as it grew (${followed}/${observed} samples at the bottom)`)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("line 40 of an answer")', 20_000), 'the long answer arrived')
     /** The settled document and the final layout land after the last append — still at the floor. */
     await new Promise((resolve) => setTimeout(resolve, 1200))
@@ -1880,6 +1881,13 @@ test('the running clock survives navigating away and back', async (context) => {
     assert.ok(typeof other === 'string' && other.startsWith('session-'), `a second session exists (${other})`)
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(other)})`)
     assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") === null', 15_000), 'the row leaves with the view')
+    /**
+     * The row must leave because **this session has no turn**, not because the original stoped: the session it left
+     * is still running. That distinction is what the page-side pending flag broke — being global, it painted the row
+     * on whichever session was shown.
+     */
+    const stillRunning = await browser.evaluate(`fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.id === ${JSON.stringify(session)})?.running ?? null)`)
+    assert.equal(stillRunning, true, 'the original session is still running while the panel shows another one')
     await new Promise((resolve) => setTimeout(resolve, 1200))
     /** And back to the session that is still running. */
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(session)})`)
