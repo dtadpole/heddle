@@ -11,7 +11,7 @@ import { runTurn } from '../agent/loop.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
-import { MAX_UPLOAD_BYTES, saveUpload } from './uploads.ts'
+import { MAX_UPLOAD_BYTES, saveUpload, uploadDirectory } from './uploads.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
@@ -21,7 +21,7 @@ import { PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
-import { canonicalPath } from '../paths.ts'
+import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
@@ -515,6 +515,47 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         'content-length': String(stats.size),
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
         'content-disposition': contentType === null ? `attachment; filename="${basename(wanted).replace(/"/g, '')}"` : 'inline',
+        'cache-control': 'no-store',
+      })
+      response.end(readFileSync(wanted))
+    } catch {
+      respond(response, 404, 'text/plain', 'no such asset\n')
+    }
+    return
+  }
+
+  /**
+   * An uploaded file's bytes, so a transcript card can show the image it names.
+   *
+   * The containment rule is the upload directory's, not a workspace's: the bytes were stored there by the
+   * upload route, are read-only to the conversation, and may sit outside every registered workspace. The leaf
+   * is a single path segment (`..`, separators and empty names are refused) and the resolved path is checked
+   * again against the canonical directory, so a hand-made request cannot walk out of it. As with `/api/raw`,
+   * only types a document embeds are served inline; anything else is a download.
+   */
+  if (url.pathname.startsWith('/api/uploads/') && request.method === 'GET') {
+    const leaf = decodeURIComponent(url.pathname.slice('/api/uploads/'.length))
+    if (leaf.length === 0 || leaf.includes('/') || leaf.includes('\\') || leaf === '..' || leaf === '.') {
+      respond(response, 404, 'text/plain', 'no such asset\n')
+      return
+    }
+    try {
+      const directory = uploadDirectory()
+      const wanted = join(directory, leaf)
+      if (!isUnder(canonicalPath(directory), canonicalPath(wanted))) {
+        respond(response, 404, 'text/plain', 'no such asset\n')
+        return
+      }
+      const stats = statSync(wanted)
+      if (!stats.isFile()) {
+        respond(response, 404, 'text/plain', 'no such asset\n')
+        return
+      }
+      const contentType = inlineContentType(wanted)
+      response.writeHead(200, {
+        'content-type': contentType ?? 'application/octet-stream',
+        'content-length': String(stats.size),
+        'content-disposition': contentType === null ? `attachment; filename="${leaf.replace(/"/g, '')}"` : 'inline',
         'cache-control': 'no-store',
       })
       response.end(readFileSync(wanted))
@@ -2248,6 +2289,32 @@ function respond(response: ServerResponse, status: number, contentType: string, 
 
 /** The page. One file, no build step, and no framework — the same choice DSH makes. */
 /**
+ * The files one message carries, as transcript cards.
+ *
+ * The stored path is only used to find the leaf the serving route addresses; everything a person sees is the
+ * metadata the server measured when the message was recorded.
+ */
+export function attachmentsOf(
+  content: readonly { readonly type?: string; readonly name?: string; readonly path?: string; readonly mimeType?: string; readonly bytes?: number }[],
+): TurnAttachment[] {
+  const attachments: TurnAttachment[] = []
+  for (const part of content) {
+    if (part.type !== 'image' && part.type !== 'file') continue
+    const leaf = typeof part.path === 'string' ? basename(part.path) : ''
+    if (leaf.length === 0) continue
+    const bytes = typeof part.bytes === 'number' && Number.isFinite(part.bytes) ? part.bytes : 0
+    attachments.push({
+      kind: part.type,
+      name: typeof part.name === 'string' && part.name.length > 0 ? part.name : leaf,
+      mimeType: typeof part.mimeType === 'string' ? part.mimeType : 'application/octet-stream',
+      bytes,
+      url: `/api/uploads/${encodeURIComponent(leaf)}`,
+    })
+  }
+  return attachments
+}
+
+/**
  * Fold a session's recorded events into the display turns the page renders.
  *
  * Exported so the fold can be judged directly: it is pure, it is where the two subtle rules live (read the
@@ -2340,16 +2407,24 @@ export function transcriptTurns(
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
       const message = event.message as
-        | { role?: string; content?: readonly { type?: string; text?: string; name?: string }[]; toolCallId?: string }
+        | {
+            role?: string
+            content?: readonly { type?: string; text?: string; name?: string; path?: string; mimeType?: string; bytes?: number }[]
+            toolCallId?: string
+          }
         | undefined
       if (message === undefined) continue
-      const text = (message.content ?? [])
-        .map((part) => (part.type === 'image' || part.type === 'file' ? `[${part.type} ${part.name ?? ''}]` : part.text ?? ''))
-        .join('')
+      const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
         written = []
         sectionStart = turns.length
-        turns.push({ kind: 'user', text, ...(typeof event.at === 'string' ? { time: event.at } : {}) })
+        const attachments = attachmentsOf(message.content ?? [])
+        turns.push({
+          kind: 'user',
+          text,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(typeof event.at === 'string' ? { time: event.at } : {}),
+        })
       }
       else if (message.role === 'assistant') turns.push({ kind: 'assistant', text })
       else if (message.role === 'tool') {
@@ -2442,6 +2517,17 @@ export function transcriptTurns(
 }
 
 /** One thing the chat shows, after the fold. A tool turn carries both halves of one call. */
+/** One file attached to a person's message, as the transcript draws it. */
+export interface TurnAttachment {
+  /** What the card shows: an image preview, or a file chip. */
+  readonly kind: 'image' | 'file'
+  readonly name: string
+  readonly mimeType: string
+  readonly bytes: number
+  /** The same-origin read-only address this server serves the stored bytes at. */
+  readonly url: string
+}
+
 export interface ChatTurn {
   readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool'
   /**
@@ -2464,6 +2550,12 @@ export interface ChatTurn {
    * local to the loop before this; a reloaded transcript could not say why its answer was empty.
    */
   readonly ended?: readonly string[]
+  /**
+   * Files attached to this message, in the order they were chosen — the gallery and file chips DSH draws on
+   * a person's row. The metadata is what the server measured when it recorded the message, so the page never
+   * re-derives a size or a media type from a path.
+   */
+  readonly attachments?: readonly TurnAttachment[]
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */

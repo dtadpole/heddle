@@ -98,7 +98,7 @@ async function startServer(label, options = {}) {
  * input whose change event the picker would fire; everything before that — opening the menu, choosing
  * File, closing it — is the real gesture.
  */
-async function attachThroughPicker(browser, filePath) {
+async function attachThroughPicker(browser, filePath, expected = 1) {
   await browser.evaluate('document.getElementById("attach").click()')
   await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000)
   const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File')`
@@ -107,7 +107,8 @@ async function attachThroughPicker(browser, filePath) {
   const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
   const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
   await browser.send('DOM.setFileInputFiles', { files: [filePath], nodeId: found.result.nodeId })
-  return browser.waitFor('document.querySelector("#attach-cards .attach-card") !== null', 20_000)
+  await browser.waitFor(`document.querySelectorAll('#attach-cards .attach-card').length === ${expected}`, 20_000)
+  return true
 }
 
 /** Spawn the CLI and resolve once it prints its URL, or reject on exit. */
@@ -1457,6 +1458,187 @@ test('a published text-only modality keeps the deterministic placeholder', async
     const request = server.double.requests[0].body
     assert.ok(!request.includes('image_url'), 'no image content reaches a route that published text only')
     assert.match(request, /\[image omitted because this model accepts text only; attachment sha256:[0-9a-f]{8}\]/, 'the placeholder names the attachment')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * A sent image is a transcript card, and its bytes are served from the upload directory.
+ *
+ * Cycle 1's honest minimum was a name marker; DSH shows the image. The card must survive a reload too, which
+ * means the fold — not just the live event — carries the attachment's metadata.
+ */
+test('a sent image becomes a transcript card served from the upload route', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-card')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'card.png')
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]), Buffer.alloc(20, 0x22)])
+    writeFileSync(chosen, bytes)
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the image is a pending card')
+    await type(browser, 'look at this')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.querySelector(".message-images img") !== null', 20_000), 'the sent image is drawn as a card')
+
+    const card = JSON.parse(await browser.evaluate(`JSON.stringify({
+      src: document.querySelector('.message-images img')?.getAttribute('src'),
+      alt: document.querySelector('.message-images img')?.getAttribute('alt'),
+      text: document.querySelector('.turn.user')?.innerText ?? '',
+      variant: document.querySelector('.message-image')?.dataset.variant,
+    })`))
+    assert.match(String(card.src), /^\/api\/uploads\/[^/]+$/, 'the card reads its bytes from the uploads route')
+    assert.equal(card.alt, 'card.png', 'and names the file in its alt text')
+    assert.ok(!card.text.includes('[image '), 'the name marker is gone from the bubble')
+    assert.equal(card.variant, 'single', 'a lone image uses the single-image frame')
+
+    const served = JSON.parse(await browser.evaluate(`(async () => {
+      const response = await fetch(${JSON.stringify(card.src)})
+      const body = new Uint8Array(await response.arrayBuffer())
+      return JSON.stringify({ status: response.status, type: response.headers.get('content-type'), length: body.length })
+    })()`))
+    assert.equal(served.status, 200, 'the uploads route serves the stored bytes')
+    assert.equal(served.type, 'image/png', 'with the image media type')
+    assert.equal(served.length, bytes.length, 'and every stored byte')
+
+    /** A reload reads the server's fold, so the card must be there too. */
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector(".message-images img") !== null', 20_000)
+    assert.equal(
+      await browser.evaluate('document.querySelectorAll(".message-images img").length'),
+      1,
+      'the reloaded transcript draws the same card from its recorded event',
+    )
+
+    /** A traversal attempt and an unknown leaf are refused, not served. */
+    const refused = JSON.parse(await browser.evaluate(`(async () => {
+      const attempts = ['/api/uploads/..%2Fetc%2Fpasswd', '/api/uploads/no-such-file.png']
+      const answers = []
+      for (const attempt of attempts) answers.push((await fetch(attempt)).status)
+      return JSON.stringify(answers)
+    })()`))
+    assert.deepEqual(refused, [404, 404], 'an upload path outside the directory, or missing, is 404')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/** Two images in one message reach the provider as two parts and draw as DSH's 64px tiles. */
+test('two images in one message reach the provider and render as tiles', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-two', { inputModalities: ['text', 'image'] })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const one = join(server.work, 'one.png')
+    const two = join(server.work, 'two.png')
+    writeFileSync(one, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]))
+    writeFileSync(two, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x02]))
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, one, 1), 'the first image is a pending card')
+    assert.ok(await attachThroughPicker(browser, two, 2), 'the second joins it')
+    await type(browser, 'compare these')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the provider was asked once')
+
+    const user = promptMessage(server, 'compare these')
+    assert.ok(Array.isArray(user.content), 'the message carries typed parts')
+    assert.equal(user.content.filter((part) => part.type === 'image_url').length, 2, 'both images are sent')
+    assert.equal(
+      await browser.evaluate('document.querySelectorAll(".message-image[data-variant=tile]").length'),
+      2,
+      'and the transcript draws two tiles',
+    )
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * A queued message keeps its image: the row shows it, editing the text leaves it, and the edited message still
+ * reaches the provider with the image attached.
+ */
+test('a queued message keeps its image through an edit and reaches the provider', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-queue-edit', { inputModalities: ['text', 'image'], holdOpenMs: 12_000 })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'queued.png')
+    writeFileSync(chosen, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x11, 0x12]))
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the image is a pending card')
+    await type(browser, 'first message')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the first turn is running')
+    const running = await browser.evaluate(`JSON.stringify({ stopHidden: document.getElementById('stop')?.hidden ?? null, sendDisabled: document.getElementById('send')?.disabled ?? null })`)
+    assert.ok(await attachThroughPicker(browser, chosen, 1), 'a second copy waits in the composer')
+    await type(browser, 'queued message')
+    await press(browser, { key: 'Enter' })
+    /** Two queue entries fold behind the header, so the dock is opened the way a person opens it. */
+    await browser.evaluate(`document.querySelector('#queue .header')?.click()`)
+    const queuedShown = await browser.waitFor('document.querySelector(".queue-files .queue-thumb") !== null', 10_000)
+    if (!queuedShown) {
+      const dump = await browser.evaluate(`JSON.stringify({
+        queueHidden: document.getElementById('queue')?.hidden ?? null,
+        rows: [...document.querySelectorAll('.row')].map((row) => ({ status: row.dataset.status, text: row.innerText, html: row.innerHTML.slice(0, 400) })),
+        cards: document.querySelectorAll('#attach-cards .attach-card').length,
+        draft: document.querySelector('#prompt textarea').value,
+      })`)
+      assert.fail(`the queued row shows the image thumbnail (${dump})`)
+    }
+    assert.ok(queuedShown, 'the queued row shows the image thumbnail')
+
+    const rows = await browser.evaluate(`JSON.stringify([...document.querySelectorAll('.row')].map((row) => ({
+      status: row.dataset.status,
+      text: row.innerText,
+      buttons: [...row.querySelectorAll('button')].map((button) => ({ label: button.getAttribute('aria-label'), disabled: button.disabled })),
+    })))`)
+    const clicked = await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#queue .row')].find((entry) => entry.dataset.status === 'pending')
+      const button = row?.querySelector('[aria-label="Edit queued message"]')
+      button?.click()
+      return JSON.stringify({ clicked: button !== undefined, editors: document.querySelectorAll('#queue .editor').length })
+    })()`)
+    const opened = await browser.waitFor('document.querySelector("#queue .editor") !== null', 10_000)
+    assert.ok(opened, `the row opens its editor (${rows}) after ${clicked}`)
+    await browser.evaluate(`(() => {
+      const editor = document.querySelector('.row .editor')
+      editor.value = 'edited queued message'
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+    const saved = await browser.evaluate(`(() => {
+      const button = document.querySelector('[aria-label="Save queued message"]')
+      button?.click()
+      return button !== undefined
+    })()`)
+    assert.ok(saved, 'the editor offers a save action')
+    assert.ok(await browser.waitFor('document.querySelector(".queue-files .queue-thumb") !== null', 10_000), 'saving keeps the image on the row')
+    assert.equal(
+      await browser.evaluate(`([...document.querySelectorAll('#queue .row')].find((row) => row.dataset.status === 'pending')?.querySelector('.preview')?.textContent) ?? null`),
+      'edited queued message',
+      'and the edit is the text shown',
+    )
+
+    /** Send it now; whether it steers or falls back to the queue, the edited text must arrive with the image. */
+    const steered = await browser.evaluate(`(() => {
+      const button = [...document.querySelectorAll('[aria-label="Steer queued message"]')].find((entry) => !entry.disabled)
+      button?.click()
+      return button !== undefined
+    })()`)
+    assert.ok(steered, 'the pending row offers steer')
+    /** A steer lands in the next round of the running turn; a fallback queues until the turn ends — either way the edited message must arrive. */
+    assert.ok(await until(() => server.double.requests.length === 2, 60_000), 'the queued message reaches the provider')
+    const user = promptMessage(server, 'edited queued message')
+    assert.ok(Array.isArray(user.content), 'the edited message still carries typed parts')
+    assert.ok(user.content.some((part) => part.type === 'image_url'), 'and its image')
   } finally {
     browser.close()
     await server.close()
