@@ -135,11 +135,51 @@ model — an attachment store/ref, a typed user-message block, and the provider 
 
 Cycle 1 must measure DSH's live message shape and heddle's session/event schema before choosing.
 
+## Cycle 1 — the delivery mechanism
+
+```
+Cycle 1 — make the model receive the attachment as typed content, not a path
+  measured:   DSH's attachment vocabulary and projection, read from the packages (dsh-llm/lib/types/types.d.ts:61-88,
+              dsh-llm/lib/index.js:558-745, dsh-client-file-upload/lib/index.js:18-73, dsh-attachment/lib/types/types.d.ts:7-71);
+              the live composer's pending cards re-read at 8080 on 2026-10-17; heddle's content vocabulary
+              (src/llm/types.ts:24-27), adapters (src/llm/adapters.ts:231-292, 485-516), turn body
+              (src/server/web.ts:1880-1930), context assembly (src/context/service.ts:430),
+              request projection (src/llm/types.ts:327-333) and upload store (src/server/uploads.ts:31-95).
+  brainstorm: (a) path-based attachment ref in the log + DSH's projection at request time — chosen;
+              (b) DSH's content-addressed attachment store with opaque ids — deferred to a later cycle, since the
+                  uploads directory already gives a durable read-only path and the model's view is what is missing;
+              (c) inline bytes/base64 into the session log — discarded: a 50 MiB file would enter the JSONL;
+              (d) send every file as text only — discarded: it is not what DSH does and drops vision;
+              (e) composer-only cards without model delivery — discarded: already ruled out by the owner.
+  step back:  the gap is a mechanism (typed user-message content + provider projection), not a value; keep the
+              objective, narrow cycle 1 to the delivery path (types, projection, adapter mapping, turn body,
+              minimal pending cards). Composer fidelity (queue/steer, limits, transcript cards) is cycle 2.
+  changed:    src/llm/types.ts — image/file content parts, endpoint inputModalities, sha identity;
+              src/llm/attachments.ts (new) — DSH's file handle, text-only placeholder, vision materialisation;
+              src/llm/service.ts — project attachments before the adapter;
+              src/llm/adapters.ts — image parts for chat/responses/anthropic;
+              src/endpoints.ts — carry inputModalities to the page;
+              src/server/web.ts — /api/turn and /steer accept attachment paths under the upload directory;
+              src/session/service.ts — user message can carry content blocks;
+              src/server/page.html — pending cards, send/queue/steer carry attachments;
+              tests + _verifiers_/80-web-ui/check-composer.mjs.
+  delivered:  pending — the cycle is mid-implement; the branch carries a checkpoint, the deployment follows.
+  evidence:   pending — failing-first unit tests for the projection and adapter mapping are being added, then the
+              browser contract with a recording chat double.
+  reds:       none yet.
+  coverage:   to visit: image on a vision route, image on a text-only route, non-image file, missing file,
+              multiple files, send/queue/steer paths, the owner's address.
+  invariants: no session log grows by file bytes; a text-only route never receives image data; tool/reasoning
+              blocks are untouched by the projection.
+  landed:     pending.
+  lessons:    pending.
+```
+
 ## Cycle status
 
 | Cycle | Aim | Phase | Evidence committed | Landed |
 |---|---|---|---|---|
-| 1 | measure DSH's message shape and heddle's substrate; choose the smallest delivery mechanism | not started | — | — |
+| 1 | delivery mechanism: typed user content + DSH projection + provider mapping + minimal pending cards | implement in progress | — | — |
 | 2 | close the fidelity gaps cycle 1 measured (pending cards, placeholders, limits) | pending | — | — |
 | 3 | full matrix re-measure at the owner's address; stop when no fix row remains | pending | — | — |
 
