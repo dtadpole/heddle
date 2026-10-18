@@ -1,0 +1,39 @@
+{
+  "cards": [
+    {
+      "name": "red-square.png",
+      "meta": "PNG 132 B",
+      "remove": "Remove file red-square.png",
+      "path": "/Users/zhenc/.heddle/uploads/2026-10-18T05-41-39-477Z-red-square.png"
+    },
+    {
+      "name": "blue-square.png",
+      "meta": "PNG 132 B",
+      "remove": "Remove file blue-square.png",
+      "path": "/Users/zhenc/.heddle/uploads/2026-10-18T05-41-39-608Z-blue-square.png"
+    }
+  ],
+  "draft": "",
+  "images": [
+    {
+      "name": "red-square.png",
+      "path": "/Users/zhenc/.heddle/uploads/2026-10-18T05-41-39-477Z-red-square.png",
+      "mimeType": "image/png",
+      "bytes": 132,
+      "sha256": "6f7ffeeb88929a8a2e34ea973c871f069be70cbaf1459fff345db59453934435"
+    },
+    {
+      "name": "blue-square.png",
+      "path": "/Users/zhenc/.heddle/uploads/2026-10-18T05-41-39-608Z-blue-square.png",
+      "mimeType": "image/png",
+      "bytes": 132,
+      "sha256": "e8ef205b78cd3e66f9688d35ac2c073a60e2a904b98df61ef538376d9ae1305f"
+    }
+  ],
+  "storedMatches": [
+    true,
+    true
+  ],
+  "answer": "red, blue",
+  "turnCompleted": true
+}

@@ -354,19 +354,61 @@ Cycle 3 — an attached file is visible where a person reads it, and several fil
               tests written first: the transcript fold's attachment metadata, the serving route's containment,
               the browser matrix (sent image card, two images as two tiles and two wire parts, queued image
               survives an edit and still reaches the provider), and the deployed address with two images.
-  changed:    pending — the cycle is at its plan.
-  delivered:  pending.
-  evidence:   pending.
-  reds:       none yet.
-  coverage:   to visit: the uploads route (a real file, a traversal attempt, an unknown leaf), lone vs several
-              images, the lightbox, a file chip, the queue strip, an edited queued message, and the owner's
-              address with two images.
-  invariants: a served upload is contained to the upload root; a non-embeddable type is served as a download;
-              the transcript remains usable when an upload was deleted (the card shows a failed state, the turn
-              still reads); the queue carries the same measured facts as the composer; sending an image never
-              changes its stored bytes.
-  landed:     pending.
-  lessons:    pending.
+  changed:    src/server/web.ts — a read-only `GET /api/uploads/<leaf>` (contained to the upload root, inline only
+              for embeddable types, a download otherwise, token-gated like every route) and user transcript turns that
+              carry attachment metadata (kind, name, media type, bytes, url) instead of only a text marker;
+              src/server/page.html — DSH's gallery on a person's row (a lone image bounded by 240px, several as 64px
+              tiles, a zoom-in frame that opens the original in a dialog, a file chip with its measured size), the
+              queue's attachment strip (24px thumbnails and name/size chips) in both the preview and the editor, and
+              composer items that carry the measured file facts so a turn sends only stored paths;
+              test/web.test.ts — the fold's attachment extraction, beside main's new page-marker test;
+              _verifiers_/80-web-ui/check-composer.mjs — the card, two-tile and queue-edit checks;
+              _verifiers_/96-deployment/check-deployment.mjs — the page comparison learns the build marker the served
+              page now carries, so a current build is judged by its own hash instead of being failed as stale.
+  delivered:  landed on main as merge a6b9943, with the deployment-check alignment in dec1878; the deployment checkout
+              /Users/zhenc/heddle-deploy is built and its launchd agent runs that checkout's dist/cli.js (PID 75408 at
+              the measurement), and _verifiers_/96-deployment is 3/3. At http://127.0.0.1:8082/ two images attached
+              through (+) File — red-square.png and blue-square.png, `PNG 132 B` each — were two pending cards with a
+              clean draft; the turn recorded exactly those two stored paths as image blocks (stored bytes equal to the
+              chosen files), the answer was `red, blue`, and the turn completed. The evidence is
+              _context_/add-file/cycle-3-e2e.json and cycle-3-landed-8082.png.
+  evidence:   failing first: with the cycle's implementation stashed and the previous build emitted, all three new
+              browser checks failed — the old page had no `.message-images` at all, so there was no card, no tile pair
+              and no queue thumbnail; with it built, all three pass. Before the batch: the unit test for the fold's
+              attachment metadata, the two-image provider assertion and the queue edit are judged by the same browser
+              checks. Final: `npx tsc --noEmit` clean, `npm test` 430/430 on the landed main, the full composer
+              verifier 25/25, 96-deployment 3/3, and the deployed two-image measurement above.
+  reds:       (1) the rebase onto newest main conflicted in test/web.test.ts; resolved by combining the imports and
+              placing the new fold test after main's page-marker test. (2) `install.sh --restart` reported a launchd
+              bootstrap I/O error and left no process behind; a manual `launchctl bootstrap gui/$UID <plist>` started
+              the deployment build (PID 75408), and the check caught the difference before the landing line was written.
+              (3) the deployment page check failed on a perfectly current build because main's new build-identity
+              marker rewrites the served document; the check was wrong, not the build — dec1878 computes the marked
+              document and compares hashes, which is stricter than the length it used before. (4) the queue dock folds
+              two entries behind its header, so the queue check opens it the way a person does; the row that is
+              sending is disabled by design, so the check acts on the pending row.
+  coverage:   visited: a sent image's card in the live view and after reload; the uploads route serving the exact
+              bytes and refusing a traversal and an unknown leaf; two images in one message as two provider parts and
+              two tiles; a queued image's thumbnail, its survival through an editor save, and the edited message
+              reaching the provider with the image; a file chip's measured name and size; the single-image and
+              multi-image variants. The whole matrix from cycles 1–2 was re-run in this cycle's suites (25 composer
+              checks) and at the deployed address (single image in cycle 2, two images here).
+              Left as stated limits rather than hidden: per-model budget declarations (the 20 images / 20 MiB request
+              budget is a constant), assistant-side images (the adapters declare text output), and a deleted stored
+              upload renders a broken image with its alt text rather than a retry card.
+  invariants: a served upload is canonical and contained to the upload root; a non-embeddable type is a download;
+              the transcript holds references and measured metadata, never file bytes, and stays readable if the
+              upload was deleted; the queue sends exactly the stored paths that were measured when the file was chosen;
+              editing a queued message cannot drop its files; the stored bytes are unchanged by being viewed.
+  landed:     merge a6b9943 (main; attachments presentation) and dec1878 (deployment check alignment), deployment
+              checkout /Users/zhenc/heddle-deploy clean at main's tip, launchd agent PID 75408, 96-deployment 3/3,
+              owner address `red, blue` for two images with both stored paths recorded and byte-identical.
+  lessons:    (1) a page-comparison check must learn a document transformation when the harness adds one: main's
+              build-identity marker made a correct deployment look stale, and the honest fix compares the marked
+              document by hash rather than relaxing the check. (2) launchd can decline a bootstrap right after a
+              bootout; the plist and the running PID are the facts, so the deployment line is written only after both
+              are read. (3) a queue row's "sending" state is not a UI accident — the check must act on the pending
+              row, and the folded header is part of the gesture a person performs.
 ```
 
 ## Cycle status
@@ -375,7 +417,16 @@ Cycle 3 — an attached file is visible where a person reads it, and several fil
 |---|---|---|---|---|
 | 1 | delivery mechanism: typed user content + DSH projection + provider mapping + pending cards | completed | test/attachments.test.ts, test/server-attachments.test.ts, check-composer (5 attachment checks) | e50b257, deployed at 9eef059 |
 | 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload | completed | test/model-info.test.ts, test/model-discovery.test.ts, check-composer (2 published-modality checks) | 56e9b69, deployed and observed |
-| 3 | transcript and queue carry the file; several images; queue-edit survival; full matrix at the owner's address | implement in progress | — | — |
+| 3 | transcript and queue carry the file; several images; queue-edit survival; full matrix at the owner's address | completed | test/web.test.ts, check-composer (3 new checks), 96-deployment alignment | a6b9943 + dec1878, deployed and observed |
+
+## Where the loop stands
+
+Three cycles, each landed and deployed, and the last full pass found no fix row in the job's own matrix: the
+composer keeps pending cards, the message records typed references, a vision route receives image content
+(discovered from what the provider publishes) while a text-only route receives DSH's placeholder, a file is a
+handle naming its saved read-only path, the transcript shows the file, several images travel and draw, and the
+queue keeps a message's files through an edit. The deployment is the checkout whose agent is live, judged by
+`96-deployment` at the owner's URL. The limits that remain are stated in cycle 3's coverage, not hidden.
 
 ## Read next
 
