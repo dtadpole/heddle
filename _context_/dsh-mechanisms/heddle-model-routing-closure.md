@@ -240,6 +240,32 @@ What the owner still needs to do, and it is one gesture rather than a deployment
 open in a tab keeps the script it loaded, so a reader who had the UI open before `23:56` sees the previous behaviour
 until they refresh. That is the browser's own memory, not a stale service.
 
+## Loose ends a reader will ask about
+
+Three things look like unfinished work and are not. Each was measured rather than assumed, on 2026-10-18.
+
+**Sessions whose recorded endpoint no longer exists.** 34 session records name `deepseek-direct`, 2 name `held` and 1
+names `plugboard-ds` — endpoints an earlier configuration carried and this one does not. `sessions` lists them like
+any other, so a reader sees them and expects them to open. Opening one and sending a turn fails **by design**:
+`src/server/web.ts` refuses a recorded endpoint the configuration no longer holds, and says so by name, because
+falling back would answer a session with a backend its person did not choose. What that left untested was whether the
+person can recover; measured: the model switcher repoints such a session and returns `200` with the new endpoint
+(`POST /api/sessions/<id>/model`), so all 37 are recoverable from the UI. Nothing to fix. The measurement was taken on
+a real session and the record was put back to `deepseek-direct` immediately, because a test that silently rewrites
+someone's history is worse than no test.
+
+**The fifteen `.bak-*` files under `~/.heddle/sessions/`.** Rollback material from the endpoint renames
+(`claude-opus` → `meta-claude`, and the five `meta-codex-*` folded into one). Verified inert: `sessions` shows zero
+rows for them, because the store only reads entries named `session-*.json`. They are kept rather than deleted — the
+renames are settled and verified, so they are dead weight, but deleting another person's rollback is not a decision
+this loop gets to make. To drop them:
+`find ~/.heddle/sessions -name '*.bak-rename-*' -o -name '*.bak-fold-*' | xargs rm -f`.
+
+**`_verifiers_/INDEX.md`'s totals.** The parts this work touched were re-run and match the numbers the index states
+(`10-llm-backends` 6, `20-streaming` 5, `50-agentic-loop` 6, `30-context-management` 8). The document's aggregate
+counts are older than parts other sessions added, and re-measuring every verifier was ruled out by the owner, so the
+totals are left as they are rather than guessed at.
+
 ## Read next
 
 [`../../_skills_/full-loop-goal/INDEX.md`](../../_skills_/full-loop-goal/INDEX.md) for the procedure this follows,
