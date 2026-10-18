@@ -1441,6 +1441,46 @@
     cursor: pointer;
   }
   .attach-remove:hover, .attach-remove:focus-visible { background: var(--hover); color: var(--text); outline: none; }
+  /**
+   * A person's message in the transcript shows the files it carried, measured from DSH's MessageImage
+   * (dsh-client-ui-attachment/lib/client.js:691-897): a wrapping gallery aligned with the bubble, a lone image
+   * bounded by a 240px box and never enlarged, several images as 64px tiles, a zoom-in frame that opens the
+   * original, and a file chip naming the attachment with its measured size.
+   */
+  .message-attachments { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 100%; }
+  .message-images { display: flex; flex-wrap: wrap; gap: 10px; max-width: 100%; }
+  .turn.user .message-images { justify-content: flex-end; align-self: flex-end; }
+  .message-image {
+    border: .5px solid var(--border); border-radius: 12px; background: var(--hover); cursor: zoom-in;
+    padding: 0; display: grid; place-items: center; overflow: hidden;
+  }
+  .message-image[data-variant="single"] img { display: block; width: auto; height: auto; max-width: 240px; max-height: 240px; }
+  .message-image[data-variant="tile"] { width: 64px; height: 64px; min-width: 64px; min-height: 64px; }
+  .message-image[data-variant="tile"] img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .message-image:focus-visible { outline: 2px solid var(--accent, #4d6bfe); outline-offset: 2px; }
+  .message-file {
+    display: inline-flex; align-items: center; gap: .4rem; max-width: 17rem; height: 2rem; padding: 0 .6rem;
+    border: 1px solid var(--border); border-radius: .45rem; background: var(--surface);
+    color: var(--text-2); font-size: .75rem; text-decoration: none; overflow: hidden;
+  }
+  .message-file span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .message-file span:last-child { flex: none; color: var(--text-3); font-size: .65rem; }
+  .image-lightbox { border: 0; padding: 0; background: transparent; max-width: 92vw; max-height: 92vh; }
+  .image-lightbox::backdrop { background: rgba(0, 0, 0, .62); }
+  .image-lightbox img { display: block; max-width: 90vw; max-height: 88vh; border-radius: 8px; }
+  /**
+   * The queue's own attachment strip, DSH's queue-dock row: 24px image thumbnails and a chip with the file's
+   * name and size, beside the preview, so editing the text visibly keeps the files.
+   */
+  .queue-files { flex: none; display: flex; align-items: center; gap: .25rem; max-width: 55%; overflow: hidden; }
+  .queue-thumb { flex: none; width: 24px; height: 24px; border: 1px solid var(--border); border-radius: 4px; object-fit: cover; }
+  .queue-file {
+    display: inline-flex; align-items: center; gap: 4px; min-width: 74px; max-width: 180px; height: 24px; padding: 0 6px;
+    border: 1px solid var(--border); border-radius: 4px; background: var(--surface);
+    color: var(--text-2); font-size: .7rem; overflow: hidden;
+  }
+  .queue-file span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-file span:last-child { flex: none; color: var(--text-3); font-size: .6rem; }
   button { font: inherit; padding: .5rem 1rem; }
   /**
    * The tool row under the draft, in DSH's order: the model seat on the right, the submit action at the end.
@@ -2740,7 +2780,7 @@ function add(kind, text, merge = true, label, tool) {
    * reason that explains why it is empty, or the files it wrote before stopping. Measured: a turn cut by the round
    * limit has no text, and dropping it took the notice with it, so the page showed a silent stop.
    */
-  const hasMeta = tool !== undefined && ((Array.isArray(tool.ended) && tool.ended.length > 0) || (Array.isArray(tool.files) && tool.files.length > 0))
+  const hasMeta = tool !== undefined && ((Array.isArray(tool.ended) && tool.ended.length > 0) || (Array.isArray(tool.files) && tool.files.length > 0) || (Array.isArray(tool.attachments) && tool.attachments.length > 0))
   if ((text === '' || text === undefined) && !hasMeta) return
   const last = log.lastElementChild
   // The merge flag is what the live stream wants: deltas of one answer belong in one block. Passing
@@ -2796,10 +2836,15 @@ function add(kind, text, merge = true, label, tool) {
      * A person's message is a **row**: the bubble, then the actions beneath it. History carries the event's own
      * `time`; a message typed here has no event yet, so it is stamped as it is drawn.
      */
-    const bubble = document.createElement('div')
-    bubble.className = 'bubble'
-    bubble.textContent = text
-    node.append(bubble)
+    if (tool !== undefined && Array.isArray(tool.attachments) && tool.attachments.length > 0) {
+      node.append(messageAttachments(tool.attachments))
+    }
+    if (text !== '') {
+      const bubble = document.createElement('div')
+      bubble.className = 'bubble'
+      bubble.textContent = text
+      node.append(bubble)
+    }
     node.dataset.copyText = text
     const sentAt = tool !== undefined && typeof tool.time === 'string' ? tool.time : new Date().toISOString()
     node.append(userActions(node, sentAt))
@@ -4781,7 +4826,12 @@ events.addEventListener('session', (message) => {
       toolCallId: event.chunk.id,
       state: 'running',
     })
-  } else if (event.type === 'message' && event.message.role === 'user') add('user', messageContentText(event.message.content), false, undefined, { time: new Date().toISOString() })
+  } else if (event.type === 'message' && event.message.role === 'user') {
+    add('user', messageContentText(event.message.content), false, undefined, {
+      time: new Date().toISOString(),
+      attachments: contentAttachments(event.message.content),
+    })
+  }
   else if (event.type === 'message' && event.message.role === 'tool') {
     const text = event.message.content.map((part) => part.text ?? '').join('')
     const failed = event.message.content.some((part) => part.text?.startsWith('error'))
@@ -5337,7 +5387,7 @@ async function steerNow(text, attachments = []) {
     const response = await fetch(`/api/sessions/${encodeURIComponent(composerKey)}/steer`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: text, ...(attachments.length > 0 ? { attachments } : {}) }),
+      body: JSON.stringify({ prompt: text, ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}) }),
     })
     if (response.ok) return true
     if (response.status === 409) return false
@@ -5448,6 +5498,34 @@ function queueActions(item, isEditing) {
   return wrap
 }
 
+/** The queue row's attachment strip: image thumbnails and file chips, DSH's queue-dock row. */
+function queueAttachmentStrip(attachments) {
+  const strip = document.createElement('div')
+  strip.className = 'queue-files'
+  for (const file of attachments) {
+    const url = uploadUrlFor(file.path)
+    if (url !== null && /[.](png|jpe?g|webp|gif)$/i.test(String(file.name ?? ''))) {
+      const thumb = document.createElement('img')
+      thumb.className = 'queue-thumb'
+      thumb.src = url
+      thumb.alt = String(file.name ?? 'image')
+      thumb.title = String(file.name ?? 'image')
+      strip.append(thumb)
+      continue
+    }
+    const chip = document.createElement('span')
+    chip.className = 'queue-file'
+    chip.title = String(file.name ?? 'file')
+    const name = document.createElement('span')
+    name.textContent = String(file.name ?? 'file')
+    const size = document.createElement('span')
+    size.textContent = formatAttachBytes(typeof file.bytes === 'number' ? file.bytes : 0)
+    chip.append(name, size)
+    strip.append(chip)
+  }
+  return strip
+}
+
 function queueRow(item) {
   const row = document.createElement('li')
   row.className = 'row'
@@ -5461,13 +5539,14 @@ function queueRow(item) {
     editor.oninput = () => {
       editing.text = editor.value
     }
+    if (Array.isArray(item.attachments) && item.attachments.length > 0) row.append(queueAttachmentStrip(item.attachments))
     row.append(editor, queueActions(item, true))
     return row
   }
+  if (Array.isArray(item.attachments) && item.attachments.length > 0) row.append(queueAttachmentStrip(item.attachments))
   const preview = document.createElement('span')
   preview.className = 'preview'
-  const fileCount = item.attachments?.length ?? 0
-  preview.textContent = `${queuePreview(item.text)}${fileCount > 0 ? ` · ${fileCount} file${fileCount === 1 ? '' : 's'}` : ''}`
+  preview.textContent = queuePreview(item.text)
   preview.title = item.text
   row.append(preview)
   if (item.status === 'sending' || item.status === 'failed') {
@@ -5645,7 +5724,7 @@ async function runTurn(text, key, attachments = []) {
      * so a reload comes back to it.
      */
     prompt: text,
-    ...(attachments.length > 0 ? { attachments } : {}),
+    ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
     folder: activeFolder,
     ...selectionForTurn(),
@@ -6463,13 +6542,10 @@ function attachTypeLabel(name) {
   return extension.length > 0 && extension.length <= 5 ? extension.toUpperCase() : 'FILE'
 }
 
-/** The text a message shows, with attachment parts named rather than dropped. */
+/** The text a message shows; attachments are drawn as cards beside it, not typed into it. */
 function messageContentText(content) {
   return (content ?? [])
-    .map((part) => {
-      if (part.type === 'image' || part.type === 'file') return `[${part.type} ${part.name ?? ''}]`
-      return part.text ?? ''
-    })
+    .map((part) => (part.type === 'image' || part.type === 'file' ? '' : part.text ?? ''))
     .join('')
 }
 
@@ -6506,12 +6582,103 @@ function renderPendingAttachments() {
   }
 }
 
-/** Take the pending paths for one submission, and clear the cards. */
+/** Take the pending files for one submission, and clear the cards. */
 function takeAttachments() {
-  const paths = pendingAttachments.map((item) => item.path)
+  const taken = pendingAttachments
   pendingAttachments = []
   renderPendingAttachments()
-  return paths
+  return taken
+}
+
+/** The same-origin address a stored upload path is served at, or null when there is no leaf. */
+function uploadUrlFor(path) {
+  const leaf = String(path ?? '').split('/').pop() ?? ''
+  return leaf.length === 0 ? null : `/api/uploads/${encodeURIComponent(leaf)}`
+}
+
+/** The attachments a live message event carries, shaped like the transcript's own metadata. */
+function contentAttachments(content) {
+  const attachments = []
+  for (const part of content ?? []) {
+    if (part.type !== 'image' && part.type !== 'file') continue
+    const url = uploadUrlFor(part.path)
+    if (url === null) continue
+    attachments.push({
+      kind: part.type,
+      name: typeof part.name === 'string' && part.name.length > 0 ? part.name : 'attachment',
+      mimeType: typeof part.mimeType === 'string' ? part.mimeType : 'application/octet-stream',
+      bytes: typeof part.bytes === 'number' ? part.bytes : 0,
+      url,
+    })
+  }
+  return attachments
+}
+
+/** Open one stored image full-size over the transcript; the frame around it is a button for this. */
+function openImagePreview(url, alt) {
+  let dialog = document.querySelector('dialog.image-lightbox')
+  if (dialog === null) {
+    dialog = document.createElement('dialog')
+    dialog.className = 'image-lightbox'
+    const picture = document.createElement('img')
+    dialog.append(picture)
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) dialog.close()
+    })
+    document.body.append(dialog)
+  }
+  const picture = dialog.querySelector('img')
+  picture.src = url
+  picture.alt = alt
+  if (!dialog.open) dialog.showModal()
+}
+
+/**
+ * The files attached to one transcript message: an image gallery, then a chip per non-image file.
+ *
+ * A lone image is bounded by 240px and never enlarged; several are 64px tiles, DSH's own rule for a gallery.
+ */
+function messageAttachments(attachments) {
+  const images = attachments.filter((entry) => entry.kind === 'image')
+  const files = attachments.filter((entry) => entry.kind === 'file')
+  const container = document.createElement('div')
+  container.className = 'message-attachments'
+  if (images.length > 0) {
+    const gallery = document.createElement('div')
+    gallery.className = 'message-images'
+    gallery.dataset.align = 'end'
+    for (const image of images) {
+      const frame = document.createElement('button')
+      frame.type = 'button'
+      frame.className = 'message-image'
+      frame.dataset.variant = images.length > 1 ? 'tile' : 'single'
+      frame.title = 'View original'
+      frame.setAttribute('aria-label', `Image ${image.name}, click to view original`)
+      const picture = document.createElement('img')
+      picture.src = image.url
+      picture.alt = image.name
+      picture.loading = 'lazy'
+      frame.append(picture)
+      frame.addEventListener('click', () => openImagePreview(image.url, image.name))
+      gallery.append(frame)
+    }
+    container.append(gallery)
+  }
+  for (const file of files) {
+    const chip = document.createElement('a')
+    chip.className = 'message-file'
+    chip.href = file.url
+    chip.target = '_blank'
+    chip.rel = 'noopener'
+    chip.title = file.name
+    const name = document.createElement('span')
+    name.textContent = file.name
+    const size = document.createElement('span')
+    size.textContent = formatAttachBytes(file.bytes)
+    chip.append(name, size)
+    container.append(chip)
+  }
+  return container
 }
 
 /**

@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentsOf, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -348,4 +348,33 @@ test('the served page states which build it is, from its own bytes', () => {
   const pageFile = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
   assert.match(pageFile, /<meta name="heddle-page" content="unbuilt" \/>/)
   assert.ok(markedPage(pageFile).includes(`content="${createHash('sha256').update(pageFile).digest('hex').slice(0, 12)}"`))
+})
+
+test('a user turn folds its attachment blocks into transcript cards', () => {
+  /**
+   * The stored reference becomes a URL on the uploads route; everything a person sees — the name, the kind and
+   * the byte size — is the metadata the server measured when the message was recorded, never re-derived here.
+   * A message with only text has no `attachments` field at all, so the page keeps drawing a plain bubble.
+   */
+  const turns = transcriptTurns([
+    {
+      type: 'message',
+      at: '2026-10-18T05:00:00.000Z',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at these' },
+          { type: 'image', name: 'red.png', path: '/tmp/uploads/2026-10-18-red.png', mimeType: 'image/png', bytes: 132, sha256: 'ab'.repeat(32) },
+          { type: 'file', name: 'notes.md', path: '/tmp/uploads/2026-10-18-notes.md', bytes: 12, sha256: 'cd'.repeat(32) },
+        ],
+      },
+    },
+    { type: 'message', at: '2026-10-18T05:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'plain' }] } },
+  ])
+  assert.deepEqual(turns[0]?.attachments, [
+    { kind: 'image', name: 'red.png', mimeType: 'image/png', bytes: 132, url: '/api/uploads/2026-10-18-red.png' },
+    { kind: 'file', name: 'notes.md', mimeType: 'application/octet-stream', bytes: 12, url: '/api/uploads/2026-10-18-notes.md' },
+  ])
+  assert.equal(turns[0]?.text, 'look at these', 'the bubble keeps only the text parts')
+  assert.equal(turns[1]?.attachments, undefined, 'a text-only message carries no attachment field')
 })
