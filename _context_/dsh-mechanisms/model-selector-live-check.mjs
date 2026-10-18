@@ -58,6 +58,14 @@ async function trustedClick(browser, expression, label) {
 
 async function openMenu(browser) {
   await trustedClick(browser, `${SEAT}`, 'seat')
+  /**
+   * One retry at a freshly measured position: the merged main paints its statistics dock as the first turn reports
+   * figures, so during a running turn the composer — and the seat — shifts a few pixels under the pointer. A person
+   * clicks again where the seat now is; the probe does the same.
+   */
+  if (!(await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 1200))) {
+    await trustedClick(browser, `${SEAT}`, 'seat (retry after layout shift)')
+  }
   await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 5000)
 }
 async function drill(browser, label) {
