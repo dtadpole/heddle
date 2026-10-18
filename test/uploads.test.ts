@@ -115,6 +115,12 @@ test('an uploaded path is readable by the agent in the confined sandbox', () => 
   })
 })
 
-test('the upload limit is a number the route can state', () => {
-  assert.equal(MAX_UPLOAD_BYTES, 10 * 1024 * 1024)
+test('the upload limit is a number the route can state, and it covers a Retina screenshot', () => {
+  /**
+   * The owner's measured failure: a 10 MiB ceiling rejected an ordinary screenshot. The limit is a local
+   * memory guard (the agent reads a stored path, not the bytes), so it must be comfortably above what a
+   * screenshot weighs, and still an explicit bound rather than none.
+   */
+  assert.equal(MAX_UPLOAD_BYTES, 50 * 1024 * 1024)
+  assert.ok(MAX_UPLOAD_BYTES >= 20 * 1024 * 1024, 'a screenshot larger than the old ten megabytes fits')
 })

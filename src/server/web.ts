@@ -707,7 +707,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     for await (const chunk of request) {
       bytes += (chunk as Buffer).length
       if (bytes > MAX_UPLOAD_BYTES) {
-        respond(response, 413, 'text/plain', 'the file is larger than this server accepts\n')
+        respond(
+          response,
+          413,
+          'text/plain',
+          `the file is larger than this server accepts (${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB)\n`,
+        )
         return
       }
       chunks.push(Buffer.from(chunk))

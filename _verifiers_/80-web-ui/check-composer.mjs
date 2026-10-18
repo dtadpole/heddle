@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
@@ -1130,6 +1130,67 @@ test('the File action stays available while the workspace tree is open', async (
     assert.equal(await browser.evaluate('document.getElementById("attach-menu").hidden'), true, 'and closes the menu')
 
     const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-2-file-inside-folder.png')
+    mkdirSync(dirname(evidence), { recursive: true })
+    await browser.screenshot(evidence)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * A file larger than the old ten-megabyte ceiling is accepted.
+ *
+ * The owner loaded a screenshot and the page answered `could not add ... the file is larger than this
+ * server accepts`: the route capped an upload at 10 MiB, which a Retina screenshot passes. The file's
+ * bytes never enter the model's context here — the agent reads a stored path — so the ceiling is a
+ * local-memory guard, not a prompt-size one, and eleven megabytes must go through. Failing-first: this
+ * test was written against the 10 MiB cap and failed with the owner's own sentence.
+ */
+test('a file larger than ten megabytes is accepted, and lands in the draft', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('add-file-large')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'large-screenshot.png')
+    const bytes = 11 * 1024 * 1024
+    writeFileSync(chosen, Buffer.alloc(bytes, 0x61))
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    await browser.evaluate(`(() => {
+      window.__filePickerClicks = 0
+      const original = HTMLInputElement.prototype.click
+      HTMLInputElement.prototype.click = function (...args) {
+        if (this.type === 'file') {
+          window.__filePickerClicks += 1
+          return undefined
+        }
+        return original.apply(this, args)
+      }
+      return true
+    })()`)
+
+    await browser.evaluate('document.getElementById("attach").click()')
+    assert.ok(await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000), 'the + menu opens')
+    const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File')`
+    assert.ok(await browser.waitFor(`${findFile} !== undefined`, 10_000), 'the menu offers File')
+    await browser.evaluate(`${findFile}.click()`)
+
+    const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
+    const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
+    assert.ok(found.result?.nodeId, 'the composer carries a file input for the picker')
+    await browser.send('DOM.setFileInputFiles', { files: [chosen], nodeId: found.result.nodeId })
+
+    assert.ok(
+      await browser.waitFor(`document.querySelector('#prompt textarea').value.includes('large-screenshot.png')`, 20_000),
+      'the draft receives a path for the eleven-megabyte file',
+    )
+    const draft = await browser.evaluate('document.querySelector("#prompt textarea").value')
+    assert.ok(draft.startsWith(server.home), `the path is inside the harness home (${draft})`)
+    assert.equal(statSync(draft).size, bytes, 'the stored copy is the whole eleven megabytes')
+
+    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-4-large-file.png')
     mkdirSync(dirname(evidence), { recursive: true })
     await browser.screenshot(evidence)
   } finally {

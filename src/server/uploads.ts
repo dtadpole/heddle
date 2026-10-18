@@ -18,8 +18,17 @@ import { heddleHome } from '../config/schema.ts'
  * - the file is created `0600`: it is the person's data, not the machine's.
  */
 
-/** The largest file the upload route accepts, matching the turn body's own ceiling. */
-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+/**
+ * The largest file the upload route accepts.
+ *
+ * This is a **local memory guard, not a prompt-size one**: the bytes are written under
+ * `$HEDDLE_HOME/uploads` and what reaches the conversation is the path, so a large file costs the server
+ * one buffered body and a disk write, not model context. The ceiling was 10 MiB until the owner loaded a
+ * Retina screenshot (`LWScreenShot 2026-05-25 at 6.53.05 PM.png`) and the page answered "the file is
+ * larger than this server accepts" — an ordinary screenshot passes 10 MiB. 50 MiB covers screenshots,
+ * images and small documents while still bounding what one request may buffer.
+ */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 /** One stored upload, as the route answers with it and the page puts in the draft. */
 export interface SavedUpload {
