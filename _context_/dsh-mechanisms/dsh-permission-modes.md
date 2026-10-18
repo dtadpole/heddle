@@ -205,7 +205,7 @@ the sandbox service was constructed. The reference has none of that — it is a 
 | Instrument | Before | After |
 |---|---|---|
 | `npm run check` | green at the base commit | green |
-| `npm test` | 315 pass | **323 pass**, 0 fail (6 new permission tests, 2 updated context contracts) |
+| `npm test` | 315 pass | **328 pass**, 0 fail (6 new permission tests, 2 updated context contracts) |
 | `npm run build` | green | green |
 | `_verifiers_/75-permission-sandbox/` | 5 checks | **7 checks, all pass** (5 three-mode + 2 session-mode) |
 | `_verifiers_/80-web-ui/` | 11 check files, 2 failing pre-existing reds | **11 check files, all pass** (access contract grown from 1 to 4 tests) |
@@ -315,7 +315,7 @@ pass.
 Every instrument, from a clean build of this branch:
 
 - `npm run check` — green.
-- `npm test` — 323 pass, 0 fail.
+- `npm test` — 328 pass, 0 fail.
 - `npm run build` — green.
 - `node --test _tools_/*/_tests_/*/unit.test.mjs` — the tool component suites, green.
 - `_verifiers_/75-permission-sandbox/verify.sh` — 7 checks (5 three-mode + 2 session-mode), verdict 0.
@@ -356,6 +356,15 @@ chip, and the reload/another-window cases are covered by the session event and t
 Not visited, and named: mobile viewports, a real provider turn under every mode, and DSH's Auto
 review.
 
+### a note on the base
+
+This branch was first rebased onto main `2934885`, and while the work continued main's history was
+rewritten and moved to `19bab86`; `2934885` stopped being an ancestor. The branch was therefore rebased
+again onto the actual merge target (`git rebase --onto 19bab86 2934885`), the page's new statistics dock
+and the access control were merged by hand, and **every instrument was re-run on the result**: the
+numbers above are from the rebased tree, not from the older base. A green branch on a base nobody will
+merge is not evidence.
+
 ### lessons (the mechanisms that now prevent a repeat)
 
 - **A permission control is a three-part mechanism** — a recorded fact, one gate every effect crosses,
@@ -370,3 +379,6 @@ review.
 - **A refusal has to be visible where the action is.** The closed row carries the sentence; a
   transcript that only reveals a refusal after a click is the same failure as a silent widening, one
   step later.
+- **The merge target moves, and evidence is per-tree.** Rebase onto the head the owner will merge and
+  re-run the suites; a green run on a base that is no longer an ancestor is a reading of a tree that
+  will not ship.
