@@ -40,6 +40,41 @@ test('a person\'s message carries the logged event time, which is the clock its 
   assert.equal(turns[1].kind, 'assistant')
 })
 
+test('the answer carries the files its exchange wrote, with the lines each one now has', () => {
+  /**
+   * The Edited-files panel's data. DSH derives it from a host-side before/after comparison; heddle states the fact
+   * its log records — a `write_file` call's path and the lines its content carried. `added` counts lines, so a
+   * trailing newline closes the last line instead of opening an empty one.
+   */
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'make two files' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: 'a.txt', content: 'one\ntwo\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 8 bytes to a.txt' }], toolCallId: 'c1' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c2', name: 'write_file', arguments: JSON.stringify({ path: 'b.txt', content: 'three' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 5 bytes to b.txt' }], toolCallId: 'c2' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'both written' } },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answer.files, [
+    { path: 'a.txt', added: 2 },
+    { path: 'b.txt', added: 1 },
+  ])
+  assert.equal(turns.find((turn) => turn.kind === 'user').files, undefined, 'the person\'s message carries no panel')
+})
+
+test('writes belong to their own exchange, and a read-only exchange carries no files', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'first' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: 'a.txt', content: 'x' }) } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'done' } },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'second' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'nothing to write' } },
+  ])
+  const answers = turns.filter((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answers[0].files, [{ path: 'a.txt', added: 1 }])
+  assert.equal(answers[1].files, undefined, 'the next exchange does not inherit the previous one\'s files')
+})
+
 test('reasoning keeps its own kind, because a reader wants it apart from the answer', () => {
   const turns = transcriptTurns([
     { type: 'assistant/chunk', chunk: { type: 'reasoning-delta', text: 'thinking' } },

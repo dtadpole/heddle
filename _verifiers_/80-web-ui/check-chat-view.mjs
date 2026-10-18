@@ -1256,3 +1256,135 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     await server.close()
   }
 })
+
+test('a finished turn shows the edited files as one summary: single name, or a folded list of four', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The reference is DSH's `ChangedFiles` card (`dsh-client-ui-deliverables`), measured from its own module CSS and
+   * component: a single edited file renders only the header, titled `Edited {name}`; several render
+   * `Edited {count} files`, then the first **four** rows, then a toggle labelled `All {count} files`; the header
+   * opens the first change and a row opens that file. Heddle's files come from its own log — a `write_file` call's
+   * path and the lines its content carried — so the card is output-complete, not a host-side before/after snapshot.
+   *
+   * The scripted fixture replays its steps for each turn, so each case gets its own server rather than a second
+   * exchange inside one: the multi-file case, the single-file case, and the no-writes case.
+   */
+  const multi = await startServer('edits-many', (work) => [
+    ...['a', 'b', 'c', 'd', 'e', 'f'].map((letter) => ({
+      toolCall: { name: 'write_file', arguments: { path: join(work, `${letter}.txt`), content: 'x\n' } },
+      reasoning: `writing ${letter}.txt`,
+    })),
+    { text: 'wrote six files' },
+  ])
+  const single = await startServer('edits-one', (work) => [
+    { toolCall: { name: 'write_file', arguments: { path: join(work, 'a.txt'), content: 'one\ntwo\nthree\n' } }, reasoning: 'writing a.txt' },
+    { text: 'wrote one file' },
+  ])
+  const plain = await startServer('edits-none', () => [{ text: 'just an answer, no files' }])
+  const browser = await openBrowser()
+  const runTurn = async (server, prompt) => {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt, folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
+    await turn.text()
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  }
+  try {
+    await runTurn(multi, 'write six files')
+    const card = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const answer = document.querySelector('#log .turn.assistant')
+        const panel = answer.querySelector('[data-changed-files]')
+        const rows = panel ? [...panel.querySelectorAll('.changed-row')] : []
+        const toggle = panel ? panel.querySelector('.changed-toggle') : null
+        return {
+          hasCard: panel !== null,
+          title: panel ? panel.querySelector('.changed-title').textContent : null,
+          counts: panel ? panel.querySelector('.changed-counts').textContent : null,
+          rows: rows.length,
+          firstPath: rows[0] ? rows[0].querySelector('.changed-path').textContent : null,
+          firstPlus: rows[0] ? rows[0].querySelector('.changed-plus').textContent : null,
+          toggleText: toggle ? toggle.textContent : null,
+          toggleExpanded: toggle ? toggle.getAttribute('aria-expanded') : null,
+          headHeight: panel ? Math.round(panel.querySelector('.changed-head').getBoundingClientRect().height) : null,
+          tile: panel ? Math.round(panel.querySelector('.changed-tile').getBoundingClientRect().width) : null,
+        }
+      })())`),
+    )
+    assert.equal(card.hasCard, true, 'a finished turn with writes shows the edited-files card')
+    assert.equal(card.title, 'Edited 6 files', `the title counts the files the reference's way (${card.title})`)
+    assert.match(String(card.counts), /^\+6$/, `the stat is the added lines it knows (${card.counts})`)
+    assert.equal(card.rows, 4, `the card folds at the reference's four rows (${card.rows})`)
+    assert.equal(card.firstPath, join(multi.work, 'a.txt'), `the first row is the first file written (${card.firstPath})`)
+    assert.equal(card.firstPlus, '+1', 'with its own added-line count')
+    assert.equal(card.toggleText, 'All 6 files', `the toggle says All {count} files (${card.toggleText})`)
+    assert.equal(card.toggleExpanded, 'false', 'and starts collapsed')
+    assert.equal(card.headHeight, 60, `the header is the reference's 60px (${card.headHeight})`)
+    assert.equal(card.tile, 40, `the tile is its 40px (${card.tile})`)
+
+    /** The toggle reveals the rest, and says what it did. */
+    await browser.evaluate(`document.querySelector('[data-changed-files] .changed-toggle').click()`)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const expanded = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const panel = document.querySelector('[data-changed-files]')
+        const toggle = panel.querySelector('.changed-toggle')
+        return { rows: panel.querySelectorAll('.changed-row').length, text: toggle.textContent, aria: toggle.getAttribute('aria-expanded') }
+      })())`),
+    )
+    assert.equal(expanded.rows, 6, `expanding shows every file (${expanded.rows})`)
+    assert.equal(expanded.text, 'Collapse changed files', `and the toggle offers the collapse (${expanded.text})`)
+    assert.equal(expanded.aria, 'true', 'with aria-expanded true')
+
+    /** A row opens that file in the file panel; the header opens the first change. */
+    await browser.evaluate(`document.querySelectorAll('[data-changed-files] .changed-row')[1].click()`)
+    await browser.waitFor('document.getElementById("file-head").textContent.includes("b.txt")', 10_000)
+    const fileView = await browser.evaluate('document.getElementById("file-head").textContent')
+    assert.match(fileView, /b\.txt/, 'clicking a row opens that file in the file panel')
+    await browser.evaluate(`document.querySelector('[data-changed-files] .changed-head').click()`)
+    await browser.waitFor('document.getElementById("file-head").textContent.includes("a.txt")', 10_000)
+    const headText = await browser.evaluate('document.getElementById("file-head").textContent')
+    assert.match(headText, /a\.txt/, 'and the header opens the first changed file')
+
+    /** One file is only the header, titled with its name — the reference's single-file shape. */
+    await runTurn(single, 'write one file')
+    const one = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const panel = document.querySelector('[data-changed-files]')
+        return {
+          hasCard: panel !== null,
+          title: panel ? panel.querySelector('.changed-title').textContent : null,
+          rows: panel ? panel.querySelectorAll('.changed-row').length : null,
+          toggle: panel ? panel.querySelector('.changed-toggle') !== null : null,
+          counts: panel ? panel.querySelector('.changed-counts').textContent : null,
+        }
+      })())`),
+    )
+    assert.equal(one.hasCard, true, 'a single edited file still shows the card')
+    assert.equal(one.title, 'Edited a.txt', `titled Edited {name} (${one.title})`)
+    assert.equal(one.rows, 0, 'with no list, as the reference does for one file')
+    assert.equal(one.toggle, false, 'and no toggle')
+    assert.match(String(one.counts), /^\+3$/, `the stat counts the lines it wrote (${one.counts})`)
+
+    /** A turn that edited nothing shows no card at all. */
+    await runTurn(plain, 'now only answer')
+    const none = await browser.evaluate('document.querySelectorAll("#log [data-changed-files]").length')
+    assert.equal(none, 0, `a turn that edited nothing shows no card (${none})`)
+  } finally {
+    browser.close()
+    await multi.close()
+    await single.close()
+    await plain.close()
+  }
+})

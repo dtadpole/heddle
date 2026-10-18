@@ -2191,6 +2191,35 @@ export function transcriptTurns(
    */
   let openAssistant = -1
   let openReasoning = -1
+  /**
+   * The files written since the last user message, which the exchange's answer carries as its panel data. A write
+   * that arrives after the answer has been drawn belongs to no answer, so it is kept for the next one rather than
+   * retroactively attached.
+   */
+  let written: { path: string; added: number }[] = []
+  /** Writes kept per exchange, keyed by the index of the user turn that opened it. */
+  const sections = new Map<number, { path: string; added: number }[]>()
+  let sectionStart = -1
+  const noteWrite = (name: string, argumentsText: string): void => {
+    if (name !== 'write_file') return
+    let args: { path?: unknown; content?: unknown }
+    try {
+      args = JSON.parse(argumentsText) as { path?: unknown; content?: unknown }
+    } catch {
+      return
+    }
+    if (typeof args.path !== 'string' || typeof args.content !== 'string') return
+    /** Lines a file will have, not segments: a trailing newline closes the last line rather than starting one. */
+    const lines = args.content === '' ? 0 : args.content.split('\n').length - (args.content.endsWith('\n') ? 1 : 0)
+    if (sectionStart >= 0) {
+      const bucket = sections.get(sectionStart) ?? []
+      sections.set(sectionStart, bucket)
+      written = bucket
+    }
+    const existing = written.find((file) => file.path === args.path)
+    if (existing === undefined) written.push({ path: args.path, added: lines })
+    else existing.added = lines
+  }
   const closeRuns = (): void => {
     openAssistant = -1
     openReasoning = -1
@@ -2221,7 +2250,11 @@ export function transcriptTurns(
         | undefined
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
-      if (message.role === 'user') turns.push({ kind: 'user', text, ...(typeof event.at === 'string' ? { time: event.at } : {}) })
+      if (message.role === 'user') {
+        written = []
+        sectionStart = turns.length
+        turns.push({ kind: 'user', text, ...(typeof event.at === 'string' ? { time: event.at } : {}) })
+      }
       else if (message.role === 'assistant') turns.push({ kind: 'assistant', text })
       else if (message.role === 'tool') {
         /**
@@ -2267,6 +2300,7 @@ export function transcriptTurns(
      * built, which is why it travels as a field.
      */
     else if (chunk.type === 'tool-call' && chunk.name !== undefined) {
+      noteWrite(chunk.name, chunk.arguments ?? '')
       turns.push({
         kind: 'tool',
         name: chunk.name,
@@ -2281,6 +2315,21 @@ export function transcriptTurns(
       closeRuns()
     }
   }
+  /**
+   * The **Edited files** panel belongs to the message that closes an exchange, so the writes are attached to that
+   * exchange's last answer once the whole log is folded — not to the first delta of a streamed answer, which is
+   * created before the writes that followed it are known.
+   */
+  for (const [start, files] of sections) {
+    if (files.length === 0) continue
+    let lastAnswer = -1
+    for (let index = start + 1; index < turns.length; index += 1) {
+      if (turns[index]?.kind === 'user') break
+      if (turns[index]?.kind === 'assistant') lastAnswer = index
+    }
+    const answer = turns[lastAnswer]
+    if (lastAnswer >= 0 && answer !== undefined) turns[lastAnswer] = { ...answer, files: files.map((file) => ({ ...file })) }
+  }
   return turns
 }
 
@@ -2293,6 +2342,15 @@ export interface ChatTurn {
    * instant, not the render clock: a reloaded session shows when each message was sent.
    */
   readonly time?: string
+  /**
+   * The files this exchange wrote, in the order they were written — the **Edited files** panel's data.
+   *
+   * DSH derives its panel from a host-side comparison of the turn's start and end (`dsh-workspace-changes`); heddle
+   * has no such snapshot service, so the fact it can state is the one its log already records: a `write_file` call's
+   * path and the lines its content carried. That is what this carries — `added` is real, `deleted` is unknown rather
+   * than zero, so the page shows only what it knows.
+   */
+  readonly files?: readonly { readonly path: string; readonly added: number }[]
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */
