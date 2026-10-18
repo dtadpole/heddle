@@ -6,6 +6,7 @@ import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
 import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
+import { sandboxPolicyStatement } from '../sandbox/policy.ts'
 
 /**
  * A model failure, read the way a seam has to read it: **by its code, not by its class**.
@@ -216,6 +217,16 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      * steps; heddle has no runtime between steps, so the message is appended to the session and the loop has
      * to look for it, which is what this pair of readings does.
      */
+    /**
+     * Keep the standing file policy in the surface before the round measures "what did the person say":
+     * DSH contributes the same statement before each request, and writing it on this side of the reading is what
+     * keeps the harness's own note from being mistaken for a steered message.
+     */
+    ctx.context.recordRuntimePolicy(
+      options.session,
+      sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode))),
+    )
+
     let inputBefore = userInputSeqs(ctx, options.session)
 
     /**

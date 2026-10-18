@@ -26,6 +26,10 @@ a display or a window.
   outranks the deployment mode for that session and no other, the change is recorded once through the HTTP
   API, an escalation to full access is refused by the server without the explicit confirmation, and no tool
   call writes the mode.
+- [`check-policy-context.mjs`](check-policy-context.mjs) — the mode as **model-visible context**: the request the
+  provider receives carries one `Current heddle file policy` statement naming the mode and workspace, a mode
+  change replaces it rather than piling up, and the Web UI's transcript does not show the harness's note as a
+  person's turn.
 - [`check-shell-confinement.mjs`](check-shell-confinement.mjs) — the mode as a **kernel** fact for the shell:
   the inside write is permitted and the outside one denied under workspace-write (including from a descendant
   shell), read-only keeps the shell but denies its writes, danger-full-access is the only bypass, `/dev/null`

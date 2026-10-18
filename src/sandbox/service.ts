@@ -102,6 +102,14 @@ export const Config = Schema.object({
    * then refuse to run rather than run unconfined.
    */
   backend: Schema.union([Schema.const('auto' as const), Schema.const('none' as const)]).default('auto'),
+  /**
+   * Absolute path to the Landlock launcher on Linux.
+   *
+   * heddle does not bundle the versioned external binary DSH ships as a platform package, and which binary
+   * confines a process must not be decidable by an ambient environment variable, so the path is configuration.
+   * Unset means the Landlock rung is unavailable and the Linux chain fails closed without bubblewrap.
+   */
+  landlockRunner: Schema.string(),
 })
 
 export interface Config {
@@ -109,6 +117,7 @@ export interface Config {
   readonly workspaceRoot?: string
   readonly extraWritableRoots?: readonly string[]
   readonly backend?: 'auto' | 'none'
+  readonly landlockRunner?: string
 }
 
 /**
@@ -138,7 +147,10 @@ export class SandboxService extends Service {
     this.mode = config.mode ?? 'workspace-write'
     this.workspaceRoot = canonical(config.workspaceRoot ?? process.cwd())
     this.extraWritableRoots = (config.extraWritableRoots ?? []).map((root) => canonical(root))
-    this.backend = config.backend === 'none' ? undefined : selectBackend()
+    this.backend =
+      config.backend === 'none'
+        ? undefined
+        : selectBackend(process.platform, { ...(config.landlockRunner !== undefined ? { landlockRunner: config.landlockRunner } : {}) })
   }
 
   /** The policy a call runs under, so a caller can report it and every consumer shares one value. */

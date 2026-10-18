@@ -392,6 +392,113 @@ never consults a backend, which a unit test asserts.
 - **Classification is part of the boundary.** A denial reported as an ordinary exit teaches the model to
   retry the wrong way; a runner failure reported as a denial teaches it the command failed when it never ran.
 
+## Cycle 2 — the Linux chain, and telling the model the policy
+
+### measured
+
+The reference was re-read where this cycle's pieces live: `dsh-sandbox-local`'s bwrap profile
+(read-only host root, fresh `/dev`, private PID namespace, private procfs, die-with-parent; workspace-write adds an
+**ephemeral** `/tmp` and a writable workspace bind), its choice of denial dialects (`read-only file system` for
+bwrap, `permission denied` for Landlock, `landlock-run: ` plus exit 125 as the Landlock failure rule), and
+`dsh-sandbox-policy`'s model-visible statement, which DSH injects as a runtime-context snapshot before each
+request. Measured on this machine: `bwrap` and a Landlock launcher are both **absent**, so neither Linux rung can
+be runtime-judged here — the honest verdict is unjudged-with-fail-closed, which the selection test asserts.
+
+### brainstorm
+
+| # | Candidate | Verdict |
+|---|---|---|
+| 1 | Vendor DSH's `node-addon-system` platform packages as dependencies | **Discarded** — heddle does not depend on DSH, and a versioned per-platform native binary inside this package would be a release and audit burden DSH already owns |
+| 2 | bwrap from the system PATH, Landlock launcher from configuration (DSH's chain order) | **Chosen** — the standard Linux binary is probed functionally, the versioned launcher is an explicit configuration path rather than an ambient variable, and the chain fails closed when neither works |
+| 3 | Landlock only, skipping bwrap | **Discarded** — DSH prefers bwrap for its mount profile and ephemeral `/tmp`; skipping it would lose the stronger rung |
+| 4 | Re-implement Landlock with native syscalls in heddle | **Discarded** — a native addon is far outside this repository's dependency policy; the launcher contract is the seam DSH itself uses |
+| 5 | Tell the model the policy by **appending** a statement every round | **Discarded** — the model would read every earlier policy beside the current one |
+| 6 | Tell the model by changing the **system prompt** | **Discarded** — DSH keeps the system prompt stable for the KV cache, and a standing fact that changes mid-session belongs after retained history, not in the prefix |
+| 7 | Tell the model only through tool descriptions or denials | **Discarded** — that is what heddle did before; the model learns the policy only by failing, which costs a round and teaches the wrong lesson |
+| 8 | Write the note as a `message` the person could have typed | **Discarded** — the Web UI would show the harness's sentence as a user turn; a `context/note` with its own origin is the surface heddle already uses for instructions and team policy |
+
+### understand and step back
+
+DSH's statement exists because **the policy is data the model can use**: a read-only session should plan around its
+boundary instead of discovering it. Heddle already had the surface for exactly this kind of note (the instruction
+baseline and the team policy are the same shape), so the statement is one more `context/note` with its own origin,
+not a new channel.
+
+The step back changed three things:
+
+- **Replace, do not append.** DSH appends superseding snapshots after retained history (its KV-cache reasoning);
+  heddle's existing instruction baseline already **replaces** its node when it changes, and one policy is what a
+  model should read. The cycle chose replace and recorded the deviation.
+- **A change of mode changes the note.** The statement is derived from the effective session policy every round and
+  compared by identity; unchanged rounds write nothing.
+- **The note must not look like a person.** The transcript projection already ignores `context/note`; the check
+  asserts it, so a future view cannot quietly start drawing it.
+
+### plan
+
+1. `src/sandbox/linux.ts` — DSH's bwrap profile (`--ro-bind / /`, fresh `/dev`, private PID/proc, ephemeral
+   `/tmp`, workspace binds), the Landlock grant argv (`--ro /`, `--rw /dev/null`, `--rw <roots>`), functional
+   probes, and the denial/failure dialects.
+2. `src/sandbox/backend.ts` — the Linux chain: bwrap when usable, otherwise Landlock when a configured launcher
+   probes, otherwise no backend.
+3. `src/sandbox/service.ts` — a `landlockRunner` config path (configuration, never an environment variable).
+4. `src/sandbox/policy.ts` — `sandboxPolicyStatement(policy)` in DSH's capability-neutral framing.
+5. `src/context/service.ts` — `recordRuntimePolicy`, one `context/note` with origin `sandbox-policy`, replaced
+   when the statement changes.
+6. `src/agent/loop.ts` — write the statement before the round's "what did the person say" reading, so the note
+   cannot be mistaken for a steered message.
+7. Tests and checks: bwrap/Landlock profile and selection unit tests, the statement text, the note's replace and
+   de-duplication, and `_verifiers_/75-permission-sandbox/check-policy-context.mjs` against a real server and a
+   local chat double.
+
+### evidence
+
+**Failed first.** The new Linux/statement/note tests were written before the modules existed; the policy-context
+verifier was written before the loop wrote the note, and it failed because no request body contained
+`Current heddle file policy`.
+
+**After** (measured on this branch):
+
+| Instrument | Before | After |
+|---|---|---|
+| `test/sandbox-backend.test.ts` | 6 pass | **9 pass** (bwrap profile, Landlock grants and partial enforcement, chain order, statement text, note replace/de-dupe) |
+| `npm test` | 345 pass | **348 pass / 0 fail** |
+| `_verifiers_/75-permission-sandbox/` | 11 checks | **12 checks, all pass** (the new policy-context check) |
+| `_verifiers_/80-web-ui/` | 11 files | 11 files green |
+
+**Measured request facts** (the double's own recorded bodies): the first turn's request carries exactly one
+`Current heddle file policy: workspace-write` statement naming the workspace; switching the session to
+`read-only` makes the next request carry exactly one `read-only` statement and no workspace-write one beside it;
+the session's transcript does not draw the note as a turn.
+
+**The Linux rungs are an honest boundary.** Their profile arguments, grants, dialects and chain order are judged
+by unit tests; their **runtime** cannot be judged on this Mac because neither `bwrap` nor `landlock-run` exists, so
+the chain reports no backend and a confined call fails closed. The doc records that as unjudged rather than
+passing. The Landlock launcher is configuration (`landlockRunner`) rather than an ambient variable, because which
+binary confines a process must not be decidable by the environment.
+
+### coverage
+
+Visited: bwrap and Landlock profile/argv construction, chain order and partial enforcement, the model-visible
+statement in a real provider request, replacement on mode change, transcript exclusion, and the Linux
+fail-closed path. Not visited: the Linux rungs executing on a Linux host (no runner here), the Windows rung (out
+of scope), and the escalation ladder (cycle 3).
+
+### invariants
+
+The shell-confinement checks still pass with the new statement in the request; the permission control's browser
+contract and the session-mode checks are unchanged; the note's replace keeps exactly one surface position (its
+test asserts the node count); the unit suite pins that a delegated child inherits the parent's mode, so the
+statement's presence does not widen anything.
+
+### lessons
+
+- **A policy the model is not told is a policy it learns by failing.** The statement is part of the mechanism's
+  honesty, not documentation for humans.
+- **A harness note is not a message.** `context/note` with an origin is what keeps the transcript from
+  misattributing the harness's words to the person.
+- **Unjudged is a verdict.** A platform whose runner is absent is asserted to fail closed, not pretended to work.
+
 ## Read next
 
 [`dsh-permission-modes.md`](dsh-permission-modes.md) for the session mode and the UI control this plan

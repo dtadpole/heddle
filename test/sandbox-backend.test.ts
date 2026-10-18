@@ -13,7 +13,10 @@ import {
   selectBackend,
 } from '../src/sandbox/backend.ts'
 import { canonical } from '../src/sandbox/paths.ts'
-import { writableRoots } from '../src/sandbox/policy.ts'
+import { sandboxPolicyStatement, writableRoots } from '../src/sandbox/policy.ts'
+import { bwrapProfileArgs, landlockBackend, landlockGrantArgs, selectLinuxBackend } from '../src/sandbox/linux.ts'
+import { ContextService } from '../src/context/service.ts'
+import { SessionStore } from '../src/session/store.ts'
 import { seatbeltBackend, seatbeltProfileArgs } from '../src/sandbox/seatbelt.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
 
@@ -160,4 +163,69 @@ test('the sandbox service still fences the file tools with the same roots', () =
   writeFileSync(outside, 'x')
   assert.equal(existsSync(outside), true)
   rmSync(outside)
+})
+
+test('the Linux chain: bwrap first, Landlock second, neither means fail closed', () => {
+  const root = '/workspace'
+  const policy = { mode: 'workspace-write' as const, workspaceRoot: root, extraWritableRoots: [] }
+
+  const bwrap = bwrapProfileArgs(policy)
+  assert.deepEqual(bwrap.slice(0, 8), ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc'], 'bwrap mounts a read-only host root with a fresh /dev and a private procfs')
+  assert.ok(bwrap.includes('--die-with-parent'), 'and dies with its parent')
+  assert.ok(bwrap.includes('--tmpfs') && bwrap.includes('/tmp'), 'workspace-write mounts an ephemeral /tmp')
+  assert.ok(bwrap.includes('--bind') && bwrap.includes(canonical(root)), 'and a writable bind for the workspace')
+  assert.ok(!bwrapProfileArgs({ ...policy, mode: 'read-only' }).includes('--tmpfs'), 'read-only mounts no writable tmpfs')
+
+  const grants = landlockGrantArgs(policy)
+  assert.deepEqual(grants.slice(0, 2), ['--ro', '/'], 'Landlock grants a read-only root first')
+  assert.ok(grants.includes('/dev/null') && grants.includes(canonical(root)) && grants.includes(canonical('/tmp')), 'and read-write grants for the dev sink, temp area and workspace')
+
+  const usable = bwrapBackendFake(true)
+  const locked = landlockBackend({ probe: () => 'partial' })
+  assert.ok(locked !== undefined)
+  assert.equal(selectLinuxBackend(usable)?.name, 'bwrap', 'a usable bubblewrap wins')
+  assert.equal(selectLinuxBackend(bwrapBackendFake(false), locked)?.name, 'landlock', 'otherwise the Landlock rung is selected')
+  assert.equal(selectLinuxBackend(bwrapBackendFake(false), undefined), undefined, 'and with neither the host fails closed')
+  assert.equal(locked.confine(['/bin/sh', '-c', 'true'], policy).enforcement, 'partial', 'an older Landlock ABI reports partial enforcement as a fact')
+
+  function bwrapBackendFake(probe: boolean) {
+    return {
+      name: 'bwrap' as const,
+      probe: () => probe,
+      confine: (argv: readonly string[]) => ({ argv, enforcement: 'full' as const, denialSignatures: [], runnerFailureRules: [] }),
+    }
+  }
+})
+
+test('the model-visible policy statement names the mode and, under workspace-write, the workspace', () => {
+  const root = canonical(workspace('statement-workspace'))
+  assert.match(sandboxPolicyStatement({ mode: 'read-only', workspaceRoot: root, extraWritableRoots: [] }), /^Current heddle file policy: read-only\. /, 'read-only names the standing mode')
+  const shared = sandboxPolicyStatement({ mode: 'workspace-write', workspaceRoot: root, extraWritableRoots: [] })
+  assert.match(shared, /workspace-write/, 'workspace-write names its mode')
+  assert.ok(shared.includes(`"${root}"`), 'and the workspace the mode promises')
+  assert.match(shared, /temp/i, 'and says the temp areas may be writable')
+  assert.match(sandboxPolicyStatement({ mode: 'danger-full-access', workspaceRoot: root, extraWritableRoots: [] }), /does not restrict file modifications/, 'full access says the sandbox does not restrict')
+})
+
+test('the runtime policy note is one surface message, replaced when the policy changes and silent when it has not', () => {
+  const store = new SessionStore(join(scratch, 'policy-note-sessions'))
+  const context = new ContextService(new Context(), store, { instructions: false })
+  const session = store.create({ cwd: workspace('policy-note-workspace') })
+  const readOnly = sandboxPolicyStatement({ mode: 'read-only', workspaceRoot: '/w', extraWritableRoots: [] })
+  const shared = sandboxPolicyStatement({ mode: 'workspace-write', workspaceRoot: '/w', extraWritableRoots: [] })
+
+  context.recordRuntimePolicy(session, readOnly)
+  const notes = () => store.read(session).filter((event) => event.type === 'context/note' && event.origin === 'sandbox-policy')
+  assert.equal(notes().length, 1, 'the first statement is one note')
+  assert.deepEqual(store.deriveMessages(session).filter((message) => message.role === 'user').map((message) => message.content.map((part) => (part.type === 'text' ? part.text : '')).join('')), [readOnly], 'and the model reads exactly that statement once')
+
+  context.recordRuntimePolicy(session, readOnly)
+  assert.equal(notes().length, 1, 'an unchanged policy writes nothing')
+  assert.equal(store.surface(session).nodes.length, 1, 'and costs no surface position')
+
+  context.recordRuntimePolicy(session, shared)
+  assert.equal(notes().length, 2, 'a changed policy is a new event')
+  assert.equal(store.surface(session).nodes.length, 1, 'that replaces the previous node rather than piling up beside it')
+  const texts = store.deriveMessages(session).filter((message) => message.role === 'user').map((message) => message.content.map((part) => (part.type === 'text' ? part.text : '')).join(''))
+  assert.deepEqual(texts, [shared], 'so the model reads one current policy, not two')
 })

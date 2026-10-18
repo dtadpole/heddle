@@ -1,3 +1,4 @@
+import { bwrapBackend, landlockBackend, selectLinuxBackend } from './linux.ts'
 import { seatbeltBackend } from './seatbelt.ts'
 import type { SandboxExecutionPolicy, SandboxMode } from './policy.ts'
 
@@ -72,15 +73,23 @@ export class SandboxUnavailableError extends Error {
  * one (probing arbitrates; it does not re-validate a choice with no alternative), and the verdict is cached by the
  * backend instance.
  *
- * The Linux chain is wired in the next cycle of this loop (bubblewrap, then Landlock) — until then a Linux host
- * has no backend and a confined call fails closed, which is the honest answer rather than an unconfined run.
+ * The Landlock candidate needs an operator-supplied launcher path (`landlockRunner` in the sandbox config): heddle
+ * does not bundle the versioned external binary DSH ships as a platform package, and which binary confines a
+ * process must not be decidable by an ambient environment variable. Without one the rung is unavailable and the
+ * chain fails closed.
  */
-export function selectBackend(platform: NodeJS.Platform | string = process.platform): SandboxBackend | undefined {
+export function selectBackend(
+  platform: NodeJS.Platform | string = process.platform,
+  options: { readonly landlockRunner?: string } = {},
+): SandboxBackend | undefined {
   switch (platform) {
     case 'darwin':
       return seatbeltBackend()
     case 'linux':
-      return undefined
+      return selectLinuxBackend(
+        bwrapBackend(),
+        options.landlockRunner === undefined ? undefined : landlockBackend({ runner: options.landlockRunner }),
+      )
     default:
       return undefined
   }

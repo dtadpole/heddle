@@ -65,3 +65,22 @@ export function writableRoots(policy: SandboxExecutionPolicy): readonly string[]
   const roots = [policy.workspaceRoot, ...policy.extraWritableRoots, '/tmp', tmpdir()].map((root) => canonical(root))
   return [...new Set(roots)]
 }
+
+/**
+ * The policy as one model-visible sentence.
+ *
+ * DSH contributes a `sandbox:policy` runtime-context snapshot before each request so the model knows the standing
+ * file policy instead of learning it from a denial. This is heddle's version of the same statement, with the same
+ * capability-neutral framing: it names the mode and, under `workspace-write`, the workspace the mode promises. It
+ * deliberately does not enumerate mounted backends — the denial a tool returns is where a refusal is explained.
+ */
+export function sandboxPolicyStatement(policy: SandboxExecutionPolicy): string {
+  switch (policy.mode) {
+    case 'read-only':
+      return 'Current heddle file policy: read-only. Any available operation enforced by heddle’s file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial guidance it returns.'
+    case 'workspace-write':
+      return `Current heddle file policy: workspace-write. Any available operation enforced by heddle’s file sandbox may modify files under the session workspace: "${policy.workspaceRoot}". The host temp areas may also be writable.`
+    case 'danger-full-access':
+      return 'Current heddle file policy: danger-full-access. The heddle file sandbox does not restrict file modifications by available operations.'
+  }
+}
