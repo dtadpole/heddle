@@ -14,10 +14,12 @@ import {
   isSandboxMode,
   permissionTransition,
 } from '../src/sandbox/service.ts'
-import { MODE_EVENT, effectiveMode, recordedMode } from '../src/session/mode.ts'
+import { MODE_EVENT, effectiveMode, inheritRecordedMode, recordedMode } from '../src/session/mode.ts'
+import { SessionStore, type SessionHandle } from '../src/session/store.ts'
 import { SessionService } from '../src/session/service.ts'
 import { builtinTools } from '../src/tools/builtin.ts'
 import { ToolRegistry } from '../src/tools/service.ts'
+import { delegateSubagent } from '../src/agent/subagent.ts'
 
 /**
  * The session-scoped access mode: the rule that decides a change, the log event that records it, and
@@ -193,4 +195,40 @@ test('a read-only session refuses the write and the shell; workspace-write permi
   const allowedShell = await registry.call('bash', { command: 'echo hi' }, context)
   assert.equal(allowedShell.error, undefined, 'and permits the shell')
   assert.match(allowedShell.output, /hi/, 'which ran')
+})
+
+test('a delegated child inherits the parent’s mode, so read-only cannot be widened by spawning a child', async () => {
+  /**
+   * A child session is created with no `permission/mode` event, so without inheritance it would run under the
+   * **deployment default** — a `read-only` parent could delegate a write and the mode would hold only for the
+   * parent's own calls. Both spawn paths call `inheritRecordedMode` immediately after the child exists; this
+   * judges the rule and the subagent path end to end with a fake child run.
+   */
+  const root = join(scratch, 'inheritance-sessions')
+  const store = new SessionStore(root)
+  const parent = store.create({ cwd: scratch })
+  store.append(parent, { type: MODE_EVENT, mode: 'read-only' })
+  const deps = {
+    store,
+    run: async (child: SessionHandle) => {
+      store.append(child, { type: 'assistant/completed', text: 'child answer' })
+    },
+  }
+  const delegated = await delegateSubagent(deps, parent, 'a scoped task', { maxDepth: 2, maxActive: 1 })
+  const child = store.open(delegated.childSession)
+  assert.ok(child !== null, 'the child session exists')
+  assert.equal(recordedMode(store.read(child)), 'read-only', 'the child inherited the parent’s narrowing')
+  assert.equal(effectiveMode(store.read(child), 'workspace-write'), 'read-only', 'so the deployment default cannot widen it')
+
+  /** A parent that never recorded a mode inherits nothing, because its own effective mode IS the deployment default. */
+  const plain = store.create({ cwd: scratch })
+  const second = await delegateSubagent(deps, plain, 'another task', { maxDepth: 2, maxActive: 1 })
+  const other = store.open(second.childSession)
+  assert.ok(other !== null, 'the second child exists')
+  assert.equal(recordedMode(store.read(other)), undefined, 'nothing to inherit, so no event is appended')
+
+  /** The helper is idempotent for the caller's purposes: a second call appends a second identical event. */
+  const direct = store.create({ cwd: scratch })
+  assert.equal(inheritRecordedMode(store, parent, direct), 'read-only', 'the helper answers with the inherited mode')
+  assert.equal(recordedMode(store.read(direct)), 'read-only')
 })

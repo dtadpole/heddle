@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { ContentPart } from '../llm/types.ts'
+import { inheritRecordedMode } from '../session/mode.ts'
 import type { SessionEvent, SessionHandle, SessionId, SessionMeta, SessionStore } from '../session/store.ts'
 import {
   addMember,
@@ -199,6 +200,8 @@ export class TeamService {
               title: `teammate ${member.name}`,
             })
       if (child === null) throw new TeamError(`the Lead session '${lead.id}' could not be read to fork from`, 'TEAM_INVALID_EVENT')
+      /** A teammate inherits the Lead's mode: a read-only team cannot spawn a teammate that writes. */
+      inheritRecordedMode(this.deps.store, lead, child)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.journal(lead, { type: 'team/member', member: { ...member, phase: 'failed', error: message } })

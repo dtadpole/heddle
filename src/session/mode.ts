@@ -1,5 +1,5 @@
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
-import type { SessionEvent } from './store.ts'
+import type { SessionEvent, SessionHandle, SessionStore } from './store.ts'
 
 /**
  * A session's access mode, recorded as one append-only event.
@@ -38,4 +38,26 @@ export function recordedMode(events: readonly SessionEvent[]): SandboxMode | und
 /** The mode a call runs under: the session's last record, or the deployment default when it has none. */
 export function effectiveMode(events: readonly SessionEvent[], fallback: SandboxMode): SandboxMode {
   return recordedMode(events) ?? fallback
+}
+
+/**
+ * Give a child session the mode its parent is running under, at creation.
+ *
+ * Delegation must not be able to widen access as a side effect: a child session is created with no
+ * `permission/mode` event, and with no inheritance it would run under the **deployment default** — so a
+ * `read-only` parent could delegate a write to a `workspace-write` child and the mode's promise would hold only
+ * for the parent's own calls. Both spawn paths (a subagent and a teammate) call this immediately after the child
+ * exists, and a child whose parent recorded no mode inherits nothing, because then the parent itself is running
+ * under the same deployment default.
+ *
+ * @param store - the session store the child was created in.
+ * @param parent - the session that is delegating.
+ * @param child - the session just created for the child or teammate.
+ * @returns the inherited mode, or `undefined` when the parent never recorded one.
+ */
+export function inheritRecordedMode(store: SessionStore, parent: SessionHandle, child: SessionHandle): SandboxMode | undefined {
+  const mode = recordedMode(store.read(parent))
+  if (mode === undefined) return undefined
+  store.append(child, { type: MODE_EVENT, mode })
+  return mode
 }

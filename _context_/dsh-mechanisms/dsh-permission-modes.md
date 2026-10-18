@@ -1,6 +1,6 @@
 ---
 title: DSH permission modes and heddle's session-scoped access mode
-version: 1.1.0
+version: 1.2.0
 description: What DSH's access-mode control renders and does, measured in a browser in every state, and the session-scoped access mode heddle now implements beside it, with the designs discarded and why.
 grounded_in:
   - source: browser
@@ -184,6 +184,11 @@ override and a per-call policy argument; the sandbox's `mode` field is process-w
   widening cannot retroactively permit the call that is already running, and a narrowing cannot
   break one that started under the wider mode.
 - `read-only` refuses `bash`, because heddle's sandbox cannot confine a shell's file effects.
+- **A narrowed session cannot widen by delegating.** A subagent's session and a teammate's session are created
+  with no mode of their own, so on their own they would run under the deployment default; both spawn paths now
+  copy the parent's recorded mode onto the child at creation (`inheritRecordedMode`), and the unit suite judges
+  the delegated case. Without it, `read-only` would hold for the parent's calls and not for the child's, which is
+  the same silent widening one hop away.
 
 ### evidence
 
