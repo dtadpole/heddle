@@ -154,36 +154,73 @@ Cycle 1 — make the model receive the attachment as typed content, not a path
   step back:  the gap is a mechanism (typed user-message content + provider projection), not a value; keep the
               objective, narrow cycle 1 to the delivery path (types, projection, adapter mapping, turn body,
               minimal pending cards). Composer fidelity (queue/steer, limits, transcript cards) is cycle 2.
-  checkpoint: 2ec59cd (plan) + the core projection commit on feat/attachments; cycle 1 is mid-implement.
   changed:    src/llm/types.ts — image/file content parts, endpoint inputModalities, sha identity, describeContent;
               src/llm/attachments.ts (new) — DSH's file handle, text-only placeholder, vision materialisation;
               src/llm/service.ts — project attachments before the adapter;
-              src/llm/adapters.ts — image parts for chat/responses/anthropic;
+              src/llm/adapters.ts — image parts for chat/responses/anthropic, and a newline between text blocks;
               src/endpoints.ts — carry inputModalities to the page;
-              src/server/web.ts — /api/turn and /steer accept attachment paths under the upload directory;
-              src/session/service.ts — user message can carry content blocks;
-              src/server/page.html — pending cards, send/queue/steer carry attachments;
-              tests + _verifiers_/80-web-ui/check-composer.mjs.
-  delivered:  pending — the cycle is mid-implement; the branch carries a checkpoint, the deployment follows.
-  evidence:   unit tests written first (test/attachments.test.ts): the first run failed with ERR_MODULE_NOT_FOUND
-              because src/llm/attachments.ts did not exist; 10 of 10 pass now that the projection and the three
-              adapter mappings exist, and `npx tsc --noEmit` is clean while the full suite is 393/393. The browser
-              contract with a recording chat double, and the compositor's cards, are the next step.
-  reds:       none yet.
-  coverage:   to visit: image on a vision route, image on a text-only route, non-image file, missing file,
-              multiple files, send/queue/steer paths, the owner's address.
-  invariants: no session log grows by file bytes; a text-only route never receives image data; tool/reasoning
-              blocks are untouched by the projection.
-  landed:     pending.
-  lessons:    pending.
+              src/server/attachments.ts (new) — a path is read into a typed block, contained to the upload root;
+              src/server/web.ts — /api/turn and /steer accept attachment paths, record them, and show them in a
+              transcript as named parts;
+              src/session/service.ts — userContent() records typed content and titles from the text part;
+              src/agent/loop.ts — a turn records its attachments beside the prompt;
+              src/server/page.html — pending cards, send/queue/steer carry attachments, live rows name them;
+              tests, _verifiers_/80-web-ui/check-composer.mjs, and this document.
+  delivered:  landed on main in merge e50b257 (attachments) and deployed on top of the main tip 9eef059, which
+              also carries 8631b30 — the missing `ended` return a main-side transcript change had left the build
+              red without. The deployment checkout /Users/zhenc/heddle-deploy is at 9eef059 with a clean tree;
+              launchd agent PID 61622 runs /Users/zhenc/heddle-deploy/dist/cli.js; the served page is that
+              checkout's dist/server/page.html (it contains #attach-cards); _verifiers_/96-deployment is 3/3.
+              At http://127.0.0.1:8082/, a fresh browser attached an 80-byte PNG through (+) File: the card read
+              `landed-image.png`, `PNG 80 B`, `Remove file landed-image.png`, the draft stayed empty; sending
+              recorded a user message whose image block names the same stored path, with the server-measured
+              sha256, and the turn completed with the answer "ok". The evidence JSON is
+              _context_/add-file/cycle-1-e2e.json, the screenshot cycle-1-landed-8082.png, the script e2e-8082.mjs.
+  evidence:   failing first, in order: test/attachments.test.ts (ERR_MODULE_NOT_FOUND, then 10/10);
+              test/server-attachments.test.ts (module absent, then 5/5, including the outside-the-upload-root
+              refusal and the batch bound); test/page-contract.test.ts (the old page wiring assertion failed
+              against the new cards, amended with the card wiring); the composer contract (the pending-card test
+              failed while the page still typed a path into the draft; the vision test failed while messages were
+              text-only; the text-only and file-handle tests assert the exact recorded provider request body).
+              Final: `npx tsc --noEmit` clean, `npm test` 404/404 on the landed tip, the composer verifier 20
+              checks with 19 passing and one unrelated load-flake (the stats dock read `0 steps` while the machine
+              ran three other sessions' sweeps; it passes alone), 96-deployment 3/3, and the deployed-address run
+              above.
+  reds:       (1) the stats-dock check flaked under parallel load — not this cycle's code; measured alone, green.
+              (2) main did not build at b322aec: web.ts read `result.ended` while the loop never returned it;
+              fixed in 8631b30 on main, which this deployment includes. (3) the shared deployment checkout was
+              reset by another session between the first merge and its push; the merge was replayed and pushed as
+              e50b257 immediately, which is the landing order now recorded in the convention.
+  coverage:   visited: image on a vision route (typed parts with a data URL); image on a text-only route (DSH's
+              placeholder, no image bytes); non-image file (DSH's handle, contents never sent); missing, unreadable,
+              outside-root and directory paths (refused, or degraded to text for a stored image that vanished);
+              the batch bound; cards, per-file remove, clean draft; submit, queue and steer carrying paths.
+              Not yet visited (cycle 2 candidates): the owner's route does not declare `inputModalities`, so the
+              deployed provider received the placeholder — capability discovery is the first fix row; DSH's
+              per-message image count/byte budgets and oldest-first offload for earlier images in a long
+              conversation; transcript rendering of an attached image as a card; several images in one message;
+              editing a queued message that carries attachments.
+  invariants: the session log holds references, never file bytes (asserted: no `base64` in the recorded message);
+              a text-only route never receives image content (asserted on the provider request); an image reference
+              is canonical and contained to the upload root; tool-call and reasoning blocks pass the projection
+              untouched; text-only messages keep their existing string wire form.
+  landed:     merge e50b257 (attachments), deployment tip 9eef059 (main, includes 8631b30), checkout clean,
+              agent PID 61622, 96-deployment 3/3, owner address observed as above.
+  lessons:    (1) a shared deployment checkout is not a private one: another session reset it between merge and
+              build, so the merge must be pushed before anything is measured, and the landing line names the
+              pushed commit rather than the local one. (2) `node --test` against a stale dist hangs on a missing
+              module in a test-owned promise; build before running browser checks, and read the path in the
+              TypeError. (3) the first deployed E2E picked the newest session row, which was not this run's —
+              find the session by the evidence it must contain (the card's path) and read the newest user message
+              from it.
 ```
 
 ## Cycle status
 
 | Cycle | Aim | Phase | Evidence committed | Landed |
 |---|---|---|---|---|
-| 1 | delivery mechanism: typed user content + DSH projection + provider mapping + minimal pending cards | implement in progress | — | — |
-| 2 | close the fidelity gaps cycle 1 measured (pending cards, placeholders, limits) | pending | — | — |
+| 1 | delivery mechanism: typed user content + DSH projection + provider mapping + pending cards | completed | test/attachments.test.ts, test/server-attachments.test.ts, check-composer (5 attachment checks) | e50b257, deployed at 9eef059 |
+| 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload; transcript cards; several images; queue-edit attachments | pending | — | — |
 | 3 | full matrix re-measure at the owner's address; stop when no fix row remains | pending | — | — |
 
 ## Read next
