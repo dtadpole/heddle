@@ -573,6 +573,48 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     )
 
     /**
+     * **The keyboard's ring stays inside the inset.** Rows are focusable (they carry a tabindex), and the platform's
+     * default ring paints *outside* the focused box: measured before this rule, a row at 12→340 focused from the
+     * keyboard matched `:focus-visible` and drew the UA's `outline: auto 1px` at 11→341 — the one row state that broke
+     * the 12-pixel gutter, in the browser's blue. The row now draws a solid 2px ring offset **inward**, in the panel's
+     * own 45% ink, so its outer edge is the row's own box.
+     */
+    const focused = await (async () => {
+      /** A trusted Tab first: `:focus-visible` is only true when the interaction that focused was the keyboard's. */
+      await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 })
+      await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 })
+      await new Promise((done) => setTimeout(done, 150))
+      return JSON.parse(await browser.evaluate(`(() => {
+        const row = document.querySelector('#tree li[data-kind] > .row')
+        if (row === null) return JSON.stringify({ error: 'no row' })
+        row.focus()
+        const style = getComputedStyle(row)
+        const box = row.getBoundingClientRect()
+        const width = parseFloat(style.outlineWidth) || 0
+        const offset = parseFloat(style.outlineOffset) || 0
+        return JSON.stringify({
+          focusVisible: row.matches(':focus-visible'),
+          box: [Math.round(box.left), Math.round(box.right)],
+          style: style.outlineStyle,
+          width: style.outlineWidth,
+          offset: style.outlineOffset,
+          color: style.outlineColor,
+          ringOuter: [Math.round(box.left - width - offset), Math.round(box.right + width + offset)]
+        })
+      })()`))
+    })()
+    assert.equal(focused.error, undefined, `the tree has a row to focus\nsaw: ${JSON.stringify(focused)}`)
+    assert.equal(focused.focusVisible, true, 'a row focused from the keyboard is visibly focused')
+    assert.equal(focused.style, 'solid', 'the ring is drawn rather than the platform\'s auto style')
+    assert.equal(focused.width, '2px', 'at 2px')
+    assert.equal(focused.offset, '-2px', 'offset inward, so it cannot paint into the inset')
+    assert.notEqual(focused.color, 'rgb(153, 200, 255)', 'in the panel\'s own ink, not the browser\'s blue')
+    assert.ok(
+      focused.ringOuter[0] >= focused.box[0] - 1 && focused.ringOuter[1] <= focused.box[1] + 1,
+      `and wholly inside the row's box\nsaw: ${JSON.stringify(focused)}`,
+    )
+
+    /**
      * The chord, which is DSH's own: `Alt+Meta+B`. It **toggles** — pressed while wide it collapses, pressed again it
      * opens — so both directions are read, because a chord bound to only one of them is a control that can put the
      * panel away and not bring it back.
