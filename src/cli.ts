@@ -73,7 +73,7 @@ options:
       --resume <id>          continue an existing session rather than starting one
       --new                  start a new session in this folder instead of continuing its own
       --generated <name>     a folder a tool writes, so the tree names it as generated (repeatable)
-      --endpoint <name>      which configured endpoint answers (default: the first)
+      --endpoint <name>      which configured endpoint answers (default: the configured default, else the first by name)
       --model <id>           override the endpoint's model for this turn
       --system <text>        system prompt, recorded when the session is new
       --max-rounds <n>       stop after n model-plus-tools rounds (one-shot default 8; web: uncapped)

@@ -496,16 +496,16 @@ export function openAiResponsesAdapter(
         const call = calls.get(key) ?? { id: key, name: '', arguments: '' }
         call.arguments += String(parsed.delta ?? '')
         calls.set(key, call)
-      } else if (type === 'response.completed') {
+      } else if (type === 'response.completed' || type === 'response.incomplete') {
         const response = parsed.response as
           | {
               usage?: { input_tokens?: number; output_tokens?: number }
               status?: string
+              incomplete_details?: { reason?: string } | null
               output?: { type?: string; call_id?: string; name?: string; arguments?: string }[]
             }
           | undefined
         if (response?.usage) usage = openaiResponsesUsage(response.usage)
-        finishReason = response?.status ?? 'stop'
         /**
          * The completed response restates every function call in full, so it is the authority for anything the
          * event stream left incomplete. A name that arrived only here is still a name; preferring the deltas
@@ -525,6 +525,7 @@ export function openAiResponsesAdapter(
         for (const call of calls.values()) {
           yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
         }
+        finishReason = responsesFinishReason(type, response?.incomplete_details?.reason, calls.size)
         yield { type: 'done', finishReason, ...(usage ? { usage } : {}) }
         return
       } else if (type === 'response.failed' || type === 'error') {
@@ -537,8 +538,29 @@ export function openAiResponsesAdapter(
     for (const call of calls.values()) {
       yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
     }
+    /**
+     * The stream closed without a terminal event. That is not a normal stop: the route always ends on one of
+     * `response.completed`, `response.incomplete` or `response.failed`, so a stream that ends on none of them was
+     * cut, and saying `stop` would present a truncated answer as a finished one.
+     */
+    finishReason = 'stream_ended'
     yield { type: 'done', finishReason, ...(usage ? { usage } : {}) }
   })()
+}
+
+/**
+ * The loop's finish reason for a Responses stream's terminal event.
+ *
+ * The loop speaks Chat Completions' words — `stop` for a finished answer, `tool_calls` for a round that asks for
+ * tools, anything else an abnormal end it reports. The Responses shape uses its own: a status of `completed`, or a
+ * separate `response.incomplete` event carrying `incomplete_details.reason`. Passing the status through made every
+ * healthy answer read as stopped — measured 2026-10-18, a plain `ok` from a Meta Codex route was logged with
+ * `ended: ['round 1: completed']` — and ignoring the incomplete event made a reasoning model that spent its whole
+ * budget thinking return an empty answer reported as a normal stop.
+ */
+export function responsesFinishReason(terminal: string, incompleteReason: string | undefined, toolCalls: number): string {
+  if (terminal === 'response.incomplete') return incompleteReason ?? 'incomplete'
+  return toolCalls > 0 ? 'tool_calls' : 'stop'
 }
 
 /** The body version an Anthropic publisher route requires; it is not a header on this shape. */
