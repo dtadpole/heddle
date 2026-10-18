@@ -1,6 +1,6 @@
 ---
 title: DSH Browser MCP
-version: 1.0.0
+version: 1.1.0
 description: A reading of how DeepSeek Harness exposes the Chrome DevTools MCP server as browser tools, taken from the installed packages.
 grounded_in:
   - source: chrome-devtools-mcp 1.11.0 under ~/.npm/_npx/15c61037b1978c83, read on 2026-10-17
@@ -9,6 +9,12 @@ grounded_in:
 ---
 
 # `dsh-browser-mcp`
+
+**Status: the server this folder reads was removed from the Web profile on 2026-10-17.** The harness's
+browser tools were replaced by [`_tools_/browser-use/`](../../_tools_/browser-use/INDEX.md) once that
+tool had been verified against the same surface (30 of 32 advertised tools implemented, 2 named as
+excluded, delivery verifier 26/26 headed and headless). This reading is kept because it is what the
+tool was built and judged against, and because a future version of either needs the same evidence.
 
 Instance of [`_context_`](../INDEX.md). Holds the reading behind the browser tool surface
 this harness mirrors: how a page is identified and selected, how the accessibility tree
