@@ -267,3 +267,109 @@ Cycle 1 — the two-tier backend and DSH's two-level control
               entering it; (2) a filtered list needs its own highlight index space, not the catalogue's; (3) a
               protocol Enter needs its carriage-return text or a focused button never activates.
 ```
+
+## Cycle 2 — states, keyboard and the running turn, re-measured from a fresh build
+
+```
+Cycle 2 — the states that only exist after a re-render, and the running-turn seam
+  measured:   served page from a fresh `npm run build`, 1280x950, 2026-10-17:
+              trigger 94x28 13/20 padding 0 4 0 8 gap 4 radius 8 #cfd3d6; effort span #81858c hidden for a
+              model without levels and visible (rgb(129,133,140)) for one with them;
+              root menu 240x76 fixed, right-aligned to the trigger and 8px above it, radius 16, padding 4,
+              z 60; root rows 34px radius 12, value #adb2b8, 12px chevron; model pane 240x329 with search
+              (6 models), sticky headings 22px 11/16 500 #adb2b8, options 34px radius 12 padding 5 7 13/18,
+              selected check 14x14; effort pane 240x144 Low/Medium/High/Max with High checked; a model
+              without levels has one root row and no effort pane; at a 900x620 viewport the menu stays inside
+              the 12px margin on both axes; keyboard: Tab -> row, Enter -> drill and search focus, arrows rove,
+              Escape back then close, after a selection focus returns without a ring; running turn: seat,
+              rows and options enabled, and a switch lands on the turn's second model call (tool double:
+              exactly one request to each endpoint).
+  brainstorm: running-turn application: (a) the existing `model/request` waterfall, applying the session's
+              current record before each call — chosen, it is the seam the model service documents; (b) re-resolve
+              inside the loop — discarded, the loop would need the session record and the layers would couple;
+              (c) leave the switch for the next turn — discarded, DSH measured otherwise.
+              focus-loss dismissal: (a) decide on a microtask after the DOM settles — chosen; (b) never close on
+              focusout — discarded, tabbing out would leave an orphan menu; (c) pointerdown-only dismissal —
+              discarded, DSH closes on blur as well.
+  step back:  no scope change. The evidence did narrow cycle 1's "menu shape" into the states that only exist
+              after a re-render (a focused row being replaced), which is where both defects found this cycle lived.
+  changed:    src/server/page.html — focus-loss decision deferred one microtask; search highlight indexed by
+              visible position instead of catalogue position; model selection records the model's declared
+              default level (DSH's model/selection carries it); src/server/web.ts already had the waterfall seam
+              from cycle 1 and it is exercised here; the verifier gained the keyboard, search, no-effort, clamp
+              and running-turn assertions.
+  evidence:   found and fixed two defects that the cycle-1 checks missed: (1) a keyboard drill closed the menu,
+              because the focused row was replaced and `focusout` reported no related target — before: after
+              Enter, focus was BODY and the menu hidden; after: focus is the search field, and Escape hands
+              focus back to the row that opened the pane; (2) after typing a query the first arrow press
+              highlighted nothing, because the highlight index was a catalogue index while the list was
+              filtered — after: the first result is highlighted while the query is typed and arrows move it.
+              Both now have assertions in the browser check. Screenshots of the delivered states:
+              `heddle-model-menu-root.png`, `heddle-model-menu-models.png`, `heddle-model-menu-effort.png`,
+              `heddle-model-seat.png`, `heddle-model-running-menu.png`; the reference states are
+              `dsh-model-menu-root.png`, `dsh-model-menu-models.png`, `dsh-model-menu-effort.png`,
+              `dsh-model-running-root.png`.
+  reds:       none.
+  coverage:   visited: re-render after drill, query + arrows + Enter, model without levels, clamp at 900x620,
+              running seat + menu + switch, selection focus marker. Not visited: the pending spinner (the route
+              answers in one round trip, so a probe cannot hold it reliably), a model-change transcript notice
+              (deliberately absent), voice input (no substrate).
+  invariants: composer submission and streaming (`check-composer` green in the folder run), composer geometry,
+              the session tree still renders (`70-workspaces-sessions`), the resizable grips (`87-resizable-panels`),
+              the page module still parses, and an outside mousedown still dismisses the menu.
+  lessons:    a re-render that replaces the focused element is a state the first check set never entered; the
+              fix belongs to the dismissal rule (a microtask), not to the panes.
+```
+
+### Before → after, per measured property
+
+| Property | DSH (reference) | Heddle before | Heddle after | Verdict |
+|---|---|---|---|---|
+| trigger box | 189×28 | 219×28 | **94×28** (label-dependent) | match |
+| trigger type / inset | 13/20, `0 4 0 8`, gap 4, radius 8 | 13/13, `0 8`, gap 4.8, radius 8 | 13/20, `0 4 0 8`, gap 4, radius 8 | fixed |
+| trigger colour / effort span | #cfd3d6 + #81858c, effort shrink 1000 | one #cfd3d6 span | two spans, effort #81858c shrink 1000 | fixed |
+| trigger hover / focus | 8% surface / 2px accent ring | 8% surface / **no ring** | 8% surface / 2px accent ring | fixed |
+| title / accessible name | `Model · Effort` / `…, reasoning effort …` | prose sentence / no effort | `Model · Effort` / `…, reasoning effort …` | fixed |
+| menu placement | fixed, right-aligned, 8px above, 12px clamp | absolute, above, right-aligned, no clamp | fixed, right-aligned, 8px above, 12px clamp | fixed |
+| menu surface | 45% glass + blur, radius 16, z 1100 | opaque #232324, radius 8, z 5 | solid `--surface`, radius 16, z 60 | geometry fixed, material kept (see divergences) |
+| root rows | 2 rows (Model/Effort), 34px, radius 12 | none (flat list) | 2 rows when levels, 34px, radius 12 | added |
+| model list | provider groups, sticky 11/16 headings | flat endpoint rows | endpoint groups, sticky 11/16 headings | fixed |
+| options | 34px, radius 12, padding 5 7, 13/18, check 14 | 29px, radius 4.8, 12.8/19.2, ✓ pseudo | 34px, radius 12, padding 5 7, 13/18, check 14 | fixed |
+| search | >4 models, 12px, clear, empty state | absent | present at >4, 12px, clear, empty state | added |
+| keyboard | Tab/arrows/Enter/Escape/back/focus restore | Tab only, Escape | all of them, plus selection-focus | fixed |
+| selection record | durable `model/selection` (provider/model/effort) | meta endpoint/model | meta endpoint/model/reasoningEffort | extended |
+| reload survival | `pending ?? lastUsed` | endpoint/model | endpoint/model/level | extended |
+| running turn | seat enabled, later step uses it | seat enabled, next turn only | seat enabled, later step uses it (waterfall) | fixed |
+| effort control | per model catalogue | none | per model catalogue, provider-verified wire values | added |
+| stale endpoint | n/a (host catalogue) | kept with `not configured` | kept, disabled group with `not configured` | kept |
+| model-change notice | user-role notice in context | none | none | kept difference |
+| voice input | present | absent | absent | kept difference |
+
+### Divergences deliberately kept
+
+1. **Menu material.** DSH paints a `rgba(67,69,74,.45)` glass card with `blur(40px) saturate(1.5)`; Heddle has no
+   glass tokens and every other menu here is the solid `--surface`. The geometry, radius, shadow and states are
+   DSH's; the material is this theme's, so the selector does not become the only translucent surface in the app.
+2. **Accent.** The focus ring is this theme's `#2694fe`, not DSH's `#7aaaff`, for the same reason every other
+   focus ring here uses the theme accent.
+3. **Menu z-index.** 60 is this page's stacking scale (its other menus are 40–60); DSH's 1100 is another app's
+   scale. What matters is asserted: `position: fixed` above the composer and inside the viewport.
+4. **Catalogue source and grouping.** DSH groups by host provider; Heddle groups by the **endpoint the user
+   configured** in `~/.heddle/heddle.json`. That is the owner's two-tier shape, and the endpoint is the only
+   provider identity this harness has.
+5. **Search ranking.** DSH filters and ranks by a case-insensitive ordered subsequence; Heddle filters by a
+   case-insensitive substring. Presence, the >4 threshold, the 12px field, clear and empty states match; the
+   ranking algorithm is not ported because nothing in this catalogue is large enough for the difference to show.
+6. **No model-change transcript notice.** DSH appends a user-role `[model changed: …]` message to the next
+   request; Heddle's selection is the session's meta record and its `model/request` events, so the transcript
+   gains no synthetic user line. The record is what a reader and a reload need; the notice is a model-visible
+   artefact whose wording is DSH's.
+7. **Stale endpoint row.** Heddle keeps a recorded endpoint the configuration no longer holds, as a disabled
+   `not configured` group, because a session switched to a removed endpoint must say what it is set to. DSH's
+   host catalogue has no equivalent state.
+8. **Model label vs endpoint.** The seat shows the model's display name (as DSH does) and the endpoint appears
+   as its group heading; when the endpoint is stale the seat falls back to the endpoint name, because a model
+   name alone would hide the reason the session stopped answering.
+9. **Not measured, named:** the pending spinner (the route is one round trip; the markup and the
+   `aria-busy` toggle exist and the running-state assertion proves no busy mark during a turn) and the
+   pending-row check marks. Neither is a divergence; neither has a number.
