@@ -1,3 +1,4 @@
+import { repairToolPairing } from './pairing.ts'
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -470,7 +471,11 @@ export class ContextService extends Service {
     const measurement = this.measure(handle, options.tools !== undefined ? { tools: options.tools } : {})
     const budget = this.budget(options.endpoint)
     return {
-      messages: this.store.deriveMessages(handle),
+      /**
+       * Every request goes through the repair: a log written before the loop closed its calls on unwind (or by a
+       * version that did not) otherwise fails every later request with the provider's pairing error.
+       */
+      messages: repairToolPairing(this.store.deriveMessages(handle)),
       estimatedTokens: measurement.totalTokens,
       contextWindow: budget.contextWindow,
       thresholdTokens: budget.thresholdTokens,

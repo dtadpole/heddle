@@ -224,6 +224,22 @@ test('Stop ends a turn that is waiting on an approval, instead of leaving it stu
     /** The question is gone from the server too: a reload has nothing to repaint. */
     const pending = await request(server, '/api/approvals').then((response) => response.json())
     assert.deepEqual(pending.requests, [], 'no question is left waiting after the stop')
+
+    /**
+     * The stopped turn left a **well-formed log**: every tool call the model asked for has an answer, because an
+     * assistant `tool_calls` message without its tool messages is refused by the provider — that was the 400 a real
+     * session hit after a stop.
+     */
+    const sessions = await request(server, '/api/sessions').then((response) => response.json())
+    const sessionId = sessions[0].id
+    const record = await request(server, `/api/sessions/${encodeURIComponent(sessionId)}`).then((response) => response.json())
+    const tools = (record.turns ?? []).filter((turn) => turn.kind === 'tool')
+    assert.ok(tools.length >= 1, 'the turn did ask for a tool')
+    for (const tool of tools) assert.notEqual(tool.state, 'running', `the stopped turn's tool call '${tool.name}' is answered`)
+    assert.ok(
+      tools.some((tool) => /INTERRUPTED|CANCELLED|refused|cancelled/i.test(String(tool.result ?? ''))),
+      'and its answer says why it did not run',
+    )
   } finally {
     browser.close()
     await server.close()

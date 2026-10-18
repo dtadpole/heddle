@@ -225,6 +225,9 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   let rounds = 0
   let lastContext: { estimatedTokens: number; thresholdTokens: number; pruned: number; compacted: boolean } | undefined
   const ended: string[] = []
+  /** Read at the moment asked: TypeScript narrows a checked field to `false` for the rest of the scope, and an
+   *  abort arrives asynchronously while a tool is running. */
+  const stoppedByCaller = (): boolean => signal !== undefined && signal.aborted
 
   for (let round = 0; round < maxRounds; round += 1) {
     /**
@@ -232,7 +235,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      * model calls — waiting on a tool, or on an approval — has no connection to break, so the loop is where the stop
      * has to be noticed. Measured: without this, a Stop during a pending approval waited for the ask's timeout.
      */
-    if (signal?.aborted === true) {
+    if (stoppedByCaller()) {
       ended.push('stopped by the caller')
       break
     }
@@ -442,12 +445,35 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
 
     for (const call of calls) {
       const args = parseArguments(call.arguments)
-      const result = await ctx.tools.call(call.name, args, {
-        cwd,
-        session: options.session,
-        ...(signal !== undefined ? { signal } : {}),
-        log: (message) => ctx.logger.info('turn: %s', message),
-      })
+      /**
+       * Every call the model asked for is answered in the log — even one that cannot run.
+       *
+       * The assistant's `tool_calls` message and its tool messages are one unit to the provider: a Stop or a thrown
+       * tool between them used to leave a call unanswered, and every later request failed with the pairing error.
+       * A stopped turn, a refused call and a tool that threw all become an `error` result the model can read.
+       */
+      let result: ToolResult
+      if (stoppedByCaller()) {
+        result = { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
+      } else {
+        try {
+          result = await ctx.tools.call(call.name, args, {
+            cwd,
+            session: options.session,
+            ...(signal !== undefined ? { signal } : {}),
+            log: (message) => ctx.logger.info('turn: %s', message),
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          result = {
+            output: '',
+            error: {
+              code: 'INTERRUPTED',
+              message: stoppedByCaller() ? 'the turn was stopped while this call ran' : message,
+            },
+          }
+        }
+      }
       toolCallRecords.push({ name: call.name, arguments: call.arguments, result })
       if (result.error) {
         denials.push({ tool: call.name, code: result.error.code, message: result.error.message })
@@ -470,7 +496,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   }
 
   /** The tools ran; if a stop arrived while they did, the next model call would be wasted. */
-  if (signal?.aborted === true && !ended.includes('stopped by the caller')) ended.push('stopped by the caller')
+  if (stoppedByCaller() && !ended.includes('stopped by the caller')) ended.push('stopped by the caller')
   if (rounds >= maxRounds) {
     ended.push(`stopped after the round limit of ${maxRounds}`)
   }
