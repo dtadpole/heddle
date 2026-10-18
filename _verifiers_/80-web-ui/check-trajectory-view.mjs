@@ -394,6 +394,27 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(accordion.summary.lineHeight, '20px', 'on a 20px line')
     assert.match(accordion.payloadFont ?? '', /SF Mono/, 'and the payload block uses DSH’s SF Mono face')
 
+    // DSH's details separator resizes by drag and resets on double-click; both are judged here.
+    const paneResize = JSON.parse(
+      await browser.evaluate(`(() => {
+        const details = document.getElementById('tr-details')
+        const handle = document.querySelector('.tr-d-resize')
+        const before = Math.round(details.getBoundingClientRect().width)
+        const start = handle.getBoundingClientRect()
+        handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: start.left, clientY: start.top + 20, pointerId: 5 }))
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: start.left - 100, clientY: start.top + 20, pointerId: 5 }))
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: start.left - 100, clientY: start.top + 20, pointerId: 5 }))
+        const dragged = Math.round(details.getBoundingClientRect().width)
+        handle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        const reset = Math.round(details.getBoundingClientRect().width)
+        return JSON.stringify({ before, dragged, reset, inline: details.style.width, title: handle.title })
+      })()`),
+    )
+    assert.ok(paneResize.dragged > paneResize.before, 'dragging the details separator widens the pane')
+    assert.equal(paneResize.title, 'Drag to resize. Double-click to reset.', 'the handle states its gestures, as DSH’s separator does')
+    assert.equal(paneResize.inline, '', 'a double-click clears the dragged width')
+    assert.equal(paneResize.reset, paneResize.before, 'returning the pane to its default width')
+
     const examined = JSON.parse(
       await browser.evaluate(`(() => {
         const tabs = [...document.querySelectorAll('#tr-details .tr-d-tab')]
