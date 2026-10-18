@@ -190,3 +190,39 @@ centred on the card (card centre 777, dock centre 776.5 at the measured window).
 - **lessons:** a stats dock is judged by its **blank state** as much as by its numbers — the first contract
   failure was the hero, not a figure; and a live figure needs both the durable fold and the stream, or a
   page that watched the turn shows one number and a reload shows another.
+
+### Cycle 3 — both UIs re-measured, three differences fixed, no fix row left
+
+- **measured:** the same property set on both docks, this time with the reference live in a running session
+  and heddle's page served from the built tree with the scripted provider. Reference: `41 turns 2484 steps ·
+  252 tok/s`, `954M tok · Cache hit 99.6%`, `34%`; dock box **510×26** (its own width hugs its items, centred
+  on the card), `padding-top 4`, `gap 12`, pills `12px/20px #adb2b8 radius 999 padding 1px 8px gap 6`, the
+  separator at `margin 0 6px` in the **label colour**, the context item `64×22 13px/20px radius 8 padding 1px
+  8px gap 6`, and a ring of **11px** (`r 5.5`, `stroke-width 2`). Heddle at first measurement: dock box
+  **956** (stretched across the column, items centred inside), separator in `--border-strong` (darker than its
+  label), ring **10px** (`r 5`) — three property differences a person could see, and one (the box) that the
+  ui-comparison skill names explicitly as "alignment is two claims".
+- **brainstorm:** (a) accept the stretched dock — discarded: the reference's own box hugs its content and the
+  hover/emphasis region differs even when the text is centred; (b) `width: fit-content` with the same max-width
+  — **chosen**; (c) absolutely position the dock — discarded: a second layout mechanism for one row, and it
+  would break the narrow-window clamp; (d) leave the darker separator as a theme choice — discarded: it is the
+  same tertiary grey in the reference, and the darker tone is a different claim about hierarchy; (e) keep the
+  10px ring — discarded: 1px on a 14px icon is the kind of difference this loop exists to remove.
+- **understand / step back:** all three are values inside the dock's own stylesheet; no mechanism is missing.
+  The re-measurement after the fix produced **no further fix row**: every measured property now matches the
+  reference within a pixel (dock 466 hugging its content against the reference's 510; ring 11px; separator the
+  label colour; pills, type, gaps, radius and the card-flush edge identical). The divergences that remain are
+  the recorded ones — the wall-time rate, the absent dialogs — not defects.
+- **changed:** `src/server/page.html` (dock width, separator colour, ring radius and its circumference);
+  `_verifiers_/80-web-ui/check-composer.mjs` (the three new claims, written before the CSS: the first run
+  failed with `actual 796 vs expected 466` for the box, and the separator/ring claims followed).
+- **evidence:** the dock contract is green; the dock probe reports `ownWidth 466`, cell values
+  `1 turns / 1 steps / … tok/s / 1.1K tok / Cache hit 80% / 50%`, ring `11×11` with `17.28 34.56` at 50%; the
+  composer suite is 12/12; the screenshot from cycle 2 was taken before these corrections and the built page
+  was re-measured after them.
+- **reds:** none in the input area. The full sweep's one red, when present, is the concurrent session's
+  `70-workspaces-sessions` tree work and is named in the round report.
+- **lessons:** "the dock is centred" and "the dock hugs its content" are two claims — a flex row with `margin:
+  auto` centres its text while stretching its own box, and only measuring the element's own width against its
+  children catches it. Separator and ring sizes are properties like any other: measured at 1px, they are
+  worth fixing rather than explaining.

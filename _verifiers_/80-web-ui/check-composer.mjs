@@ -612,6 +612,12 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
           contextHidden: pill('context') === null ? null : pill('context').hidden,
           rateSepHidden: (document.querySelector('[data-stat="rate-sep"]') || {}).hidden,
           ring: (document.querySelector('[data-stat="context-ring"]') || {}).getAttribute?.('stroke-dasharray'),
+          ringR: (document.querySelector('[data-stat="context-ring"]') || {}).getAttribute?.('r'),
+          sepColor: status === null ? null : getComputedStyle(document.querySelector('[data-stat="rate-sep"]')).color,
+          /** The dock's own box against its content: the reference's box hugs its items, it does not fill the column. */
+          ownWidth: status === null ? null : Math.round(status.getBoundingClientRect().width),
+          contentWidth: status === null ? null : Math.round([...status.children].reduce((sum, node) => sum + node.getBoundingClientRect().width, 0) + 12 * 2),
+          cardWidth: card === null ? null : Math.round(card.getBoundingClientRect().width),
           dock: box(status), card: box(card),
           pillStyle: style(pill('time'), ['font-size', 'line-height', 'color', 'border-radius', 'padding', 'gap']),
           contextStyle: style(pill('context'), ['font-size', 'line-height', 'color', 'border-radius', 'padding']),
@@ -636,6 +642,10 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
     assert.equal(first.context, '50%', 'the context share is the last prompt over the window')
     assert.ok(Number.parseFloat(first.ring) > 0, 'the ring is drawn for the share')
     assert.equal(first.dock.top, first.card.bottom, 'the dock sits flush at the card\u2019s bottom edge')
+    assert.equal(first.ownWidth, first.contentWidth, 'the dock\u2019s own box hugs its items, as the reference\u2019s does')
+    assert.ok(first.ownWidth < first.cardWidth - 120, `and it is not stretched across the column (${first.ownWidth} vs card ${first.cardWidth})`)
+    assert.equal(first.sepColor, 'rgb(173, 178, 184)', 'the separator is the label colour, not a darker border colour')
+    assert.equal(first.ringR, '5.5', 'the ring is the reference\u2019s 11px circle')
     assert.equal(first.pillStyle['font-size'], '12px', 'the pills are 12px')
     assert.equal(first.pillStyle['line-height'], '20px', 'on a 20px line')
     assert.equal(first.pillStyle.color, 'rgb(173, 178, 184)', 'in the reference\u2019s tertiary grey')
