@@ -354,6 +354,9 @@ something the loop can trust.
 | Completed goal kept its dock | the state matrix was never derived from the state machine | the matrix is derived from the data model; filled before the first fix |
 | Text verbs where the reference had icon buttons | anatomy taken from partial JS reading, not the live DOM | anatomy inventory from the live DOM before measuring boxes |
 | Four ad-hoc probes, two of which measured the wrong node | no committed instrument, silent nulls | one committed probe, fixed schema, fail-loud node lookup |
+| A check "passed" a live-update step that never happened | the shared browser wait returned `false` on timeout instead of failing | `waitFor` now throws with the expression it waited for; a timeout is a test failure |
+| A second scripted turn silently replayed the first plan | scripted steps are handed out by **round index within a turn**, not a global counter | multi-turn checks rewrite the script file between turns (the endpoint reads it per request) |
+| The todo panel was placed below the goal dock | the coexistence cell was not in the matrix | an ordering cell with DSH's slot orders (`todo: 0`, `goal: 10`) and a box-comparison test |
 
 The loop's job is not to be lucky about what the owner notices next; it is to have already looked. These rules are
 how "already looked" is made checkable.
