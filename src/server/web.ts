@@ -822,6 +822,29 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     respond(response, 200, 'application/json', `${JSON.stringify({ session: handle.id, goal: goals.get(handle) ?? null }, null, 2)}\n`)
     return
   }
+  /**
+   * The session's todo list, as its current fold. An absent list is `null` rather than an empty one, so a
+   * client can tell "never written" from "written empty" (the UI hides both, but the API keeps the fact).
+   */
+  if (url.pathname === '/api/todo' && request.method === 'GET') {
+    const todos = ctx.todo
+    if (todos === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the todo plugin' })}\n`)
+      return
+    }
+    const wanted = url.searchParams.get('session')
+    if (wanted === null || wanted.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a session is required' })}\n`)
+      return
+    }
+    const handle = ctx.session.store.open(wanted)
+    if (handle === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${wanted}` })}\n`)
+      return
+    }
+    respond(response, 200, 'application/json', `${JSON.stringify({ session: handle.id, todo: todos.get(handle) ?? null }, null, 2)}\n`)
+    return
+  }
   if (url.pathname === '/api/goal' && request.method === 'POST') {
     const goals = ctx.goal
     if (goals === undefined) {

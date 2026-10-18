@@ -84,6 +84,17 @@
       name: ./src/plugins/goal-tool.ts
       inject: [goal, tools]
 
+    # The todo list: a session's task plan, as whole-list `todo/write` snapshots folded last-write-wins.
+    # Kept per session rather than DSH's per-turn list, so it survives rounds and restarts.
+    - id: todo
+      name: ./src/todo/service.ts
+      inject: [session]
+
+    # The model-facing todo verbs, their own row so the durable list can exist without the tools.
+    - id: todo-tool
+      name: ./src/plugins/todo-tool.ts
+      inject: [todo, tools]
+
     # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
     # the loop checks for it — so a minimal profile can run turns without interruption.
     - id: turns
