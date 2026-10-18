@@ -116,16 +116,18 @@ async function measure(label, page, prepare) {
     const buttons = [...document.querySelectorAll('button')]
     const button = buttons.find((entry) => ${pattern}.test((entry.textContent ?? '') + ' ' + (entry.getAttribute('aria-label') ?? '') + ' ' + (entry.getAttribute('title') ?? '')))
     button?.click()
-    return button === undefined ? 'no control' : 'clicked'
+    return button === undefined ? 'no control' : (button.textContent ?? '').trim()
   })()`
   const collapse = { base: await page.evaluate(countRows) }
-  for (const [name, pattern] of [['turns', '/collapse turns/i'], ['calls', '/collapse calls/i']]) {
-    const clicked = await page.evaluate(clickControl(pattern))
-    await sleep(600)
+  for (const [name, on, off] of [['turns', '/collapse turns/i', '/expand turns/i'], ['calls', '/collapse calls/i', '/expand calls/i']]) {
+    const clicked = await page.evaluate(clickControl(on))
+    await sleep(700)
     collapse[name] = { clicked, after: await page.evaluate(countRows) }
-    await page.evaluate(clickControl(pattern))
-    await sleep(600)
+    // The label flips to "Expand …" when the control is active; toggle it back through the new label.
+    const collapsed = await page.evaluate(clickControl(off))
+    await sleep(700)
     collapse[name].restored = await page.evaluate(countRows)
+    collapse[name].restoreControl = collapsed
   }
   // Search with real key events: a controlled input ignores a native setter, so the text goes in over CDP.
   const search = { base: await page.evaluate(countRows) }
@@ -137,7 +139,7 @@ async function measure(label, page, prepare) {
     return document.activeElement === input ? 'focused' : 'not focused'
   })()`)
   search.focused = focused
-  await page.send('Input.insertText', { text: 'not-a-real-term-xyz' })
+  await page.send('Input.insertText', { text: process.env.SEARCH_TERM ?? 'bash' })
   await sleep(800)
   search.filtered = await page.evaluate(countRows)
   search.typedValue = await page.evaluate(`(() => { const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]'); return input === null ? null : input.value })()`)
@@ -150,6 +152,13 @@ async function measure(label, page, prepare) {
   await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
   await sleep(800)
   search.cleared = await page.evaluate(countRows)
+  // If DSH's search finds/jumps rather than filters, the evidence is a highlight, an active descendant or a scroll move.
+  search.evidence = json(await page.evaluate(`(() => {
+    const pane = [...document.querySelectorAll('div')].find((element) => { const rect = element.getBoundingClientRect(); return rect.width > 400 && rect.height > 200 && element.scrollHeight > element.clientHeight + 20 })
+    const marks = [...document.querySelectorAll('mark, [class*=highlight], [class*=match]')].map((element) => String(element.className).slice(0, 30)).slice(0, 5)
+    const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]')
+    return JSON.stringify({ marks, activeDescendant: input === null ? null : input.getAttribute('aria-activedescendant'), scrollTop: pane === undefined ? null : pane.scrollTop })
+  })()`))
   // Sidebar width, at the same two viewports, because the content column depends on it.
   const sidebar = (await page.evaluate(`(() => { const aside = document.querySelector('aside, nav'); return aside === null ? null : Math.round(aside.getBoundingClientRect().width) })()`))
   return { label, ready, rows: visible.length, heights: [...new Set(visible.map((row) => row.height))].slice(0, 3), hoverState, geometry, scroll, collapse, search, sidebar }

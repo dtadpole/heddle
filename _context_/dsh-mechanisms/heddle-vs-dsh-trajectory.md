@@ -308,3 +308,24 @@ rebuilt and restarted before judging) and with the ui-comparison procedure: idle
 4. DSH's SYSTEM / COMPACTED tag colours — those rows were outside the rendered window in every scan.
 5. DSH's row hover on a *selected* row, and the timeline drag-focus dimming — not measured.
 6. heddle's calls-collapse on a session that actually has call rows — the measured session had none.
+
+## Round 12: the last two unknowns got sharper, not resolved
+
+The probe's final refinements and what they showed:
+
+- **DSH's collapse controls are glyph-labelled**: their DOM text is `⊟Turns` / `⊞Turns` and `⊟Calls` / `⊞Calls`,
+  while the accessible name in the a11y tree is "Collapse turns" / "Collapse calls" (carried by the
+  `description`, not by the text). The probe matched the glyph text, so it toggled on but could not restore by
+  the "Expand …" label, and the counts stayed crossed (34 → 28, restore failed). The fix is to find the
+  control by its **accessible name/description** and read `aria-pressed`, not to match visible text.
+- **DSH's search still does not act on programmatic text**: with a real term (`bash`) typed over CDP and the
+  value verified in the field, the row count stayed 28 with **no highlight element, no
+  `aria-activedescendant` and no scroll movement**. So neither filtering nor a find/jump was observed. Its
+  search is likely composed differently (perhaps entered only through the app's own key handling or a
+  server-side query); heddle's filter (6 → 4 → cleared) is measured and works, but it is **not claimed to
+  match** until DSH's model is observed.
+- Heddle's own collapse stays stable (15 → 6), and its restore needs the same label it toggled (its buttons
+  keep their label and flip `aria-pressed`), which the earlier round's probe did correctly.
+
+Both items stay on the unknown list with the sharper follow-up. They are the only two state-matrix items the
+loop could not settle; everything else is either asserted agreement or a recorded deliberate difference.

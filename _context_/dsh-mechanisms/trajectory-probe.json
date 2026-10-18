@@ -70,24 +70,31 @@
       ]
     },
     "collapse": {
-      "base": 52,
+      "base": 34,
       "turns": {
-        "clicked": "clicked",
-        "after": 36,
-        "restored": 38
+        "clicked": "⊟Turns",
+        "after": 28,
+        "restored": 28,
+        "restoreControl": "no control"
       },
       "calls": {
-        "clicked": "clicked",
-        "after": 42,
-        "restored": 42
+        "clicked": "⊟Calls",
+        "after": 28,
+        "restored": 28,
+        "restoreControl": "⊞Calls"
       }
     },
     "search": {
-      "base": 42,
+      "base": 28,
       "focused": "focused",
-      "filtered": 42,
-      "typedValue": "not-a-real-term-xyz",
-      "cleared": 42
+      "filtered": 28,
+      "typedValue": "bash",
+      "cleared": 28,
+      "evidence": {
+        "marks": [],
+        "activeDescendant": null,
+        "scrollTop": 0
+      }
     },
     "sidebar": 256
   },
@@ -141,22 +148,29 @@
     "collapse": {
       "base": 15,
       "turns": {
-        "clicked": "clicked",
+        "clicked": "Turns",
         "after": 6,
-        "restored": 15
+        "restored": 6,
+        "restoreControl": "no control"
       },
       "calls": {
-        "clicked": "clicked",
-        "after": 15,
-        "restored": 15
+        "clicked": "Calls",
+        "after": 6,
+        "restored": 6,
+        "restoreControl": "no control"
       }
     },
     "search": {
-      "base": 15,
+      "base": 6,
       "focused": "focused",
       "filtered": 4,
-      "typedValue": "not-a-real-term-xyz",
-      "cleared": 15
+      "typedValue": "bash",
+      "cleared": 6,
+      "evidence": {
+        "marks": [],
+        "activeDescendant": null,
+        "scrollTop": null
+      }
     },
     "sidebar": 352
   }
