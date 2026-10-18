@@ -43,7 +43,11 @@ function startServer(label, options = {}) {
       const endpoint = options.steps !== undefined ? 'scripted' : 'double'
       const child = spawn(
         process.execPath,
-        [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--endpoint', endpoint, '--session-root', join(home, 'sessions')],
+        /**
+         * `--sandbox-root` confines the scripted write to this check's fixture: the refusal test runs a real
+         * `write_file`, and a check that let it land in the checkout would leave a file behind.
+         */
+        [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--endpoint', endpoint, '--session-root', join(home, 'sessions'), '--sandbox-root', work],
         { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
