@@ -1,7 +1,7 @@
 ---
 title: Verifier 9 — Web UI
-version: 1.0.0
-description: a Web UI on localhost, on a documented default port.
+version: 1.1.0
+description: a Web UI on localhost, on a documented default port, whose access-mode control is a session-scoped permission selector.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
 ---
@@ -34,6 +34,9 @@ doubles. Nothing here needs a display, so it runs unattended.
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
   extension, and a file's own script tags shown rather than obeyed.
+- [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
+  label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
+  gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.
 - [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's two workspace controls: registering
   a folder over the API the button posts to, the refusals that keep the controls honest, the split
   between a chosen root and one adopted because a session ran in it, and a browser clicking both

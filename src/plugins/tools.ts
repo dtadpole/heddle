@@ -38,10 +38,10 @@ export default class ToolsPlugin extends ToolRegistry {
     bashTimeoutMs: Schema.number().default(30_000),
   })
 
-  static readonly inject = ['approvals', 'sandbox']
+  static readonly inject = ['approvals', 'sandbox', 'session']
 
   constructor(ctx: import('@deepseek-ai/cordis').Context, config: { allow?: readonly string[]; includeBuiltins?: boolean; bashTimeoutMs?: number } = {}) {
-    super(ctx, ctx.approvals, ctx.sandbox)
+    super(ctx, ctx.approvals, ctx.sandbox, ctx.session)
     /** Tools the configuration named and nothing registered, reported once the tree is loaded. */
     const cfgProblems: string[] = []
 

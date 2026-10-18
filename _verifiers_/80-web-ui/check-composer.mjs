@@ -479,11 +479,15 @@ test('the access chip reports the server\u2019s sandbox mode', async (context) =
      * The mode arrives from `/api/status` after the page boots, so the chip's *text* is what is awaited — the
      * element itself exists before that answer does.
      */
-    await browser.waitFor('document.getElementById("access").textContent !== "Access"', 10_000)
+    /**
+     * The chip is a control now, so its `textContent` carries formatting whitespace around the glyph, label and
+     * chevron; the **label** is the mode's name, and that is what the page fills in after `/api/status` answers.
+     */
+    await browser.waitFor('(document.getElementById("access-label")?.textContent ?? "") !== "Access"', 10_000)
     const chip = JSON.parse(
-      await browser.evaluate('JSON.stringify({ text: document.getElementById("access").textContent, title: document.getElementById("access").title })'),
+      await browser.evaluate('JSON.stringify({ text: document.getElementById("access-label")?.textContent ?? "", title: document.getElementById("access").title })'),
     )
-    assert.match(chip.text, /^(Read only|Workspace write|Full access)$/, `the chip names the mode (${chip.text})`)
+    assert.match(chip.text, /^(Read Only|Workspace Write|Full access)$/, `the chip names the mode (${chip.text})`)
     assert.match(chip.title, /sandbox mode/, 'and says where the name comes from')
   } finally {
     browser.close()

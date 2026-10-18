@@ -41,7 +41,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     run: async (args, context): Promise<ToolResult> => {
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'write_file needs a path' } }
-      const target = sandbox.assertWritable(path)
+      const target = sandbox.assertWritable(path, context.mode)
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
@@ -61,10 +61,10 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         additionalProperties: false,
       },
     },
-    run: async (args): Promise<ToolResult> => {
+    run: async (args, context): Promise<ToolResult> => {
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
-      const target = sandbox.assertReadable(path)
+      const target = sandbox.assertReadable(path, context.mode)
       const text = readFileSync(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
     },
@@ -80,8 +80,8 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         additionalProperties: false,
       },
     },
-    run: async (args): Promise<ToolResult> => {
-      const target = sandbox.assertReadable(String(args.path ?? '.'))
+    run: async (args, context): Promise<ToolResult> => {
+      const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode)
       const entries = readdirSync(target, { withFileTypes: true })
         .sort((left, right) => left.name.localeCompare(right.name))
         .map((entry) => {
@@ -96,7 +96,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     spec: {
       name: 'bash',
       description:
-        'Run a shell command in the workspace and return its combined output. It runs with the workspace as its working directory; the sandbox governs the paths the harness itself writes, not what a command does.',
+        'Run a shell command in the workspace and return its combined output. It runs with the workspace as its working directory; the sandbox governs the paths the harness itself writes, not what a command does. A read-only session refuses the shell entirely, because an unconfined shell could write outside those paths.',
       parameters: {
         type: 'object',
         properties: {
@@ -110,6 +110,25 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
+      /**
+       * A read-only session refuses the shell.
+       *
+       * The refusal is not an accident of this tool's implementation: the sandbox governs the paths **the
+       * harness itself writes**, and a shell's writes to the filesystem are outside it. A `read-only` mode
+       * that still started a shell would therefore be a promise the harness cannot keep, and "no file
+       * effects" has to mean none. The alternative — an OS-level confinement — is a different, much larger
+       * mechanism, and the module's own doc says this one is not that.
+       */
+      if (context.mode === 'read-only') {
+        return {
+          output: '',
+          error: {
+            code: 'SANDBOX',
+            message:
+              "the session is read-only, so the shell is refused: heddle's sandbox governs its own file tools, and a shell could write outside them",
+          },
+        }
+      }
       // The working directory is the workspace, and that is the only confinement
       // claimed here: this is the harness's own shell, not an OS-level seccomp
       // boundary, and the description says so rather than implying more.

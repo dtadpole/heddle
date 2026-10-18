@@ -58,11 +58,16 @@ test('a team session renders its roster, board and mailbox; a session with no te
   const { SessionStore } = await import('../../dist/session/store.js')
   const sessions = new SessionStore(root)
   try {
+    /**
+     * A session id is `session-<uuid>` — the API refuses anything else before it reaches the store, so the
+     * fixture's ids are shaped like real ones. Measured: the crafted `session-view-…` ids made the session
+     * route answer 400, and the page then reported "No session" and an empty roster.
+     */
     // The teammate first, the Lead last, so the page's newest-session selection lands on the team's session.
-    const member = sessions.create({ id: 'session-view-member', cwd: work, parentSession: 'session-view-lead', origin: 'subagent', delegationDepth: 1, teamId: 'session-view-lead' })
+    const member = sessions.create({ id: 'session-22222222-2222-4222-8222-222222222222', cwd: work, parentSession: 'session-11111111-1111-4111-8111-111111111111', origin: 'subagent', delegationDepth: 1, teamId: 'session-11111111-1111-4111-8111-111111111111' })
     sessions.message(member, { role: 'user', content: [{ type: 'text', text: 'the spawn prompt' }] })
     sessions.append(member, { type: 'assistant/completed', text: 'member done' })
-    const lead = sessions.create({ id: 'session-view-lead', cwd: work, endpoint: 'scripted', model: 'scripted' })
+    const lead = sessions.create({ id: 'session-11111111-1111-4111-8111-111111111111', cwd: work, endpoint: 'scripted', model: 'scripted' })
     const version = 2
     const teamId = lead.id
     sessions.append(lead, { type: 'team/member', version, teamId, member: { id: member.id, name: 'alpha', description: 'the teammate', context: 'fresh', phase: 'provisioning' } })
@@ -83,8 +88,8 @@ test('a team session renders its roster, board and mailbox; a session with no te
       await browser.evaluate(`localStorage.setItem('heddle.tree.grouping.v1', 'list')`)
       await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(work)} }) })`)
       await browser.goto(url)
-      await browser.waitFor('document.querySelector(\'li[data-session-id="session-view-lead"]\') !== null', 15_000)
-      await browser.evaluate(`(document.querySelector('li[data-session-id="session-view-lead"] .row') || document.querySelector('li[data-session-id="session-view-lead"]')).click()`)
+      await browser.waitFor('document.querySelector(\'li[data-session-id="session-11111111-1111-4111-8111-111111111111"]\') !== null', 15_000)
+      await browser.evaluate(`(document.querySelector('li[data-session-id="session-11111111-1111-4111-8111-111111111111"] .row') || document.querySelector('li[data-session-id="session-11111111-1111-4111-8111-111111111111"]')).click()`)
       await browser.waitFor('document.getElementById("team-panel") !== null && document.getElementById("team-panel").hidden === false', 20_000)
       const view = JSON.parse(
         await browser.evaluate(`JSON.stringify({

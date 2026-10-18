@@ -8,7 +8,7 @@ import { after, test } from 'node:test'
 import { foldGoal, GoalError, GoalService, type GoalView } from '../src/goal/service.ts'
 import { goalTools } from '../src/goal/tool.ts'
 import { SessionStore } from '../src/session/store.ts'
-import type { ToolContext } from '../src/tools/service.ts'
+import type { ToolContext, ToolRunContext } from '../src/tools/service.ts'
 
 /**
  * Goal management: the fold, the transition table, and the tool the model uses.
@@ -191,7 +191,7 @@ test('the model cannot resume a goal a person paused', async () => {
   assert.ok(tool !== undefined)
   const result = await tool.run(
     { goal_id: paused.id, revision: paused.revision, action: 'resume' },
-    { cwd: root, session: handle } as ToolContext,
+    { cwd: root, session: handle, mode: 'workspace-write' } as ToolRunContext,
   )
   assert.equal(result.error?.code, 'GOAL_TOOL_RESUME_PAUSED')
 })
@@ -203,14 +203,14 @@ test('the model creates a goal through the tool, and reads it back', async () =>
   const get = tools.find((definition) => definition.spec.name === 'get_goal')
   assert.ok(create !== undefined && get !== undefined)
 
-  const created = await create.run({ objective: 'finish the goal feature', max_goal_rounds: 6 }, { cwd: root, session: handle } as ToolContext)
+  const created = await create.run({ objective: 'finish the goal feature', max_goal_rounds: 6 }, { cwd: root, session: handle, mode: 'workspace-write' } as ToolRunContext)
   assert.equal(created.error, undefined)
   const view = JSON.parse(created.output) as GoalView
   assert.equal(view.phase, 'active')
   assert.equal(view.maxGoalRounds, 6)
   assert.equal(view.activation, 'armed')
 
-  const read = await get.run({}, { cwd: root, session: handle } as ToolContext)
+  const read = await get.run({}, { cwd: root, session: handle, mode: 'workspace-write' } as ToolRunContext)
   assert.equal((JSON.parse(read.output) as GoalView).id, view.id)
 })
 
@@ -218,7 +218,7 @@ test('a goal tool call with no session is refused rather than guessed', async ()
   const { goals } = await service()
   const tool = goalTools(goals).find((definition) => definition.spec.name === 'create_goal')
   assert.ok(tool !== undefined)
-  const result = await tool.run({ objective: 'x' }, { cwd: root } as ToolContext)
+  const result = await tool.run({ objective: 'x' }, { cwd: root, mode: 'workspace-write' } as ToolRunContext)
   assert.equal(result.error?.code, 'GOAL_TOOL_NO_SESSION')
 })
 
