@@ -590,6 +590,68 @@
    * folds the list at four rows and labels the toggle "All {count} files".
    */
   /**
+   * **The running row**: DSH's `RunningStatus` (`dsh-client-ui-chat`), with heddle's own verb.
+   *
+   * Measured from its component and module CSS: a `.runningDivider` of `width:100%`, **0.5px** height,
+   * `color-mix(border-l1 75%, border-l2)`, `margin: 8px 0 10px`, shown only when the row follows non-user content;
+   * an inline-flex `.runningContent` with a 6px gap holding a 14×14 brand mark and a label; the label is
+   * `Deep diving` before the start time is known and `Deep diving for {compact duration} ···` on a 1s clock
+   * (`LIVE_RUN_CLOCK_INTERVAL_MS = 1000`), 12px on 22px with `font-variant-numeric: tabular-nums`, in the
+   * deep-diving blue; a visually hidden `role=status aria-live=polite` span announces the phrase and the visible
+   * ticks stay unannounced; reduced motion keeps a still label. The verb here is **Weaving**, because a heddle is
+   * the loom's warp-lifting part and a harness that weaves sessions is what this product is.
+   */
+  .chat-running {
+    display: flex; flex-direction: column; align-items: flex-start;
+    color: var(--accent);
+    font-size: 12px; line-height: 22px;
+    --chat-running-shimmer: color-mix(in oklab, var(--accent) 55%, var(--chat-text));
+  }
+  .chat-running .divider {
+    display: none; width: 100%; height: .5px; margin: 8px 0 10px;
+    background: color-mix(in oklab, var(--line) 75%, var(--text-3));
+    pointer-events: none;
+  }
+  .chat-running[data-divided='true'] .divider { display: block; }
+  .chat-running .content { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+  .chat-running .glyph { width: 14px; height: 14px; flex: none; display: inline-flex; }
+  .chat-running .glyph svg { width: 14px; height: 14px; display: block; }
+  .chat-running .label {
+    min-width: 0; font-variant-numeric: tabular-nums;
+    /**
+     * The same sweep as the reference's `TextShimmer`: the tint travels under the glyphs (a text clip), at its
+     * measured 105°, 40–60% band, 1.5s, 0.3s delay and `steps(48, end)`.
+     */
+    background-image: linear-gradient(
+      105deg,
+      currentColor 0%,
+      currentColor 42%,
+      var(--chat-running-shimmer) 50%,
+      currentColor 58%,
+      currentColor 100%
+    );
+    background-size: 260% 100%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    animation: heddle-row-shimmer 1.5s steps(48, end) 0.3s infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .chat-running .label {
+      animation: none;
+      background: none;
+      color: inherit;
+      -webkit-text-fill-color: currentColor;
+    }
+  }
+  .chat-running .visually-hidden {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /**
    * A turn that stopped early says why. It is the loop's own sentence (the round limit is the usual one), shown in
    * the muted ink under the answer so an empty or cut answer never reads as a silent failure.
    */
@@ -2821,7 +2883,7 @@ function add(kind, text, merge = true, label, tool) {
    */
   const hasMeta = tool !== undefined && ((Array.isArray(tool.ended) && tool.ended.length > 0) || (Array.isArray(tool.files) && tool.files.length > 0) || (Array.isArray(tool.attachments) && tool.attachments.length > 0))
   if ((text === '' || text === undefined) && !hasMeta) return
-  const last = log.lastElementChild
+  const last = lastTurnRow()
   // The merge flag is what the live stream wants: deltas of one answer belong in one block. Passing
   // false is what history wants, where two consecutive entries of the same kind are two turns.
   //
@@ -2891,6 +2953,7 @@ function add(kind, text, merge = true, label, tool) {
     node.textContent = text
   }
   log.append(node)
+  keepRunningLast()
   log.scrollTop = log.scrollHeight
   /** A turn on screen is content: the invitation, if it is showing, has been answered. */
   paintEmptyState()
@@ -3263,6 +3326,98 @@ async function renderSettledAnswers() {
  * `error` (its `ToolRow` state). A tool that is still marked running when the turn ends answered nothing, and
  * `ok` is the honest word for it only because the loop records a result for every call it ran.
  */
+/**
+ * The last transcript row, skipping the running row.
+ *
+ * The running row sits at the end of the log (DSH mounts its status after the content), so the merge decisions and
+ * the "append the stop notice to the last answer" step must look past it rather than at `log.lastElementChild`.
+ */
+function lastTurnRow() {
+  for (let node = log.lastElementChild; node !== null; node = node.previousElementSibling) {
+    if (!node.hasAttribute('data-chat-running')) return node
+  }
+  return null
+}
+
+/** Keep the running row after every row that arrives while a turn runs: it is the *last* thing, by definition. */
+function keepRunningLast() {
+  const running = log.querySelector('[data-chat-running]')
+  if (running !== null && running !== log.lastElementChild) log.append(running)
+}
+
+/** DSH's `formatRunDuration`: compact units, hours and minutes only once the run reaches them. */
+function formatRunDuration(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor(total / 60) % 60
+  const seconds = total % 60
+  return `${hours > 0 ? `${hours}h` : ''}${total >= 60 ? `${minutes}m` : ''}${seconds}s`
+}
+
+let runStartedAt = null
+let runClock = null
+let runRow = null
+
+/**
+ * The running row, rebuilt from the state around it: shown while a turn runs, removed when it does not.
+ *
+ * Idempotent on purpose — every state change calls this, so a second call must move the same row and restart no
+ * clock. Its label starts as `Weaving` and becomes `Weaving for {duration} ···` once a second has passed, exactly
+ * the reference's two phrases.
+ */
+function refreshRunningStatus() {
+  const running = sessionRunning() || directTurnPending > 0
+  if (!running) {
+    if (runClock !== null) {
+      clearInterval(runClock)
+      runClock = null
+    }
+    if (runRow !== null) {
+      runRow.remove()
+      runRow = null
+    }
+    runStartedAt = null
+    return
+  }
+  if (runStartedAt === null) runStartedAt = Date.now()
+  if (runRow === null || !runRow.isConnected) {
+    runRow = document.createElement('div')
+    runRow.className = 'chat-running'
+    runRow.setAttribute('data-chat-running', 'true')
+    const status = document.createElement('span')
+    status.className = 'visually-hidden'
+    status.setAttribute('role', 'status')
+    status.setAttribute('aria-live', 'polite')
+    status.setAttribute('aria-atomic', 'true')
+    status.textContent = 'Weaving'
+    const divider = document.createElement('span')
+    divider.className = 'divider'
+    divider.setAttribute('aria-hidden', 'true')
+    const content = document.createElement('span')
+    content.className = 'content'
+    const glyph = document.createElement('span')
+    glyph.className = 'glyph'
+    glyph.setAttribute('aria-hidden', 'true')
+    glyph.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5v11M8 2.5v11M12 2.5v11" opacity=".45"/><path d="M2.5 8h11"/><path d="M6.2 6.3 8 4.8l1.8 1.5v3.4L8 11.2 6.2 9.7Z"/></svg>'
+    const label = document.createElement('span')
+    label.className = 'label'
+    label.textContent = 'Weaving'
+    content.append(glyph, label)
+    runRow.append(status, divider, content)
+    runClock = setInterval(refreshRunningStatus, 1000)
+  }
+  const previous = runRow.previousElementSibling
+  runRow.dataset.divided = String(previous !== null && previous.dataset.kind !== 'user')
+  const label = runRow.querySelector('.label')
+  if (label !== null) {
+    /** The reference clamps the first reading to a second: its `Math.max(1e3, now - startTime)`. */
+    label.textContent = `Weaving for ${formatRunDuration(runStartedAt === null ? 1000 : Math.max(1000, Date.now() - runStartedAt))} ···`
+  }
+  if (runRow !== log.lastElementChild) log.append(runRow)
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48
+  if (atBottom) log.scrollTop = log.scrollHeight
+}
+
 function settleChat() {
   for (const node of log.querySelectorAll('.turn[data-state="running"]')) {
     node.dataset.state = node.dataset.kind === 'tool' ? 'ok' : 'settled'
@@ -3408,7 +3563,7 @@ function showToolError(node, result) {
 }
 
 function addBlock(kind, text, merge, label, tool) {
-  const last = log.lastElementChild
+  const last = lastTurnRow()
   if (merge && last && last.dataset.kind === kind) {
     const body = last.querySelector('[data-body]')
     body.textContent += text
@@ -3463,6 +3618,7 @@ function addBlock(kind, text, merge, label, tool) {
   node.append(line, body)
   if (kind === 'tool' && tool !== undefined && typeof tool.result === 'string') showToolError(node, tool.result)
   log.append(node)
+  keepRunningLast()
   log.scrollTop = log.scrollHeight
 }
 
@@ -5899,13 +6055,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * reason travels on the completed event, so a reload shows it again from the transcript.
          */
         if (Array.isArray(payload.ended) && payload.ended.length > 0) {
-          const last = log.lastElementChild
+          const last = lastTurnRow()
           if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
           else log.append(turnNotice(payload.ended))
         }
         /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
         settleReasoning()
         settleChat()
+        refreshRunningStatus()
         void renderSettledAnswers()
         /**
          * The turn may have created **this folder's** session, so both the tree and the list are
@@ -5926,6 +6083,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         stopRequested = false
         stopButton.disabled = false
         settleReasoning()
+        refreshRunningStatus()
         /** A question the stopped turn was waiting on has no answer to give now. */
         hideApproval()
         settleChat()
@@ -6023,6 +6181,7 @@ function renderComposerState() {
     ? 'Cmd/Ctrl+Enter steers all queued messages'
     : 'Message or run a task, / commands, @ files or sessions'
   updateSendDisabled()
+  refreshRunningStatus()
   updateStatusBar()
 }
 

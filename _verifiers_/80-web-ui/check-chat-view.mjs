@@ -1589,3 +1589,77 @@ test('a thinking row shimmers only while it is thinking, and turns solid when th
     await server.close()
   }
 })
+
+test('a running turn says Weaving, and the row leaves with the turn', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's `RunningStatus` (`dsh-client-ui-chat`) is the reference: while the session runs, the chat ends with a row
+   * whose divider is 100% wide and 0.5px tall (`margin: 8px 0 10px`, shown only after non-user content), whose
+   * content is an inline-flex pair at a 6px gap — a 14×14 brand mark and a label at 12px/22px with tabular numerals
+   * and the text shimmer — and whose hidden `role=status aria-live=polite` element announces the phrase while the
+   * visible ticks stay unannounced. Its label reads `Deep diving` and then `Deep diving for {duration} ···` on a 1s
+   * clock. Heddle's verb is **Weaving**: a heddle is the loom's warp-lifting part, and a harness that weaves sessions
+   * is what this product is. The row arrives with the turn and leaves with it.
+   */
+  const steps = () => [
+    ...Array.from({ length: 12 }, (_, index) => ({
+      reasoning: `thinking ${index + 1}`,
+      toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } },
+    })),
+    { text: 'all done' },
+  ]
+  const server = await startServer('weaving-row', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.equal(await browser.evaluate('document.querySelectorAll("[data-chat-running]").length'), 0, 'no running row while the session is idle')
+    await sendMessage(browser, 'weave something')
+    await browser.waitFor('document.querySelector("[data-chat-running]") !== null', 20_000)
+    /** The clock's first reading is clamped to a second, the reference's `Math.max(1000, now - startTime)`. */
+    const row = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const row = document.querySelector('[data-chat-running]')
+        const label = row.querySelector('.label')
+        const divider = row.querySelector('.divider')
+        const glyph = row.querySelector('.glyph')
+        const status = row.querySelector('[role="status"]')
+        return {
+          label: label.textContent,
+          status: status === null ? null : { text: status.textContent, live: status.getAttribute('aria-live'), atomic: status.getAttribute('aria-atomic') },
+          animation: getComputedStyle(label).animationName,
+          glyph: getComputedStyle(glyph).width + '×' + getComputedStyle(glyph).height,
+          font: getComputedStyle(label).fontSize + '/' + getComputedStyle(row).lineHeight,
+          dividerHeight: getComputedStyle(divider).height,
+          dividerMargin: getComputedStyle(divider).marginTop + ' ' + getComputedStyle(divider).marginBottom,
+        }
+      })())`),
+    )
+    assert.match(row.label, /^Weaving for \d+s ···$/, `the row states the working verb and its duration (${row.label})`)
+    assert.ok(row.status !== null && row.status.text === 'Weaving', `the hidden status announces the verb (${JSON.stringify(row.status)})`)
+    assert.equal(row.status.live, 'polite', 'politely')
+    assert.equal(row.status.atomic, 'true', 'atomically')
+    assert.equal(row.animation, 'heddle-row-shimmer', 'the label carries the text shimmer, as the reference does')
+    assert.equal(row.glyph, '14px×14px', 'the mark is the reference’s 14px box')
+    assert.equal(row.font, '12px/22px', 'the label is 12px on the reference’s 22px line')
+    assert.equal(row.dividerHeight, '0.5px', 'the divider is the reference’s half-pixel rule')
+    assert.equal(row.dividerMargin, '8px 10px', 'with its 8px over 10px margins')
+    /** The clock ticks: the duration grows while the turn runs. */
+    assert.ok(
+      await browser.waitFor('(document.querySelector("[data-chat-running] .label")?.textContent ?? "").includes("for 2s")', 15_000),
+      'the duration ticks once a second',
+    )
+    /** Once a process row precedes it, the divider is drawn (the reference hides it only after a user row). */
+    assert.ok(
+      await browser.waitFor('document.querySelector("[data-chat-running]") !== null && getComputedStyle(document.querySelector("[data-chat-running] .divider")).display !== "none"', 15_000),
+      'the divider is drawn under the turn’s process rows',
+    )
+    await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000)
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("all done")', 15_000), 'and the answer arrives after the row is gone')
+    assert.equal(await browser.evaluate('document.querySelectorAll("[data-chat-running]").length'), 0, 'the running row leaves with the turn')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
