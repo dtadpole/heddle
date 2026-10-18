@@ -166,6 +166,9 @@ Then, after the change:
   contains the chosen bytes. Screenshot: [`_context_/add-file/cycle-1-heddle-after.png`](_context_/add-file/cycle-1-heddle-after.png).
 - Browser-contract screenshot: [`_context_/add-file/cycle-1-add-file.png`](_context_/add-file/cycle-1-add-file.png).
 
+**Landed:** commit `a6d2d38` on `main`, and the deployed page at `http://127.0.0.1:8082/` was observed
+doing this gesture end to end — see [Landing and deployment](#landing-and-deployment).
+
 ### What verification found, and the fix
 
 The first run of the sandbox unit test failed with a real denial: the stored path under the temp
@@ -234,6 +237,9 @@ Screenshots: before the fix [`_context_/add-file/cycle-2-before.png`](_context_/
 (the descended menu with no `File`), after it
 [`_context_/add-file/cycle-2-file-inside-folder.png`](_context_/add-file/cycle-2-file-inside-folder.png).
 
+**Landed:** the same landing commit `a6d2d38` carries this fix; the deployed page at 8082 serves it
+(see [Landing and deployment](#landing-and-deployment)).
+
 ## Cycle 3 — measured, no fix row, stopped
 
 Re-measured after cycle 2, with a file chosen **from inside a folder**:
@@ -259,6 +265,9 @@ than inventing work:
 Screenshots: [`_context_/add-file/cycle-3-menu-in-folder.png`](_context_/add-file/cycle-3-menu-in-folder.png),
 [`_context_/add-file/cycle-3-draft.png`](_context_/add-file/cycle-3-draft.png).
 
+**Landed:** commit `a6d2d38`; `_verifiers_/96-deployment` reports the live service at 3082 running the
+deployment checkout's `dist/cli.js` and 8082 serving that checkout's built page byte for byte.
+
 ## Cycle log
 
 | Cycle | Reference measured | Target measured | Fix rows | Outcome |
@@ -275,16 +284,56 @@ Screenshots: [`_context_/add-file/cycle-3-menu-in-folder.png`](_context_/add-fil
 - The screenshot per cycle is evidence for a reader, not the assertion: the contract asserts the
   draft path, the stored bytes and the menu states.
 
-## Branch and commits
+## Landing and deployment
 
-Work is on `feat/add-file` in `/Users/zhenc/heddle-addfile`, based on `fbfb1b1` (the commit the
-worktree was created from). The main checkout is **dirty** and has also advanced while this loop ran
-(its HEAD moved past the base with other loops' commits), so nothing was merged, rebased or pushed:
-the branch is the checkpoint, and the base commit is stated here so a later landing knows what it is
-rebasing.
+The owner's rule of 2026-10-17 (full-loop-goal v1.4, [`_conventions_/landed-and-deployed/`](../_conventions_/landed-and-deployed/INDEX.md)):
+a green branch is a checkpoint, and done means **merged into main and deployed**, with the deployment
+observed at the address the owner uses.
 
-| Commit | What |
-|---|---|
-| `feat(web): the + menu adds a file from the computer as a readable path` | the capability, its unit tests and the browser contract |
-| `fix(verifiers): the model switcher check isolates its home and waits for its own answer` | the full sweep's pre-existing red check, fixed so the verdict is about the code |
-| `feat(web): the File action is offered at every level of the attach menu` | cycle 2's fix and its failing-first check |
+### The landing
+
+`main` was being written by other sessions throughout this loop, so landing could not be a plain
+fast-forward: it would have overwritten their working copies. The change was landed as one commit whose
+tree is the branch's tree, with the three files another session also edits
+(`src/server/page.html`, `_verifiers_/80-web-ui/check-composer.mjs`, `test/page-contract.test.ts`) set to
+a three-way merge of **main's committed content, their uncommitted working copy, and this change** — so
+their hunks stayed uncommitted and unstaged by this loop, and the landing commit contains only this
+change's hunks. Their staged entries for other files were not touched.
+
+- **Landed commit:** `a6d2d38` — `feat(web): the + menu adds a file from the computer as a readable path`,
+  on `main` (parent `5a44f08`).
+- **Branch:** `feat/add-file` in `/Users/zhenc/heddle-addfile` remains the checkpoint; it was rebased onto
+  `5a44f08` before landing (reconciling the sandbox's module rewrite and the model-seat check rewrite),
+  its suites were green there, and it carries the per-cycle commits. The branch's verifier-fix commit was
+  dropped during rebase because main's newer `check-model-switcher.mjs` had already replaced that check.
+- **Main and origin:** `origin/main` reached `ba4f991` with `a6d2d38` in its history (another session's
+  push carried the landed commit), so main and origin agree.
+
+### The deployment
+
+The deployment is a separate checkout, `/Users/zhenc/heddle-deploy`, whose agent is
+`~/Library/LaunchAgents/com.dtadpole.heddle-web.plist`; the verifier reads that agent rather than assuming
+a path. It was one commit behind, so it was pulled to `ba4f991` (clean, committed `main`), built, and the
+agent restarted. The process behind the owner's port is now the deployment checkout's own build:
+
+- **Process:** PID 97134, started 21:26 local, command
+  `/Users/zhenc/.volta/tools/image/node/24.19.0/bin/node /Users/zhenc/heddle-deploy/dist/cli.js web --host 127.0.0.1 --port 3082`.
+- **`_verifiers_/96-deployment`:** 3 of 3 checks pass — the live service runs the deployment checkout's
+  cli, the page at `http://127.0.0.1:8082/` is that checkout's built page byte for byte, and the
+  deployment checkout contains only committed `main` (`ba4f991`).
+- **Observed end to end at the deployed URL:** `+` opened the menu, its `File` entry asked for the file
+  picker once and closed the menu, and choosing a real file put
+  `/Users/zhenc/.heddle/uploads/2026-10-18T04-27-03-497Z-landed-sample.md` in the draft; the stored file
+  exists and its bytes are the chosen file's. Screenshot:
+  [`_context_/add-file/landed-8082.png`](../_context_/add-file/landed-8082.png).
+
+The two conditions of the rule are therefore met: the change is on `main` (and on `origin/main`), and the
+owner's address serves that build with the behaviour observed live.
+
+## Commits
+
+| Where | Commit | What |
+|---|---|---|
+| `main` | `a6d2d38` | the landed change: Add File, its unit tests, the browser contract, this document and its screenshots |
+| `feat/add-file` | branch tip before landing | the per-cycle commits: the capability, cycle 2's per-level fix, and this document's first version |
+| dropped | `fix(verifiers): the model switcher check isolates its home and waits for its own answer` | superseded by main's newer model-seat check; not re-applied |

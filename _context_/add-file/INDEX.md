@@ -33,3 +33,4 @@ surface the measurements were taken with.
 | [`cycle-2-file-inside-folder.png`](cycle-2-file-inside-folder.png) | after the fix: `File` offered in the same descended menu |
 | [`cycle-3-menu-in-folder.png`](cycle-3-menu-in-folder.png) | the final state at the folder level: `File` is offered above `↑ up` |
 | [`cycle-3-draft.png`](cycle-3-draft.png) | the draft after a file was chosen from that level, holding the stored path the agent can read |
+| [`landed-8082.png`](landed-8082.png) | the deployed page at `http://127.0.0.1:8082/` after the change was landed and served: the draft holds the stored path of a real file chosen through the `+` menu |
