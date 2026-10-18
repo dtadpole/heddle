@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The access-mode chip as a **control**, judged in a browser.
@@ -30,15 +30,20 @@ function startServer(label, options = {}) {
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const home = isolatedHome(`access-${label}`)
       const work = fixtureDir(`access-${label}-work`)
-      const double = await chatDouble({
-        content: 'the answer',
-        reasoning: 'thinking',
-        holdOpenMs: options.holdOpenMs ?? 300,
-      })
-      const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
+      /**
+       * Two server shapes: a streaming double for the states a turn has to be **running** for, and a
+       * scripted endpoint when the check needs a specific tool call to be refused. Both are local and free.
+       */
+      const double = options.steps === undefined
+        ? await chatDouble({ content: 'the answer', reasoning: 'thinking', holdOpenMs: options.holdOpenMs ?? 300 })
+        : null
+      const config = options.steps !== undefined
+        ? scriptedConfig({ home, steps: options.steps }).config
+        : httpConfig({ home, baseUrl: double.baseUrl, stream: true })
+      const endpoint = options.steps !== undefined ? 'scripted' : 'double'
       const child = spawn(
         process.execPath,
-        [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double', '--session-root', join(home, 'sessions')],
+        [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--endpoint', endpoint, '--session-root', join(home, 'sessions')],
         { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
@@ -55,7 +60,7 @@ function startServer(label, options = {}) {
             output: () => output,
             close: async () => {
               child.kill('SIGKILL')
-              await double.close()
+              if (double !== null) await double.close()
               removeDir(home)
               removeDir(work)
             },
@@ -105,14 +110,19 @@ function sseBlocks(text) {
   return blocks
 }
 
-/** Start one session through the API, so the page opens onto a conversation whose chip is enabled. */
-async function startSession(server) {
-  const response = await request(server, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'open a session' }) })
-  assert.equal(response.status, 200, 'the session-creating turn was accepted')
+/** Post one turn and answer with the session it ran in. */
+async function postTurn(server, body) {
+  const response = await request(server, '/api/turn', { method: 'POST', body: JSON.stringify(body) })
+  assert.equal(response.status, 200, 'the turn was accepted')
   const text = await response.text()
   const session = sseBlocks(text).find((block) => block.name === 'session' && typeof block.data.session === 'string')?.data.session
   assert.ok(typeof session === 'string' && session.length > 0, 'the turn named its session')
   return session
+}
+
+/** Start one session through the API, so the page opens onto a conversation whose chip is enabled. */
+function startSession(server) {
+  return postTurn(server, { prompt: 'open a session' })
 }
 
 /** A session's mode as the API reports it — the fact the page must be showing. */
@@ -356,6 +366,60 @@ test('full access needs the risk gate, and the server refuses an unconfirmed esc
     })
     assert.ok(unconfirmed.status === 400 || unconfirmed.status === 409, `the server refuses the unconfirmed escalation (${unconfirmed.status})`)
     assert.equal(await sessionMode(server, session), 'workspace-write', 'and the mode stayed put')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a refused write is visible on the closed row, and no UI action widens the session by itself', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The reference prints a failed tool as one red line a reader sees without opening anything, and a mode
+   * whose refusals are invisible until a click is a mode that reads as "it worked". So the refusal is judged
+   * where a person reads it: the **closed** tool row names the mode it was refused under, and the session's
+   * recorded mode is still the narrow one afterwards.
+   */
+  const server = await startServer('refusal', {
+    steps: [
+      { toolCall: { name: 'write_file', arguments: { path: 'refused.txt', content: 'x' } } },
+      { text: 'done' },
+    ],
+  })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const session = await startSession(server)
+    /** The owner narrows the session through the same API the chip uses, then the scripted write is refused. */
+    const narrowed = await request(server, `/api/sessions/${encodeURIComponent(session)}/permission`, {
+      method: 'POST',
+      body: JSON.stringify({ mode: 'read-only' }),
+    })
+    assert.equal(narrowed.status, 200, 'the session can be narrowed to read-only')
+    await postTurn(server, { session, prompt: 'try the write' })
+
+    await browser.goto(server.url)
+    assert.ok(
+      await browser.waitFor('document.querySelector(\'#log .turn.tool[data-state="error"]\') !== null', 20_000),
+      'the refused call is a failed tool row',
+    )
+    const row = JSON.parse(
+      await browser.evaluate(`(() => {
+        const tool = document.querySelector('#log .turn.tool[data-state="error"]')
+        return JSON.stringify({
+          state: tool.dataset.state,
+          summary: tool.querySelector('summary').textContent,
+          closed: tool.open === false,
+          result: tool.querySelector('[data-result]')?.textContent ?? '',
+          chip: document.getElementById('access-label').textContent,
+        })
+      })()`),
+    )
+    assert.match(row.summary, /Error:/, `the closed row carries the failure sentence (${row.summary})`)
+    assert.match(row.summary, /read-only/, 'and names the mode that refused it')
+    assert.equal(row.closed, true, 'without needing the row opened')
+    assert.match(row.result, /error \(SANDBOX\)/, 'the full result is still inside the row')
+    assert.equal(row.chip, 'Read only', 'the chip reports the session it is actually running under')
+    assert.equal(await sessionMode(server, session), 'read-only', 'and no turn or tool call widened it')
   } finally {
     browser.close()
     await server.close()
