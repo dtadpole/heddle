@@ -247,3 +247,21 @@ reading `8 turns 17 steps`, `267K tok · Cache hit 63%`, `2%`.
 Lesson for the skill: a loop that ends at "the suites are green" can still leave the owner looking at a
 different build; **deployment is the last assertion**, and it is a question of *which checkout the service
 runs*, not only whether `dist/` is fresh.
+
+### Deployment, second incident — the service was repointed again
+
+The first fix was overwritten within a minute: `com.dtadpole.heddle-web` was repointed back to
+`/Users/zhenc/heddle-model-selector` at 19:42 by another session that used the shared daemon for its own UI
+checks, so `8082` (a supervisord-managed transparent proxy fixed to `3082`) kept serving the worktree's build.
+A 3084 side-daemon experiment was tried and dropped: the documented architecture in
+`nexus/_projects_/dsh-web-ops/_tools_/heddle-web-gate/LOOP.md` is *one* heddle on 3082 behind a guarded 8082,
+and adding a second daemon behind a private proxy was a second truth.
+
+Restored again: the plist's `ProgramArguments` and `WorkingDirectory` point at `/Users/zhenc/heddle`, the
+service was booted out and bootstrapped (the running process now is `.../heddle/dist/cli.js`), and the served
+pages were checked at both ports — `3082` and `8082` each carry `data-stat-pill`. The owner's URL was verified
+directly: [heddle-stats-dock-8082.png](_context_/dsh-mechanisms/heddle-stats-dock-8082.png) is
+`http://localhost:8082/` with the dock reading `8 turns 17 steps · 267K tok · Cache hit 63%` (the context
+percent is honestly blank there because that session's endpoint declares no window; the claude-opus session at
+`3082` showed `2%`). The model-selector session was steered to run its own server on another port and to leave
+`3082`/`8082` alone.
