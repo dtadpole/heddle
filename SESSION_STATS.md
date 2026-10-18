@@ -448,9 +448,14 @@ visible on the deployed page, not only in a scripted check.
   `lastPromptTokens` over a declared or discovered window. The rate's blank cases were re-measured: a round
   with no reported tokens contributes to neither half, and a provider that reports nothing leaves the phrase
   empty (asserted in the contract's bare-server case).
-- **landing:** the change is on `main` (this session commits there directly), `dist/` rebuilt, the main
-  daemon restarted from `/Users/zhenc/heddle/dist/cli.js`, and the deployment asserted by
-  `_verifiers_/96-deployment`: the serving process is this checkout's cli and the page at 8082 is this
-  checkout's built page byte for byte. No worktree branch was left unmerged.
+- **landing:** the change was committed to `main` and pushed (`2e9e7dc`), and landed the way the committed
+  convention now requires: the **deployment checkout** `/Users/zhenc/heddle-deploy` — a clone that contains only
+  committed `main` — was fast-forwarded to that commit, built, and the launchd agent repointed to run its
+  `dist/cli.js` (the shared working checkout is never the deployment; another session's deploy work had already
+  moved the agent there, which `96-deployment` caught while this loop was still on the shared tree).
+  `_verifiers_/96-deployment` now passes **3/3**: the service runs the deployment checkout's cli, the page at
+  8082 is that build byte for byte, and the checkout is clean `main` at its tip. Live at
+  `http://localhost:8082/` the dock reads `7 turns 17 steps · 111 tok/s · 269K tok · Cache hit 75% · 2%`
+  after a reload.
 - **stop:** the full measurement yields no further fix row; the remaining difference (DSH's decode-only
   denominator) is recorded above with the measurement that forced the re-cut.
