@@ -150,6 +150,17 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### The pin's tail: a malformed path (2026-10-17)
+
+The solid pin showed its head but not its thin tail. The cause was in this page, not in the reference's artwork: the **needle
+path's `d` had been compacted by hand**, and the compaction broke each cubic command into its own `C` with a single coordinate
+pair — an invalid path that paints nothing. The body path happened to be all `L` commands, so only the tail vanished.
+
+Found by rendering the two paths **in separate colours** at 240px: the body painted, the needle was blank. The `d` is now copied
+verbatim from the reference (spaces included). Measured after the fix: the needle's box is 4.10 × 5.29 units and its bottom
+(14.47) reaches below the body's (12.74), so the tail sticks out and the icon reads as a pin. The check now asserts both paths
+paint and that the tail reaches below the body.
+
 ### The pin's ink and weight (2026-10-17)
 
 Two nits from the owner, both measured before and after.

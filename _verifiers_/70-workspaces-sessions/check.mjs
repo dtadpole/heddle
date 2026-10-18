@@ -3889,10 +3889,16 @@ test('a written session moves to the top of its folder, its age follows, and a r
         const pinnedRow = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li.dataset.pinned === 'true')
         const slot = pinnedRow.querySelector('.row-right > .pin-slot')
         const markerSvg = slot.querySelector('svg')
+        /** Both artwork paths are measured, because a malformed path paints nothing: the pin's thin tail disappeared that way once. */
+        const markerPaths = [...markerSvg.querySelectorAll('path')].map((path) => {
+          const box = path.getBBox()
+          return { w: Math.round(box.width * 100) / 100, h: Math.round(box.height * 100) / 100, bottom: Math.round((box.y + box.height) * 100) / 100, painted: getComputedStyle(path).fill !== 'none' }
+        })
         const marker = {
           color: getComputedStyle(slot).color,
           weight: getComputedStyle(markerSvg).strokeWidth,
-          filled: [...markerSvg.querySelectorAll('path')].filter((path) => getComputedStyle(path).fill !== 'none').length,
+          filled: markerPaths.filter((path) => path.painted).length,
+          paths: markerPaths,
         }
         pinnedRow.focus()
         await wait(150)
@@ -3916,6 +3922,16 @@ test('a written session moves to the top of its folder, its age follows, and a r
     assert.equal(ink.hovered.weight, ink.marker.weight, `and the same weight\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.filled, 2, `and stays solid\nsaw: ${JSON.stringify(ink)}`)
     assert.equal(ink.hovered.markerDisplay, 'none', 'with the marker swapped out, so one icon is drawn')
+    /**
+     * The artwork has a **head and a tail**: the needle path must paint (a non-zero box) and reach below the body. A cubic path
+     * whose commands were compacted into one coordinate pair each is invalid and paints nothing — measured, that is exactly why
+     * the pin's thin tail was missing while its head showed.
+     */
+    assert.equal(ink.marker.paths.length, 2, `the mark is the two-path pin artwork\nsaw: ${JSON.stringify(ink.marker)}`)
+    const [pinBody, pinNeedle] = ink.marker.paths
+    assert.ok(pinBody.w > 1 && pinBody.h > 1, `the pin's body paints\nsaw: ${JSON.stringify(pinBody)}`)
+    assert.ok(pinNeedle.w > 1 && pinNeedle.h > 1, `the pin's tail paints (a broken path paints nothing)\nsaw: ${JSON.stringify(pinNeedle)}`)
+    assert.ok(pinNeedle.bottom > pinBody.bottom, `and its tail reaches below the body, so the pin reads as a pin\nsaw: ${JSON.stringify(ink.marker.paths)}`)
     /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
     const glyphs = JSON.parse(
       await browser.evaluate(`(() => {

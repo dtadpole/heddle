@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="heddle-page" content="rail-sections/instant-swell" />
+<meta name="heddle-page" content="unbuilt" />
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Heddle</title>
 <!--
@@ -148,8 +148,8 @@
    * query stands, rather than filtered, so the answer is about names rather than about where they happen to live.
    */
   #search-results { display: flex; flex-direction: column; gap: .12rem; }
-  #search-results .hit { display: flex; align-items: baseline; gap: .4rem; width: 100%; text-align: left; padding: .3rem .4rem; font: inherit; color: inherit; background: none; border: 0; border-radius: .3rem; cursor: pointer; }
-  #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 10%, transparent); outline: none; }
+  #search-results .hit { display: flex; align-items: baseline; gap: .4rem; width: 100%; text-align: left; padding: .3rem .5rem; font: inherit; color: inherit; background: none; border: 0; border-radius: 12px; cursor: pointer; }
+  #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 8%, transparent); outline: none; }
   #search-results .hit-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
   #session-search { width: 100%; margin: 0 0 .5rem; padding: .3rem .45rem; font: inherit; font-size: .8rem; color: inherit; background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: .3rem; }
@@ -194,7 +194,12 @@
    * because a long row label belongs in its row, where it is ellipsised, not in a second scrollbar at the panel's edge.
    */
   #workspace-scroll > p,
-  #search-results { padding-inline: .75rem; }
+  /**
+   * The search list is the same **list of rows** as the tree, so it takes the same inset — measured from the
+   * reference: its filtered tree rows sit at 12→268 inside the same list, exactly where its tree rows do. The hits
+   * themselves use the row's radius and inner padding, so a hit's tint stops where a row's tint stops.
+   */
+  #search-results { padding-inline: 12px calc(12px - 5px); }
   #workspace-scroll {
     flex: 1 1 auto;
     min-height: 0;
