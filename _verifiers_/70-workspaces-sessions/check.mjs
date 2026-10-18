@@ -2516,6 +2516,22 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
     assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
 
+    /** **A session's glyph is a conversation**, not a folder: the reference's bubble artwork, distinct from the folder path. */
+    const glyphs = JSON.parse(
+      await browser.evaluate(`(() => {
+        const session = document.querySelector('#tree li[data-kind="session"] .icon svg path')
+        const folder = document.querySelector('#tree li[data-kind="workspace"] .icon svg path') ?? document.querySelector('#tree li[data-kind="type"] .icon svg path')
+        return JSON.stringify({
+          session: session === null ? null : (session.getAttribute('d') ?? '').slice(0, 16),
+          folder: folder === null ? null : (folder.getAttribute('d') ?? '').slice(0, 16),
+          sessionPaths: document.querySelectorAll('#tree li[data-kind="session"] .icon svg path').length,
+        })
+      })()`),
+    )
+    assert.equal(glyphs.session, 'M2.37091 11.2501', `a session row draws the reference bubble glyph\nsaw: ${JSON.stringify(glyphs)}`)
+    assert.notEqual(glyphs.folder, glyphs.session, 'and it is not the folder mark')
+    assert.ok(glyphs.sessionPaths > 0, 'the bubble is drawn once per session row')
+
     /** **A long name ellipsizes before the controls**, never underneath them. */
     assert.equal(reading.longNameRow.overlaps, false, `a long name stops before the controls\nsaw: ${JSON.stringify(reading.longNameRow)}`)
     assert.ok(reading.longNameRow.toolsLeft - reading.longNameRow.labelRight >= 0, 'with at least no overlap between them')
@@ -2984,24 +3000,35 @@ test('a running session says so before its name, and a workspace row offers the 
         const workspaceSlots = workspaceRow === null ? [] : [...workspaceRow.querySelectorAll('.row-tools > *')].map((child) => child.className)
 
         /**
-         * The running mark. The stream is what sets it in a live UI (model/request adds, turn/completed removes); the
-         * paint function is called here directly with the same set, because a scripted turn can finish faster than a
-         * check can look for the word.
+         * The running mark. The stream is what sets it in a live UI (model/request adds, turn/completed removes); the paint
+         * function is called here directly with the same set, because a scripted turn can finish faster than a check can look
+         * for it. The mark is the reference StateDot ongoing spinner, not a word.
          */
         const sessionLi = [...document.querySelectorAll('#tree li[data-kind="session"]')][0]
         const sessionRow = sessionLi.querySelector(':scope > .row')
-        const before = sessionRow.querySelector(':scope > .status')?.textContent ?? null
+        const before = sessionRow.querySelector(':scope > .status-dot') === null ? null : 'already there'
         runningSessions.add(${JSON.stringify(created.session)})
         paintRunningMarks(); await wait(200)
-        const painted = sessionRow.querySelector(':scope > .status')
+        const painted = sessionRow.querySelector(':scope > .status-dot')
+        const motion = painted === null ? null : painted.querySelector('.spinner-motion')
+        const arc = painted === null ? null : painted.querySelector('.spinner-arc')
+        const track = painted === null ? null : painted.querySelector('.spinner-track')
         const whileRunning = {
-          text: painted === null ? null : painted.textContent,
+          state: painted === null ? null : painted.dataset.state,
+          label: painted === null ? null : painted.getAttribute('aria-label'),
           beforeLabel: painted !== null && painted.nextElementSibling !== null && painted.nextElementSibling.classList.contains('label'),
           colour: painted === null ? null : getComputedStyle(painted).color,
+          spin: motion === null ? null : getComputedStyle(motion).animationName,
+          spinDuration: motion === null ? null : getComputedStyle(motion).animationDuration,
+          spinTiming: motion === null ? null : getComputedStyle(motion).animationTimingFunction,
+          dash: arc === null ? null : getComputedStyle(arc).animationName,
+          dashArray: arc === null ? null : getComputedStyle(arc).strokeDasharray,
+          trackOpacity: track === null ? null : getComputedStyle(track).opacity,
+          rings: painted === null ? null : painted.querySelectorAll('circle').length,
         }
         runningSessions.delete(${JSON.stringify(created.session)})
         paintRunningMarks(); await wait(200)
-        const after = sessionRow.querySelector(':scope > .status') === null ? null : 'still there'
+        const after = sessionRow.querySelector(':scope > .status-dot') === null ? null : 'still there'
         return JSON.stringify({
           workspaceControls,
           workspaceSlots,
@@ -3029,10 +3056,22 @@ test('a running session says so before its name, and a workspace row offers the 
 
     /** The running mark: absent while quiet, `Running` before the name while the set says so, gone again after. */
     assert.equal(result.before, null, 'a quiet row carries no state word')
-    assert.equal(result.whileRunning.text, 'Running', 'a running session says so')
-    assert.equal(result.whileRunning.beforeLabel, true, 'and says it before its name')
+    /**
+     * The mark is DSH's **spinner**: `StateDot`'s ongoing state — two rings, the track at a quarter opacity and an arc whose
+     * dash breathes, the whole glyph rotating 360° in 1.5 s linear — placed before the name and removed when the turn ends.
+     */
+    assert.equal(result.whileRunning.state, 'ongoing', `a running session carries the ongoing state\nsaw: ${JSON.stringify(result.whileRunning)}`)
+    assert.equal(result.whileRunning.label, 'Running', 'labelled for a reader who cannot see it')
+    assert.equal(result.whileRunning.beforeLabel, true, 'placed before its name')
+    assert.equal(result.whileRunning.rings, 2, 'drawn as a track and an arc')
+    assert.equal(result.whileRunning.spin, 'heddle-spin', `the glyph rotates\nsaw: ${JSON.stringify(result.whileRunning)}`)
+    assert.equal(result.whileRunning.spinDuration, '1.5s', 'over the reference 1.5 s period')
+    assert.equal(result.whileRunning.spinTiming, 'linear', 'linearly')
+    assert.equal(result.whileRunning.dash, 'heddle-dash', 'while the arc dash breathes')
+    assert.match(String(result.whileRunning.dashArray), /px/, 'on a stroke-dasharray, not a painted band')
+    assert.equal(result.whileRunning.trackOpacity, '0.25', 'with the quiet track at a quarter opacity')
     assert.match(String(result.whileRunning.colour), /173, 178, 184/, `in DSH's muted body colour\nsaw: ${result.whileRunning.colour}`)
-    assert.equal(result.after, null, 'and the word leaves when the session stops')
+    assert.equal(result.after, null, 'and the spinner leaves when the session stops')
   } finally {
     browser?.close()
     live?.kill()
@@ -3885,6 +3924,18 @@ test('a written session moves to the top of its folder, its age follows, and a r
     assert.ok(after.slot !== null, 'and carries one after')
     assert.equal(Math.round(after.slot[1]), 16, `the mark is 16px wide\nsaw: ${JSON.stringify(geometryAfter)}`)
     assert.equal(await browser.evaluate(`document.querySelectorAll('#tree .pin-mark').length`), 0, 'and nothing draws a pin beside a name')
+    /** One pin per pinned row, and no second one on the row's left: the old badge class is gone from the page entirely. */
+    const pins = JSON.parse(
+      await browser.evaluate(`(() => {
+        const row = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li.dataset.pinned === 'true')
+        return JSON.stringify({
+          leftBadges: document.querySelectorAll('#tree .pin').length,
+          marks: row === null ? null : row.querySelectorAll('.row-right > .pin-slot svg').length,
+        })
+      })()`),
+    )
+    assert.equal(pins.leftBadges, 0, 'no pin is drawn on the row left')
+    assert.equal(pins.marks, 1, 'and exactly one mark sits at the right')
     /**
      * The icon's **ink and weight**, measured: the mark is the neutral caption ink and not the accent, it is drawn solid (both
      * artwork paths filled) at the reference's Regular 1px, and the pin control that replaces it on hover is the same colour,

@@ -56,7 +56,7 @@ export function tapCounts(text, key) {
  * classification above is testable.
  *
  * @param {string} check absolute path to a `*.check.mjs` file
- * @param {{list?: boolean, json?: boolean}} options
+ * @param {{list?: boolean, json?: boolean, allowSkip?: boolean}} options
  */
 export async function runCheck(check, options = {}) {
   const args = ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout', check]
@@ -83,7 +83,7 @@ export async function runCheck(check, options = {}) {
     child.on('close', resolve)
   })
 
-  const result = classify(stdout, stderr, code)
+  const result = classify(stdout, stderr, code, { allowSkip: options.allowSkip === true })
   return { ...result, code, stdout, stderr, check }
 }
 
@@ -93,7 +93,7 @@ export async function runCheck(check, options = {}) {
  * Exported because the mapping is the whole point of this file and is worth a
  * test of its own: an unjudged check must never be counted as a pass.
  */
-export function classify(stdout, stderr, code) {
+export function classify(stdout, stderr, code, options = {}) {
   const tests = tapCounts(stdout, 'tests')
   const pass = tapCounts(stdout, 'pass')
   const fail = tapCounts(stdout, 'fail')
@@ -107,6 +107,14 @@ export function classify(stdout, stderr, code) {
   if (fail > 0 || cancelled > 0) return { verdict: 1, reason: `${fail || cancelled} check(s) failed`, counts }
   if (pass === 0 && skipped === 0 && todo === 0) return { verdict: 3, reason: 'no verdict was produced', counts }
   if (skipped > 0 || todo > 0) {
+    /**
+     * The **standard target** deliberately excludes the browser checks (`HEDDLE_VERIFY_UI=0`), so their skips are a stated
+     * part of that run rather than an unjudged gap. The flag is explicit: without `--allow-skip`, a skip still means exit 3,
+     * which is the contract this runner exists for.
+     */
+    if (options.allowSkip === true && fail === 0 && cancelled === 0) {
+      return { verdict: 0, reason: `all ${pass} judged check(s) passed; ${skipped + todo} skipped by this target`, counts }
+    }
     return { verdict: 3, reason: `${skipped + todo} of ${tests} check(s) could not be judged`, counts }
   }
   if (pass === 0) return { verdict: 3, reason: 'every check was skipped, so nothing was judged', counts }
@@ -143,9 +151,10 @@ async function main() {
   const check = argv.find((arg) => !arg.startsWith('-'))
   const list = argv.includes('--list')
   const json = argv.includes('--json')
+  const allowSkip = argv.includes('--allow-skip')
   if (!check) return usage(process.stderr, 2)
 
-  const result = await runCheck(check, { list, json })
+  const result = await runCheck(check, { list, json, allowSkip })
 
   if (list) {
     for (const entry of collectNames(result.stdout)) {

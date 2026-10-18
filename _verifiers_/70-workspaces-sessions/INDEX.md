@@ -54,10 +54,19 @@ for the first, `no list in the tree draws a marker` for the second.
 ## Running it
 
 ```bash
-sh verify.sh            # every check, with the verdict
+sh verify.sh            # every check, including the browser ones
 sh verify.sh --list     # the check names, and why any was unjudged
 sh verify.sh --json     # one parseable object
+
+# The two targets. A standard deployment host has no browser and must not need one.
+npm run verify:fast     # unit suite, then every check that needs no page (~47 s here)
+npm run verify:ui       # every check, browser included (~149 s here)
 ```
+
+`HEDDLE_VERIFY_UI=0` makes the browser gate answer "no" for every check that needs a page; they report
+**skipped**, and `--allow-skip` lets the runner call the standard target's verdict `0` while still printing
+"14 skipped by this target". Without the flag a skip is still exit `3`: the standard target is honest about
+what it did not judge, and the full UI target is what judges the rest.
 
 Exit `0` when the claim holds, `1` when it fails, `3` when it could not be judged. A
 claim that could not be judged is never reported as holding, which is the runner's

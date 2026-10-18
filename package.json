@@ -42,7 +42,9 @@
     "check": "tsc --noEmit && tsc -p tsconfig.test.json",
     "start": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "verify:ui": "sh _verifiers_/70-workspaces-sessions/verify.sh",
+    "verify:fast": "npm test && HEDDLE_VERIFY_UI=0 sh _verifiers_/70-workspaces-sessions/verify.sh --allow-skip"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.4",

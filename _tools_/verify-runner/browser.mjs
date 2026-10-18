@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { browserAvailable, browserPath, openBrowser as openToolBrowser } from '../browser-use/lib.mjs'
+import { browserAvailable as toolBrowserAvailable, browserPath, openBrowser as openToolBrowser } from '../browser-use/lib.mjs'
 
 /**
  * A browser, driven over the browser tool, for the checks that need a page.
@@ -23,7 +23,21 @@ import { browserAvailable, browserPath, openBrowser as openToolBrowser } from '.
  * would fight over it.
  */
 
-export { browserAvailable, browserPath }
+/**
+ * Whether a check may use a browser here.
+ *
+ * Two conditions: this machine has a browser, **and** the run asks for the UI target. `HEDDLE_VERIFY_UI=0` is the standard
+ * deployment's run — it skips every browser check with a labelled reason, so a server or CI host without a browser can still
+ * judge everything that does not need a page. The browser checks are the slow half of the suite, and they are their own target.
+ *
+ * @returns true when the UI target is enabled and a browser binary exists.
+ */
+export function browserAvailable(override) {
+  if (process.env.HEDDLE_VERIFY_UI === '0') return false
+  return toolBrowserAvailable(override)
+}
+
+export { browserPath }
 
 /**
  * Open a browser and return a page you can look at more than once.

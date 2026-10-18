@@ -94,3 +94,22 @@ test('a skip line names the check and carries its reason, indented or not', () =
     { name: 'the fourth claim', status: 'fail' },
   ])
 })
+
+test('a deliberate skip is a pass only when the target asks for it, never by default', () => {
+  /** The default contract: a skipped check is unjudged, and an unjudged run is exit 3. */
+  const skipped = classify(tap({ tests: 5, pass: 3, skipped: 2 }), '', 0)
+  assert.equal(skipped.verdict, 3, 'a skip without permission stays unjudged')
+  assert.match(skipped.reason, /2 of 5 check\(s\) could not be judged/)
+
+  /**
+   * The **standard target** excludes the browser checks on purpose, so those skips are a stated part of that run. The flag is
+   * explicit — the same input still fails without it.
+   */
+  const allowed = classify(tap({ tests: 5, pass: 3, skipped: 2 }), '', 0, { allowSkip: true })
+  assert.equal(allowed.verdict, 0, 'with --allow-skip the judged checks decide the verdict')
+  assert.match(allowed.reason, /all 3 judged check\(s\) passed; 2 skipped by this target/)
+
+  /** A failure still outranks a permitted skip: a red check is never hidden by the flag. */
+  const failed = classify(tap({ tests: 5, pass: 2, fail: 1, skipped: 2 }), '', 1, { allowSkip: true })
+  assert.equal(failed.verdict, 1, 'a failure is still a failure')
+})

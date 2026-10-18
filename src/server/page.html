@@ -450,6 +450,11 @@
    * one place instead of inferred from a dozen rules.
    */
   #log::-webkit-scrollbar { display: none; width: 0; }
+  /**
+   * DSH's follow rule: while the transcript follows its tail, `overflow-anchor` is off — native anchoring and a
+   * scroll-to-floor are two ways of choosing the same offset, and they fight.
+   */
+  #log[data-following='true'] { overflow-anchor: none; }
   #log {
     /**
      * DSH's reading size: **14px on a 24px line**, which is what its `--dsh-content-font-size` resolves to and what
@@ -619,32 +624,12 @@
   .chat-running .label {
     min-width: 0; font-variant-numeric: tabular-nums;
     /**
-     * The same sweep as the reference's `TextShimmer`: the tint travels under the glyphs (a text clip), at its
-     * measured 105°, 40–60% band, 1.5s, 0.3s delay and `steps(48, end)`.
+     * **Static, and readable.** The reference sweeps its label with `TextShimmer`; on this page's dark surface the
+     * travelling band over a 12px phrase read as "shuttling" and made the duration hard to read (the owner's
+     * report). The running row's job is a quiet statement — the shimmer stays on the process rows it suits
+     * (tool/thinking titles), and this label holds still in the readable blue.
      */
-    background-image: linear-gradient(
-      105deg,
-      currentColor 0%,
-      currentColor 42%,
-      var(--chat-running-shimmer) 50%,
-      currentColor 58%,
-      currentColor 100%
-    );
-    background-size: 260% 100%;
-    background-repeat: no-repeat;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    -webkit-text-fill-color: transparent;
-    animation: heddle-row-shimmer 1.5s steps(48, end) 0.3s infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .chat-running .label {
-      animation: none;
-      background: none;
-      color: inherit;
-      -webkit-text-fill-color: currentColor;
-    }
+    color: color-mix(in oklab, var(--accent) 82%, var(--chat-text));
   }
   .chat-running .visually-hidden {
     position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
@@ -1370,7 +1355,26 @@
    */
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
   /** DSH's state word: the muted body type, before the name, smaller than it. */
-  #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
+  /**
+   * The running spinner, measured from the reference's `StateDot.module.css`: a 2px ring at 25% and a 2px round-capped arc
+   * whose dash breathes over 1.5 s while the whole group rotates 360° in the same 1.5 s linear. Reduced motion keeps a still
+   * arc. Colour is the muted label tone, as the reference's ongoing state is.
+   */
+  #tree .status-dot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--text-3); }
+  #tree .status-dot .spinner-motion { transform-origin: center; animation: heddle-spin 1.5s linear infinite; }
+  #tree .status-dot circle { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  #tree .status-dot .spinner-track { opacity: .25; }
+  #tree .status-dot .spinner-arc { stroke-dasharray: 12 150; animation: heddle-dash 1.5s ease-in-out infinite; }
+  @keyframes heddle-spin { to { transform: rotate(360deg); } }
+  @keyframes heddle-dash {
+    0% { stroke-dasharray: 12 150; stroke-dashoffset: 0; }
+    50% { stroke-dasharray: 24 150; stroke-dashoffset: -6; }
+    100% { stroke-dasharray: 12 150; stroke-dashoffset: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #tree .status-dot .spinner-motion, #tree .status-dot .spinner-arc { animation: none; }
+    #tree .status-dot .spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
+  }
 
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
@@ -2193,8 +2197,6 @@
    * quiet affordance — the row is what a person is looking at — so it paints nothing, and only its opacity
    * answers the pointer.
    */
-  #tree .pin { display: inline-flex; align-items: center; opacity: .55; }
-  #tree .pin svg { width: 11px; height: 11px; }
   /** An archived row is drawn only when asked for, and then quietly: it is not part of the live list. */
   #tree li[data-archived='true'] { opacity: .55; }
   /**
@@ -2894,7 +2896,7 @@ function add(kind, text, merge = true, label, tool) {
     // merge=false... measured, that path is what threw and left the log holding one turn of nine.
     last.textContent += text
     last.dataset.state = 'running'
-    log.scrollTop = log.scrollHeight
+    followChatTail()
     return
   }
   if (kind === 'reasoning' || kind === 'tool') {
@@ -2954,7 +2956,8 @@ function add(kind, text, merge = true, label, tool) {
   }
   log.append(node)
   keepRunningLast()
-  log.scrollTop = log.scrollHeight
+  /** A person's own message is the one growth that always re-engages the follow, as a send implies the floor. */
+  followChatTail(kind === 'user')
   /** A turn on screen is content: the invitation, if it is showing, has been answered. */
   paintEmptyState()
 }
@@ -3414,9 +3417,66 @@ function refreshRunningStatus() {
     label.textContent = `Weaving for ${formatRunDuration(runStartedAt === null ? 1000 : Math.max(1000, Date.now() - runStartedAt))} ···`
   }
   if (runRow !== log.lastElementChild) log.append(runRow)
-  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48
-  if (atBottom) log.scrollTop = log.scrollHeight
+  followChatTail()
 }
+
+/**
+ * The transcript's follow intent, written as DSH writes it.
+ *
+ * Its chat view keeps one `ScrollFollow` per scrollport with a **25px** tolerance: the floor is followed while the
+ * reader is within that distance of it, reader movement away stops the follow so new content never yanks a person
+ * who is reading back, and its CSS disables `overflow-anchor` while following (native anchoring and a scroll-to-floor
+ * fight each other). The page used to set `scrollTop = scrollHeight` at a handful of append sites only, so content
+ * that grew **after** the append — the settled answer's document, a tool's result, an edited-files card, a wider
+ * image — left the view above the bottom (the owner's "sometimes it does not follow").
+ */
+const FOLLOW_SLACK_PX = 25
+let chatFollowing = true
+let chatFollowFrame = null
+
+function chatFloor() {
+  return Math.max(0, log.scrollHeight - log.clientHeight)
+}
+
+/** Schedule a follow to the current floor when the reader is at it. The frame is what lets layout land first. */
+function followChatTail(force = false) {
+  if (force) {
+    chatFollowing = true
+    log.dataset.following = 'true'
+  }
+  if (!chatFollowing || view !== 'chat') return
+  if (chatFollowFrame !== null) return
+  chatFollowFrame = requestAnimationFrame(() => {
+    chatFollowFrame = null
+    if (!chatFollowing || view !== 'chat') return
+    const floor = chatFloor()
+    if (Math.abs(log.scrollTop - floor) > 0.5) log.scrollTop = floor
+  })
+}
+
+log.addEventListener('scroll', () => {
+  /** Programmatic moves land here too, and the distance — not who moved it — is what decides. */
+  const following = chatFloor() - log.scrollTop <= FOLLOW_SLACK_PX
+  if (following !== chatFollowing) {
+    chatFollowing = following
+    log.dataset.following = String(following)
+  }
+})
+
+/**
+ * Everything that can grow the transcript asks the follow intent to look again.
+ *
+ * A `MutationObserver` sees rows, results and re-rendered documents; ResizeObserver sees the ones whose height changes
+ * come from layout (a document swapped for another, an image decoding), and the capture-phase `load` catches images.
+ * None of them scroll on its own: `followChatTail` decides, and only a reader at the floor is followed.
+ */
+if (typeof MutationObserver !== 'undefined') {
+  new MutationObserver(() => followChatTail()).observe(log, { childList: true, subtree: true, characterData: true })
+}
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => followChatTail()).observe(log)
+}
+log.addEventListener('load', () => followChatTail(), true)
 
 function settleChat() {
   for (const node of log.querySelectorAll('.turn[data-state="running"]')) {
@@ -3570,7 +3630,7 @@ function addBlock(kind, text, merge, label, tool) {
     if (kind === 'reasoning') last.dataset.state = 'running'
     const hint = last.querySelector('summary .hint')
     if (hint) hint.textContent = firstLine(body.textContent)
-    log.scrollTop = log.scrollHeight
+    followChatTail()
     return
   }
   const node = document.createElement('details')
@@ -3619,7 +3679,7 @@ function addBlock(kind, text, merge, label, tool) {
   if (kind === 'tool' && tool !== undefined && typeof tool.result === 'string') showToolError(node, tool.result)
   log.append(node)
   keepRunningLast()
-  log.scrollTop = log.scrollHeight
+  followChatTail()
 }
 
 /**
@@ -4029,6 +4089,7 @@ async function showView(next) {
   filePane.hidden = view !== 'file'
   const toolbar = document.getElementById('tr-toolbar')
   if (toolbar !== null) toolbar.hidden = view !== 'trajectory'
+  if (view === 'chat') followChatTail(true)
   if (view === 'trajectory' && current !== null) {
     followTail = true
     await showLedger(current)
@@ -4881,6 +4942,7 @@ async function showSession(id) {
         log.append(note)
       }
     }
+    followChatTail(true)
   } catch (error) {
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
@@ -5890,11 +5952,29 @@ async function pumpQueue(key = composerKey) {
        * turn created; this reads that id at send time.
        */
       const forKey = key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE ? composerKey : key
+      /**
+       * Retire the row as soon as the turn is **accepted**, which is DSH's rule for a local submission echo: it
+       * lives only until the host has the message. Removing it at the end of the turn (the previous behaviour) kept
+       * a delivered message in the dock, marked `Sending…`, for the whole length of its turn.
+       */
+      let accepted = false
+      const retire = () => {
+        accepted = true
+        const at = queue.findIndex((entry) => entry.id === item.id)
+        if (at !== -1) queue.splice(at, 1)
+        renderQueue()
+      }
       try {
-        await runTurn(item.text, forKey, item.attachments ?? [])
+        await runTurn(item.text, forKey, item.attachments ?? [], retire)
         const at = queue.findIndex((entry) => entry.id === item.id)
         if (at !== -1) queue.splice(at, 1)
       } catch (error) {
+        /** Past acceptance the message is in the log: a stream error is the turn's failure, not a failed send. */
+        if (accepted) {
+          add('denied', `the turn failed: ${(error && error.message) || error}`)
+          renderQueue()
+          continue
+        }
         item.status = 'failed'
         /**
          * A refusal gives the message **back to the composer** when nothing new has been typed, which is what
@@ -6132,7 +6212,7 @@ function updateSendDisabled() {
 }
 field.addEventListener('input', () => {
   growComposer()
-  updateSendDisabled()
+  renderComposerState()
 })
 
 field.addEventListener('keydown', (keyEvent) => {
@@ -8123,19 +8203,54 @@ const rowIndex = new Map()
  * Called on every add and delete rather than redrawing the tree: the tree's rows are the same rows, and only one span
  * per session changes. A re-fetch per event would also be a request per event.
  */
+/**
+ * The reference's running indicator, from `StateDot.module.css`: a 24-unit box with a quiet full ring behind a breathing arc,
+ * the whole glyph rotating continuously. Both animations share one 1.5 s period, the arc's dash runs 12→24→12, and reduced
+ * motion shows a still arc. Every spinner is pinned to the same start time so they stay in phase.
+ */
+function runningSpinner() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('aria-hidden', 'true')
+  const motion = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+  motion.setAttribute('class', 'spinner-motion')
+  const track = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+  track.setAttribute('class', 'spinner-track')
+  for (const [name, value] of [['cx', '12'], ['cy', '12'], ['r', '9.5']]) track.setAttribute(name, value)
+  const arc = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+  arc.setAttribute('class', 'spinner-arc')
+  for (const [name, value] of [['cx', '12'], ['cy', '12'], ['r', '9.5']]) arc.setAttribute(name, value)
+  motion.append(track, arc)
+  svg.append(motion)
+  return svg
+}
+
+function runningMark() {
+  const mark = document.createElement('span')
+  mark.className = 'status-dot'
+  mark.dataset.state = 'ongoing'
+  mark.setAttribute('role', 'img')
+  mark.setAttribute('aria-label', 'Running')
+  mark.title = 'Running'
+  mark.append(runningSpinner())
+  return mark
+}
+
 function paintRunningMarks() {
   for (const entry of rowIndex.values()) {
     const { node, li } = entry
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
     const row = li.querySelector(':scope > .row')
     if (row === null) continue
-    const existing = row.querySelector(':scope > .status')
+    const existing = row.querySelector(':scope > .status-dot')
     const running = runningSessions.has(node.session.id)
     if (running && existing === null) {
-      const status = document.createElement('span')
-      status.className = 'status'
-      status.textContent = 'Running'
-      row.querySelector(':scope > .icon')?.after(status)
+      const mark = runningMark()
+      row.querySelector(':scope > .icon')?.after(mark)
+      /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
+      for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
     } else if (!running && existing !== null) {
       existing.remove()
     }
@@ -8435,11 +8550,15 @@ function kindIcon(kind, open = false) {
   }
   if (kind === 'session') {
     /**
-     * A conversation, not a folder: two speech lines in the same box. A session's `_sessions_` folder is
-     * not drawn at all (the server hoists its instances into the branch), so this glyph is the only thing
-     * that says a row is a session rather than something to walk into.
+     * A conversation, not a folder: the reference's **speech bubble**, taken from its own `NewChatOutlineArtwork` with the
+     * plus removed — the bubble is the conversation, the plus is the action of starting one. A session's `_sessions_` folder is
+     * not drawn at all (the server hoists its instances into the branch), so this glyph is what says a row is a conversation.
      */
-    svg.append(svgPath('M3.2 3.6h9.6v6.2H8.4L5.6 12v-2.2H3.2z'), svgPath('M5.6 6.3h4.8M5.6 8.2h3.2'))
+    svg.append(
+      svgPath(
+        'M2.37091 11.2501C1.58745 9.89288 1.32067 8.29835 1.61969 6.76006C1.91872 5.22177 2.76342 3.8433 3.99826 2.87846C5.2331 1.91362 6.77494 1.42737 8.33988 1.50925C9.90482 1.59113 11.3875 2.23562 12.5149 3.32406C13.6425 4.41269 14.3387 5.87206 14.4754 7.4334C14.612 8.99474 14.18 10.5529 13.2587 11.8209C12.3375 13.0888 10.9891 13.9813 9.46194 14.3337C8.18691 14.628 6.85895 14.5294 5.64989 14.0605C5.1712 13.8748 4.76962 13.4932 4.26534 13.3967C3.67413 13.2835 2.95257 13.5598 2.03794 14.3337',
+      ),
+    )
     return svg
   }
   svg.append(svgPath(FOLDER_PATH))
@@ -9428,33 +9547,20 @@ function nodeRow(node, depth = 0) {
   icon.append(kindIcon(node.kind, false))
   row.append(icon)
   /**
-   * DSH prints a session's state before its name — `Running` in the muted body type — and the live half of it is a fact
-   * this page already tracks (`runningSessions`, fed by `model/request` and `turn/completed` on the stream). The word
-   * is painted from that set and repainted when it changes, so a row says "still working" without a re-fetch.
+   * A running session carries the reference's **spinner** before its name — not a word: `StateDot`'s ongoing state is a
+   * rotating ring with a breathing arc, and the row repaints it from `runningSessions` (fed by `model/request` and
+   * `turn/completed` on the stream) so the mark says "still working" without a re-fetch.
    */
   if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
-    const status = document.createElement('span')
-    status.className = 'status'
-    status.textContent = 'Running'
-    row.append(status)
+    const mark = runningMark()
+    row.append(mark)
+    for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
   }
   if (node.badge) {
     const badge = document.createElement('span')
     badge.className = 'badge'
     badge.textContent = node.badge
     row.append(badge)
-  }
-  /**
-   * A pinned session says so on the row, because a pin that only reorders rows is a rule a reader has to know;
-   * this is the same mark DSH puts beside a session it holds at the top.
-   */
-  if (node.pinned) {
-    const pin = document.createElement('span')
-    pin.className = 'pin'
-    pin.title = 'pinned'
-    pin.setAttribute('aria-label', 'pinned')
-    pin.append(kindIcon('pin'))
-    row.append(pin)
   }
   if (node.archived) li.dataset.archived = 'true'
   const label = document.createElement('span')

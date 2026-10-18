@@ -150,6 +150,35 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### Verifier timings and the two targets (2026-10-17)
+
+The owner asked which part of the suite is slow, and for browser checks to be optional. Measured from the runner's own TAP timings
+(one full run, 45 checks, **134 s** summed):
+
+| Check | Time | Needs |
+|---|---|---|
+| a folder opens and closes with the same control | 24.5 s | browser |
+| the four session shortcuts act on the selected session | 11.3 s | browser |
+| a written session moves to the top, its age follows, a pin click holds it | 10.1 s | browser |
+| a session row's controls appear on hover, and a search replaces the tree | 9.5 s | browser |
+| the panel follows the selection | 8.6 s | browser |
+| a session is renamed from its own menu | 6.7 s | browser |
+| View options groups the sessions two ways | 6.2 s | browser |
+| New session here, on an instance row | 5.6 s | API/CLI |
+| a clipped session title crawls on hover | 5.2 s | browser |
+| the interactive inventory | 4.9 s | browser |
+| a pinned row glides | 4.7 s | browser |
+| the menu forks a session | 4.6 s | browser |
+
+**The browser checks are the slow half**: 14 of 45 checks, and they account for almost all of the run. The split:
+
+- `_tools_/verify-runner/browser.mjs`'s `browserAvailable()` answers **false** when `HEDDLE_VERIFY_UI=0`, so every browser check
+  reports skipped with the reason "a browser on this machine";
+- the runner gained `--allow-skip`: with it, a run with no failures and some deliberate skips is verdict `0` **and says so**
+  ("all 31 judged check(s) passed; 14 skipped by this target"). Without the flag a skip is still exit `3`, so the contract that
+  unjudged is not passing is unchanged — the standard target simply names what it did not judge.
+- `npm run verify:fast` = unit suite + the standard target: **2 s + 47 s**. `npm run verify:ui` = every check: **149 s**.
+
 ### The tail in the middle of the head, at the reference's thickness (2026-10-17)
 
 The owner asked twice more: the tail must sit **in the middle of the pin head**, and its thinness must match DSH — "not over thin, nor

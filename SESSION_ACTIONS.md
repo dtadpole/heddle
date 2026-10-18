@@ -123,6 +123,26 @@ The cycle that the goal's stop rule asks for: all three actions measured togethe
   the tree placement and the menu path to fork. Not measured, and named: the archive confirmation dialog's own look (only its
   accept path is exercised), and concurrent forks of one source.
 
+## Cycle 6 — the row's remaining marks, and a verifier that does not need a browser (2026-10-17)
+
+Five nits, each measured.
+
+- **One pin, on the right.** A leftover badge from an earlier pass still appended an outline pin **beside the name**, so a pinned row
+  showed two pins. The badge and its CSS were removed; the check asserts no `.pin` exists and exactly one mark sits in the right-hand slot.
+- **Running is a spinner, not a word.** Read from the reference's `StateDot.module.css`: ongoing is two 2px rings in a 24-unit box,
+  a track at 25% opacity and an arc whose dash breathes (12→24→12, 1.5 s ease-in-out) while the whole group rotates 360° in the same
+  1.5 s linear, reduced motion showing a still arc, and all spinners pinned to one start time. The tree row paints that mark before
+  its name and removes it at `turn/completed`. The check asserts the state, the two rings, both animations and their timing, the
+  track opacity, and removal.
+- **The session glyph is the reference's bubble.** Its `NewChatOutlineArtwork` is a speech bubble with a plus; the plus is the action,
+  the bubble is the conversation, so the row uses the bubble alone — one path, distinct from the folder marks. The check asserts the
+  path and that it differs from a folder's.
+- **Verifier timings, and two targets.** The slowest checks were attributed from the runner's TAP durations (the full table is in
+  SESSION_UI.md): the browser checks are 14 of 45 and take almost the whole run. `browserAvailable()` now honours
+  `HEDDLE_VERIFY_UI=0`, and the runner gained `--allow-skip`, which makes a no-failure run with deliberate skips verdict 0 **and says
+  what it skipped**; without the flag a skip is still exit 3. Targets: `npm run verify:fast` (unit + standard checks, **49 s**) and
+  `npm run verify:ui` (everything, **149 s**).
+
 ## Cycle 5 — the pin icon and the glide (2026-10-17)
 
 - **Research.** DSH's icon primitives were read for the pin: `IconPinOutlineArtwork` / `IconPinFillArtwork` (16px box, a body
