@@ -583,6 +583,22 @@ Screenshots beside this file: [`heddle-sandbox-approval-card.png`](heddle-sandbo
 card over a transcript whose closed row already says `Error: [sandbox: file access denied under workspace-write
 mode]`) and [`heddle-sandbox-refusal.png`](heddle-sandbox-refusal.png) (the same turn after Reject).
 
+### deployment
+
+The branch was merged into main with an autostash (another workstream's uncommitted sidebar work was preserved
+through the merge), pushed, and the deployment checkout (`~/heddle-deploy`, which the launch agent actually runs)
+was fast-forwarded and rebuilt; the `com.dtadpole.heddle-web` agent was restarted and the owner's address verified
+live:
+
+- `http://127.0.0.1:8082/` serves the new build — the access chip and the approval card's markup are in the page
+  ([`heddle-sandbox-deployed-8082.png`](heddle-sandbox-deployed-8082.png)), and `GET /api/approvals` answers
+  `{"requests":[]}` through the gate;
+- a scripted turn run from the **deployed** tree shows the kernel boundary: the inside write succeeds, the outside
+  write is denied, and the tool result carries `error (SANDBOX): [sandbox: file access denied under
+  workspace-write mode]`;
+- the same build was judged by the named suites: `npm run check`, `npm test` (353 pass), `npm run build`, verifier
+  75 (15 checks) and verifier 80 (12 files).
+
 ### coverage
 
 Visited: the ladder's allowed and refused transitions, argument pairing, the approval service's four outcomes, the
