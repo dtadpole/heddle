@@ -148,7 +148,9 @@ viewport bottom — against DSH's 98px, 17px and 30px. Recorded for cycle 2, not
 - **evidence:** the boxes and gaps above, produced by [`_context_/dsh-mechanisms/input-area-measure.mjs`](_context_/dsh-mechanisms/input-area-measure.mjs) against both running
   apps in one browser session (headed-free automation: headless, per the browser-modes convention). Composer
   contract remains 11/11.
-- **reds:** `70-workspaces-sessions` no longer red in this run (the concurrent session's tree work settled);
-  any suite red at cycle end is named at the end of the block.
+- **reds:** the full sweep during this cycle showed `70-workspaces-sessions` at one red (a folder open/close
+  check) while another session was mid-edit on the tree; it passed on re-run and no red remains at close. The
+  input area's own contract was 11/11 throughout. A red that belongs to another session is named and left
+  alone, per the skill.
 - **lessons:** compare the **pixels a person sees** (text-to-control distance, insets, bands), not the box
   heights two implementations happen to report; equal rhythm can hide behind unequal boxes.
