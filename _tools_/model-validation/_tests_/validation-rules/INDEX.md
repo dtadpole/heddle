@@ -6,14 +6,14 @@ grounded_in:
   - source: unit.test.mjs and the model-validation library
 ---
 
-# `lib`
+# `validation-rules`
 
 Component tests for [`../../lib.mjs`](../../lib.mjs), run with **no browser** and no provider calls.
 [`unit.test.mjs`](unit.test.mjs) pins model targets, wire-format classification, fingerprints,
 reasoning-level selection, minimum output budgets, cache lookup and pass/fail judgments.
 
 ```bash
-node --test _tools_/model-validation/_tests_/lib/unit.test.mjs
+node --test _tools_/model-validation/_tests_/validation-rules/unit.test.mjs
 ```
 
 Read [`../INDEX.md`](../INDEX.md) for the sibling wire-format suite.

@@ -13,8 +13,8 @@ They do not spend provider quota or replace the live endpoint validation matrix.
 
 | Suite | Responsibility |
 |---|---|
-| [`lib/`](lib/INDEX.md) | target selection, configuration fingerprints, reasoning levels and result judgments |
-| [`formats/`](formats/INDEX.md) | local HTTP doubles for Chat Completions, Responses and Anthropic Vertex streams |
+| [`validation-rules/`](validation-rules/INDEX.md) | target selection, configuration fingerprints, reasoning levels and result judgments |
+| [`wire-formats/`](wire-formats/INDEX.md) | local HTTP doubles for Chat Completions, Responses and Anthropic Vertex streams |
 
 Run both suites from the repository root:
 
