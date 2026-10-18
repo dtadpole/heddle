@@ -127,26 +127,28 @@ async function measure(label, page, prepare) {
     await sleep(600)
     collapse[name].restored = await page.evaluate(countRows)
   }
-  const searchInput = `(() => {
+  // Search with real key events: a controlled input ignores a native setter, so the text goes in over CDP.
+  const search = { base: await page.evaluate(countRows) }
+  const focused = await page.evaluate(`(() => {
     const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]')
     if (input === null) return 'no input'
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
-    setter.call(input, 'not-a-real-term-xyz')
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    return 'typed'
-  })()`
-  const search = { base: await page.evaluate(countRows) }
-  search.typed = await page.evaluate(searchInput)
-  await sleep(700)
+    input.focus()
+    input.select()
+    return document.activeElement === input ? 'focused' : 'not focused'
+  })()`)
+  search.focused = focused
+  await page.send('Input.insertText', { text: 'not-a-real-term-xyz' })
+  await sleep(800)
   search.filtered = await page.evaluate(countRows)
+  search.typedValue = await page.evaluate(`(() => { const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]'); return input === null ? null : input.value })()`)
   await page.evaluate(`(() => {
     const input = document.querySelector('#tr-search-input') ?? document.querySelector('input[aria-label*=Search], input[placeholder*=Search]')
     if (input === null) return
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
-    setter.call(input, '')
-    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.select()
   })()`)
-  await sleep(700)
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+  await sleep(800)
   search.cleared = await page.evaluate(countRows)
   // Sidebar width, at the same two viewports, because the content column depends on it.
   const sidebar = (await page.evaluate(`(() => { const aside = document.querySelector('aside, nav'); return aside === null ? null : Math.round(aside.getBoundingClientRect().width) })()`))

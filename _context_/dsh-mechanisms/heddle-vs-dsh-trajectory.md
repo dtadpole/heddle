@@ -241,3 +241,27 @@ What this settles:
 
 Deliberate difference still open: **virtualisation** (DSH keeps ~34 DOM rows at every scroll position; heddle
 renders the ledger whole). Recorded for the owner's decision rather than copied silently.
+
+## Round 10: real keys, and two DSH semantics that are still not established
+
+The probe now types into the search field with real CDP key events (`Input.insertText`, then Backspace via
+`dispatchKeyEvent`), not a native value setter. The measured result:
+
+| State | DSH | heddle |
+|---|---|---|
+| search field receives the term | yes (value and focus verified) | yes |
+| rows after "not-a-real-term-xyz" | **42 → 42 → 42** | 15 → **4** → 15 |
+| collapse turns | 52 → 36, restore read 38 (label flipped to "Expand turns", so the probe's second click missed it) | 15 → 6 → 15 |
+| collapse calls | 42 → 42 (state already crossed by the turns toggle) | 15 → 15 |
+
+Two DSH semantics are therefore **not established**, and are recorded as such:
+
+- **Search**: with a real term typed and the input verified, DSH's row count does not change. That is consistent
+  with a **find/jump or highlight** search (which keeps the rows) rather than heddle's row **filter**. One probe
+  cannot tell which: the next one must search a real term and read for a highlight element, an
+  `aria-activedescendant`, or a scroll jump. Heddle's filtering remains its own model until DSH's is measured;
+  it is not claimed as agreement or as a defect.
+- **Collapse controls**: DSH's labels flip between "Collapse …" and "Expand …", so a probe that re-finds the
+  control by its original label toggles the wrong state (the crossed counts above). The fix is to find the
+  control by position or `aria-pressed` and to reset between the two toggles. Heddle's own collapse is stable
+  and measured (turns 15→6→15).

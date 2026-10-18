@@ -70,23 +70,24 @@
       ]
     },
     "collapse": {
-      "base": 34,
+      "base": 52,
       "turns": {
         "clicked": "clicked",
-        "after": 28,
-        "restored": 11
+        "after": 36,
+        "restored": 38
       },
       "calls": {
         "clicked": "clicked",
-        "after": 11,
-        "restored": 11
+        "after": 42,
+        "restored": 42
       }
     },
     "search": {
-      "base": 11,
-      "typed": "typed",
-      "filtered": 11,
-      "cleared": 11
+      "base": 42,
+      "focused": "focused",
+      "filtered": 42,
+      "typedValue": "not-a-real-term-xyz",
+      "cleared": 42
     },
     "sidebar": 256
   },
@@ -152,8 +153,9 @@
     },
     "search": {
       "base": 15,
-      "typed": "typed",
+      "focused": "focused",
       "filtered": 4,
+      "typedValue": "not-a-real-term-xyz",
       "cleared": 15
     },
     "sidebar": 352
