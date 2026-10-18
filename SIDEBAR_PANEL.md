@@ -92,7 +92,7 @@ check: the same "slow-growing content scrolls the pane" shape exists in `main` (
 | scrolling the list | moved the whole panel | `scrollTop` 1746, brand y 12, `New session` y 78, search y 166 — **unchanged** |
 | page / aside scroll after | — | `asideScrollTop: 0`, `pageScroll: 0` |
 
-Screenshot: `.heddle-tmp/sidebar-after.png` (the scrolled region, chrome in place). The assertion that proves it: part
+Screenshot: [`_context_/sidebar-panel/cycle-1-scrolled.png`](_context_/sidebar-panel/cycle-1-scrolled.png) — the scrolled region with the chrome in place. The assertion that proves it: part
 11's `the panel is a fixed column` / `the workspaces region is the only thing that scrolls`, shown to fail against the
 old CSS (the aside reported `auto` and `asideScrolls: true`; the region did not exist).
 
