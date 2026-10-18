@@ -3,7 +3,7 @@ title: Streaming, from the plugboard route to the page a person opens
 version: 1.0.0
 description: The full-loop goal that makes a DeepSeek answer arrive at the owner's Web UI incrementally instead of in one burst, with three cycles and the deployment at 8082 as the last measurement.
 level: L2
-status: cycle-2-verified
+status: complete
 grounded_in:
   - owner statement 2026-10-17 asking whether heddle can run with the DeepSeek models behind the plugboard interface and receive streaming
   - owner statement 2026-10-17 that the message must be seen arriving in the Web UI in a streaming manner, not only in the log
@@ -250,3 +250,60 @@ Cycle 2 — the page goes silent while the model writes a tool call's arguments
               a different meaning of empty — the page check now pins that path. A double that counts every request
               miscounts: the page's `/models` discovery spent the first version's tool call.
 ```
+
+## Cycle 3 — the cells cycle 2 left unvisited, and the stop condition
+
+```
+Cycle 3 — a page that joins mid-answer, the CLI printer, and whether anything is left to fix
+  measured:   all at the owner's address, on the build cycle 2 delivered (PID 63375, marker dd6d45d28567), with
+              no code changed this cycle.
+              (a) Joining mid-answer, server side (python, 8082): a turn was started, and 59 text deltas in a
+              second client read the log and opened /api/events. The history held 61 text deltas, the live stream
+              delivered 724 more from 2.833s, and the turn's own stream counted 787 — history plus live covers the
+              whole answer. The first live event after the history read was seq 3317, contiguous with it.
+              (b) Joining mid-answer, the page (fresh Chrome profile `goalc3j`, `showSession` on a running
+              session): deepseek-v4-pro joined while it was still reasoning (33 reasoning deltas, 0 text) — the
+              answer row then took 196 distinct lengths, first drawn 313ms after the join, and grew to 6575
+              characters; the running row was on screen throughout. Joined later (47 text for pro, 95 for flash),
+              the row at join already held the recorded prefix and grew from it to the end (276 -> 5165,
+              1031 -> 5036 characters).
+              (c) After the turn, the live-grown answer and a fresh history render of the same session hold the
+              same words: comparing the recorded text with the drawn one, ignoring list numbers and whitespace,
+              is equal (5057 recorded characters, 40 lines). The character counts differ only because the
+              settled row is drawn as markdown — "1. " becomes an ordered-list marker.
+              (d) The CLI's printer (`heddle --stream --json`, deepseek-flash, the deployed dist): 302 text and
+              1080 reasoning deltas printed over 5664ms, completed, finish stop.
+  brainstorm: (a) build a per-session replay buffer so a joining page gets the chunks between its history read
+              and its first live event; (b) add a `since=<seq>` cursor to /api/events; (c) make the history read
+              return the last seq so the page can drop duplicates; (d) do nothing. chosen: (d). discarded: (a),
+              (b) and (c) each solve a gap that was measured **not to exist** on this server: the live stream is
+              opened before the history is read (the page's EventSource is up from load), so the join is already
+              covered, and a mechanism built against an unmeasured gap is the "half-built feature" the skill warns
+              against.
+  step back:  narrow and stop. The skill's stop rule: stop when a full measurement produces no fix row, only
+              match and difference-kept-with-its-reason. This cycle's measurements produced none. The one
+              observed difference — the live answer's character count vs the fresh render's — is a render
+              difference (plain text growing, markdown when settled) with the same words, kept as is.
+  changed:    nothing in src/. This document only.
+  delivered:  unchanged from cycle 2: http://127.0.0.1:8082/ -> 127.0.0.1:3082, launchd com.dtadpole.heddle-web
+              PID 63375 running /Users/zhenc/heddle-deploy/dist/cli.js, marker dd6d45d28567 = sha12 of dist's page,
+              dist built from committed main.
+  reds:       none.
+  coverage:   visited: join-while-reasoning, join-while-answering (both models), history/live agreement, the CLI
+              printer. Not visited, with the reason: a reload during a tool call's arguments (the live card is not
+              recorded, so the card appears when the call lands — by design, cycle 2); the Responses and Anthropic
+              routes (outside this objective).
+  landed:     the code of this loop is on main as cc9c576 (cycle 1, the concurrent session's fix verified here),
+              ad7aff6 and 3bb7dc2 (cycle 2); the deployment at 8082 serves 3bb7dc2's build — the page marker and
+              the PID above. This document lands with its own commit.
+  lessons:    Stopping is a measurement too. The cheapest proof that no replay buffer was needed was to join a
+              running session from a second client and count: history plus live equalled the turn.
+```
+
+## Where it stands
+
+**Done, measured at the address the owner opens.** Both DeepSeek models behind the plugboard interface run turns
+in heddle, and their answers reach `http://127.0.0.1:8082/` as they are written: reasoning, text and — since
+cycle 2 — a tool call's arguments, each growing on the page before the turn completes, for a page that sends the
+turn and for one that joins it midway. Two instruments agree for every claim, and one of them is always the
+delivered page.
