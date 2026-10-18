@@ -274,6 +274,14 @@
     --chat-bubble: #2c2c2e;
     --chat-code: #1e1e21;
     flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
+    /**
+     * **No visible scrollbar in the main chat.** the reference's transcript keeps a scrollbar in the box model
+     * (`::-webkit-scrollbar` 6px, `scrollbar-gutter: stable`) but paints it **transparent**, so nothing appears while
+     * reading or scrolling; heddle was left on the platform's overlay bar, which slides in over the text on every
+     * scroll — the distraction the owner reported. The rail already scrubs, so the bar is redundant; `overflow` stays
+     * `auto`, so wheel, keyboard, drag, scrubbing and programmatic scrolling all keep working.
+     */
+    scrollbar-width: none;
     padding: 16px max(24px, calc((100% - var(--chat-column)) / 2));
     font-size: var(--chat-size); line-height: var(--chat-leading);
   }
