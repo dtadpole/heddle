@@ -62,6 +62,7 @@ async function startServer(label, options = {}) {
         model: 'held-model',
         stream: true,
         ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
+        ...(options.inputModalities !== undefined ? { inputModalities: options.inputModalities } : {}),
       },
     ],
   })
@@ -88,6 +89,25 @@ async function startServer(label, options = {}) {
       removeDir(work)
     },
   }
+}
+
+/**
+ * Add one real file through the `+ → File` gesture, the way a person does, and wait for its pending card.
+ *
+ * The browser's picker cannot be driven directly in a headless run, so the file is put into the hidden
+ * input whose change event the picker would fire; everything before that — opening the menu, choosing
+ * File, closing it — is the real gesture.
+ */
+async function attachThroughPicker(browser, filePath) {
+  await browser.evaluate('document.getElementById("attach").click()')
+  await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000)
+  const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File')`
+  await browser.waitFor(`${findFile} !== undefined`, 10_000)
+  await browser.evaluate(`${findFile}.click()`)
+  const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
+  const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
+  await browser.send('DOM.setFileInputFiles', { files: [filePath], nodeId: found.result.nodeId })
+  return browser.waitFor('document.querySelector("#attach-cards .attach-card") !== null', 20_000)
 }
 
 /** Spawn the CLI and resolve once it prints its URL, or reject on exit. */
@@ -1007,7 +1027,7 @@ test('the context gauge uses a window the provider reports, and stays blank when
  * the picker's change event does — and judges both halves: the draft names a stored file, and the bytes
  * on disk are the file that was chosen.
  */
-test('the + menu adds a file from this computer, and the draft receives its stored path', async (context) => {
+test('the + menu adds a file as a pending card, and the draft stays clean', async (context) => {
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('add-file')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1018,50 +1038,32 @@ test('the + menu adds a file from this computer, and the draft receives its stor
 
     await browser.goto(server.url)
     await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the chosen file becomes a pending card')
 
-    /**
-     * Count the picker invocations without opening one: headless Chrome has no native dialog to show,
-     * and the claim is that the handler asks for the picker, not that a window appeared.
-     */
-    await browser.evaluate(`(() => {
-      window.__filePickerClicks = 0
-      const original = HTMLInputElement.prototype.click
-      HTMLInputElement.prototype.click = function (...args) {
-        if (this.type === 'file') {
-          window.__filePickerClicks += 1
-          return undefined
-        }
-        return original.apply(this, args)
-      }
-      return true
-    })()`)
-
-    await browser.evaluate('document.getElementById("attach").click()')
-    assert.ok(await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000), 'the + menu opens')
-    const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File')`
-    assert.ok(await browser.waitFor(`${findFile} !== undefined`, 10_000), 'the menu offers File')
-    await browser.evaluate(`${findFile}.click()`)
-    assert.equal(await browser.evaluate('window.__filePickerClicks'), 1, 'choosing File asks for the file picker')
-    assert.equal(await browser.evaluate('document.getElementById("attach-menu").hidden'), true, 'and closes the menu')
-
-    /** Put the file into the hidden input the way the picker's own change event does. */
-    const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
-    const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
-    assert.ok(found.result?.nodeId, 'the composer carries a file input for the picker')
-    await browser.send('DOM.setFileInputFiles', { files: [chosen], nodeId: found.result.nodeId })
-
-    assert.ok(
-      await browser.waitFor(`document.querySelector('#prompt textarea').value.includes('from-picker.md')`, 15_000),
-      'the draft receives a path for the chosen file',
+    const card = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        hidden: document.getElementById('attach-cards').hidden,
+        name: document.querySelector('#attach-cards .attach-name')?.textContent,
+        meta: document.querySelector('#attach-cards .attach-meta')?.textContent,
+        remove: document.querySelector('#attach-cards .attach-remove')?.getAttribute('aria-label'),
+        path: document.querySelector('#attach-cards .attach-card')?.dataset.path,
+        draft: document.querySelector('#prompt textarea').value,
+      })`),
     )
-    const draft = await browser.evaluate('document.querySelector("#prompt textarea").value')
-    assert.ok(draft.startsWith(server.home), `the path is inside the harness home (${draft})`)
-    assert.match(draft, /[/\\]uploads[/\\]/, 'and inside the upload directory the endpoint owns')
-    assert.ok(existsSync(draft), 'the stored file exists')
-    assert.equal(readFileSync(draft, 'utf8'), '# from the picker\n\nhello\n', 'with the bytes that were chosen')
+    assert.equal(card.hidden, false, 'the pending row is shown')
+    assert.equal(card.name, 'from-picker.md', 'the card is named after the file')
+    assert.match(String(card.meta), /MD \d+ B/, 'and carries its type and size')
+    assert.equal(card.remove, 'Remove file from-picker.md', 'with a remove control naming the file')
+    assert.equal(card.draft, '', 'the draft is not polluted with a path')
+    assert.ok(card.path.startsWith(server.home), `the stored reference is inside the harness home (${card.path})`)
+    assert.match(String(card.path), /[/\\]uploads[/\\]/, 'and inside the upload directory')
+    assert.equal(readFileSync(card.path, 'utf8'), '# from the picker\n\nhello\n', 'with the bytes that were chosen')
 
-    /** Evidence for the loop's document: the draft holding the path, the menu closed. */
-    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-1-add-file.png')
+    /** Removing is per file, as DSH's ✕ is; the pending row disappears with the last card. */
+    await browser.evaluate('document.querySelector("#attach-cards .attach-remove").click()')
+    assert.ok(await browser.waitFor('document.getElementById("attach-cards").hidden === true', 10_000), 'removing the file hides the row')
+
+    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-1-cards.png')
     mkdirSync(dirname(evidence), { recursive: true })
     await browser.screenshot(evidence)
   } finally {
@@ -1147,7 +1149,7 @@ test('the File action stays available while the workspace tree is open', async (
  * local-memory guard, not a prompt-size one, and eleven megabytes must go through. Failing-first: this
  * test was written against the 10 MiB cap and failed with the owner's own sentence.
  */
-test('a file larger than ten megabytes is accepted, and lands in the draft', async (context) => {
+test('a file larger than ten megabytes is accepted as a pending card', async (context) => {
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('add-file-large')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1158,37 +1160,15 @@ test('a file larger than ten megabytes is accepted, and lands in the draft', asy
 
     await browser.goto(server.url)
     await browser.waitFor('document.getElementById("attach") !== null', 20_000)
-    await browser.evaluate(`(() => {
-      window.__filePickerClicks = 0
-      const original = HTMLInputElement.prototype.click
-      HTMLInputElement.prototype.click = function (...args) {
-        if (this.type === 'file') {
-          window.__filePickerClicks += 1
-          return undefined
-        }
-        return original.apply(this, args)
-      }
-      return true
-    })()`)
-
-    await browser.evaluate('document.getElementById("attach").click()')
-    assert.ok(await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000), 'the + menu opens')
-    const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File')`
-    assert.ok(await browser.waitFor(`${findFile} !== undefined`, 10_000), 'the menu offers File')
-    await browser.evaluate(`${findFile}.click()`)
-
-    const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
-    const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
-    assert.ok(found.result?.nodeId, 'the composer carries a file input for the picker')
-    await browser.send('DOM.setFileInputFiles', { files: [chosen], nodeId: found.result.nodeId })
-
-    assert.ok(
-      await browser.waitFor(`document.querySelector('#prompt textarea').value.includes('large-screenshot.png')`, 20_000),
-      'the draft receives a path for the eleven-megabyte file',
-    )
-    const draft = await browser.evaluate('document.querySelector("#prompt textarea").value')
-    assert.ok(draft.startsWith(server.home), `the path is inside the harness home (${draft})`)
-    assert.equal(statSync(draft).size, bytes, 'the stored copy is the whole eleven megabytes')
+    assert.ok(await attachThroughPicker(browser, chosen), 'the eleven-megabyte file becomes a pending card')
+    const card = JSON.parse(await browser.evaluate(`JSON.stringify({
+      name: document.querySelector('#attach-cards .attach-name')?.textContent,
+      path: document.querySelector('#attach-cards .attach-card')?.dataset.path,
+      draft: document.querySelector('#prompt textarea').value,
+    })`))
+    assert.equal(card.name, 'large-screenshot.png')
+    assert.equal(card.draft, '', 'the draft stays clean')
+    assert.equal(statSync(card.path).size, bytes, 'the stored copy is the whole eleven megabytes')
 
     const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-4-large-file.png')
     mkdirSync(dirname(evidence), { recursive: true })
@@ -1275,6 +1255,148 @@ test('the dock elements open the reference\u2019s detail surfaces, and close aga
 
     await browser.evaluate(`(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true })()`)
     assert.equal(JSON.parse(await panel()).hidden, true, 'Escape closes the surface')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The request message that carries a turn's prompt.
+ *
+ * The harness appends its own instruction messages as `user` messages after the turn's, so "the last user
+ * message" is a system reminder rather than the person's words; the prompt text is the stable way to find the
+ * one under test.
+ */
+function promptMessage(server, needle) {
+  const request = server.double.requests.at(-1)
+  assert.ok(request !== undefined, 'the provider was asked')
+  const message = JSON.parse(request.body).messages.find(
+    (entry) => entry.role === 'user' && JSON.stringify(entry.content).includes(needle),
+  )
+  assert.ok(message !== undefined, `the provider was sent the prompt (${needle})`)
+  return message
+}
+
+/** The user message the session recorded, read from its own JSONL log. */
+async function recordedUserMessage(browser, sessionId) {
+  const text = await browser.evaluate(`(async () => (await fetch('/api/sessions/${sessionId}/log')).text())()`)
+  const events = text
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line))
+  return events.find((event) => event.type === 'message' && event.message?.role === 'user')?.message
+}
+
+/**
+ * A pending image reaches a vision route as image content, and the session keeps the reference.
+ *
+ * This is the claim the whole loop exists for: DSH sends an image attached in the composer to a model that
+ * accepts image input, not a path in the prompt. The recording double is the instrument — the assertion is
+ * on the exact provider request body, and the session log is the second instrument proving the recorded
+ * message kept a typed block rather than bytes.
+ */
+test('a pending image is delivered to a vision route as image content', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-vision', { inputModalities: ['text', 'image'] })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'picture.png')
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 0x11)])
+    writeFileSync(chosen, bytes)
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the image is a pending card')
+    await type(browser, 'describe this image')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the provider was asked once')
+
+    const sent = JSON.parse(server.double.requests[0].body)
+    const user = promptMessage(server, 'describe this image')
+    assert.ok(Array.isArray(user.content), `the user message carries typed parts (${JSON.stringify(user.content).slice(0, 200)})`)
+    const image = user.content.find((part) => part.type === 'image_url')
+    assert.ok(image !== undefined, 'the image is sent as image content')
+    assert.match(String(image.image_url.url), /^data:image\/png;base64,/, 'as a data URL of the declared media type')
+    assert.equal(Buffer.from(String(image.image_url.url).split(',')[1] ?? '', 'base64').length, bytes.length, 'with the whole stored file')
+    assert.ok(user.content.some((part) => part.type === 'text' && part.text === 'describe this image'), 'beside the prompt text')
+    assert.ok(!JSON.stringify(sent).includes(server.home), 'and the stored path is not what the provider was told')
+
+    const rows = await browser.evaluate(`(async () => (await (await fetch('/api/sessions')).json()).map((row) => row.id).slice(0, 1))()`)
+    assert.equal(rows.length, 1, 'the turn created a session')
+    const recorded = await recordedUserMessage(browser, rows[0])
+    const block = (recorded?.content ?? []).find((part) => part.type === 'image')
+    assert.ok(block !== undefined, 'the session recorded an image block')
+    assert.equal(block.mimeType, 'image/png', 'with the media type the server measured')
+    assert.match(String(block.path), /[/\\]uploads[/\\]/, 'and the stored reference, not the bytes')
+    assert.ok(!JSON.stringify(recorded).includes('base64'), 'the log holds no encoded bytes')
+
+    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-1-delivery.png')
+    mkdirSync(dirname(evidence), { recursive: true })
+    await browser.screenshot(evidence)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The same image on a route that accepts text only becomes DSH's deterministic placeholder.
+ *
+ * The failure this prevents is the one a person would see as "it ignored my image": an unsupported route must
+ * still be told the attachment exists, by a stable sentence naming its sha256 prefix, and no image bytes may
+ * be sent to it.
+ */
+test('a pending image on a text-only route becomes the deterministic placeholder', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-text-only')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'picture.png')
+    writeFileSync(chosen, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03]))
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the image is a pending card')
+    await type(browser, 'what is in this file?')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the provider was asked once')
+
+    const request = server.double.requests[0].body
+    assert.ok(!request.includes('image_url'), 'no image content reaches a text-only route')
+    assert.match(request, /\[image omitted because this model accepts text only; attachment sha256:[0-9a-f]{8}\]/, 'the placeholder names the attachment')
+    assert.match(request, /what is in this file\?/, 'beside the prompt text')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * A non-image file is never sent to a provider: it becomes the file handle naming its saved read-only path.
+ *
+ * DSH's rule, asserted on the wire: the provider receives text with the name, the byte size, the sha256
+ * prefix and the path, and the file's contents stay on disk for the agent's own file tools.
+ */
+test('a pending document reaches the provider as DSH\'s file handle', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('attach-document')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    const chosen = join(server.work, 'notes.md')
+    writeFileSync(chosen, '# private notes\n\nnot for the provider\n')
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    assert.ok(await attachThroughPicker(browser, chosen), 'the document is a pending card')
+    await type(browser, 'summarise the attached notes')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1), 'the provider was asked once')
+
+    const user = promptMessage(server, 'summarise the attached notes')
+    assert.match(String(user.content), /\[File "notes\.md" \(\d+ bytes, sha256:[0-9a-f]{8}\): verbatim read-only copy saved at "/, 'the handle names the file and its digest')
+    assert.match(String(user.content), /Read that path with your file tools/, 'with the instruction to read the saved path')
+    assert.ok(!String(user.content).includes('not for the provider'), 'and the file content never leaves the disk')
   } finally {
     browser.close()
     await server.close()

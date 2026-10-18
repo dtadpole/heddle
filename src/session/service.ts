@@ -5,7 +5,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
 import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
-import type { Message } from '../llm/types.ts'
+import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 
 import { inheritsAnswer, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
@@ -185,10 +185,22 @@ export class SessionService extends Service {
    * because this only fills a blank.
    */
   user(handle: SessionHandle, text: string, source?: unknown): void {
-    this.store.message(handle, { role: 'user', content: [{ type: 'text', text }], ...(source !== undefined ? { source } : {}) })
+    this.userContent(handle, [{ type: 'text', text }], source)
+  }
+
+  /**
+   * Record a user turn whose content is more than text — an attached image or file keeps its typed block.
+   *
+   * The title is still taken from the **text** part: an attachment is not a name for the conversation, and a
+   * message that carries only an attachment names nothing (the list keeps the folder's name until a person
+   * types one). DSH titles from the first message the same way.
+   */
+  userContent(handle: SessionHandle, content: readonly ContentPart[], source?: unknown): void {
+    if (content.length === 0) return
+    this.store.message(handle, { role: 'user', content: [...content], ...(source !== undefined ? { source } : {}) })
     const meta = this.store.list().find((one) => one.id === handle.id)
     if (meta !== undefined && (meta.title === undefined || meta.title.trim().length === 0)) {
-      const title = titleFrom(text)
+      const title = titleFrom(textOf(content))
       if (title.length > 0) this.store.rename(handle.id, title)
     }
   }

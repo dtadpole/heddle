@@ -282,7 +282,8 @@ export function toChatMessage(message: GenerateRequest['messages'][number]): Rec
   const text = message.content
     .filter((part): part is Extract<(typeof message.content)[number], { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
-    .join('')
+    /** Separate text blocks are separate blocks on the wire; a newline is this form's way to keep them apart. */
+    .join('\n')
   const calls = message.content.filter((part) => part.type === 'tool-call')
   const images = message.content.filter(
     (part): part is ImagePart => part.type === 'image' && part.data !== undefined,

@@ -286,5 +286,7 @@ test('the + menu carries the computer-side File action and the input it drives',
   assert.match(page, /<input type="file" id="attach-file" multiple hidden>/, 'the picker input exists')
   assert.match(page, /file\.textContent = 'File'/, 'the menu item is labelled File, as DSH labels it')
   assert.match(page, /`\/api\/uploads\?name=\$\{encodeURIComponent\(file\.name\)\}`/, 'the bytes go to the upload route')
-  assert.match(page, /paths\.push\(\(await response\.json\(\)\)\.path\)/, 'and the answer path is what the draft receives')
+  assert.match(page, /id="attach-cards"/, 'the composer draws pending attachment cards')
+  assert.match(page, /saved\.path, name: file\.name, bytes: saved\.bytes/, 'the stored reference waits as a pending attachment')
+  assert.match(page, /pendingAttachments = \[\.\.\.pendingAttachments, \.\.\.added\]/, 'and it is kept with the draft, not typed into it')
 })
