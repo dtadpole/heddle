@@ -117,6 +117,30 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * and the chord `Alt+Meta+N`. Judged here because it is the sidebar's; the click is real, and what it must do is
      * start a conversation in the workspace the reader is looking at.
      */
+    /**
+     * The **empty state** — DSH's home, which this panel did not have: its centre carries the mark, a heading and the
+     * chord rather than a column headed "No session". With no conversation open (this fixture has a workspace and no
+     * sessions), the invitation is shown and the conversation's own column is put away under it.
+     */
+    const empty = JSON.parse(
+      await browser.evaluate(`(() => {
+        const section = document.getElementById('empty-state')
+        const heading = section.querySelector('h3')
+        return JSON.stringify({
+          shown: !section.hidden && getComputedStyle(section).display !== 'none',
+          heading: heading === null ? null : heading.textContent.trim(),
+          hint: section.querySelector('p')?.textContent.replace(/\\s+/g, ' ').trim() ?? '',
+          logHidden: document.getElementById('log').hidden,
+          title: document.getElementById('session-title').textContent.trim()
+        })
+      })()`),
+    )
+    assert.equal(empty.shown, true, 'a panel with no conversation shows the invitation')
+    assert.equal(empty.heading, 'Start a conversation', 'with a heading that says what to do')
+    assert.match(empty.hint, /⌥⌘N/, 'and the chord that does it')
+    assert.equal(empty.title, 'No session', 'the header still says there is no session')
+    assert.equal(empty.logHidden, true, 'while the conversation\'s own column is put away')
+
     /** The seeded workspace has to be drawn before the action has a target; the tree is a fetch of its own. */
     assert.ok(
       await browser.waitFor('document.querySelector("#tree li[data-kind=\\"workspace\\"]") !== null', 20_000),
@@ -157,6 +181,17 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
       await browser.evaluate(`document.getElementById('session-title').textContent`),
       'No session',
       'and the panel opens it',
+    )
+    /** And the invitation gives way: it is for the panel with nothing in it. */
+    assert.equal(
+      await browser.evaluate(`!document.getElementById('empty-state').hidden`),
+      false,
+      'the empty state is put away once there is a conversation',
+    )
+    assert.equal(
+      await browser.evaluate(`document.getElementById('log').hidden`),
+      false,
+      'and the conversation\'s column is back',
     )
 
     /** DSH\'s chord, `Alt+Meta+N`, does the same thing from the keyboard. */

@@ -145,6 +145,24 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
 })
 
+test('a panel with nothing open shows an invitation, and gives way when something opens', () => {
+  /**
+   * DSH's home centres a mark, a heading and the composer; Heddle showed an empty column under a header that said
+   * "No session". The invitation is painted from the panel's own state — the chat view with no session in it — rather
+   * than from a flag someone has to remember, and the conversation's column is put away beneath it.
+   */
+  assert.match(page, /<section id="empty-state" hidden>/, 'the invitation exists and starts hidden')
+  assert.match(page, /<h3>Start a conversation<\/h3>/, 'with a heading that says what to do')
+  assert.match(page, /<kbd>⌥⌘N<\/kbd>/, 'and the chord that does it')
+  assert.match(page, /function paintEmptyState\(\)/, 'one painter decides when it is shown')
+  assert.match(page, /const nothingOpen = view === 'chat' && current === null/, 'from the panel\'s own state')
+  assert.ok(page.includes('paintEmptyState()\n}'), 'the view switch ends by painting it')
+  assert.ok(page.includes('current = id\n  paintEmptyState()'), 'opening a session paints it')
+  assert.ok(page.includes('paintEmptyState()\n</script>'), 'and boot ends by painting it')
+  /** A session that no longer exists must not keep the invitation hidden. */
+  assert.ok(page.includes('current = null\n      const title'), 'a vanished session releases the pointer')
+})
+
 test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
   /**
    * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as

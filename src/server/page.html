@@ -933,6 +933,8 @@
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
   /** DSH's state word: the muted body type, before the name, smaller than it. */
   #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
+  /** The rest-state pin mark: small, muted, and never the whole width of the row. */
+  #tree .pin-mark { display: inline-flex; flex: none; width: 14px; height: 14px; opacity: .7; }
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
    * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a
@@ -2072,6 +2074,8 @@ function add(kind, text, merge = true, label, tool) {
   }
   log.append(node)
   log.scrollTop = log.scrollHeight
+  /** A turn on screen is content: the invitation, if it is showing, has been answered. */
+  paintEmptyState()
 }
 
 /**
@@ -2687,11 +2691,30 @@ window.addEventListener('resize', scheduleMinimap)
 function paintEmptyState() {
   const empty = document.getElementById('empty-state')
   if (empty === null) return
-  const nothingOpen = view === 'chat' && current === null
+  /**
+   * Three reasons not to invite: another panel is showing, a session is open, or a turn is already drawn.
+   *
+   * The third one is not hypothetical. Measured in part 9: a message sent from a fresh page renders its turn **before**
+   * the session's own fetch comes back and sets `current`, so the transcript was measured at width 0 — the invitation
+   * still covered the column it was inviting the reader to fill. Content is the strongest signal there is; the
+   * invitation yields to it regardless of what the pointers say.
+   */
+  const hasContent = log !== null && log.childElementCount > 0
+  const nothingOpen = view === 'chat' && current === null && !hasContent
   empty.hidden = !nothingOpen
   /** The conversation's own column is hidden under the invitation rather than left to draw an empty box. */
   if (log !== null) log.hidden = nothingOpen || view !== 'chat'
 }
+
+/**
+ * The **first** paint happens here, not only at the end of boot.
+ *
+ * The script sits at the end of the body, so the section exists now; the steps after this point fetch endpoints,
+ * status, sessions and the tree, and any of them failing must not leave a static `hidden` invitation over an empty
+ * panel. Boot asks again when everything has loaded. Measured in a full verifier sweep: the invitation was sometimes
+ * hidden with the header saying "No session", because a later boot step had thrown before the single end-of-boot call.
+ */
+paintEmptyState()
 
 async function showView(next) {
   view = next
@@ -5760,7 +5783,8 @@ function menuItemsFor(node) {
      * other way round. The shortcut the other menu shows beside each item is not printed here; the keys work, and
      * duplicating them into the label would make the name something other than the action.
      */
-    items.push({ label: node.pinned ? 'Unpin session' : 'Pin session', glyph: 'pin', run: () => pinSession(node) })
+    /** DSH hides the pin on an archived row altogether: the two flags are mutually exclusive. */
+    if (!node.archived) items.push({ label: node.pinned ? 'Unpin session' : 'Pin session', glyph: 'pin', run: () => pinSession(node) })
     items.push({ label: 'Rename', glyph: 'rename', run: () => renameSession(node) })
     items.push({ label: 'Fork session', glyph: 'fork', run: () => forkSession(node) })
     items.push({ label: node.archived ? 'Unarchive session' : 'Archive session', glyph: 'archive', run: () => archiveSession(node) })
@@ -5850,7 +5874,19 @@ function pinSession(node) {
   return setSessionFlags(node, { pinned: !node.pinned })
 }
 
-function archiveSession(node) {
+/**
+ * Archive (or unarchive) a session.
+ *
+ * Archiving a session with a turn in flight is refused by the route unless the caller says to stop it — DSH puts this
+ * behind a dialog that offers exactly that choice. A native confirm is that dialog here: it says what will happen to the
+ * work, and declining leaves everything as it was.
+ */
+async function archiveSession(node) {
+  if (!node.archived && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
+    const answer = window.confirm('This session is running. Stop the turn and archive it?')
+    if (!answer) return
+    return setSessionFlags(node, { archived: true }, { stop: true })
+  }
   return setSessionFlags(node, { archived: !node.archived })
 }
 
@@ -5860,11 +5896,11 @@ function archiveSession(node) {
  * One function for both flags because the route is one: the record and the definition are written together, and
  * a row's menu only decides which of the two it is changing.
  */
-async function setSessionFlags(node, patch) {
+async function setSessionFlags(node, patch, extra = {}) {
   const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...patch, folder: node.path }),
+    body: JSON.stringify({ ...patch, ...extra, folder: node.path }),
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -6279,7 +6315,8 @@ function nodeRow(node) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
-    quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
+    /** An archived row offers no pin, for the same reason the menu does not: pinning it would be refused. */
+    if (!node.archived) quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
     quick.dataset.slot = 'after-menu'
     rowTools.append(quick)
   }
@@ -6305,6 +6342,17 @@ function nodeRow(node) {
   const menuSlot = rowTools.querySelector(':scope > .menu-wrap')
   const quickSlot = rowTools.querySelector(':scope > .session-actions')
   if (menuSlot !== null && quickSlot !== null) rowTools.insertBefore(menuSlot, quickSlot)
+  /**
+   * A pinned row carries a mark at rest, at the right where the hover pin button lands — DSH's `_pinIndicator`. Without it a
+   * pin is only visible by the row's position, which is a rule a reader has to know.
+   */
+  if (node.pinned === true) {
+    const mark = document.createElement('span')
+    mark.className = 'pin-mark'
+    mark.append(kindIcon('pin'))
+    mark.title = 'pinned'
+    row.append(mark)
+  }
   /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
   if (rowTools.children.length > 0) rowRight.append(rowTools)
   if (rowRight.children.length > 0) row.append(rowRight)
