@@ -1,6 +1,6 @@
 ---
 title: Full loop goal
-version: 1.1.0
+version: 1.2.0
 description: How to turn a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → verify → fix for a stated number of cycles, with each cycle's evidence required before it counts.
 grounded_in:
   - owner statement 2026-10-17 that a big job should be set up as a goal that researches, understands, plans, implements, verifies, fixes and loops three times
@@ -102,6 +102,8 @@ Cycle n — <one-line aim>
   changed:    <files, one line each>
   evidence:   <before → after, screenshot, the assertion that fails without the fix>
   reds:       <none | named, with its owner>
+  coverage:   <cells visited, cells not visited and why>
+  invariants: <what the structural change could have broken, and the assertion that it did not>
   lessons:    <the mechanism that now prevents a repeat>
 ```
 
@@ -128,6 +130,14 @@ will repeat work.
   refactor, name it and move on; do not edit under it.
 - **Lessons become mechanisms.** A lesson is "the assertion I added", "the check that now judges it", "the
   convention it became" — not a paragraph of good intentions.
+- **A cycle states its coverage.** `ui-parity-audit` has a coverage matrix; a round names the cells it visited
+  and the cells it did **not**, with a reason. "No differences" is only credible beside that statement —
+  otherwise it means the probe did not look. An unvisited cell that is not named is the next cycle's miss.
+- **A structural change keeps the invariants.** When a round moves a node, wraps it or renames a class, the
+  behaviour the old structure guaranteed is asserted too (rows still render, hover still reveals, selection
+  still paints, nothing overlaps), and the probe reports page errors with the failure. A render that throws
+  looks exactly like missing data — that is how a `const` used before its declaration removed every session row
+  while the branch still rendered.
 - **Keep the goal active until the last cycle has verified.** Claiming completion is a measurement too, and it
   goes in the document.
 
