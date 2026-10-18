@@ -2395,6 +2395,39 @@ function summaryLine(kind, text, tool, label) {
   return line
 }
 
+/**
+ * The sentence a refused or failed tool call is remembered by, for the **closed** row.
+ *
+ * DSH prints a failed tool as one line a reader can see without opening anything — `Write ·
+ * Error: [sandbox: file access denied under read-only mode]` — and heddle kept the same sentence inside
+ * the row's body only, so the refusal of a permission the person just chose was invisible until a click.
+ * A permission the page can change must report its refusals where the action appears.
+ */
+function toolErrorLine(result) {
+  const line = String(result).split('\n')[0].trim()
+  if (line.length === 0) return ''
+  return 'Error: ' + line.replace(/^error\s*(\([^)]*\))?\s*:\s*/i, '').slice(0, 160)
+}
+
+/** Put the failure sentence on the summary line, replacing the path hint the call started with. */
+function showToolError(node, result) {
+  if (node.dataset.state !== 'error') return
+  const line = node.querySelector('summary')
+  if (line === null) return
+  const text = toolErrorLine(result)
+  if (text === '') return
+  let hint = line.querySelector('.hint')
+  if (hint === null) {
+    const separator = document.createElement('span')
+    separator.className = 'sep'
+    separator.setAttribute('aria-hidden', 'true')
+    hint = document.createElement('span')
+    hint.className = 'hint'
+    line.append(separator, hint)
+  }
+  hint.textContent = text
+}
+
 function addBlock(kind, text, merge, label, tool) {
   const last = log.lastElementChild
   if (merge && last && last.dataset.kind === kind) {
@@ -2449,6 +2482,7 @@ function addBlock(kind, text, merge, label, tool) {
     body.textContent = text
   }
   node.append(line, body)
+  if (kind === 'tool' && tool !== undefined && typeof tool.result === 'string') showToolError(node, tool.result)
   log.append(node)
   log.scrollTop = log.scrollHeight
 }
@@ -2473,6 +2507,7 @@ function fillToolResult(toolCallId, result, failed) {
   }
   answer.textContent += result
   open.dataset.state = failed ? 'error' : 'ok'
+  showToolError(open, answer.textContent)
   return true
 }
 
@@ -3667,12 +3702,12 @@ async function showSession(id) {
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
        */
       current = null
-      applySessionAccess(null)
       const title = document.getElementById('session-title')
       if (title !== null) title.textContent = 'No session'
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
+      applySessionAccess(null)
       return
     }
     const body = await response.json()
