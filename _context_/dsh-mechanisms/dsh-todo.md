@@ -90,3 +90,26 @@ the goal bar uses, so a session with both stacks them above the composer). Its s
 
 The tool semantics are researched and cited; the rendered values are the gap the instrument closes, and no UI
 code is written before that.
+
+## Ordering: the todo panel sits above the goal dock
+
+DSH mounts both docks into the same `conversation.input.dock` slot and fixes their order there: the todo
+client plugin registers `{ id: 'todo', order: 0 }` and the goal client plugin registers `{ id: 'goal',
+order: 10 }` — so with both present, the todo panel renders **above** the goal bar. That is the owner's rule
+too, and it is what heddle does now: the `#todo-panel` sits before the `#goal-bar` in the input dock, with the
+same 6px separation before the composer card.
+
+Judged in the browser, not in the stylesheet: a part 9 test creates both (a scripted `todo_write` turn and a
+paused goal), then compares the two boxes and requires `todoPanel.bottom <= goalBar.top`. The same test
+catches the reverse ordering, which the first implementation had.
+
+## The generated surface is the measured surface
+
+Two findings from the UI round worth keeping beside the numbers:
+
+- **Scripted turns hand steps out by round index, not by a turn counter.** A second turn replays round 0, so a
+  multi-turn check must rewrite the script file between turns (the endpoint reads it per request). The first
+  version of the todo check assumed a global step counter and silently re-wrote the first plan on turn two.
+- **A browser wait that times out must fail the test.** The shared wait helper used to return `false` after its
+  deadline, which let a check proceed to a later assertion with stale state and report the wrong cause. It now
+  throws with the expression it waited for, which is how the todo check exposed the stale-plan write.

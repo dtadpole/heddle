@@ -407,7 +407,12 @@ export class Page {
       }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
     }
-    return false
+    /**
+     * A timeout is a **failure**, not a `false` a check can ignore: returning false let a check proceed to a
+     * later assertion with stale state and report the wrong cause (the todo check did exactly that). The
+     * expression is named so the failure says what never became true.
+     */
+    throw new Error(`timed out after ${timeoutMs}ms waiting for: ${expression}`)
   }
 
   /** Capture the page, or one element of it, as an image. */

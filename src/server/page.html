@@ -584,6 +584,32 @@
   #goal-actions button:disabled { opacity: .4; cursor: default; }
   #goal-actions button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
   #goal-actions svg { width: 14px; height: 14px; }
+
+  /**
+   * The todo dock, measured from DSH's rendered TodoPanel: the menu surface at radius 16, a 6/12 body, a 36px
+   * header (title 13/500 primary, progress 13/400 tertiary, counts zero-omitted and joined with an en-space
+   * middot), a 180px scrolling list with 8px gaps and 13/20 secondary items whose 16px status glyph carries the
+   * accessible label. The chevron points up while collapsed, as DSH's does.
+   */
+  #todo-panel { box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), var(--chat-column)); margin: 0 auto 6px; border-radius: 16px; background: rgba(67, 69, 74, 0.45); backdrop-filter: blur(40px) saturate(1.5); box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; }
+  #todo-panel[hidden] { display: none; }
+  #todo-body { display: flex; flex-direction: column; gap: 8px; padding: 6px 12px; }
+  #todo-header { display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  #todo-header:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 8px; }
+  #todo-lead { display: grid; place-items: center; flex: 0 0 auto; color: color-mix(in oklab, currentColor 70%, transparent); }
+  #todo-title { flex: 0 0 auto; font-size: 13px; font-weight: 500; line-height: 24px; color: var(--text); }
+  #todo-progress { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 20px; color: color-mix(in oklab, currentColor 70%, transparent); }
+  #todo-chevron { display: grid; place-items: center; flex: 0 0 auto; color: color-mix(in oklab, currentColor 70%, transparent); transition: transform .15s ease; }
+  #todo-header[aria-expanded='true'] #todo-chevron { transform: rotate(180deg); }
+  #todo-list { display: flex; flex-direction: column; gap: 8px; max-height: 180px; margin: 0; padding: 0; list-style: none; overflow-y: auto; }
+  #todo-list[hidden] { display: none; }
+  #todo-list li { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 13px; line-height: 20px; color: color-mix(in oklab, currentColor 82%, transparent); }
+  .todo-glyph { display: grid; place-items: center; flex: 0 0 auto; width: 16px; height: 16px; }
+  .todo-content { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #todo-list li[data-status='in_progress'] .todo-glyph { color: #2f6feb; }
+  #todo-list li[data-status='completed'] .todo-glyph { color: #2fa36b; }
+  #todo-list li[data-status='pending'] .todo-glyph { color: color-mix(in oklab, currentColor 45%, transparent); }
+  #todo-list li[data-status='completed'] .todo-content { color: color-mix(in oklab, currentColor 55%, transparent); }
   /**
    * The person's own message: **a right-aligned bubble**, DSH's `Sixlwa_bubble`.
    *
@@ -2687,7 +2713,27 @@
   <button id="gutter-column" class="column-grip" data-side="right" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <div id="composer">
   <!--
-    The goal indicator, where DSH's `GoalDock` lives: **inside the chat window, above the composer**, not a banner
+    DSH's TodoPanel, measured live from its own rendered dock: a section labelled "To-dos" with a header button
+    (`aria-expanded`) carrying a checklist glyph, the title, the per-status progress counts (zero-count segments
+    omitted, joined by an en-space middot) and a chevron, collapsing by default to that header. The surface is the
+    menu surface the goal dock uses, radius 16, body padding 6/12, list capped at 180px with 8px gaps.
+  -->
+  <section id="todo-panel" data-todo-ui="dsh" hidden aria-label="To-dos">
+    <div id="todo-body">
+      <button id="todo-header" type="button" aria-expanded="false">
+        <span id="todo-lead" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="6" height="6" rx="1.5"/><path d="M12 7h9M3 14h6M12 14h9M3 21h6M12 21h9M5 5.5l1.5 1.5 2.5-2.5"/></svg></span>
+        <span id="todo-title">To-dos</span>
+        <span id="todo-progress"></span>
+        <span id="todo-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg></span>
+      </button>
+      <ul id="todo-list" hidden></ul>
+    </div>
+  </section>
+
+  <!--
+    The goal indicator, where DSH's `GoalDock` lives — registered after the todo panel because DSH gives
+    the todo dock `order: 0` and the goal dock `order: 10` in `conversation.input.dock`, so the todo list sits
+    above the goal when both exist. **inside the chat window, above the composer**, not a banner
     over the conversation. Measured from DSH's GoalDock in the `conversation.input.dock` slot: a goal glyph, the
     objective, the phase, the round count, then the person's verbs. The durable phase and activation come from
     `/api/goal`; **running** is the one fact the durable record cannot tell you, so it comes from the live stream.
@@ -2700,6 +2746,7 @@
     <span id="goal-running" hidden><span class="pulse" aria-hidden="true"></span>running</span>
     <span id="goal-actions"></span>
   </div>
+
   <!--
     DSH's approval card: an amber-bordered question above the composer, with the model's justification verbatim and
     one way to say no and one to allow exactly the call that asked. It is drawn from the server's
@@ -2908,6 +2955,12 @@ function followLedgerTail() {
 let current = null
 /** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
 let goalView = null
+/** The generation of the goal read: an older response must not paint over a newer goal. */
+let goalGeneration = 0
+let todoView = null
+let todoCollapsed = true
+/** The generation of the todo read: an older response must not paint over a newer list. */
+let todoGeneration = 0
 /** The goal indicator is drawn from durable state, so every edge that can change it asks for one re-read. */
 let goalRefreshTimer = null
 function scheduleGoalRefresh() {
@@ -2915,6 +2968,16 @@ function scheduleGoalRefresh() {
   goalRefreshTimer = setTimeout(() => {
     goalRefreshTimer = null
     void refreshGoal()
+  }, 120)
+}
+
+/** The todo panel follows the same rule as the goal dock: a durable edge asks for one debounced re-read. */
+let todoRefreshTimer = null
+function scheduleTodoRefresh() {
+  if (todoRefreshTimer !== null) return
+  todoRefreshTimer = setTimeout(() => {
+    todoRefreshTimer = null
+    void refreshTodo()
   }, 120)
 }
 
@@ -4868,6 +4931,15 @@ function wireTrajectoryToolbar() {
 }
 wireTrajectoryToolbar()
 
+/** The header is the panel's only control: it expands and collapses the list. */
+const todoHeaderButton = document.getElementById('todo-header')
+if (todoHeaderButton !== null) {
+  todoHeaderButton.addEventListener('click', () => {
+    todoCollapsed = !todoCollapsed
+    renderTodo()
+  })
+}
+
 async function refreshGoal() {
   const bar = document.getElementById('goal-bar')
   if (bar === null) return
@@ -4876,11 +4948,14 @@ async function refreshGoal() {
     goalView = null
     return
   }
+  const generation = ++goalGeneration
   try {
     const response = await fetch('/api/goal?session=' + encodeURIComponent(current))
     const body = await response.json()
+    if (generation !== goalGeneration) return
     goalView = response.ok ? (body.goal ?? null) : null
   } catch {
+    if (generation !== goalGeneration) return
     goalView = null
   }
   if (goalView === null) {
@@ -4956,6 +5031,65 @@ async function refreshGoal() {
     }
     actions.append(button)
   }
+}
+
+/** Re-read the session's todo list and draw the dock; an absent or empty list hides it, as DSH's panel does. */
+async function refreshTodo() {
+  const panel = document.getElementById('todo-panel')
+  if (panel === null) return
+  if (current === null) {
+    panel.hidden = true
+    todoView = null
+    return
+  }
+  const generation = ++todoGeneration
+  try {
+    const response = await fetch('/api/todo?session=' + encodeURIComponent(current))
+    const body = await response.json()
+    if (generation !== todoGeneration) return
+    todoView = response.ok ? (body.todo ?? null) : null
+  } catch {
+    if (generation !== todoGeneration) return
+    todoView = null
+  }
+  renderTodo()
+}
+
+/** The counts are the header's whole content; the segments are zero-omitted and joined the way DSH joins them. */
+function renderTodo() {
+  const panel = document.getElementById('todo-panel')
+  if (panel === null) return
+  const view = todoView
+  if (view === null || view.todos.length === 0) {
+    panel.hidden = true
+    return
+  }
+  panel.hidden = false
+  const { completed, inProgress, pending } = view.counts
+  const segments = []
+  if (completed > 0) segments.push(completed + ' done')
+  if (inProgress > 0) segments.push(inProgress + ' in progress')
+  if (pending > 0) segments.push(pending + ' pending')
+  document.getElementById('todo-progress').textContent = segments.join('\u2002·\u2002')
+  document.getElementById('todo-header').setAttribute('aria-expanded', String(!todoCollapsed))
+  const list = document.getElementById('todo-list')
+  list.hidden = todoCollapsed
+  list.replaceChildren(
+    ...view.todos.map((todo) => {
+      const item = document.createElement('li')
+      item.dataset.status = todo.status
+      const glyph = document.createElement('span')
+      glyph.className = 'todo-glyph'
+      glyph.setAttribute('role', 'img')
+      glyph.setAttribute('aria-label', todo.status === 'completed' ? 'Completed' : todo.status === 'in_progress' ? 'In progress' : 'Pending')
+      glyph.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4" fill="currentColor"/></svg>'
+      const content = document.createElement('span')
+      content.className = 'todo-content'
+      content.textContent = todo.content
+      item.append(glyph, content)
+      return item
+    }),
+  )
 }
 
 async function showSession(id) {
@@ -5045,6 +5179,7 @@ async function showSession(id) {
     log.append(note)
   }
   await refreshGoal()
+  await refreshTodo()
 }
 
 async function refreshSessions() {
@@ -5133,6 +5268,7 @@ events.addEventListener('session', (message) => {
   if ((event.type === 'goal/change' || event.type === 'turn/completed' || event.type === 'model/request') && payload.session === (current ?? composerKey)) {
     scheduleGoalRefresh()
   }
+  if (event.type === 'todo/write' && payload.session === (current ?? composerKey)) scheduleTodoRefresh()
   if (event.type === 'model/request') {
     runningSessions.add(payload.session)
     paintRunningMarks()
