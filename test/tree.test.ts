@@ -372,3 +372,45 @@ test('a pinned session sorts above newer ones, and the flags come from the store
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('pinned sessions order by when they were pinned, newest pin first', () => {
+  const root = scaffold(['_tools_/some-tool/_sessions_/alpha', '_tools_/some-tool/_sessions_/beta', '_tools_/some-tool/_sessions_/gamma'])
+  try {
+    for (const [name, id, created] of [
+      ['alpha', 'session-1', '2026-10-17T10:00:00.000Z'],
+      ['beta', 'session-2', '2026-10-17T11:00:00.000Z'],
+      ['gamma', 'session-3', '2026-10-17T12:00:00.000Z'],
+    ] as const) {
+      writeFileSync(
+        join(root, '_tools_/some-tool/_sessions_', name, 'session.json'),
+        JSON.stringify({ id, log: `/logs/${id}`, cwd: join(root, '_tools_/some-tool'), createdAt: created }),
+      )
+    }
+    /**
+     * All three are pinned, and the reference's pin is a **stack**: each new pin is prepended, so the order is the time
+     * each was pinned, newest first — not the order of their names and not the order they were created.
+     */
+    const sessions = [
+      { ...session('session-1', join(root, '_tools_/some-tool'), '2026-10-17T10:00:00.000Z'), pinned: true, pinnedAt: '2026-10-17T13:00:00.000Z' },
+      { ...session('session-2', join(root, '_tools_/some-tool'), '2026-10-17T11:00:00.000Z'), pinned: true, pinnedAt: '2026-10-17T15:00:00.000Z' },
+      { ...session('session-3', join(root, '_tools_/some-tool'), '2026-10-17T12:00:00.000Z'), pinned: true, pinnedAt: '2026-10-17T14:00:00.000Z' },
+    ]
+    const labels = (tree(join(root, '_tools_/some-tool'), { roots: [{ path: root, title: 'fixture' }], sessions }).children ?? [])
+      .filter((child) => child.kind === 'session')
+      .map((child) => child.label)
+    assert.deepEqual(labels, ['beta', 'gamma', 'alpha'], 'the newest pin is first, not the newest session')
+
+    /** A session pinned without a time (an older record) sorts after the timed ones rather than crashing the order. */
+    const mixed = [
+      { ...session('session-1', join(root, '_tools_/some-tool'), '2026-10-17T10:00:00.000Z'), pinned: true, pinnedAt: '2026-10-17T13:00:00.000Z' },
+      { ...session('session-2', join(root, '_tools_/some-tool'), '2026-10-17T11:00:00.000Z'), pinned: true },
+    ]
+    const mixedLabels = (tree(join(root, '_tools_/some-tool'), { roots: [{ path: root, title: 'fixture' }], sessions: mixed }).children ?? [])
+      .filter((child) => child.kind === 'session')
+      .map((child) => child.label)
+    /** gamma's definition has no store record, so it still draws — after the pinned rows, as any unpinned session does. */
+    assert.deepEqual(mixedLabels, ['alpha', 'beta', 'gamma'], 'a pin without a time still sorts among the pinned rows')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

@@ -20,6 +20,7 @@ import { canonicalPath } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
+import { SessionFlagError } from '../session/store.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -992,6 +993,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
+    if ('error' in forked) {
+      /** A fork is cut at the last completed turn; a session with none is refused rather than copied as empty. */
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: `session ${id} has no completed turn to fork from`, code: forked.error })}\n`,
+      )
+      return
+    }
     respond(
       response,
       200,
@@ -1024,10 +1035,45 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'pinned or archived is required' })}\n`)
       return
     }
-    const meta = ctx.session.flags(id, {
-      ...(pinned !== undefined ? { pinned } : {}),
-      ...(archived !== undefined ? { archived } : {}),
-    })
+    /**
+     * Archiving a session with a turn in flight is refused unless the caller says to stop it, which is DSH's
+     * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
+     * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     */
+    if (archived === true) {
+      const running = state.running.get(id) ?? 0
+      if (running > 0) {
+        if (body.stop !== true) {
+          respond(
+            response,
+            409,
+            'application/json',
+            `${JSON.stringify({ error: `session ${id} is running; pass stop: true to stop it and archive`, code: 'active', running })}\n`,
+          )
+          return
+        }
+        abortSession(state.controllers, id)
+      }
+    }
+    let meta
+    try {
+      meta = ctx.session.flags(id, {
+        ...(pinned !== undefined ? { pinned } : {}),
+        ...(archived !== undefined ? { archived } : {}),
+      })
+    } catch (error) {
+      /**
+       * Recognised by **class or name**: the store's error class crosses the compiled module graph, and an `instanceof` that
+       * silently fails there would answer a semantic refusal as a 500. The name is part of the class's contract.
+       */
+      const refused = error instanceof SessionFlagError || (error instanceof Error && error.name === 'SessionFlagError')
+      if (refused) {
+        const code = (error as SessionFlagError).code ?? 'archived'
+        respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message, code })}\n`)
+        return
+      }
+      throw error
+    }
     if (meta === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return

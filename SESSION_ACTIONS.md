@@ -1,0 +1,107 @@
+---
+title: Session actions — pin, archive and fork
+version: 1.0.0
+description: What the reference implementation means by pinning, archiving and forking a session — read from the installed DSH packages — and how this project's backend and UI implement the same three, row by row.
+grounded_in:
+  - source: human-authored reading of the installed DSH packages on 2026-10-17
+  - the owner's request to research, plan and implement the functions behind pin, archive and fork in both the backend and the UI
+  - the comparison document SESSION_UI.md, whose row menu and hover controls these actions share
+---
+
+# Session actions
+
+Three actions on a session, each with a meaning that is easy to get half right: **pin** changes where a session is
+listed, **archive** takes it out of every listing while keeping it findable, **fork** creates a new conversation from
+the state of an old one. This document records the reference's semantics first, then this project's implementation and
+the differences that are deliberate.
+
+The reference is the installed DSH, read at
+`~/.volta/tools/image/packages/@deepseek-ai/dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`.
+File references below are to that tree.
+
+## Pin
+
+| Question | DSH | Where |
+|---|---|---|
+| What is stored | a registry-global **set of session ids**, not a per-session field | `dsh-workspace/lib/index.js`, `pinnedSessionIds` state |
+| What order | a **prepend**: the most recently pinned id is first, and pinned sessions surface ahead of every unpinned one | `pinSession()` — `pinnedSessionIds: [sessionId, ...state.pinnedSessionIds]` |
+| Does it touch the session | no — pinning never touches workspace accounting or the session's own record | the same function |
+| Archived session | **refuses** (`WorkspaceArchivedSessionPinError`) | `pinSession()` |
+| Idempotent | yes — an already pinned id resolves without writing | `pinSession()` |
+| Row rest state | a pin indicator sits at the row's right (`_pinIndicator`, 16×20), where the hover pin button lands | `dsh-client-ui-workspace/lib/client.js` |
+| Menu order | Pin is menu order 100, the hover button order 200 (rightmost on the row) | `session-actions/PinSession.d.ts` |
+| Hidden when | on an **archived** row the pin menu item and button render `null` | the same file |
+
+## Archive
+
+| Question | DSH | Where |
+|---|---|---|
+| What is stored | a registry-global **archive set** of session ids; the session's workspace slot is untouched, so unarchiving restores its position | `dsh-workspace/lib/index.js`, `archivedSessionIds` |
+| What it hides | the session from **every grouping surface** | the same state |
+| Pin interaction | archiving **drops the pin** in the same durable write — the two are mutually exclusive | `archiveSession()` |
+| Running work | **refuses** when the session reports activity (`workspace/session-activity` waterfall), unless `stopActivity: true`, in which case it writes the archive first and then asks `workspace/session-stop` providers to stop | `archiveSession(sessionId, { stopActivity })` |
+| After archiving | an `agent/pre-step` gate rejects steps for an archived session, so a stop-induced wake cannot do work | `underArchivedSession()` |
+| Unarchive | drops the id from the set; no existence check; the position returns | `unarchiveSession()` |
+| UI confirmation | the client opens a dialog when the session has running work: confirming **stops the work and archives**, cancelling leaves it running and visible | `session-actions/ArchiveSession.d.ts` |
+| Idempotent | yes — an already archived id resolves without writing, asking or stopping | `archiveSession()` |
+
+## Fork
+
+| Question | DSH | Where |
+|---|---|---|
+| What it copies | an **inclusive event prefix** of the source log — raw events, not projected messages | `buildForkSeed()` in `dsh-session/lib/index.js` |
+| The cut | `atSeq`, or the **latest completed turn**: the last `turn/end`, extended over trailing events until the next turn start, appended user message or spliced inbox | `latestCompletedPrefixBoundary()` |
+| No completed turn | **refuses** with `session/fork-unavailable` | `SessionController.fork()` |
+| Open tail | the seed appends `session/end-seed { inherited: true }` and **synthetic closers** for an interrupted turn (a tool call started without a result gets a `forked` result telling the model the parent may have finished it after the fork point) | `buildForkSeed()` and the `forked` closers |
+| Provenance | the child's header records `parentSession` and `isSeeded: true`; its workspace is the source's, so the child is listed **beside its source** | `SessionController.fork()` |
+| Naming | the child gets a fresh `session-<uuid>` id and **no title**; the title arrives with its first prompt | the same function |
+| Model | the child is created with the current default model selection, not necessarily the source's | the same function |
+| Archived source | a fork of an archived session is an **independent** conversation — the archive gate follows lineage through subagent-origin sessions only | `underArchivedSession()` |
+| UI | menu order 300; **no** hover button — fork is a menu action only | `session-actions/ForkSession.d.ts` |
+
+## Cycle 1 — the rules, implemented and verified (2026-10-17)
+
+Implemented from the gaps table above, backend and UI together:
+
+- **Mutual exclusion.** `SessionStore.flags()` throws `SessionFlagError('archived')` when asked to pin an archived session,
+  and **archiving deletes the pin and its time** in the same write. The route answers that refusal as **409 with
+  `code: 'archived'`** rather than a 500 — the compiled module graph can hand the route a different class identity, so the
+  catch recognises the class **or its name**.
+- **Pin order.** A pin records `pinnedAt`; the tree orders pinned sessions by that time descending, so a pin is a stack
+  (newest first) instead of a name sort, and an old pinned record without a time sorts after the timed ones.
+- **Archive of a running session.** The route refuses with **409 `code: 'active'`** and the number of running turns unless
+  the caller passes `stop: true`, in which case it aborts the turn through the same handle the Stop button uses and then
+  archives. The page asks first — a native confirm naming what will happen to the work — and only then sends `stop: true`.
+- **Fork rules.** A fork is refused with **409 `code: 'unavailable'`** when the source has no completed turn, and the
+  child records `parentSession` — the provenance DSH's header keeps. The title stays `<title> (n)` (kept difference, above).
+- **UI.** Pin is absent from an archived row's menu and quick controls; an archived row carries `data-archived`; a pinned
+  row shows a 14px pin mark at rest; archiving a running session asks before stopping it.
+
+**Verified.** Unit: 320 passing, including the exclusivity, the pin time, the pin order (newest first, untimed after
+timed), and provenance. Part 7: a new HTTP check runs pin → archive → refused pin → refused fork → fork with provenance
+through the routes; the pin/archive check now asserts the pin is dropped and the 409; the inventory check reads a pinned
+row's mark and an archived row's control set after switching the archive filter on. Every one of those checks passes
+individually. **Not verified / open:** a full part-7 run hung once at the end of this cycle and was killed; the changed
+checks were run individually instead, and hunting that hang is the next cycle's first task.
+
+## This project's implementation, before cycle 1
+
+| Action | Backend | UI |
+|---|---|---|
+| pin | `POST /api/sessions/<id>/flags {pinned}` → `SessionStore.flags()` writes `pinned: true` into the session's **meta file** | menu `Pin session` / `Unpin session`; quick control on the row |
+| archive | the same route with `{archived}` → `archived: true` in the meta file; the tree hides archived sessions unless `?archived=show|only` | menu `Archive session` / `Unarchive session`; quick control; View options filter |
+| fork | `POST /api/sessions/<id>/fork` → `SessionStore.fork()` copies the **projected messages** (minus system) into a new session; `SessionService.fork()` titles it `<title> (N)` and writes its definition | menu `Fork session` only |
+
+## Gaps against the reference, and what this project will do
+
+| Gap | Decision |
+|---|---|
+| pinning and archiving are not mutually exclusive here | **fix**: pinning an archived session is refused; archiving drops the pin |
+| pin order is "pinned first, then newest name" | **fix**: record a `pinnedAt` time and order pinned sessions **most recently pinned first** |
+| archiving while a turn runs is allowed silently | **fix**: the route refuses with a structured error naming the activity, and the UI asks before stopping and archiving |
+| a fork has no provenance | **fix**: record `parentSession` on the child's meta |
+| a fork with no completed turn is allowed and copies nothing | **fix**: refuse with `fork-unavailable` |
+| the fork copies the projected messages, not the raw event prefix | **kept**: replaying another log's shadowing ranges into a fresh log means remapping sequence numbers, and a wrong remap is worse than a clean projection. The visible conversation is what a reader forked; the log stays the source of truth |
+| our fork is titled `<title> (n)` | **kept**: this UI lists sessions by title, and two rows called the same thing cannot be told apart; the reference relies on the first prompt to name its child |
+| DSH's pin indicator in the row's rest state | **fix**: a pin mark on a pinned row, at the right where the hover button lands |
+| Pin hidden on archived rows | **fix**: no pin control on an archived row |

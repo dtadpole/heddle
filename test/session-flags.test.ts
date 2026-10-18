@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { SessionStore } from '../src/session/store.ts'
+import { SessionFlagError, SessionStore } from '../src/session/store.ts'
 import { forkTitle, titleFrom } from '../src/session/service.ts'
 
 /**
@@ -53,10 +53,14 @@ test("a session's flags are written to its record, and a flag that is false is r
 
   const pinned = sessions.flags(handle.id, { pinned: true })
   assert.equal(pinned?.pinned, true, 'the pin is recorded')
+  /**
+   * Archiving is the one write that **removes** the pin: the two flags are mutually exclusive in the reference, so a session
+   * cannot be pinned and archived at once. The old version of this test expected the pin to survive, which was the gap.
+   */
   sessions.flags(handle.id, { archived: true })
   const both = sessions.list().find((one) => one.id === handle.id)
-  assert.equal(both?.pinned, true, 'and survives a second flag being written')
-  assert.equal(both?.archived, true, 'which landed too')
+  assert.equal(both?.archived, true, 'the archive landed')
+  assert.equal(both?.pinned, undefined, 'and dropped the pin')
 
   /** The rules the record keeps: a false flag is absent, and the log is untouched. */
   sessions.flags(handle.id, { pinned: false })
@@ -67,6 +71,39 @@ test("a session's flags are written to its record, and a flag that is false is r
 
   assert.equal(sessions.flags('session-00000000-0000-4000-8000-000000000000', { pinned: true }), null, 'a session that does not exist is refused')
   assert.ok(root.length > 0)
+})
+
+test('a pin and an archive are mutually exclusive, and each writes the field the other cannot keep', () => {
+  const { store: sessions } = store()
+  const handle = sessions.create({ cwd: '/tmp/project' })
+
+  /** Pinning records *when*, which is the order among several pins — the reference prepends each pin. */
+  sessions.flags(handle.id, { pinned: true })
+  const pinned = sessions.list().find((one) => one.id === handle.id)
+  assert.equal(pinned?.pinned, true, 'the pin is recorded')
+  assert.match(String(pinned?.pinnedAt), /^\d{4}-\d{2}-\d{2}T/, 'with the time it was pinned')
+
+  /** Archiving **drops** the pin in the same write, as DSH's archive does. */
+  sessions.flags(handle.id, { archived: true })
+  const archived = sessions.list().find((one) => one.id === handle.id)
+  assert.equal(archived?.archived, true, 'the archive is recorded')
+  assert.equal(archived?.pinned, undefined, 'and the pin is gone with it')
+  assert.equal(archived?.pinnedAt, undefined, 'including its time')
+
+  /** And pinning an archived session is refused, not silently ignored. */
+  assert.throws(
+    () => sessions.flags(handle.id, { pinned: true }),
+    (error: unknown) => error instanceof SessionFlagError && error.code === 'archived',
+    'an archived session cannot be pinned',
+  )
+  const after = sessions.list().find((one) => one.id === handle.id)
+  assert.equal(after?.pinned, undefined, 'and the refusal wrote nothing')
+
+  /** Unarchiving leaves it unpinned, which is the reversible half. */
+  sessions.flags(handle.id, { archived: false })
+  const restored = sessions.list().find((one) => one.id === handle.id)
+  assert.equal(restored?.archived, undefined, 'the archive is removed')
+  assert.equal(restored?.pinned, undefined, 'and it is not silently re-pinned')
 })
 
 test('forking copies the conversation (not the parent), names it, and leaves the parent untouched', () => {
@@ -92,6 +129,14 @@ test('forking copies the conversation (not the parent), names it, and leaves the
   const forkMeta = sessions.list().find((one) => one.id === forked.id)
   assert.equal(forkMeta?.cwd, '/tmp/project', 'bound to the folder its parent worked in')
   assert.equal(forkMeta?.endpoint, 'scripted', 'and to the backend it was run with')
+
+  const forkedMeta = sessions.list().find((one) => one.id === forked.id)
+  assert.equal(forkedMeta?.parentSession, undefined, 'a bare fork records no parent unless asked')
+
+  /** When the caller names the parent — as the service does — the child carries the provenance. */
+  const attributed = sessions.fork(parent.id, { parentSession: parent.id })
+  assert.ok(attributed !== null)
+  assert.equal(sessions.list().find((one) => one.id === attributed.id)?.parentSession, parent.id, 'and a fork of the service kind does')
 
   assert.ok(readFileSync(parent.transcript).equals(parentBefore), 'the parent log is not rewritten by a fork')
   assert.equal(sessions.list().filter((one) => one.id === parent.id).length, 1, 'and it is still one session')

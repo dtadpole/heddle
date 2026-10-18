@@ -41,7 +41,7 @@ the miss this skill exists to prevent.
 | **anatomy** | what the thing is made of: icon, label, shortcut, badge, state mark, count |
 | states | idle, hover, hover-left, focus, selected, disabled, live |
 | **opened surfaces** | everything a click brings into existence: the menu, its items, a dialog, a popover. Measure it **while open**, item by item |
-| **content stress** | long, empty, unicode, many items, deep nesting, zero rows |
+| **content stress** | long, empty, unicode, many items, deep nesting, zero rows — and **what the reference does when content overflows**: truncate with an ellipsis, reveal with a marquee, or show a tooltip |
 | **occlusion** | is it fully visible? clipped by an ancestor? under another layer? hit-testable at its centre? |
 | **control chrome** | the box of a **control**: its size and hit area, its padding and radius, its background and its hover surface, and the size of the glyph inside it. The reference usually has **more than one class** — a small row-action button and a larger icon button — and each must be matched by its own class |
 | cursor | is every clickable thing a hand, and does a disabled one keep the arrow |
@@ -130,6 +130,11 @@ A closed menu is a hidden element; the defect lives in its **opened** state. For
 - open it **twice in a row** and with a long label, because the state after the second click is a state too;
 - do the same for dialogs, popovers, the model menu and the attach menu.
 
+An overflowing title is the same kind of state: DSH's row crawls its clipped title on hover at 30px/s after an 8px floor,
+with edge masks driven by `data-scrolled`/`data-clipped`, and resets on leave — a whole behaviour that "it ellipsizes" does not
+imply. Measure the overflow behaviour with a **trusted pointer** and a title long enough to overflow, and assert the
+scroll position before, during and after.
+
 The squashed menu of 2026-10-17 was invisible to every closed-state assertion: a **descendant selector**
 (`#tree .row-tools button`) had also sized the buttons inside the menu, so each item measured 20x16 with its label
 clipped. The check now measures the open state item by item, and the selector is scoped to the action buttons only.
@@ -196,6 +201,7 @@ Every miss appends a row. The ledger is the skill's memory, and a new session re
 | A user turn called "full width, left-aligned" from a screenshot | the assertion went red against the correct right-aligned bubble | a screenshot is not a measurement; measure the **box** and settle disagreements with it |
 | The selected tab's 2px underline missed for a cycle | computed-style reads cannot see a `::after` | read pseudo-elements and the reference's own `cssRules` |
 | A `getComputedStyle` declaration read after restoring the state | reported `animation-name: none` on a working rule | snapshot every value before changing the state back |
+| A clipped session title was compared only as "an ellipsis" | the reference crawls it on hover with edge fades; this UI never revealed the full name | overflow is a state with behaviour: measure it with a trusted pointer before, during and after the hover |
 | A descendant selector sized the buttons **inside an open menu** | the menu measured 20x16 per item and its labels were clipped; no closed-state assertion could see it | measure opened surfaces item by item (box, label clipping, glyph), and scope a rule to the control it is about with `>` |
 | A `const` declared after its first use (TDZ) | threw for every session row; branches rendered and sessions vanished | declare a wrapper before anything appends to it; capture page errors in probes |
 | A check clicked tree levels blindly | a blind click closes an open level; the fixture "lost" its rows | idempotent navigation and explicit precondition errors |

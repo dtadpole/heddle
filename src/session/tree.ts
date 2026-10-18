@@ -52,6 +52,8 @@ export interface TreeNode {
   readonly bytes?: number
   /** A session's pin, so it can be held at the top and marked there. */
   readonly pinned?: boolean
+  /** When it was pinned, which is the order among pinned sessions: the list is a pin stack, not a name sort. */
+  readonly pinnedAt?: string
   /** A session the owner put away — only drawn when archived sessions were asked for. */
   readonly archived?: boolean
   /**
@@ -386,13 +388,31 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
          * a session is archived, while the tree and the store can disagree — measured, two sessions were
          * flagged in their definitions and vanished from the tree because of it.
          */
-        return { entry, dir, definition, pinned: meta?.pinned === true, archived: meta?.archived === true }
+        return {
+          entry,
+          dir,
+          definition,
+          pinned: meta?.pinned === true,
+          ...(meta?.pinnedAt !== undefined ? { pinnedAt: meta.pinnedAt } : {}),
+          archived: meta?.archived === true,
+        }
       })
       const visible = flagged.filter((one) =>
         context.archived === 'show' ? true : context.archived === 'only' ? one.archived : !one.archived,
       )
       for (const one of visible.sort((left, right) => {
         if (left.pinned !== right.pinned) return left.pinned ? -1 : 1
+        /**
+         * Among pinned sessions the **most recently pinned** comes first — DSH prepends each pin to a registry list, so a
+         * timestamp descending is the same order. Where this UI sorted by name before, two sessions pinned minutes apart
+         * sorted as if the pin had no history.
+         */
+        if (left.pinnedAt !== undefined && right.pinnedAt !== undefined && left.pinnedAt !== right.pinnedAt) {
+          return String(right.pinnedAt).localeCompare(String(left.pinnedAt))
+        }
+        /** A pinned record without a time is an older one; it sorts after a timed pin rather than crashing the order. */
+        if (left.pinnedAt !== undefined && right.pinnedAt === undefined) return -1
+        if (left.pinnedAt === undefined && right.pinnedAt !== undefined) return 1
         return collator.compare(right.entry.name, left.entry.name)
       })) {
         const node = row(one.dir, 'session', one.entry.name, context)
@@ -407,6 +427,7 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
           ...node,
           session: sessionOf(one.dir, context),
           ...(one.pinned ? { pinned: true } : {}),
+          ...(one.pinnedAt !== undefined ? { pinnedAt: one.pinnedAt } : {}),
           ...(one.archived ? { archived: true } : {}),
           children: [],
         })

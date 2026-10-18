@@ -94,6 +94,13 @@ export interface SessionMeta {
   readonly turns: number
   /** Held at the top of its branch. A reading preference, but one a person sets and expects to persist. */
   readonly pinned?: boolean
+  /**
+   * When it was pinned, so several pinned sessions order by **recency of the pin** rather than by name.
+   *
+   * DSH keeps a registry-level list and **prepends** each new pin, which is the same order as a timestamp descending;
+   * a per-session record cannot prepend, so it records the time that produces that order.
+   */
+  readonly pinnedAt?: string
   /** Out of the tree, and the log untouched: the reversible act, and the only one offered. */
   readonly archived?: boolean
   /**
@@ -339,6 +346,24 @@ export function deriveNodeMessage(events: readonly SessionEvent[], seq: number):
  * would have been a second copy of the truth with its own lag; the listener fires from
  * the one write path, so what a browser shows is what was just written.
  */
+/**
+ * A flag the store refuses for a reason that is not "no such session".
+ *
+ * Pinning and archiving are mutually exclusive in the reference, and a silence that answered `null` for both an unknown
+ * session and a refused pin would leave a route unable to tell a 404 from a 409.
+ */
+export class SessionFlagError extends Error {
+  readonly code: 'archived' | 'not-archived'
+  readonly id: string
+
+  constructor(code: 'archived' | 'not-archived', id: string) {
+    super(code === 'archived' ? `session ${id} is archived and cannot be pinned` : `session ${id} is not archived`)
+    this.name = 'SessionFlagError'
+    this.code = code
+    this.id = id
+  }
+}
+
 export class SessionStore {
   readonly root: string
   private readonly onEvent: ((handle: SessionHandle, event: SessionEvent) => void) | undefined
@@ -464,12 +489,25 @@ export class SessionStore {
     if (current === undefined) return null
     const next: SessionMeta = { ...current }
     if (patch.pinned !== undefined) {
-      if (patch.pinned) (next as { pinned?: boolean }).pinned = true
-      else delete (next as { pinned?: boolean }).pinned
+      if (patch.pinned) {
+        /** Archived and pinned are exclusive in the reference: an archived session cannot be pinned at all. */
+        if (current.archived === true) throw new SessionFlagError('archived', id)
+        ;(next as { pinned?: boolean }).pinned = true
+        ;(next as { pinnedAt?: string }).pinnedAt = new Date().toISOString()
+      } else {
+        delete (next as { pinned?: boolean }).pinned
+        delete (next as { pinnedAt?: string }).pinnedAt
+      }
     }
     if (patch.archived !== undefined) {
-      if (patch.archived) (next as { archived?: boolean }).archived = true
-      else delete (next as { archived?: boolean }).archived
+      if (patch.archived) {
+        ;(next as { archived?: boolean }).archived = true
+        /** Archiving **drops the pin** in the same write, as DSH's archive does. */
+        delete (next as { pinned?: boolean }).pinned
+        delete (next as { pinnedAt?: string }).pinnedAt
+      } else {
+        delete (next as { archived?: boolean }).archived
+      }
     }
     const meta = this.metaFile(id)
     if (meta === null) return null
