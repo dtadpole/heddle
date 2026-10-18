@@ -194,7 +194,6 @@
    * because a long row label belongs in its row, where it is ellipsised, not in a second scrollbar at the panel's edge.
    */
   #workspace-scroll > p,
-  #history > summary,
   #search-results { padding-inline: .75rem; }
   #workspace-scroll {
     flex: 1 1 auto;
@@ -1073,8 +1072,7 @@
    * (the same 19.2px, less the 5px bar the row cannot paint under). Both numbers are `calc`s of the same two facts, so
    * changing the panel's inset or the bar's width keeps the column.
    */
-  #tree .row,
-  #adhoc .row {
+  #tree .row {
     position: relative;
     display: flex;
     align-items: center;
@@ -1184,18 +1182,28 @@
   /** DSH's state word: the muted body type, before the name, smaller than it. */
   #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
   /**
-   * The rest-state pin slot: a fixed box at the row's right edge, empty when the row is not pinned. Its width is reserved on
-   * every row so a pin never moves the age or the controls; the accent colour makes the state a visible cue rather than a
-   * muted detail.
+   * The pinned badge: an **accent chip beside the name**, drawn only on a pinned row.
+   *
+   * It takes no space on any other row — the right-hand slot keeps the age and the hover controls and nothing else — and
+   * its tint makes the state readable at rest rather than a faint glyph. It is not interactive: the row's own pin
+   * control (in the hover tools, and the menu item) is where the state is changed.
    */
-  #tree .pin-slot {
-    display: inline-flex; flex: none; align-items: center; justify-content: center;
-    width: 16px; height: 16px; margin-left: 4px; color: var(--accent); pointer-events: none;
+  #tree .pin-mark {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 16%, transparent);
+    pointer-events: none;
     transition: opacity .12s ease;
   }
-  #tree .pin-slot svg { width: 14px; height: 14px; }
-  /** Hovering a row shows the same state on the pin control, so the marker steps aside rather than duplicating it. */
-  #tree li:hover > .row .pin-slot, #tree li:focus-within > .row .pin-slot { opacity: 0; }
+  #tree .pin-mark svg { width: 14px; height: 14px; }
+  /** Hovering shows the filled pin control itself, so the badge stands down rather than duplicating it beside the name. */
+  #tree li:hover > .row .pin-mark, #tree li:focus-within > .row .pin-mark { opacity: 0; }
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
    * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a
@@ -1281,8 +1289,7 @@
   #tree li[data-kind='generated'] .label { opacity: .55; }
   #tree li[data-kind='folder'] .label { opacity: .8; }
   #tree .empty { font-size: .78rem; opacity: .5; padding-left: 1.4rem; }
-  #history { margin-top: .9rem; }
-  #history > summary { cursor: pointer; font-size: .8rem; opacity: .6; }
+  /** The adopted-folder group used to live here; the owner removed it, so the tree ends its own list. */
   /**
    * The composer: the draft on top, its tool row underneath, and **this rule is load-bearing**.
    *
@@ -1831,7 +1838,6 @@
   body[data-sidebar='collapsed'] #tree,
   body[data-sidebar='collapsed'] #search-results,
   body[data-sidebar='collapsed'] #tree-note,
-  body[data-sidebar='collapsed'] #history { display: none; }
   /** A rail has no list to scroll: the region goes with the words. */
   body[data-sidebar='collapsed'] #workspace-scroll { display: none; }
   body[data-sidebar='collapsed'] #sidebar-search { display: inline-flex; }
@@ -2225,11 +2231,6 @@
     <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
     <div id="search-results" role="tree" aria-label="search results" hidden></div>
     <p id="tree-note" class="meta" hidden></p>
-    <details id="history">
-      <summary>ad hoc</summary>
-      <p class="meta" id="adhoc-note" hidden></p>
-      <ul id="adhoc" role="tree" aria-label="folders adopted because a session ran in them"></ul>
-    </details>
   </div>
   <!--
     The panel's **anchored bottom area**, which the reference has and this panel did not.
@@ -2588,8 +2589,6 @@ function followLedgerTail() {
  * as a root only because `bootstrap` adopts any folder a session ran in. Registering one (the `+`
  * above, or `heddle workspace add`) promotes it into the tree, sessions and all.
  */
-const list = document.getElementById('adhoc')
-const adhocNote = document.getElementById('adhoc-note')
 let current = null
 /** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
 let goalView = null
@@ -8443,22 +8442,27 @@ function nodeRow(node, depth = 0) {
   if (rowTools.children.length > 0) rowRight.append(rowTools)
   if (rowRight.children.length > 0) row.append(rowRight)
   /**
-   * The pinned mark, in a slot that is **always reserved** at the row's right edge — DSH's `_pinIndicator`, filled, 14px.
+   * The pinned mark: a small accent badge **beside the name, only on a row that is pinned**.
    *
-   * Measured report: when the mark was appended only for pinned rows, pinning **shifted the age and the hover controls to the
-   * left**, so the pin control jumped under the pointer. A fixed slot costs every row the same 16px, and the mark's presence
-   * then moves nothing at all.
+   * It used to be a fixed 16-pixel slot reserved at the row's right edge on every row, which cost the whole list that
+   * width whether or not anything was pinned — the owner's report that the right side was not using the full space. The
+   * mark now costs nothing on an unpinned row, and because it sits with the name rather than at the edge it **cannot
+   * move** the age or the hover controls when a row is pinned: pinning adds a badge to the left-hand text line and
+   * leaves the right-hand slot's geometry alone.
    */
-  const pinSlot = document.createElement('span')
-  pinSlot.className = 'pin-slot'
   if (node.pinned === true && node.archived !== true) {
-    pinSlot.append(kindIcon('pin-fill'))
-    pinSlot.setAttribute('role', 'img')
-    pinSlot.setAttribute('aria-label', 'pinned')
-    pinSlot.title = 'pinned'
+    const pinMark = document.createElement('span')
+    pinMark.className = 'pin-mark'
+    pinMark.append(kindIcon('pin-fill'))
+    pinMark.setAttribute('role', 'img')
+    pinMark.setAttribute('aria-label', 'pinned')
+    pinMark.title = 'pinned'
     li.dataset.pinned = 'true'
+    /** Immediately after the name, before the right-hand slot: the pin reads as part of the row's label. */
+    const label = row.querySelector(':scope > .label')
+    if (label === null) row.append(pinMark)
+    else label.after(pinMark)
   }
-  row.append(pinSlot)
 
   row.onclick = async () => {
     /**
@@ -8881,19 +8885,13 @@ async function renderTree() {
   }
   if (tops.length === 0) setNote('no workspace root yet — register one with the + above')
   else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
-  treeList.replaceChildren(...tops.map(nodeRow))
-
   /**
-   * The adopted folders, drawn with the same rows as the tree.
-   *
-   * They are the sessions nobody chose a project for: a folder that exists as a root only because a
-   * session ran there. Same component, same lazy expansion, one level at a time — the difference is
-   * a heading a person can act on.
+   * `map` passes the **array index** as the second argument, and `nodeRow(node, depth)` reads one — so the first version
+   * drew the three workspace roots as depth 0, 1 and 2, each indented 14 pixels more than the last and reading as nested
+   * rather than parallel. The owner saw it exactly that way. The callback is explicit so the index cannot leak again.
    */
-  const adhoc = body.adHoc ?? []
-  list.replaceChildren(...adhoc.map(nodeRow))
-  adhocNote.hidden = adhoc.length > 0
-  adhocNote.textContent = 'nothing ad hoc — every session is under a workspace you registered'
+  treeList.replaceChildren(...tops.map((node) => nodeRow(node)))
+
   /**
    * A reload comes back to the shape a person left: the remembered nodes are opened again shallowest
    * first, so a deeper one is drawn by the time its turn comes, and each level is re-read rather than

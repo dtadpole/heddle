@@ -123,6 +123,24 @@ The cycle that the goal's stop rule asks for: all three actions measured togethe
   the tree placement and the menu path to fork. Not measured, and named: the archive confirmation dialog's own look (only its
   accept path is exercised), and concurrent forks of one source.
 
+## Cycle 5 — the pin icon and the glide (2026-10-17)
+
+- **Research.** DSH's icon primitives were read for the pin: `IconPinOutlineArtwork` / `IconPinFillArtwork` (16px box, a body
+  and a needle), used as **outline for the pin action** and **solid for the pinned state**. Its `AnimatedRows` reads row
+  positions before a commit and animates the FLIP after it: `ROW_GLIDE_MS = 200` with `ease-out` for a moved row,
+  `ROW_FADE_MS = 100` for a new one, reduced motion off, first-input arming, viewport-only.
+- **The mark.** The pinned row's rest-state marker is a **reserved 16px slot at the row's right edge on every row** — empty
+  when unpinned — so pinning moves nothing, which was the report ("the icon moved to the left"). The marker and the unpin
+  control use the **solid** artwork in the accent colour; an unpinned control uses the **outline**.
+- **The glide.** Pin/unpin captures the rows, redraws, and animates each moved row from its old offset to zero (200 ms,
+  `ease-out`), new rows fade in (100 ms). Reduced motion skips it. The reference's first-input arming guard is **not** copied,
+  with the reason in the code: this glide is entered only by the pin handler, and the guard made a programmatic pin move
+  without gliding (measured).
+- **Verified.** Part 7's new check pins a row and, in the same page turn, reads the animation (`duration 200`,
+  `easing ease-out`, `translate(0, dy) → translate(0, 0)`), its clock advancing while it runs, the resting transform `none`,
+  the final order with the row first, the solid glyph on its control, and — under emulated `prefers-reduced-motion: reduce` —
+  zero transform animations while the order still changes. Unit 383 and part 7 45 of 45, verdict 0.
+
 ## Cycle 4 — age, order and the pressed control (2026-10-17)
 
 The owner reported three behaviours; each was reproduced before it was changed, and each now has an assertion.

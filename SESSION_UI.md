@@ -150,6 +150,37 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### The pin artwork and the glide (2026-10-17)
+
+**The icon is the reference's own.** DSH's primitives carry `IconPinOutlineArtwork` and `IconPinFillArtwork` (16px box, one
+body plus a needle), and its rows swap them by state: **outline** for the action that would pin an unpinned session,
+**solid** for a pinned one's marker and its unpin control. Both paths are copied here path for path; both fill the needle, and
+the solid variant also fills the body — which is the difference the check reads.
+
+**The move is DSH's `AnimatedRows`.** Read from its client bundle: a **FLIP** measured before and after a redraw and played
+with the Web Animations API — a moved row animates from `translate(dx, dy)` to zero over **`ROW_GLIDE_MS = 200`** with
+**`ease-out`**, a new row fades in over **`ROW_FADE_MS = 100`**, rows outside the viewport are skipped, and reduced motion
+turns it off. This page keeps the numbers, the easing, the fade and the reduced-motion rule, and drops one part on purpose:
+DSH arms its motion on the first pointer/key input because its rows re-render on a load, while this glide is entered only by
+the pin handler — copying the guard made a programmatic pin move the row with no glide at all (measured), so the guard is
+not copied. That decision is recorded in the code at the guard's old site.
+
+### The pinned mark: the reference's artwork, in a reserved slot (2026-10-17)
+
+The owner reported that pinning a row **moved the pin icon left**, and asked for a clear pinned/unpinned cue.
+
+- **The mark is the reference's own artwork.** DSH's `IconPinOutlineArtwork` / `IconPinFillArtwork` (16px box) are copied path
+  for path: the **outline** pin is the action that would pin, the **filled** pin is the state — for a pinned row's marker and
+  for its unpin control, exactly as DSH swaps `IconPinOutlineRegular` / `IconPinFillRegular`. Both fill the needle; the filled
+  variant also fills the body, and that is the difference the check reads.
+- **The slot is always reserved.** The mark sits in a 16px slot at the row's right edge that every session row draws, empty when
+  unpinned. Before this, the mark was appended only for pinned rows and pushed the age and the hover controls to the left, which
+  is what made the pin control jump under the pointer. The check now asserts that the age and the controls keep their x position
+  across a pin.
+- **The cue is visible.** A pinned row's mark is the filled pin in the accent colour rather than DSH's muted caption tone: the
+  owner asked for a visual cue, and the sidebar is where a pinned row needs to be recognisable at a glance. On hover the mark
+  steps aside and the pin control itself carries the state (filled when pinned, outline when not).
+
 ### Row age, order and the blinking control (2026-10-17)
 
 Three reports from the owner, one root each.
