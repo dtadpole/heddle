@@ -1629,6 +1629,8 @@ test('a running turn says Weaving, and the row leaves with the turn', async (con
           label: label.textContent,
           status: status === null ? null : { text: status.textContent, live: status.getAttribute('aria-live'), atomic: status.getAttribute('aria-atomic') },
           animation: getComputedStyle(label).animationName,
+          shimmer: getComputedStyle(label).backgroundImage,
+          fill: getComputedStyle(label).webkitTextFillColor,
           glyph: getComputedStyle(glyph).width + '×' + getComputedStyle(glyph).height,
           font: getComputedStyle(label).fontSize + '/' + getComputedStyle(row).lineHeight,
           dividerHeight: getComputedStyle(divider).height,
@@ -1640,7 +1642,14 @@ test('a running turn says Weaving, and the row leaves with the turn', async (con
     assert.ok(row.status !== null && row.status.text === 'Weaving', `the hidden status announces the verb (${JSON.stringify(row.status)})`)
     assert.equal(row.status.live, 'polite', 'politely')
     assert.equal(row.status.atomic, 'true', 'atomically')
-    assert.equal(row.animation, 'heddle-row-shimmer', 'the label carries the text shimmer, as the reference does')
+    /**
+     * The label holds still: the reference sweeps it, but on this dark surface the travelling band over a 12px phrase
+     * read as "shuttling" and made the duration hard to read (the owner's report), so only the process rows keep the
+     * shimmer.
+     */
+    assert.equal(row.animation, 'none', 'the running label does not animate, so the duration stays readable')
+    assert.equal(row.shimmer, 'none', 'and paints no moving gradient')
+    assert.notEqual(row.fill, 'transparent', 'its text is filled with the readable ink rather than a clipped gradient')
     assert.equal(row.glyph, '14px×14px', 'the mark is the reference’s 14px box')
     assert.equal(row.font, '12px/22px', 'the label is 12px on the reference’s 22px line')
     assert.equal(row.dividerHeight, '0.5px', 'the divider is the reference’s half-pixel rule')
@@ -1658,6 +1667,89 @@ test('a running turn says Weaving, and the row leaves with the turn', async (con
     await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("all done")', 15_000), 'and the answer arrives after the row is gone')
     assert.equal(await browser.evaluate('document.querySelectorAll("[data-chat-running]").length'), 0, 'the running row leaves with the turn')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('the transcript follows its tail, and never yanks a reader who scrolled back', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's chat keeps one `ScrollFollow` per scrollport with a **25px** tolerance (`useScrollFollow(state.followingTail,
+   * 25)`): the floor is followed while the reader is within it, a reader's own movement away turns the follow off,
+   * and content that grows **after** an append — the settled answer's document, a tool's result, an edited-files
+   * card — is covered by observing the element rather than by scrolling at each append site. Its `sample(metrics,
+   * movedByReader)` distinction matters as much: a layout shift is not a reader movement, or a brief shrink would
+   * silently stop the follow. That last part is what this page lacked: it set `scrollTop = scrollHeight` at a few
+   * append points only, so the view sometimes sat above the bottom while the answer was still growing (the owner's
+   * "sometimes it does not follow").
+   */
+  const longText = Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n')
+  const steps = () => [
+    ...Array.from({ length: 8 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } } })),
+    { toolCall: { name: 'write_file', arguments: { path: join(fixtureDir('unused'), 'never.txt'), content: 'x\n' } } },
+    { text: longText },
+  ]
+  const server = await startServer('follow-tail', steps, { sandboxRoot: true })
+  const browser = await openBrowser({ width: 1100, height: 700 })
+  const distance = () => browser.evaluate('Math.round((() => { const log = document.getElementById("log"); return log.scrollHeight - log.scrollTop - log.clientHeight })())')
+  const rows = () => browser.evaluate('document.querySelectorAll("#log .turn").length')
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'a long answer please')
+
+    /** At the floor, growth is followed: sampled while the turn is still arriving, where the old page slipped. */
+    let followed = 0
+    let observed = 0
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      const running = await browser.evaluate('document.getElementById("send").hidden')
+      if ((await rows()) > 6) {
+        observed += 1
+        if ((await distance()) <= 1) followed += 1
+      }
+      if (!running && observed > 0) break
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+    assert.ok(observed > 2, `the turn was observed growing (${observed} samples)`)
+    assert.ok(followed >= observed - 1, `the transcript followed the floor as it grew (${followed}/${observed} samples at the bottom)`)
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("line 40 of an answer")', 20_000), 'the long answer arrived')
+    /** The settled document and the final layout land after the last append — still at the floor. */
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    assert.ok((await distance()) <= 1, `the settled answer is still at the floor (${await distance()}px away)`)
+
+    /**
+     * A reader who scrolls back is not yanked, and a second turn keeps growing above them. The wheel is what
+     * attributes the movement to the reader, which is DSH's `movedByReader`; a bare scrollTop change is a layout
+     * consequence rather than a reader's decision.
+     */
+    await sendMessage(browser, 'one more')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === true', 10_000), 'the second turn is running')
+    const markAway = await rows()
+    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = 0 })()')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const awayFrom = await distance()
+    assert.ok(awayFrom > 100, `scrolling up leaves the reader away from the floor (${awayFrom}px)`)
+    assert.ok(
+      await browser.waitFor(`document.querySelectorAll("#log .turn").length > ${markAway}`, 15_000),
+      'content still arrives while the reader is away',
+    )
+    assert.ok((await distance()) >= awayFrom - 2, `and it does not pull the reader back (${await distance()} vs ${awayFrom})`)
+
+    /** Scrolling back to the floor re-engages following, as the reference's near-bottom test does. */
+    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.ok((await distance()) <= 1, 'the floor is reachable again')
+    const markFollow = await rows()
+    assert.ok(
+      await browser.waitFor(`document.querySelectorAll("#log .turn").length > ${markFollow}`, 15_000),
+      'and more content arrives',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.ok((await distance()) <= 1, `and the follow is re-engaged (${await distance()}px away)`)
   } finally {
     browser.close()
     await server.close()
