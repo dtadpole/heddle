@@ -229,6 +229,21 @@ Measured facts in the delivered harness:
 
 Screenshot: [`heddle-runtime-context-trajectory.png`](heddle-runtime-context-trajectory.png).
 
+### deployment
+
+The branch was merged into main with an autostash (main's other workstream's uncommitted screenshots and sidebar
+notes were preserved), pushed as `74827f0`, and the deployment checkout the launch agent runs (`~/heddle-deploy`)
+was fast-forwarded to that commit, rebuilt, and its `com.dtadpole.heddle-web` agent restarted. Verified live:
+
+- `http://127.0.0.1:8082/` serves the new build (HTTP 200; the approval card markup and the access chip are in
+  the page);
+- from the **deployed** tree, `_verifiers_/75-permission-sandbox/check-runtime-context.mjs` passes both its
+  mid-turn and restart claims (`verdict 0 — all 2 check(s) passed`);
+- from the **deployed** tree, `_verifiers_/80-web-ui/check-runtime-context.mjs` passes its Trajectory/Chat claim
+  (`verdict 0 — all 1 check(s) passed`);
+- the named suites on the branch were green before the merge: `npm run check`, 359 unit tests, `npm run build`,
+  verifier 75 (17 checks), verifier 80 (13 files).
+
 ## Coverage and what it deliberately does not claim
 
 Visited: between-turn and mid-turn changes, unchanged reuse, revert, restart, legacy migration, cleared snapshots,
