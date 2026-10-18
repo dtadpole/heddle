@@ -1184,7 +1184,12 @@
    * row, so an unpinned list does not pay for it — the reason an earlier fixed slot was removed — while a pinned row still
    * gets a marker that cannot collide with anything.
    */
-  #tree .pin-slot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--accent); pointer-events: none; }
+  /**
+   * The mark is **neutral ink**, not the accent: the owner does not want the pinned icon to turn blue. The pin control that
+   * replaces it on hover uses the same colour and does not lighten either, so the icon looks exactly the same whether or not
+   * the row is hovered — the mark swaps for the control in place, and the reader sees one unchanging glyph.
+   */
+  #tree .pin-slot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--text-3); pointer-events: none; }
   #tree .pin-slot:empty { display: none; }
   #tree .pin-slot svg { width: 14px; height: 14px; }
   /** The resting state: age and marker. The controls are not in flow until the row is hovered or focused. */
@@ -1225,6 +1230,9 @@
   #tree .row-tools > .menu-wrap > button:hover,
   #tree .row-tools > .session-actions > button:hover,
   #tree .row-tools > button:hover { color: var(--text); }
+  /** The pin control is a **state**, not just an action: it does not change ink on hover, so the mark and the control look identical. */
+  #tree .row-tools > .session-actions > .pin-action,
+  #tree .row-tools > .session-actions > .pin-action:hover { color: var(--text-3); }
   /** The slot's children are one level deeper than the row now, so these are descendant selectors. */
   #tree li:hover > .row .row-tools,
   #tree li:focus-within > .row .row-tools,
@@ -7921,7 +7929,11 @@ function kindIcon(kind, open = false) {
      * The reference's own pin artwork, copied from its primitives (`IconPinOutlineArtwork` / `IconPinFillArtwork`, 16px box):
      * one pin body and its needle. **Outline** is the action that would pin (nothing pinned yet); **filled** is the state, for a
      * pinned row's marker and its unpin control. Two shapes rather than one, so the state reads without a tooltip.
+     *
+     * Drawn at the reference's **Regular** weight, `stroke-width = 1`, not the tree glyphs' 1.2: at 14px a filled body with a
+     * 1.2 outline is a bold blob — the owner's report that the pin's head had "a good line" while the pin itself did not read.
      */
+    svg.setAttribute('stroke-width', '1')
     const body = svgPath(
       'M9.96976 1.70572L13.1554 3.93629L10.9019 8.12317L11.5158 11.605L10.7192 12.7427L2.52767 7.00693L3.3243 5.86922L6.80612 5.25528L9.96976 1.70572Z',
     )
@@ -9050,7 +9062,11 @@ function nodeRow(node, depth = 0) {
     quick.className = 'session-actions'
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
     /** An archived row offers no pin, for the same reason the menu does not: pinning it would be refused. */
-    if (!node.archived) quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', node.pinned ? 'pin-fill' : 'pin', () => pinSession(node)))
+    if (!node.archived) {
+      const pinButton = quickButton(node.pinned ? 'Unpin session' : 'Pin session', node.pinned ? 'pin-fill' : 'pin', () => pinSession(node))
+      pinButton.classList.add('pin-action')
+      quick.append(pinButton)
+    }
     quick.dataset.slot = 'after-menu'
     rowTools.append(quick)
   }

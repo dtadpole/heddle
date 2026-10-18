@@ -3865,6 +3865,44 @@ test('a written session moves to the top of its folder, its age follows, and a r
     assert.ok(after.slot !== null, 'and carries one after')
     assert.equal(Math.round(after.slot[1]), 16, `the mark is 16px wide\nsaw: ${JSON.stringify(geometryAfter)}`)
     assert.equal(await browser.evaluate(`document.querySelectorAll('#tree .pin-mark').length`), 0, 'and nothing draws a pin beside a name')
+    /**
+     * The icon's **ink and weight**, measured: the mark is the neutral caption ink and not the accent, it is drawn solid (both
+     * artwork paths filled) at the reference's Regular 1px, and the pin control that replaces it on hover is the same colour,
+     * weight and shape — the icon looks identical whether the row is hovered or not, which is the owner's request.
+     */
+    const ink = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const pinnedRow = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li.dataset.pinned === 'true')
+        const slot = pinnedRow.querySelector('.row-right > .pin-slot')
+        const markerSvg = slot.querySelector('svg')
+        const marker = {
+          color: getComputedStyle(slot).color,
+          weight: getComputedStyle(markerSvg).strokeWidth,
+          filled: [...markerSvg.querySelectorAll('path')].filter((path) => getComputedStyle(path).fill !== 'none').length,
+        }
+        pinnedRow.focus()
+        await wait(150)
+        const control = pinnedRow.querySelector('.row-right > .row-tools > .session-actions > .pin-action')
+        const controlSvg = control.querySelector('svg')
+        const hovered = {
+          color: getComputedStyle(control).color,
+          weight: getComputedStyle(controlSvg).strokeWidth,
+          filled: [...controlSvg.querySelectorAll('path')].filter((path) => getComputedStyle(path).fill !== 'none').length,
+          markerDisplay: getComputedStyle(slot).display,
+        }
+        pinnedRow.blur()
+        const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim().toLowerCase()
+        return JSON.stringify({ marker, hovered, accent })
+      })()`),
+    )
+    assert.notEqual(ink.marker.color.toLowerCase(), ink.accent, `the mark is not the accent ink\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.marker.filled, 2, `the mark paints solid: both artwork paths filled\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.marker.weight, '1px', `at the reference's Regular 1px stroke\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.hovered.color, ink.marker.color, `the hover pin control keeps the same ink\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.hovered.weight, ink.marker.weight, `and the same weight\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.hovered.filled, 2, `and stays solid\nsaw: ${JSON.stringify(ink)}`)
+    assert.equal(ink.hovered.markerDisplay, 'none', 'with the marker swapped out, so one icon is drawn')
     /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
     const glyphs = JSON.parse(
       await browser.evaluate(`(() => {

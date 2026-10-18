@@ -150,6 +150,20 @@ group headings and opened geometry.
 
 **Lesson.** *A state that exists only after a click is part of the comparison*; a hidden surface is not a measured one.
 
+### The pin's ink and weight (2026-10-17)
+
+Two nits from the owner, both measured before and after.
+
+- **No accent blue.** The mark was drawn in the accent colour, which the owner does not want. It is now the neutral caption ink
+  (`--text-3`), and the pin control that replaces it on hover keeps **the same ink and does not lighten on hover**. The glyph is
+  therefore indistinguishable between the resting marker and the hovered control: the swap happens in place, and the icon stays
+  exactly the same.
+- **The weight made the pin unreadable.** The pin artwork was drawn with the tree glyphs' `stroke-width: 1.2`; on a *filled*
+  body at 14px that outline is a bold blob, so the owner saw a head with a heavy line but no pin. The pin is drawn at the
+  reference's **Regular** weight — `stroke-width: 1` — which also matches how DSH renders `IconPinOutlineRegular` /
+  `IconPinFillRegular`. Measured after the change: the marker is `rgb(173, 178, 184)`, both artwork paths report a painted fill,
+  the stroke is `1px`, and the hover control reports the same colour, weight and fill count.
+
 ### One pin mark, at the right, and a slower glide (2026-10-17)
 
 Three follow-ups from the owner, and the layout reasoning behind them.
