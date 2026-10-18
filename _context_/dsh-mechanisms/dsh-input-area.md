@@ -82,7 +82,7 @@ Measured the same way on Heddle's page after the port:
 | capability-hinted placeholder | yes (`Message or run a task, / commands, @ files or sessions`) |
 | `+` entry | yes — a file-path menu fed by `/api/tree` |
 | access chip | yes, but **read-only**: Heddle's sandbox mode is fixed at construction, so the chip reports rather than switches |
-| model + effort label | **endpoint · model only** — Heddle's endpoint configuration has no reasoning-effort concept, so there is nothing honest to display |
+| model + effort label | yes — the model's display name with its reasoning effort in the caption tone, the two-span anatomy measured above. Each configured endpoint lists the model types it offers and, per model, the reasoning levels its route was verified to accept; the level's own provider wire value is what the turn sends, and an endpoint/model that declares no levels shows no effort. The two-level seat and menu (root `Model`/`Effort` rows, endpoint-grouped model list, search, effort pane) are measured in [`dsh-model-selector.md`](dsh-model-selector.md) |
 | send / stop swap | yes; Stop aborts the turn's `AbortController`, the abort reaches the provider connection, and the turn ends with `event: cancelled` |
 | status row | turns and steps always; `tok/s` and `context %` only when the provider reported usage and the endpoint declares a `contextWindow`; nothing is invented |
 | shared resizable column | yes — a 12px `col-resize` grip, keyboard operable, persisted in `localStorage` |
