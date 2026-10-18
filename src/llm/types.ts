@@ -1,3 +1,5 @@
+import type { TokenUsage } from './usage.ts'
+
 /**
  * The model service's vocabulary.
  *
@@ -80,7 +82,7 @@ export type Chunk =
   | {
       readonly type: 'done'
       readonly finishReason: string
-      readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number }
+      readonly usage?: TokenUsage
     }
 
 /** What an adapter is told about its endpoint. */

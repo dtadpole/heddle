@@ -175,7 +175,7 @@ test("the page's module parses, because one syntax error leaves the whole UI wit
   const directory = join(repoRoot, '.heddle-tmp')
   mkdirSync(directory, { recursive: true })
   const scratch = join(directory, 'page-module-guard.mjs')
-  writeFileSync(scratch, extracted[1])
+  writeFileSync(scratch, extracted[1] ?? '')
   try {
     execFileSync(process.execPath, ['--check', scratch], { stdio: 'pipe' })
   } finally {

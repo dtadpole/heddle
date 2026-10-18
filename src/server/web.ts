@@ -9,7 +9,7 @@ import { runTurn } from '../agent/loop.ts'
 import { logFileName } from './log-download.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
-import { projectLedger, projectRows, projectTimeline } from './ledger.ts'
+import { projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { PREVIEW_CSP, rewriteResources } from './html.ts'
@@ -1299,6 +1299,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
           turns: transcriptTurns(events).map((turn) =>
             turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
           ),
+          /**
+           * The composer's bottom statistics, from the same events as everything else in this answer.
+           * The reference prints turns, steps, a token total with its cache-hit share, and a context share;
+           * every one of those is a fact of this record, so they travel with it rather than being re-derived
+           * by the page from whatever happened to be on screen.
+           */
+          stats: projectSessionStats(events),
         },
         null,
         2,

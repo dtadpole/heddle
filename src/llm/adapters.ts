@@ -1,3 +1,4 @@
+import { anthropicUsage, openaiChatUsage, openaiResponsesUsage, type TokenUsage } from './usage.ts'
 import { ModelError, type Adapter, type Chunk, type GenerateRequest } from './types.ts'
 
 /**
@@ -183,14 +184,7 @@ export function openAiChatAdapter(
         yield {
           type: 'done',
           finishReason: choice.finish_reason,
-          ...(parsed.usage
-            ? {
-                usage: {
-                  ...(parsed.usage.prompt_tokens !== undefined ? { inputTokens: parsed.usage.prompt_tokens } : {}),
-                  ...(parsed.usage.completion_tokens !== undefined ? { outputTokens: parsed.usage.completion_tokens } : {}),
-                },
-              }
-            : {}),
+          ...(openaiChatUsage(parsed.usage) !== undefined ? { usage: openaiChatUsage(parsed.usage) } : {}),
         }
         return
       }
@@ -236,14 +230,7 @@ function* finishFromChatMessage(json: unknown): Generator<Chunk> {
   yield {
     type: 'done',
     finishReason: choice?.finish_reason ?? 'stop',
-    ...(answer.usage
-      ? {
-          usage: {
-            ...(answer.usage.prompt_tokens !== undefined ? { inputTokens: answer.usage.prompt_tokens } : {}),
-            ...(answer.usage.completion_tokens !== undefined ? { outputTokens: answer.usage.completion_tokens } : {}),
-          },
-        }
-      : {}),
+    ...(openaiChatUsage(answer.usage) !== undefined ? { usage: openaiChatUsage(answer.usage) } : {}),
   }
 }
 
@@ -305,7 +292,7 @@ export function openAiResponsesAdapter(
     }
 
     const calls = new Map<string, PartialToolCall>()
-    let usage: { inputTokens?: number; outputTokens?: number } | undefined
+    let usage: TokenUsage | undefined
     let finishReason = 'stop'
 
     for await (const event of readSse(result.stream)) {
@@ -338,12 +325,7 @@ export function openAiResponsesAdapter(
         const response = parsed.response as
           | { usage?: { input_tokens?: number; output_tokens?: number }; status?: string }
           | undefined
-        if (response?.usage) {
-          usage = {
-            ...(response.usage.input_tokens !== undefined ? { inputTokens: response.usage.input_tokens } : {}),
-            ...(response.usage.output_tokens !== undefined ? { outputTokens: response.usage.output_tokens } : {}),
-          }
-        }
+        if (response?.usage) usage = openaiResponsesUsage(response.usage)
         finishReason = response?.status ?? 'stop'
         for (const call of calls.values()) {
           yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }

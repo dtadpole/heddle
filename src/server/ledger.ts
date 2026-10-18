@@ -20,13 +20,15 @@
  * - **A record's timing comes from its own events.** Nothing interpolates a missing timestamp.
  */
 
+import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
+
 /** One event, as much of it as the projection reads. */
 export interface LedgerEvent {
   readonly seq?: number
   readonly at?: string
   readonly type: string
   readonly message?: { readonly role?: string; readonly content?: readonly { readonly type?: string; readonly text?: string }[]; readonly toolCallId?: string }
-  readonly chunk?: { readonly type?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly text?: string; readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number } }
+  readonly chunk?: { readonly type?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly text?: string; readonly usage?: TokenUsage }
   readonly text?: string
   readonly reasoning?: string
   readonly finishReason?: string
@@ -70,7 +72,7 @@ export interface LedgerRecord {
   /** Time to first token, when a stream recorded one and a step start is known. */
   readonly ttftMs?: number
   /** Token counts, each absent rather than zero when the record does not carry one. */
-  readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number }
+  readonly usage?: TokenUsage
   /** Whether the counts came from the provider rather than from the harness's own estimate. */
   readonly usageSource?: 'provider' | 'estimated'
   /** Whatever else the event said that a reader would want: finish reason, denials, pruned count. */
@@ -121,9 +123,49 @@ export interface Ledger {
   readonly turns: readonly LedgerTurn[]
   /** Records that belong to no turn — a session that recorded events before the first prompt. */
   readonly loose: readonly LedgerRecord[]
-  readonly tokens: { readonly input?: number; readonly output?: number; readonly estimated?: number }
+  readonly tokens: {
+    readonly input?: number
+    readonly output?: number
+    readonly cacheRead?: number
+    readonly cacheWrite?: number
+    readonly estimated?: number
+  }
   readonly records: number
   readonly inFlight: number
+}
+
+/**
+ * The session's bottom statistics: what the composer's dock prints.
+ *
+ * One pass over the session's own events, because every number is in them: the user messages are the turns,
+ * `turn/completed.rounds` are the agent steps, and the assistant chunks carry the provider's usage per round.
+ * Nothing is estimated or multiplied here — a bucket that no frame reported stays absent so the page can print
+ * a blank instead of an invented number.
+ */
+export interface SessionStats {
+  readonly turns: number
+  readonly steps: number
+  readonly usage?: TokenUsage
+}
+
+export function projectSessionStats(events: readonly LedgerEvent[]): SessionStats {
+  let turns = 0
+  let steps = 0
+  let usage: TokenUsage | undefined
+  for (const event of events) {
+    if (event.type === 'message' && event.message?.role === 'user') {
+      turns += 1
+      continue
+    }
+    if (event.type === 'turn/completed') {
+      steps += typeof event.rounds === 'number' && event.rounds > 0 ? event.rounds : 0
+      continue
+    }
+    if (event.type === 'assistant/chunk' && event.chunk?.usage !== undefined) {
+      usage = mergeTokenUsage(usage, event.chunk.usage)
+    }
+  }
+  return { turns, steps, ...(usage !== undefined ? { usage } : {}) }
 }
 
 /** One row of the Trajectory table: a record, plus where it sits. */
@@ -224,6 +266,8 @@ interface PendingAssistant {
   firstTokenAt?: string
   inputTokens?: number
   outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
   sawProviderUsage: boolean
 }
 
@@ -248,7 +292,13 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
   let step: { startedAt?: string; endedAt?: string; model?: string; records: LedgerRecord[] } | null = null
   let pending: PendingAssistant | null = null
 
-  const tokens = { input: undefined as number | undefined, output: undefined as number | undefined, estimated: undefined as number | undefined }
+  const tokens = {
+    input: undefined as number | undefined,
+    output: undefined as number | undefined,
+    cacheRead: undefined as number | undefined,
+    cacheWrite: undefined as number | undefined,
+    estimated: undefined as number | undefined,
+  }
 
   /**
    * Close the open step.
@@ -365,6 +415,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
               usage: {
                 ...(pending.inputTokens !== undefined ? { inputTokens: pending.inputTokens } : {}),
                 ...(pending.outputTokens !== undefined ? { outputTokens: pending.outputTokens } : {}),
+                ...(pending.cacheReadTokens !== undefined ? { cacheReadTokens: pending.cacheReadTokens } : {}),
+                ...(pending.cacheWriteTokens !== undefined ? { cacheWriteTokens: pending.cacheWriteTokens } : {}),
               },
               usageSource: pending.sawProviderUsage ? ('provider' as const) : ('estimated' as const),
             }
@@ -482,7 +534,13 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
        * reported. Measured, and it read as `undefined` rather than as an error until a `done` chunk carried
        * usage and the code wrote to a record that had already been closed.
        */
-      if (pending !== null && (chunk.usage?.inputTokens !== undefined || chunk.usage?.outputTokens !== undefined)) {
+      if (
+        pending !== null &&
+        (chunk.usage?.inputTokens !== undefined ||
+          chunk.usage?.outputTokens !== undefined ||
+          chunk.usage?.cacheReadTokens !== undefined ||
+          chunk.usage?.cacheWriteTokens !== undefined)
+      ) {
         pending.sawProviderUsage = true
         if (chunk.usage.inputTokens !== undefined) {
           pending.inputTokens = chunk.usage.inputTokens
@@ -491,6 +549,19 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
         if (chunk.usage.outputTokens !== undefined) {
           pending.outputTokens = chunk.usage.outputTokens
           tokens.output = (tokens.output ?? 0) + chunk.usage.outputTokens
+        }
+        /**
+         * The cache buckets are prompt-side billing facts, not a second input count: they are summed so the
+         * composer's token pill can print `Cache hit` and the session's billed total, and a provider that does
+         * not report them leaves them absent rather than zero.
+         */
+        if (chunk.usage.cacheReadTokens !== undefined) {
+          pending.cacheReadTokens = chunk.usage.cacheReadTokens
+          tokens.cacheRead = (tokens.cacheRead ?? 0) + chunk.usage.cacheReadTokens
+        }
+        if (chunk.usage.cacheWriteTokens !== undefined) {
+          pending.cacheWriteTokens = chunk.usage.cacheWriteTokens
+          tokens.cacheWrite = (tokens.cacheWrite ?? 0) + chunk.usage.cacheWriteTokens
         }
       }
       if (chunk.type === 'done') settleAssistant(event.at, true)
@@ -594,6 +665,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     tokens: {
       ...(tokens.input !== undefined ? { input: tokens.input } : {}),
       ...(tokens.output !== undefined ? { output: tokens.output } : {}),
+      ...(tokens.cacheRead !== undefined ? { cacheRead: tokens.cacheRead } : {}),
+      ...(tokens.cacheWrite !== undefined ? { cacheWrite: tokens.cacheWrite } : {}),
       ...(tokens.estimated !== undefined ? { estimated: tokens.estimated } : {}),
     },
     records: all.length,

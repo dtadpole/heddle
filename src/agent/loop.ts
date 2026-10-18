@@ -1,3 +1,5 @@
+import { mergeTokenUsage } from '../llm/usage.ts'
+import type { TokenUsage } from '../llm/usage.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { Chunk, Message, ToolSpec } from '../llm/types.ts'
@@ -89,7 +91,7 @@ export interface TurnResult {
    * sum. Absent when no round reported any — the status line under the composer prints a rate only from a
    * number the provider actually sent.
    */
-  readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number }
+  readonly usage?: TokenUsage
 }
 
 /**
@@ -98,20 +100,8 @@ export interface TurnResult {
  * Kept as a function so the rule can be judged without a provider: a field stays absent until a round reports
  * it, and rounds add up rather than overwrite, because a turn with tools is several model calls.
  */
-export function mergeUsage(
-  previous: { readonly inputTokens?: number; readonly outputTokens?: number } | undefined,
-  next: { readonly inputTokens?: number; readonly outputTokens?: number } | undefined,
-): { readonly inputTokens?: number; readonly outputTokens?: number } | undefined {
-  if (next === undefined) return previous
-  if (previous === undefined) return next
-  return {
-    ...(previous.inputTokens !== undefined || next.inputTokens !== undefined
-      ? { inputTokens: (previous.inputTokens ?? 0) + (next.inputTokens ?? 0) }
-      : {}),
-    ...(previous.outputTokens !== undefined || next.outputTokens !== undefined
-      ? { outputTokens: (previous.outputTokens ?? 0) + (next.outputTokens ?? 0) }
-      : {}),
-  }
+export function mergeUsage(previous: TokenUsage | undefined, next: TokenUsage | undefined): TokenUsage | undefined {
+  return mergeTokenUsage(previous, next)
 }
 
 export interface RunTurnOptions {

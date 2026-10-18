@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { laneOf, previewOf, projectLedger, projectRows, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
+import { laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
 
 /**
  * Unit tests for the Trajectory ledger.
@@ -447,4 +447,41 @@ test('the prompt is folded into one step, not every step of the turn', () => {
   assert.equal(ofKind('user').length, 1, 'the prompt is recorded once for the turn')
   assert.equal(ofKind('context').length, 1, 'and so is the instruction baseline it carried')
   assert.equal(steps[1]!.records.filter((record) => record.kind === 'user' || record.kind === 'context').length, 0, 'the second step starts from the model request, not from a copy of the prompt')
+})
+
+test('the session stats fold turns, steps and usage buckets from the session\'s own events', () => {
+  /**
+   * The composer's dock prints these four numbers under the card: turns, agent steps, the billed token total
+   * with its cache-hit share, and the context share. Each is a fact of the log, so the fold is judged here
+   * rather than in a browser: a bucket no frame reported stays absent, and steps come from the turn's own
+   * `rounds` rather than from tool rows.
+   */
+  const events: LedgerEvent[] = [
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
+    {
+      type: 'assistant/chunk',
+      chunk: { type: 'done', usage: { inputTokens: 10, outputTokens: 4, cacheReadTokens: 30 } },
+    },
+    { type: 'turn/completed', rounds: 2 },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'again' }] } },
+    {
+      type: 'assistant/chunk',
+      chunk: { type: 'done', usage: { inputTokens: 5, outputTokens: 6, cacheWriteTokens: 7 } },
+    },
+    { type: 'turn/completed', rounds: 3 },
+  ]
+  assert.deepEqual(projectSessionStats(events), {
+    turns: 2,
+    steps: 5,
+    usage: { inputTokens: 15, outputTokens: 10, cacheReadTokens: 30, cacheWriteTokens: 7 },
+  })
+})
+
+test('session stats stay empty rather than zero where nothing was reported', () => {
+  assert.deepEqual(projectSessionStats([]), { turns: 0, steps: 0 }, 'no turns, no steps, and no usage key at all')
+  const noUsage: LedgerEvent[] = [
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
+    { type: 'turn/completed', rounds: 1 },
+  ]
+  assert.deepEqual(projectSessionStats(noUsage), { turns: 1, steps: 1 }, 'a frame with no usage leaves the usage absent')
 })

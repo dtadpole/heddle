@@ -127,3 +127,39 @@ centred on the card (card centre 777, dock centre 776.5 at the measured window).
 - **lessons:** the number a dock prints is the *last* thing to copy — the formula and the bucket shape
   behind it decide whether the UI can even be built; and a quoted reference with line breaks is a
   formatting artefact, not a layout.
+
+### Cycle 2 — the backend half (in progress)
+
+- **measured:** reference numbers re-used from cycle 1; this half is the facts behind them.
+- **brainstorm:** (a) compute the totals only on the page from the live stream — discarded: a reload would
+  forget a session's history, and the reference's numbers are durable; (b) add a single fold
+  (`projectSessionStats`) over the session's own events and expose it on `GET /api/sessions/<id>` —
+  **chosen**; (c) a second projection store on the server — discarded: the events already hold every fact, and
+  a second store would be a second truth; (d) keep the narrow two-field usage and guess the cache share —
+  discarded: invented numbers are forbidden by this goal.
+- **understand:** the missing numbers are a **mechanism**: the adapters never carried cache buckets, so no
+  downstream consumer could print `Cache hit`. The step count had a mechanism already (`turn/completed.rounds`)
+  that the page simply did not read.
+- **step back:** the objective's backend half is now precise and smaller than it looked: normalise each
+  provider frame into three prompt-side buckets plus output, merge per round, and fold the log once.
+- **plan / changed:**
+  - `src/llm/usage.ts` (new): `TokenUsage` with `inputTokens` (uncached), `outputTokens`,
+    `cacheReadTokens`, `cacheWriteTokens`; `openaiChatUsage`, `openaiResponsesUsage`, `anthropicUsage`
+    (OpenAI's cached count is a subset of prompt tokens, Anthropic's buckets are disjoint),
+    `mergeTokenUsage`, `billedInputTokens`.
+  - `src/llm/adapters.ts`: every provider frame now goes through those normalisers.
+  - `src/agent/loop.ts`: `TurnResult.usage` is the shared type and `mergeUsage` delegates to
+    `mergeTokenUsage`, so a turn with tools sums per round.
+  - `src/server/ledger.ts`: totals carry `cacheRead`/`cacheWrite`; new `projectSessionStats(events)` folds
+    turns (user messages), steps (`turn/completed.rounds`) and the usage buckets in one pass.
+  - `src/server/web.ts`: `GET /api/sessions/<id>` carries `stats`, from the same events as the transcript.
+  - `test/usage.test.ts` (new) and `test/ledger.test.ts`: the normalisers, the merge and the fold, written
+    before the implementation (the usage module did not exist and the test failed on the import).
+- **evidence:** `npm run check` 0 errors; `npm test` 319 passing; the usage tests failed first with
+  `ERR_MODULE_NOT_FOUND` before `src/llm/usage.ts` existed, then passed; the ledger stats tests pass.
+- **reds:** `test/page-contract.test.ts` carried a type error from a concurrent commit (`extracted[1]` nullable)
+  and blocked the whole check; narrowed to `extracted[1] ?? ''` in the same pass.
+- **remaining for this cycle:** the page's dock (two pills + context gauge, the reference's formatting) and a
+  failing-first browser contract in `check-composer.mjs`; then the suites and a screenshot.
+- **lessons:** normalising provider usage into DSH's bucket shape is a *mechanism* and belongs in one module
+  with its own tests; a consumer-side fix (formatting) would have been three guesses repeated per provider.
