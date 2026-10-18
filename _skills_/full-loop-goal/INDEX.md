@@ -143,6 +143,13 @@ tree it happens to be standing in.
   fresh-profile probe so the claim does not depend on the person's browser state.
 - **Both states are evidence.** "Ran from a checkout and passed" and "the person's URL serves that build" are
   different facts; a report that gives only the first is the miss this section exists to prevent.
+- **The case that proved it (2026-10-17, heddle's model selector).** The browser contract spawned its own
+  `dist/cli.js` with `--port 0` from the checkout it lived in, and was green; every measurement and screenshot came
+  from such a spawned instance; the only probe of the owner's URL was created **after** the deploy. The address the
+  owner opened (`8082` → a launchd daemon on another checkout) served a page with **zero** of the feature's markers
+  and the old one-level menu. A controlled run of *that* build reproduced exactly what the owner saw. The missing
+  step was not the check — it was the phase that compares the check's build with the process the person's request
+  reaches.
 
 ## The document the loop keeps
 
