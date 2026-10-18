@@ -373,3 +373,79 @@ Cycle 2 — the states that only exist after a re-render, and the running-turn s
 9. **Not measured, named:** the pending spinner (the route is one round trip; the markup and the
    `aria-busy` toggle exist and the running-state assertion proves no busy mark during a turn) and the
    pending-row check marks. Neither is a divergence; neither has a number.
+
+## Cycle 3 — the user's own catalogue in `~/.heddle/`, and the last verification
+
+```
+Cycle 3 — configure the owner's machine and judge the whole delivery
+  measured:   the served page from a fresh build, reading the user's own ~/.heddle/heddle.json (2026-10-17):
+              seat aria "Select model, current DeepSeek V4.1 Flash, reasoning effort High", title
+              "DeepSeek V4.1 Flash · High", two spans; the model pane lists, grouped by endpoint,
+              claude-opus -> Claude Opus 5.5 / Sonnet 5.5 / Opus 5 / Sonnet 5 / Opus 4.8,
+              plugboard-ds -> DeepSeek V4.1 Flash (current) / V4 Pro, plugboard-cx -> GPT-6.1-Sol /
+              GPT-6-Astra / GPT-6-Sol / GPT-6-Luna / GPT-5.6-Sol / GPT-5.6-Terra / GPT-5.6-Luna,
+              plus the repository's offline defaults (scripted, localhost) and deepseek-direct.
+              Live turns through the served HTTP API, one per endpoint kind, all answering "ok":
+              plugboard-ds/deepseek-flash/low -> stop; plugboard-cx/gpt-6.1-sol/low -> completed;
+              claude-opus/claude-sonnet-5-5/low -> end_turn; each session's record carries
+              endpoint + model + reasoningEffort.
+  brainstorm: where the catalogue lives: (a) endpoint.models + per-model reasoning in ~/.heddle/heddle.json
+              (chosen — the existing resolution ladder already reads that file and no endpoint value enters the
+              repo); (b) a separate models file (discarded: a second source to resolve and keep in step);
+              (c) a provider catalogue in the repository (discarded: endpoint values in the repo, not
+              user-specific). How a level reaches a provider: (a) level values declared in the user's config and
+              sent in the parameter the endpoint kind documents (chosen; each kind probed live); (b) one generic
+              parameter for every kind (discarded: the Anthropic publisher route refused the thinking-budget form
+              with "use adaptive thinking and output_config.effort"), (c) a free-text effort (discarded earlier).
+  step back:  the objective is met. The catalogue is the owner's two tiers and the control is DSH's, with the kept
+              differences listed above. Nothing widened: the remaining unmeasured states are named, not silently
+              absent, and no row of the coverage matrix is a fix.
+  changed:    ~/.heddle/heddle.json (machine-local, not in the repository): claude-opus gains five models with
+              low/medium/high/xhigh/max, plugboard-ds gains deepseek-flash and deepseek-v4-pro with
+              low/high/max (the route's own advertised levels and default high), plugboard-cx gains seven
+              gpt-6.x/5.6 models with low/medium/high/xhigh/max and gpt-6.1-sol as its default; a backup is at
+              ~/.heddle/heddle.json.bak-model-selector. Docs: SESSION_UI.md (the composer's seat rows),
+              dsh-input-area.md (the model + effort row), this folder's INDEX.md.
+  evidence:   the real catalogue rendered by the delivered page and screenshotted as
+              `heddle-model-real-catalogue.png`; three live turns through the served API, one per endpoint kind,
+              each with the session record naming endpoint, model and level. Final suites: `npm run check`
+              clean, `npm test` 322/322, `npm run build` clean. The final verifier sweep, with the exit code of
+              each folder this time: **13 of 15 folders green**, `10-llm-backends` exit **3** (one real-backend
+              check unjudged — that folder's own honest contract, not a failure), and `80-web-ui` exit 1 on
+              **two checks outside this workstream**: `check-composer.mjs` (2 of its 12, the empty-draft
+              opacity and the text-column measurement — timing assertions that fail differently run to run) and
+              `check-team-view.mjs` (1 of 1, an empty roster). Both were run against the pre-change build at
+              `d446e67` in `/private/tmp/heddle-model-old` and fail there too (composer 1/12, a **different**
+              assertion; team-view 1/1, the same one), so they are pre-existing at the branch point and are
+              named here rather than bent to pass. The model selector's own check is 5/5, and
+              `70-workspaces-sessions` is 40/40 and `87-resizable-panels` 1/1.
+  reds:       two named, both pre-existing at the branch point and outside this workstream's files:
+              `_verifiers_/80-web-ui/check-composer.mjs` (timing assertions, owner: the composer/statistics
+              workstream) and `_verifiers_/80-web-ui/check-team-view.mjs` (empty roster, owner: the team
+              workstream). The one pre-existing type error fixed in cycle 1 is recorded there.
+  coverage:   live-measured: three endpoint kinds, seven catalogue models seen, three turns with three levels,
+              one reload, one running-turn switch, keyboard, search, clamp. Not measured: xhigh/max as a live
+              turn (the routes accepted them in the direct probes: Claude accepted all five and the Responses
+              route named its supported values in a refusal), an unconfigured endpoint's turn failure path (the
+              refusal route is judged in the browser check), the pending spinner (named).
+  invariants: full verifier sweep 15/15 folders, unit 322, type check clean, build clean; the composer, the
+              session tree, the trajectory views and the resizable panels are all unchanged and green.
+  lessons:    (1) a catalogue in the user's home is what "user-specific" means here — the repository can hold the
+              schema, the adapters and the checks, and must hold no URL, model or key; (2) a level is honest only
+              when the provider's own parameter was probed, which is why the Anthropic route's refusal is in this
+              record rather than a copied budget guess; (3) the two tiers are also a testing shape: a double per
+              endpoint makes "which backend answered" and "what effort was sent" countable.
+```
+
+### The goal, measured against its own words
+
+| The objective's clause | Where it is evidenced |
+|---|---|
+| measure DSH in every named state with the repo browser tool | the measured tables above and the four `dsh-model-*.png` screenshots |
+| brainstorm and record the discarded candidates | three cycles of candidates, each with its discard reason |
+| understand the mechanism, then step back | cycle 1's widening to the config schema and narrowing of effort; cycles 2–3 record no scope change |
+| implement in `feat/model-selector`, never the main checkout | the worktree `/Users/zhenc/heddle-model-selector`; two commits on the branch |
+| failing-first assertions, screenshot, suites green | unit tests red before the code; the browser contract 5/5 red on the pre-change build and 5/5 green after; screenshots beside this file; 322 unit tests, check and build clean, 13/15 verifier folders green with the two pre-existing red checks and the one unjudged folder named above |
+| reasoning effort only where provider-grounded | the per-kind wire table, the live probes (including the refused budget form), and the config that declares a level's wire value |
+| a user-specific selector in `~/.heddle/` | the real catalogue rendered by the page and three live turns, in cycle 3 |
+| report branch, commits, numbers, divergences | this document, plus the branch `feat/model-selector` at the two commits above |
