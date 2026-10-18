@@ -170,6 +170,9 @@ test('the repository ships no machine-specific endpoint default', () => {
   assert.ok(
     defaultEndpoints().every((endpoint) => endpoint.kind === 'scripted'),
     'and it points at no network address at all',
+  )
+})
+
 test('a local configuration can exclude the repository’s offline default from the catalogue', () => {
   /**
    * The repository's remaining default after the 2026-10-17 endpoint cleanup is the offline `scripted` fixture,
@@ -195,6 +198,7 @@ test('a local configuration can exclude the repository’s offline default from 
     'excluding it leaves the operator’s catalogue only',
   )
 })
+
 test('a switch records the reasoning level with the model, and a switch that names neither clears both', () => {
   /**
    * The level is part of the selection, not a second write: a session is run with one endpoint, one model and

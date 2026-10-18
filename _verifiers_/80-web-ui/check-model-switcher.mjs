@@ -32,7 +32,7 @@ async function startServer(label, options = {}) {
   const home = isolatedHome(`model-switcher-${label}`)
   const work = fixtureDir(`model-switcher-${label}-work`)
   const one = options.toolFirst === true
-    ? await toolThenPlainDouble('answer from one', options.holdOpenMs ?? 1400)
+    ? await toolThenPlainDouble('answer from one', options.holdOpenMs ?? 3200)
     : await plainDouble('answer from one')
   const two = await plainDouble('answer from two')
   const config = writeJson(join(home, 'heddle.json'), {
@@ -92,10 +92,18 @@ async function startServer(label, options = {}) {
   }
 }
 
-/** An SSE chat double that records each request body and answers with one text delta. */
+/**
+ * An SSE chat double that records each completion request and answers with one text delta.
+ *
+ * `GET /models` is answered separately: the merged main discovers a model's context window from the provider's
+ * own model list (`src/llm/model-info.ts`), so a double that answered the discovery with an event stream would be
+ * judged as a broken endpoint. The `requests` array stays every call; `turns` is the completion calls only, which
+ * is what "how many turns did this endpoint answer" means.
+ */
 async function plainDouble(content) {
   const { createServer } = await import('node:http')
   const requests = []
+  const turns = []
   const server = createServer((request, response) => {
     let body = ''
     request.on('data', (chunk) => {
@@ -103,6 +111,12 @@ async function plainDouble(content) {
     })
     request.on('end', () => {
       requests.push({ url: request.url ?? '', body })
+      if ((request.url ?? '').endsWith('/models')) {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ object: 'list', data: [{ id: 'model-one', object: 'model', context_window: 128000 }] }))
+        return
+      }
+      turns.push({ url: request.url ?? '', body })
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       response.write(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`)
       response.write('data: [DONE]\n\n')
@@ -115,6 +129,7 @@ async function plainDouble(content) {
   return {
     baseUrl: `http://127.0.0.1:${port}/d`,
     requests,
+    turns,
     close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
   }
 }
@@ -129,6 +144,7 @@ async function plainDouble(content) {
 async function toolThenPlainDouble(content, holdOpenMs) {
   const { createServer } = await import('node:http')
   const requests = []
+  const turns = []
   let count = 0
   const server = createServer((request, response) => {
     let body = ''
@@ -136,8 +152,14 @@ async function toolThenPlainDouble(content, holdOpenMs) {
       body += chunk
     })
     request.on('end', () => {
-      count += 1
       requests.push({ url: request.url ?? '', body, at: Date.now() })
+      if ((request.url ?? '').endsWith('/models')) {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ object: 'list', data: [{ id: 'model-one', object: 'model', context_window: 128000 }] }))
+        return
+      }
+      count += 1
+      turns.push({ url: request.url ?? '', body, at: Date.now() })
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const first = count === 1
       const finish = () => {
@@ -172,6 +194,7 @@ async function toolThenPlainDouble(content, holdOpenMs) {
   return {
     baseUrl: `http://127.0.0.1:${port}/d`,
     requests,
+    turns,
     close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
   }
 }
@@ -411,9 +434,20 @@ async function trustedClick(browser, expression, label) {
   await new Promise((resolvePromise) => setTimeout(resolvePromise, label.startsWith('option') || label.startsWith('cell') ? 500 : 300))
 }
 
-/** Open the menu from the seat with a real click on the trigger; the open seat owns focus, as DSH's does. */
+/**
+ * Open the menu from the seat with a real click on the trigger; the open seat owns focus, as DSH's does.
+ *
+ * The click is retried **once** at a freshly measured position when the first one does not open the menu. That is
+ * not a leniency for a broken control: the merged main paints its statistics dock when the first turn's figures
+ * arrive, so during a running turn the composer — and the seat with it — shifts a few pixels while the pointer is
+ * down. A person clicks again at where the seat now is; the instrument does the same instead of demanding that a
+ * moving target stay still.
+ */
 async function openMenu(browser) {
   await trustedClick(browser, SEAT, 'seat')
+  if (!(await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 1200))) {
+    await trustedClick(browser, SEAT, 'seat (retry after layout shift)')
+  }
   await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 5000)
   assert.ok(await browser.waitFor(`document.activeElement === ${SEAT}`, 3000), 'the opened menu leaves focus on the seat')
 }
@@ -582,7 +616,7 @@ test('choosing a model type and an effort is recorded, sent, and survives a relo
      */
     await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'first'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
     assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from one')`, 20_000), 'the first endpoint answered')
-    assert.ok(await until(() => server.one.requests.length === 1), 'the session exists and has a record')
+    assert.ok(await until(() => server.one.turns.length === 1), 'the session exists and has a record')
 
     /**
      * Select the second endpoint's reasoning-capable model. DSH records the model's **default effort** with the
@@ -623,9 +657,9 @@ test('choosing a model type and an effort is recorded, sent, and survives a relo
     /** A turn is answered by the chosen endpoint with the chosen model and the declared wire value. */
     await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'who answers?'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
     assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the chosen endpoint answered')
-    assert.ok(await until(() => server.two.requests.length === 1), 'the chosen double was asked once')
-    assert.equal(server.one.requests.length, 1, 'and the previous endpoint was asked only for the creating turn')
-    const asked = JSON.parse(server.two.requests[0].body)
+    assert.ok(await until(() => server.two.turns.length === 1), 'the chosen double was asked once')
+    assert.equal(server.one.turns.length, 1, 'and the previous endpoint was asked only for the creating turn')
+    const asked = JSON.parse(server.two.turns[0].body)
     assert.equal(asked.model, 'model-two', 'the request names the chosen model')
     assert.equal(asked.reasoning_effort, 'low', 'and sends the level’s wire value, which is what “shown” has to mean')
 
@@ -742,7 +776,7 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
    * tool call held open long enough to switch; the loop's second model call must then reach the second endpoint.
    */
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
-  const server = await startServer('running', { toolFirst: true, holdOpenMs: 1400 })
+  const server = await startServer('running', { toolFirst: true, holdOpenMs: 3200 })
   const browser = await openBrowser({ width: 1280, height: 1000 })
   try {
     await watchErrors(browser)
@@ -768,9 +802,9 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
       'the seat answers the switch at once',
     )
     assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the same turn ends with the new endpoint’s answer')
-    assert.ok(await until(() => server.one.requests.length === 1), 'the first step asked the first endpoint')
-    assert.ok(await until(() => server.two.requests.length === 1), 'the next step asked the second')
-    assert.equal(JSON.parse(server.two.requests[0].body).model, 'model-two', 'with the newly chosen model')
+    assert.ok(await until(() => server.one.turns.length === 1), 'the first step asked the first endpoint')
+    assert.ok(await until(() => server.two.turns.length === 1), 'the next step asked the second')
+    assert.equal(JSON.parse(server.two.turns[0].body).model, 'model-two', 'with the newly chosen model')
     assert.equal((await sessionsOf(server))[0]?.endpoint, 'double-two', 'and the session records the switch')
     assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
   } finally {
