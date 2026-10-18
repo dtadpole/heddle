@@ -6,6 +6,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import { reasoningLevelFor } from '../llm/types.ts'
 import { logFileName } from './log-download.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
@@ -15,11 +16,11 @@ import { inspectTool } from './tool-inspector.ts'
 import { PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
-import { describeEndpoints } from '../endpoints.ts'
+import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { readFileText, tree } from '../session/tree.ts'
-import type { SessionEvent, SessionHandle } from '../session/store.ts'
+import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -133,6 +134,43 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     const line = `event: session\ndata: ${JSON.stringify(payload)}\n\n`
     for (const client of subscribers) {
       client.write(line)
+    }
+  })
+
+  /**
+   * A running turn's **next** model call is answered by the session's current record.
+   *
+   * This is DSH's running-turn rule, measured on 2026-10-17: its seat stays enabled while a turn streams and
+   * a switch lands on a later step rather than on the next turn. Heddle's loop builds a request per round
+   * with the selection the turn started with, so without this seam a switch made mid-turn would be visible in
+   * the seat and ignored by the turn that was already running.
+   *
+   * The `model/request` waterfall is the project's existing version of that seam (`ModelService` documents it
+   * as "how a model-selection policy works"), and the loop carries the session id in every request, so the
+   * rule is one listener rather than a second loop.
+   *
+   * The record is authoritative only where it can be enforced: an endpoint the run still has, and a level the
+   * model still declares. A record that cannot be applied leaves the request untouched rather than half-rewriting
+   * it, because a request addressed to no endpoint is not a better answer than the one the turn asked for.
+   */
+  ctx.on('model/request', (request, next) => {
+    const resolved = next()
+    const id = resolved.sessionId
+    if (id === undefined) return resolved
+    const meta = ctx.session.list().find((entry) => entry.id === id)
+    const selection = sessionRequestSelection(meta)
+    if (selection.endpoint === undefined || !ctx.model.names().includes(selection.endpoint)) return resolved
+    const configured = ctx.model.endpoint(selection.endpoint)
+    const enforceable =
+      configured !== undefined &&
+      selection.reasoningEffort !== undefined &&
+      reasoningLevelFor(configured, selection.model, selection.reasoningEffort) !== undefined
+    const { model: _previousModel, reasoningEffort: _previousEffort, ...rest } = resolved
+    return {
+      ...rest,
+      endpoint: selection.endpoint,
+      ...(selection.model !== undefined ? { model: selection.model } : {}),
+      ...(enforceable && selection.reasoningEffort !== undefined ? { reasoningEffort: selection.reasoningEffort } : {}),
     }
   })
 
@@ -1113,7 +1151,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const model = typeof body.model === 'string' && body.model.trim().length > 0 ? body.model.trim() : undefined
-    const meta = ctx.session.setModel(id, { endpoint, ...(model !== undefined ? { model } : {}) })
+    const reasoningEffort =
+      typeof body.reasoningEffort === 'string' && body.reasoningEffort.trim().length > 0 ? body.reasoningEffort.trim() : undefined
+    /**
+     * A model or a level the endpoint does not offer is refused here rather than recorded. It is the one place a
+     * name from a browser reaches the store; recording one would make every following turn of the session fail
+     * with a name nobody chose, and the page would have shown a control for a value the provider never receives.
+     */
+    const configured = ctx.model.endpoint(endpoint)
+    const problem = configured === undefined ? null : selectionProblem(configured, model, reasoningEffort)
+    if (problem !== null) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: problem })}\n`)
+      return
+    }
+    const meta = ctx.session.setModel(id, {
+      endpoint,
+      ...(model !== undefined ? { model } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    })
     if (meta === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
@@ -1281,6 +1336,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            */
           endpoint: meta?.endpoint ?? null,
           model: meta?.model ?? null,
+          /**
+           * The reasoning level the session was switched to, when the model declares one. It travels with the
+           * transcript for the same reason the endpoint and model do: a reload has no memory, and the seat must
+           * come back to what the server recorded rather than to the endpoint's default.
+           */
+          reasoningEffort: meta?.reasoningEffort ?? null,
           /**
            * The name the session is read under, and the folder it belongs to — the two things DSH prints above a
            * conversation's tabs. The page had them only in the sidebar, so a reader had to look away to know which
@@ -1558,6 +1619,43 @@ export function resolveTurnEndpoint(sources: {
   return undefined
 }
 
+/**
+ * Which reasoning level a turn runs with: the request's, then the session's record, then nothing.
+ *
+ * The same ladder as the endpoint and for the same reason — a reload sends the session id without a choice, so
+ * the record is what makes a switch survive it. It is a level **id**, not the provider's wire value: the adapter
+ * resolves the value through the model's own catalogue, so a level that is recorded but no longer declared is
+ * filtered by the caller rather than sent to a provider that would refuse every turn.
+ */
+export function resolveTurnEffort(sources: {
+  readonly requested?: string
+  readonly recorded?: string
+}): string | undefined {
+  for (const candidate of [sources.requested, sources.recorded]) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return undefined
+}
+
+/**
+ * The selection a session's own record carries, as fields a model request may be given.
+ *
+ * The `model/request` waterfall's rule reduced to a pure function: a running turn reads the session's record
+ * before **every** model call, so a switch made while the turn streams lands on its next step — DSH's own
+ * running-turn behaviour. A record without an endpoint names no selection at all, because an endpoint is what
+ * makes a model or an effort meaningful.
+ */
+export function sessionRequestSelection(
+  meta: SessionMeta | undefined,
+): { readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } {
+  if (meta?.endpoint === undefined) return {}
+  return {
+    endpoint: meta.endpoint,
+    ...(meta.model !== undefined ? { model: meta.model } : {}),
+    ...(meta.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}),
+  }
+}
+
 /** Run one turn and stream its session events back as they are written. */async function handleTurn(ctx: Context, request: IncomingMessage, response: ServerResponse, state: RequestState): Promise<void> {
   let raw = ''
   for await (const chunk of request) {
@@ -1567,7 +1665,15 @@ export function resolveTurnEndpoint(sources: {
       return
     }
   }
-  let body: { session?: string; prompt?: string; endpoint?: string; model?: string; folder?: string; new?: boolean }
+  let body: {
+    session?: string
+    prompt?: string
+    endpoint?: string
+    model?: string
+    reasoningEffort?: string
+    folder?: string
+    new?: boolean
+  }
   try {
     body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
   } catch {
@@ -1603,7 +1709,13 @@ export function resolveTurnEndpoint(sources: {
     return
   }
   const model = typeof body.model === 'string' && body.model.length > 0 ? body.model : undefined
-  const born = { ...(requested !== undefined ? { endpoint: requested } : {}), ...(model !== undefined ? { model } : {}) }
+  const requestedEffort =
+    typeof body.reasoningEffort === 'string' && body.reasoningEffort.length > 0 ? body.reasoningEffort : undefined
+  const born = {
+    ...(requested !== undefined ? { endpoint: requested } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(requestedEffort !== undefined ? { reasoningEffort: requestedEffort } : {}),
+  }
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
       ? ctx.session.start({ resume: body.session })
@@ -1639,15 +1751,44 @@ export function resolveTurnEndpoint(sources: {
     return
   }
   /**
+   * The model and the reasoning level the turn runs with, read the same way the endpoint is.
+   *
+   * A model belongs to the endpoint that offered it, so a request that names a **different** endpoint must not
+   * inherit the record's model or effort: that pair belongs to the backend being left. When the request names
+   * this endpoint (or none), the record's own choice fills in — which is what a reload relies on, because it
+   * sends the session id without the page's memory.
+   *
+   * The level is then filtered through the model's own catalogue: an effort recorded before a configuration
+   * change is not sent to a provider that no longer declares it, and a caller that names one the model does not
+   * offer gets the model's default rather than a refusal on every following turn. The **route** that a browser
+   * writes through (`/api/sessions/<id>/model`) refuses such a level instead of filtering, because that is the
+   * point where a person can be told.
+   */
+  const sameEndpoint = requested === undefined || requested === record?.endpoint
+  const runModel = model ?? (sameEndpoint ? record?.model : undefined)
+  const runEndpoint = ctx.model.endpoint(endpoint)
+  const wantedEffort = resolveTurnEffort({
+    ...(requestedEffort !== undefined ? { requested: requestedEffort } : {}),
+    ...(sameEndpoint && record?.reasoningEffort !== undefined ? { recorded: record.reasoningEffort } : {}),
+  })
+  const runEffort =
+    runEndpoint !== undefined && wantedEffort !== undefined && reasoningLevelFor(runEndpoint, runModel, wantedEffort) !== undefined
+      ? wantedEffort
+      : undefined
+  /**
    * The session records how it is run.
    *
    * A session created by this request is born with the choice, so this writes only when the record and the
    * turn disagree — a resumed session this request pointed elsewhere, or one started before the record
    * existed. Writing only on a difference is what keeps an ordinary turn from rewriting a metadata file on
-   * every message, which is also the reason the comparison includes the model.
+   * every message, which is also the reason the comparison includes the model and the level.
    */
-  if (record?.endpoint !== endpoint || record?.model !== model) {
-    ctx.session.setModel(handle.id, { endpoint, ...(model !== undefined ? { model } : {}) })
+  if (record?.endpoint !== endpoint || record?.model !== runModel || record?.reasoningEffort !== runEffort) {
+    ctx.session.setModel(handle.id, {
+      endpoint,
+      ...(runModel !== undefined ? { model: runModel } : {}),
+      ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
+    })
   }
 
   /**
@@ -1699,7 +1840,8 @@ export function resolveTurnEndpoint(sources: {
       endpoint,
       prompt: body.prompt,
       signal: controller.signal,
-      ...(model !== undefined ? { model } : {}),
+      ...(runModel !== undefined ? { model: runModel } : {}),
+      ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
     })
     safeWrite(
       `event: done\ndata: ${JSON.stringify({

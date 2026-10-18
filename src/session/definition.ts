@@ -46,6 +46,7 @@ export interface SessionDefinitionFields {
   readonly title?: string
   readonly endpoint?: string
   readonly model?: string
+  readonly reasoningEffort?: string
 }
 
 /**
@@ -134,7 +135,7 @@ export function ensureSessionsFolder(branch: string): string {
 export function writeSessionDefinition(
   handle: SessionHandle,
   branch: string,
-  options: { readonly createdAt: string; readonly title?: string; readonly endpoint?: string; readonly model?: string; readonly taken?: readonly string[] } ,
+  options: { readonly createdAt: string; readonly title?: string; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string; readonly taken?: readonly string[] } ,
 ): SessionDefinition {
   const canonical = canonicalPath(branch)
   const name = sessionName(new Date(options.createdAt), options.taken ?? [])
@@ -149,6 +150,7 @@ export function writeSessionDefinition(
     ...(options.title !== undefined ? { title: options.title } : {}),
     ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
   }
   writeFileSync(join(dir, DEFINITION_FILE), `${JSON.stringify(fields, null, 2)}\n`)
   writeFileSync(join(dir, 'INDEX.md'), indexFor(name, canonical, fields))

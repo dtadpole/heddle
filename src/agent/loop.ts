@@ -127,6 +127,8 @@ export interface RunTurnOptions {
   readonly system?: string
   /** The model id, overriding the endpoint's default. */
   readonly model?: string
+  /** The reasoning level, as an id the model declares; the adapter turns it into the provider's wire value. */
+  readonly reasoningEffort?: string
   /** Cap on model-plus-tools rounds, so a looping model cannot run forever. */
   readonly maxRounds?: number
   /** Cap on generated tokens per model call. */
@@ -289,6 +291,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         endpoint: options.endpoint,
         messages: prepared.messages,
         ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
         ...(maximumTokens !== undefined ? { maxOutputTokens: maximumTokens } : {}),
         ...(prepared.tools.length > 0 ? { tools: prepared.tools } : {}),
         ...(options.purpose !== undefined ? { purpose: options.purpose } : {}),
@@ -299,6 +302,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       ctx.session.store.modelRequest(options.session, {
         endpoint: options.endpoint,
         ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
         messages: prepared.messages.length,
         tools: prepared.tools.map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,

@@ -5,8 +5,8 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { describeEndpoints } from '../src/endpoints.ts'
-import { SessionStore } from '../src/session/store.ts'
-import { resolveTurnEndpoint } from '../src/server/web.ts'
+import { SessionStore, type SessionMeta } from '../src/session/store.ts'
+import { resolveTurnEffort, resolveTurnEndpoint, sessionRequestSelection } from '../src/server/web.ts'
 
 /**
  * The three pure decisions behind switching a session's model.
@@ -150,4 +150,90 @@ test('an endpoint summary carries the context window when it declares one', () =
   assert.equal(described.endpoints[0]?.contextWindow, 128000)
   const quiet = describeEndpoints([{ name: 'unstated', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:1' }])
   assert.equal('contextWindow' in (quiet.endpoints[0] ?? {}), false, 'and says nothing when the endpoint does not')
+})
+
+test('a switch records the reasoning level with the model, and a switch that names neither clears both', () => {
+  /**
+   * The level is part of the selection, not a second write: a session is run with one endpoint, one model and
+   * one effort, and recording them apart would allow a model from one switch beside an effort from another —
+   * which is a provider request nobody made and, for a model that does not declare that level, a refusal on
+   * every following turn.
+   */
+  const root = join(scratch, 'effort-store')
+  const sessions = new SessionStore(root)
+  const handle = sessions.create({ cwd: scratch, endpoint: 'two-tier', model: 'model-a', reasoningEffort: 'low' })
+  assert.equal(sessions.list().find((meta) => meta.id === handle.id)?.reasoningEffort, 'low', 'a born session can carry one')
+
+  const changed = sessions.setModel(handle.id, { endpoint: 'two-tier', model: 'model-a', reasoningEffort: 'max' })
+  assert.equal(changed?.reasoningEffort, 'max', 'the level is recorded with the selection')
+  const meta = JSON.parse(readFileSync(handle.meta, 'utf8')) as Record<string, unknown>
+  assert.equal(meta.reasoningEffort, 'max', 'and it is on disk, which is what a reload reads')
+
+  const cleared = sessions.setModel(handle.id, { endpoint: 'two-tier', model: 'model-b' })
+  assert.equal(cleared?.model, 'model-b', 'a new model is recorded')
+  assert.equal(cleared?.reasoningEffort, undefined, 'and the previous model’s level is gone rather than carried over')
+  assert.equal('reasoningEffort' in (JSON.parse(readFileSync(handle.meta, 'utf8')) as Record<string, unknown>), false)
+})
+
+test('a model request records the reasoning level it was sent with', () => {
+  /**
+   * The trajectory view reads this event, and so does a check that wants to know what a turn actually asked
+   * for. Recording the level only in the request object would make "did the running turn use the effort I
+   * switched to?" unanswerable after the fact.
+   */
+  const root = join(scratch, 'request-store')
+  const sessions = new SessionStore(root)
+  const handle = sessions.create({ cwd: scratch, endpoint: 'two-tier' })
+  sessions.modelRequest(handle, {
+    endpoint: 'two-tier',
+    model: 'model-a',
+    reasoningEffort: 'high',
+    messages: 1,
+    tools: [],
+  })
+  const request = sessions.read(handle).find((event) => event.type === 'model/request')
+  assert.equal(request?.reasoningEffort, 'high', 'the level travels with the recorded request')
+})
+
+test('the effort a turn runs with is the request’s, then the session’s record, then nothing', () => {
+  /**
+   * The same ladder as the endpoint, and for the same reason: a reload sends the session id without a
+   * choice, so a recorded level below the request is what makes a switch survive it. An empty string is
+   * absence rather than a level named nothing.
+   */
+  assert.equal(resolveTurnEffort({ requested: 'low', recorded: 'max' }), 'low', 'a request that names one wins')
+  assert.equal(resolveTurnEffort({ recorded: 'max' }), 'max', 'then the session’s own record')
+  assert.equal(resolveTurnEffort({}), undefined, 'nothing named is nothing')
+  assert.equal(resolveTurnEffort({ requested: '', recorded: 'max' }), 'max', 'an empty request is absent')
+})
+
+test('the session’s recorded selection is what every model call of its turn is given', () => {
+  /**
+   * The `model/request` waterfall's rule, as a pure function so it can be judged without a server: a running
+   * turn may be switched, and DSH applies a concurrent switch to a **later step**. That is only true if each
+   * request is rebuilt from the session's current record rather than from the values the turn started with.
+   */
+  const record = (selection: Partial<SessionMeta>): SessionMeta => ({
+    id: 'session-a',
+    created: '2026-10-17T00:00:00.000Z',
+    cwd: scratch,
+    turns: 0,
+    ...selection,
+  })
+  assert.deepEqual(
+    sessionRequestSelection(record({ endpoint: 'plugboard-ds', model: 'deepseek-flash', reasoningEffort: 'max' })),
+    { endpoint: 'plugboard-ds', model: 'deepseek-flash', reasoningEffort: 'max' },
+    'all three parts travel together',
+  )
+  assert.deepEqual(
+    sessionRequestSelection(record({ endpoint: 'plugboard-ds' })),
+    { endpoint: 'plugboard-ds' },
+    'a record with no model names no model rather than an empty string',
+  )
+  assert.deepEqual(sessionRequestSelection(undefined), {}, 'a request with no session record is left alone')
+  assert.deepEqual(
+    sessionRequestSelection(record({ reasoningEffort: 'high' })),
+    {},
+    'a record without an endpoint cannot name a selection, so it changes nothing',
+  )
 })
