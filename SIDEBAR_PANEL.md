@@ -280,6 +280,56 @@ vacuous.
 settings dialog is unaffected by the gutter change (it is outside the region); the first-visit expansion still opens
 the workspace after a reload.
 
+## After the loop — the list's width, a dead module, and a stray daemon
+
+The owner read the finished panel and reported it three times in a row: the scrolling pane should **span the whole
+panel**, the list should be **as wide as the search field**, the scrollbar should be **on the right**, and the tree's
+content should **fill more of the horizontal space** instead of sitting in the middle. Three of those turned out not to
+be layout at all, so they are recorded here.
+
+**A dead module, not a narrow list.** The page's script was throwing at boot — `Cannot access 'armRows' before
+initialization` — because the concurrent session's row-animation code registered its listeners near the top of the
+module, before the `const armRows` they call was initialized. The whole module stopped, so the tree never rendered: the
+panel was empty and there was no scrollbar at all. The fix is a hoisted `function armRows()`.
+
+**A stray daemon, not a stale stylesheet.** The live UI at :8082 was served by a process running
+`heddle/dist/cli.js` with its working directory at `/Users/zhenc` — no profile, so the workspace plugin did not load and
+the page said "this profile does not load the workspace plugin". Every `install.sh --restart` in the session had been
+failing silently (the output was discarded), because the script refuses a dirty checkout and the daemon the script
+manages is a **deployment clone** (`~/heddle-deploy`) rather than the working tree. The daemon now runs from
+`~/heddle` with `HEDDLE_ALLOW_DIRTY_INSTALL=1` — the script's documented development escape hatch — and the tree
+renders. A restart is only believed when its exit status is zero.
+
+**The paint and the content are two widths.** With the page alive: the panel keeps 12px of horizontal padding for its
+chrome, the region spans 0→352 with the 5px bar at 347→352, and the rows' boxes were 12→340 because the tree indented
+with the group's `padding-left`. Two fixes, one per report:
+
+- the indentation is the **content's** (`depth * 14px`, the tree's documented rule), passed to the row as
+  `--tree-depth`, so the group no longer narrows the rows below it and every row's paint spans 0→347;
+- the content column is the **widest aligned column**: 12px in — where the `Workspaces` heading and the search field's
+  box begin — and 8px inside the row's own right edge (the reference's row rule). The earlier 19.2/14.2 lined the
+  content up with the search *text*, costing seven pixels left and six right.
+
+Measured after, at 1200×760 on the live daemon:
+
+| Element | Reading |
+|---|---|
+| panel | 0→352 |
+| scrolling pane | 0→352, `padding-inline: 0`, bar at 347→352 |
+| every row's **paint** | 0→347, at depth 0, 1 and 2 |
+| every row's **content** | 12 / 26 / 40 px from the edge (12 + depth × 14) |
+| root row content left | 12 — the `Workspaces` heading's own left edge |
+| row content right | 339 — 8px inside the row, the reference's rule |
+
+Screenshot: [`_context_/sidebar-panel/after-loop-list-width.png`](_context_/sidebar-panel/after-loop-list-width.png).
+
+Part 11 asserts the pane's edges, the paint's edges, the content's column, the 8px right inset and the 14px indent; the
+unit contracts pin the `--tree-depth` wiring and the row padding formula.
+
+**A divergence, recorded:** the groups no longer draw their vertical guide line (`border-left`), because the line was
+the group's box edge and the group no longer has one; the tree's shape is still readable from the indentation, and the
+reference draws no guides either.
+
 **lessons:** a scrollbar is geometry as well as paint. The measurable facts are `offsetWidth - clientWidth`,
 `scrollbar-gutter` and the end padding — and the first attempt failed on a property (`scrollbar-width: thin`) whose
 only effect was to switch the mechanism off, which is why the new contract asserts its **absence**.

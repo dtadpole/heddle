@@ -33,6 +33,12 @@ scrolling workspaces region.
 edge and the 16 pixels of padding under the last row, the two facts cycle 1 had left to the platform. The panel's foot
 and the conversation beside it are unchanged.
 
+## After the loop
+
+`after-loop-list-width.png` — the live panel at 1200×760 with a hovered file row painting the panel's full width,
+its content starting at the panel's 12-pixel inset and indenting 14 pixels per level, and the 5-pixel scrollbar at the
+panel's right edge.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

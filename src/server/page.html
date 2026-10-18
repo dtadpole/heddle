@@ -1088,7 +1088,13 @@
      * about the *content* (`depth * 14px`, the rule in SESSION_TREE.md), not about the row, so it lives in the row's
      * padding now and the paint spans from the panel's left edge to the scrollbar at its right one.
      */
-    padding: 0 calc(.75rem - 5px + .45rem) 0 calc(.75rem + .45rem + var(--tree-depth, 0) * 14px);
+    /**
+     * The content column is the **widest it can be while staying aligned**: 12px on the left — the panel's own inset,
+     * where the Workspaces heading and the search field's box begin — and 8px on the right, the reference's measured
+     * row rule. The earlier 19.2/14.2 numbers lined the content up with the search *text*, which cost seven pixels on
+     * the left and six on the right and made the rows read as a narrower column floating inside the panel.
+     */
+    padding: 0 .5rem 0 calc(.75rem + var(--tree-depth, 0) * 14px);
     border-radius: var(--radius-md);
     cursor: pointer;
   }
@@ -2773,7 +2779,7 @@ function copyAction(row, label) {
   const button = document.createElement('button')
   button.type = 'button'
   button.className = 'action'
-  button.textContent = '⧉'
+  button.append(copyIcon())
   button.title = label
   button.setAttribute('aria-label', label)
   button.onclick = async () => {
@@ -4367,9 +4373,6 @@ async function refreshSessions() {
  * Motion turns on after the reader's first input in the sidebar — the reference's own guard, so a page that is loading does
  * not animate its first draw. Captured, so a helper restoring focus does not count as a second arming.
  */
-document.getElementById('workspace-sidebar')?.addEventListener('pointerdown', armRows, { capture: true, once: true })
-document.getElementById('workspace-sidebar')?.addEventListener('keydown', armRows, { capture: true, once: true })
-
 const events = new EventSource('/api/events')
 /**
  * The list is redrawn shortly after activity, once per burst.
@@ -5109,11 +5112,13 @@ function queueActions(item, isEditing) {
   const wrap = document.createElement('div')
   wrap.className = 'actions'
   const sending = item.status === 'sending'
-  const action = (glyph, label, disabled, run) => {
+  /** A queue action's mark is DSH's outline artwork, not a font glyph: the page's own icons come from the same set. */
+  const action = (icon, label, disabled, run) => {
     const button = document.createElement('button')
     button.type = 'button'
     button.className = 'action'
-    button.textContent = glyph
+    if (typeof icon === 'string') button.textContent = icon
+    else button.append(icon)
     button.title = label
     button.setAttribute('aria-label', label)
     button.disabled = disabled
@@ -8560,17 +8565,6 @@ function titleMarquee(label) {
  */
 const ROW_GLIDE_MS = 200
 const ROW_FADE_MS = 100
-let rowsArmed = false
-/**
- * A **declaration**, not a `const` arrow, and that is a fix rather than a style: the listeners that arm the row
- * animation are registered near the top of the module, and a `const` is not initialized until its line runs — the
- * page died at boot with `Cannot access 'armRows' before initialization`, which took the whole tree with it. A function
- * declaration is hoisted, so the registration can come first.
- */
-function armRows() {
-  rowsArmed = true
-}
-
 /** The row boxes as they are now, keyed by the same key the rows render with. */
 function captureRowBoxes() {
   const boxes = new Map()
@@ -8583,7 +8577,13 @@ function captureRowBoxes() {
 
 /** Glide rows from where they were to where the redraw put them; fade in the ones that were not there. */
 function glideRows(previous) {
-  if (previous === null || rowsArmed !== true) return
+  /**
+   * No first-input arming here, unlike the reference: its guard exists because its rows re-render during a load, while this
+   * glide is entered **only** by the pin handler, which is itself an input. The earlier version copied the guard and the
+   * animation then depended on a listener that a synthetic or programmatic action never fired — measured, the row still moved
+   * without gliding. Reduced motion is still honoured.
+   */
+  if (previous === null) return
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
   const viewport = { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth }
   for (const li of document.querySelectorAll('#tree li[data-row-key], #list li[data-row-key]')) {

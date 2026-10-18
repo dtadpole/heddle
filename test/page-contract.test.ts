@@ -200,13 +200,20 @@ test('the panel ends with a Settings entry, and the Settings surface never rende
   assert.match(page, /endpoint\.credential === 'set' \? 'credential set' : 'no credential'/, 'the credential is reported as set or not, never printed')
 })
 
-test('the workspaces region carries the reference\'s scrollbar and its end padding', () => {
+test('the workspaces region spans the panel and carries the reference\'s scrollbar and end padding', () => {
   /**
    * Measured from DSH on 2026-10-17: its list reports a 5-pixel scrollbar (`offsetWidth - clientWidth`),
    * `scrollbar-gutter: stable` and `padding-bottom: 16px`. Heddle measured 0 and 0, and its first attempt reserved
    * nothing because `scrollbar-width: thin` stops `::-webkit-scrollbar` from applying at all. Part 11 measures the
    * result; these contracts catch the CSS being dropped.
    */
+  assert.match(page, /#workspace-scroll \{[\s\S]*?margin-inline: -.75rem;/, 'the region breaks out of the panel\'s padding')
+  assert.match(page, /#workspace-scroll \{[\s\S]*?padding-inline: 0;/, 'and leaves the inline inset to the rows, so their paint reaches the edges')
+  assert.match(page, /--tree-depth/, 'the indentation travels with the row as a depth')
+  assert.match(page, /padding: 0 .5rem 0 calc\(\.75rem \+ var\(--tree-depth, 0\) \* 14px\);/, 'whose content starts at the panel inset, ends 8px inside the row, and indents 14 pixels per level')
+  assert.match(page, /#tree ul\[role='group'\] \{ padding-left: 0; \}/, 'while a group no longer narrows the rows below it')
+  assert.match(page, /function nodeRow\(node, depth = 0\)/, 'nodeRow carries the depth')
+  assert.match(page, /group.append\(nodeRow\(child, depth \+ 1\)\)/, 'and passes one more to each child')
   assert.match(page, /#workspace-scroll \{[\s\S]*?padding-bottom: 1rem;/, 'the region ends with the reference\'s 16 pixels')
   assert.match(page, /#workspace-scroll \{[\s\S]*?scrollbar-gutter: stable;/, 'and reserves its scrollbar gutter')
   assert.match(page, /#workspace-scroll::-webkit-scrollbar \{ width: 5px; \}/, 'with the reference\'s 5-pixel bar')

@@ -1166,9 +1166,16 @@ test('a folder opens and closes with the same control, including a leaf with not
       await browser.evaluate(`JSON.stringify((() => {
         const lists = [...document.querySelectorAll('#tree ul, #tree ol')]
         const find = (label) => [...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === label)
+        /** The indentation is the row's **content** inset: the boxes agree (the paint is the panel's width). */
+        const contentLeft = (label) => {
+          const row = find(label)
+          const box = row.getBoundingClientRect()
+          return box.left + parseFloat(getComputedStyle(row).paddingLeft)
+        }
         return {
           styles: lists.map((list) => getComputedStyle(list).listStyleType),
-          indent: Math.round(find('some-tool').getBoundingClientRect().left - find('_tools_').getBoundingClientRect().left),
+          indent: Math.round(contentLeft('some-tool') - contentLeft('_tools_')),
+          boxIndent: Math.round(find('some-tool').getBoundingClientRect().left - find('_tools_').getBoundingClientRect().left),
         }
       })())`),
     )
@@ -1180,6 +1187,12 @@ test('a folder opens and closes with the same control, including a leaf with not
       layout.indent > 0 && layout.indent < 30,
       `a nested row is indented by the tree's own rule rather than by a browser marker gutter (${layout.indent}px)`,
     )
+    /**
+     * And the indent is the **content's**, not the row's: the row boxes all start at the panel's edge, so a highlight does
+     * not step inward with the tree. Measured before the change: the group carried the padding and the boxes differed by
+     * the same 14 pixels as the text.
+     */
+    assert.equal(layout.boxIndent, 0, `the row boxes stay at the panel\'s edge (${layout.boxIndent}px)`)
 
     /**
      * A file row opens its content in the right panel.
@@ -2174,7 +2187,12 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         const quiet = target.querySelector(':scope > .row .age')
         const rowRect = target.querySelector(':scope > .row').getBoundingClientRect()
         const ageRect = quiet === null ? null : quiet.getBoundingClientRect()
-        const ageSlot = { rowRight: Math.round(rowRect.right), ageRight: ageRect === null ? null : Math.round(ageRect.right) }
+        const slotRect = target.querySelector(':scope > .row .pin-slot')?.getBoundingClientRect() ?? null
+        const ageSlot = {
+          rowRight: Math.round(rowRect.right),
+          ageRight: ageRect === null ? null : Math.round(ageRect.right),
+          slot: slotRect === null ? null : [Math.round(slotRect.width), Math.round(rowRect.right - slotRect.right)],
+        }
 
         /** And a selection is DSH's: the same surface as a hover, no bar, no bold. */
         target.querySelector(':scope > .row').click(); await wait(1200)
@@ -2276,13 +2294,18 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           userTurn: (() => {
             const turn = document.querySelector('#log .turn.user')
             if (turn === null) return { alignSelf: null, radius: null, background: null, maxWidth: null, turnWidth: null, turnRight: null, logWidth: null, logRight: null, contentRight: null }
-            const style = getComputedStyle(turn)
+            /**
+             * The bubble is the element that carries the shape; the turn wrapper only positions it. Measured on 2026-10-17:
+             * reading the wrapper reported a 0px radius while the bubble itself is 20px, so the probe reads the bubble.
+             */
+            const bubble = turn.querySelector('.bubble') ?? turn
+            const style = getComputedStyle(bubble)
             const log = document.getElementById('log')
             const logRect = log === null ? null : log.getBoundingClientRect()
             const logPaddingRight = log === null ? 0 : parseFloat(getComputedStyle(log).paddingRight)
-            const turnRect = turn.getBoundingClientRect()
+            const turnRect = bubble.getBoundingClientRect()
             return {
-              alignSelf: style.alignSelf,
+              alignSelf: getComputedStyle(turn).alignSelf,
               radius: style.borderRadius,
               background: style.backgroundColor,
               maxWidth: style.maxWidth,
@@ -2396,12 +2419,35 @@ test("a session row's controls appear on hover, and a search replaces the tree w
 
     /**
      * The two rules the owner saw missing, judged as measurements rather than as impressions: the age is the row's
-     * rightmost thing when the row is quiet, and the controls take its slot when it is not.
+     * rightmost thing when the row is quiet — less the pin slot that every row reserves at its edge — and the controls take
+     * the age's place when it is not.
      */
     assert.ok(reading.ageSlot.ageRight !== null, 'the row carries an age to place')
+    /**
+     * The reserved slot is the rightmost thing: 16px wide, ending at the row's **content edge**.
+     *
+     * The row's paint spans the panel, so its right inset is the panel's 12-pixel inset plus the search field's 7.2-pixel
+     * padding, less the 5-pixel scrollbar the row cannot paint under — the same column the search field's text ends in.
+     * The reference's own 8-pixel figure was measured on *its* row, whose box stopped inside the panel; on a full-bleed
+     * row 8 would put the age 6 pixels right of the field's text.
+     */
+    const expectedGap = await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree li[data-kind="session"] > .row')][0]
+      return Math.round(parseFloat(getComputedStyle(row).paddingRight))
+    })()`)
+    assert.equal(reading.ageSlot.slot[0], 16, `the pin slot is 16px wide\nsaw: ${JSON.stringify(reading.ageSlot)}`)
+    /**
+     * The reserved pin slot is the row's rightmost element now, so the age ends left of it: the content edge plus the slot's
+     * width, its margin and the grid gap. The slot itself is what must end 8px inside, asserted above.
+     */
+    const contentGap = Math.round(reading.ageSlot.rowRight - reading.ageSlot.ageRight)
     assert.ok(
-      reading.ageSlot.rowRight - reading.ageSlot.ageRight <= 10 && reading.ageSlot.rowRight - reading.ageSlot.ageRight >= 4,
-      `the age sits at the row's right edge, 8px inside it\nsaw row ${reading.ageSlot.rowRight}, age ${reading.ageSlot.ageRight}`,
+      contentGap >= expectedGap + 20 && contentGap <= expectedGap + 32,
+      `and ends just left of the reserved pin slot, ${expectedGap}px inside the row plus the slot\nsaw: ${JSON.stringify(reading.ageSlot)}`,
+    )
+    assert.ok(
+      contentGap >= 4 && contentGap <= 40,
+      `the age sits clear of the reserved pin slot\nsaw row ${reading.ageSlot.rowRight}, age ${reading.ageSlot.ageRight}, gap ${contentGap}`,
     )
     assert.equal(reading.focused.ageOpacity, '0', 'and it steps aside when the controls arrive')
 
@@ -3225,8 +3271,9 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           /** The filter re-reads the tree asynchronously; the archived rows appear after that fetch. */
           await wait(1200)
           const sessionRows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
-          const pinnedRow = sessionRows.find((li) => li.querySelector(':scope > .row .pin-mark') !== null)
-          const pinnedMark = pinnedRow === undefined ? null : pinnedRow.querySelector(':scope > .row .pin-mark').getBoundingClientRect()
+          const pinnedRow = sessionRows.find((li) => li.dataset.pinned === 'true')
+          const pinnedGlyph = pinnedRow === undefined ? null : pinnedRow.querySelector(':scope > .row .pin-slot svg')
+          const pinnedMark = pinnedGlyph === null || pinnedGlyph === undefined ? null : pinnedGlyph.getBoundingClientRect()
           /** An archived row is one the row itself says archived; the tree draws it only when the archive filter shows it. */
           const archivedRows = sessionRows.filter((li) => li.querySelector(':scope > .row .label')?.textContent?.includes('archived') !== true)
           return {
@@ -3300,7 +3347,7 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
     }
 
     /** A pinned row says so at rest; an archived row offers no pin, because the store would refuse it. */
-    assert.deepEqual(result.flagStates.pinnedMark, [14, 14], `a pinned row carries a 14px pin mark\nsaw: ${JSON.stringify(result.flagStates)}`)
+    assert.deepEqual(result.flagStates.pinnedMark, [14, 14], `a pinned row carries the reference's 14px pin glyph\nsaw: ${JSON.stringify(result.flagStates)}`)
     assert.ok(result.flagStates.archivedRows >= 1, `the archived row is drawn once the filter shows it\nsaw: ${JSON.stringify(result.flagStates)}`)
     assert.notEqual(result.flagStates.archivedPinControls, null, 'and its controls are readable')
     {
@@ -3646,7 +3693,24 @@ test('a written session moves to the top of its folder, its age follows, and a r
           })
         })()`),
       )
+    /** The age and controls' positions, so the pin can be judged by what it must **not** move. */
+    const geometry = async () =>
+      JSON.parse(
+        await browser.evaluate(`(() => {
+          const rows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+          return JSON.stringify(rows.map((li) => {
+            const row = li.querySelector(':scope > .row')
+            const age = row.querySelector(':scope > .row-right .age')
+            const tools = row.querySelector(':scope > .row-right .row-tools')
+            const slot = row.querySelector(':scope > .pin-slot')
+            const box = (node) => node === null ? null : (() => { const rect = node.getBoundingClientRect(); return [Math.round(rect.left), Math.round(rect.width)] })()
+            return { age: box(age), tools: box(tools), slot: box(slot), slotGlyph: slot === null ? null : slot.querySelector('svg') !== null }
+          }))
+        })()`),
+      )
+    /** Read the rows first — reading expands the tree — then measure the boxes on the rows as drawn. */
     const earlier = await readRows()
+    const geometryBefore = await geometry()
     /**
      * The order is newest-write first. Rows the store does not know (definitions without a record) carry no stamp; they sort
      * after the stamped ones, so the stamps read in descending order on their own.
@@ -3721,6 +3785,175 @@ test('a written session moves to the top of its folder, its age follows, and a r
     assert.equal(pinned.labels[0], pinTarget.label, `a pressed pin holds the top of its folder\nsaw: ${JSON.stringify({ pinned, pinTarget, press })}`)
     const pinnedMetas = (await sessionsNow()).filter((meta) => meta.pinned === true)
     assert.equal(pinnedMetas.length, 1, `and the store records exactly one pin\nsaw: ${JSON.stringify(pinnedMetas)}`)
+
+    /**
+     * **A pin moves nothing.** The age and the controls keep their x position — the report that the pin icon jumped to the left
+     * when a row was pinned is judged here — and the state is the filled pin in the slot that every row reserves.
+     */
+    const geometryAfter = await geometry()
+    const byLabel = new Map((await readRows()).labels.map((label, index) => [label, index]))
+    const pinnedIndex = byLabel.get(pinTarget.label)
+    assert.ok(pinnedIndex !== undefined, 'the pinned row is in the list')
+    /** Find the same row by its slot: after the pin it is the one whose slot holds a glyph. */
+    const geometryOfTarget = geometryBefore.find((row, index) => earlier.labels[index] === pinTarget.label)
+    const after = geometryAfter.find((row) => row.slotGlyph === true)
+    assert.ok(after !== undefined, `the pinned row draws a glyph in its slot\nsaw: ${JSON.stringify(geometryAfter)}`)
+    assert.deepEqual(after.age, geometryOfTarget.age, 'pinning does not move the age')
+    assert.deepEqual(after.tools, geometryOfTarget.tools, 'nor the controls')
+    assert.deepEqual(after.slot, geometryBefore[0].slot, 'the slot is reserved on every row at the same place')
+    /** And the hover control carries the state in its glyph: filled on a pinned row, outline otherwise. */
+    const glyphs = JSON.parse(
+      await browser.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+        return JSON.stringify(rows.map((li) => {
+          const pin = [...li.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+          /** Both DSH pins fill the needle; the filled variant also fills the **body**, so the count is the difference. */
+          const filled = pin === undefined ? null : pin.querySelectorAll('path[fill]').length >= 2
+          return { label: li.querySelector(':scope > .row .label').textContent, filled, pinned: li.dataset.pinned === 'true' }
+        }))
+      })()`),
+    )
+    const pinnedGlyph = glyphs.find((row) => row.label === pinTarget.label)
+    assert.equal(pinnedGlyph?.filled, true, `a pinned row's pin control is the filled glyph\nsaw: ${JSON.stringify(glyphs)}`)
+    assert.ok(glyphs.filter((row) => row.pinned !== true).every((row) => row.filled !== true), 'an unpinned row keeps the outline glyph')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a pinned row glides to its new place, and reduced motion skips the glide', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-pin-glide')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    for (let index = 0; index < 3; index += 1) {
+      await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })
+      await runCli(adminArgs(h, ['--turn', `conversation for the glide ${index + 1}`]), { env: h.env, cwd: branch })
+      await new Promise((done) => setTimeout(done, 20))
+    }
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    /**
+     * Pin and sample **in one page turn**. The animation is 200 ms and the reference's glide is the claim, so the click and the
+     * `getAnimations()` read happen in the same script — a CDP round trip under load can outlast the animation and report
+     * nothing while the row did glide.
+     */
+    const result = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const frame = () => new Promise((done) => requestAnimationFrame(() => done()))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const rowFor = (label) => rows().find((row) => row.querySelector('.label')?.textContent === label)
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rowFor(label)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
+        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
+        await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
+        /**
+         * Wait for the session rows to be drawn: the tree re-reads itself when activity arrives, so the count can be mid-render
+         * right after an expansion. Retry the deepest level when the rows are not there yet.
+         */
+        for (let attempt = 0; attempt < 25 && document.querySelectorAll('#tree li[data-kind="session"]').length < 2; attempt += 1) {
+          await wait(200)
+          if (document.querySelectorAll('#tree li[data-kind="session"]').length < 2) await ensureOpen('some-tool')
+        }
+        const beforeOrder = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .label')].map((label) => label.textContent)
+        const target = [...document.querySelectorAll('#tree li[data-kind="session"]')][1]
+        const key = target.dataset.rowKey
+        const pin = [...target.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+        if (pin === undefined) return JSON.stringify({ error: 'no pin control' })
+        pin.click()
+        /**
+         * The handler is async — a POST, then a tree re-read, then the glide — so the animation starts a few frames later. Poll
+         * for it; the glide itself is 200 ms, which is why this is a tight loop rather than one delayed sample.
+         */
+        const moveRow = () => document.querySelector('#tree li[data-row-key="' + key + '"]')
+        let animations = []
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const li = moveRow()
+          animations = li === null ? [] : li.getAnimations().map((animation) => ({
+            duration: animation.effect?.getTiming?.().duration ?? null,
+            easing: animation.effect?.getTiming?.().easing ?? null,
+            transforms: (animation.effect?.getKeyframes?.() ?? []).map((frameEntry) => frameEntry.transform).filter((value) => typeof value === 'string'),
+          }))
+          if (animations.length > 0) break
+          await wait(8)
+        }
+        /** The animation's own clock is the honest in-flight measure: a rendered transform can be sampled before its first frame. */
+        const glideAnimation = moveRow() === null ? null : moveRow().getAnimations()[0] ?? null
+        const startTime = glideAnimation === null ? null : glideAnimation.currentTime
+        await wait(90)
+        const laterTime = glideAnimation === null ? null : glideAnimation.currentTime
+        await wait(500)
+        const settled = {
+          transform: getComputedStyle(document.querySelector('#tree li[data-row-key="' + key + '"]')).transform,
+          order: [...document.querySelectorAll('#tree li[data-kind="session"] > .row .label')].map((label) => label.textContent),
+          pinned: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.pinned === 'true'),
+          glyphFilled: (() => {
+            const li = document.querySelector('#tree li[data-row-key="' + key + '"]')
+            const button = [...li.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+            return button === undefined ? null : button.querySelectorAll('path[fill]').length >= 2
+          })(),
+        }
+        return JSON.stringify({ beforeOrder, key, animations, startTime, laterTime, settled })
+      })()`),
+    )
+    assert.equal(result.error, undefined, `the fixture offered a pin control\nsaw: ${JSON.stringify(result)}`)
+    const glide = result.animations.find((animation) => animation.transforms.length >= 2)
+    assert.ok(glide !== undefined, `the pinned row glides with a transform animation\nsaw: ${JSON.stringify(result.animations)}`)
+    assert.equal(glide.duration, 200, `with the reference's 200 ms glide\nsaw: ${JSON.stringify(glide)}`)
+    assert.equal(glide.easing, 'ease-out', `and its ease-out\nsaw: ${JSON.stringify(glide)}`)
+    assert.ok(
+      Number(result.laterTime) > Number(result.startTime),
+      `the row is in flight while the animation runs\nsaw: ${JSON.stringify({ startTime: result.startTime, laterTime: result.laterTime })}`,
+    )
+    assert.equal(result.settled.transform, 'none', `and settles at its resting position\nsaw: ${JSON.stringify(result.settled)}`)
+    assert.equal(result.settled.order[0], result.beforeOrder[1], `with the pinned row at the top\nsaw: ${JSON.stringify(result.settled)}`)
+    assert.equal(result.settled.pinned[0], true, 'drawn as pinned')
+    assert.equal(result.settled.glyphFilled, true, 'with the solid pin on its unpin control')
+
+    /** Reduced motion: the same action moves the row with no animation at all. */
+    await browser.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
+    const reduced = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const frame = () => new Promise((done) => requestAnimationFrame(() => done()))
+        const target = [...document.querySelectorAll('#tree li[data-kind="session"]')][0]
+        const key = target.dataset.rowKey
+        const pin = [...target.querySelectorAll(':scope > .row .row-tools > .session-actions > button')].find((candidate) => (candidate.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
+        pin.click()
+        await frame()
+        await frame()
+        const animations = [...document.querySelectorAll('#tree li[data-row-key="' + key + '"]')].flatMap((li) => li.getAnimations()).filter((animation) => (animation.effect?.getKeyframes?.() ?? []).some((entry) => typeof entry.transform === 'string'))
+        await wait(300)
+        return JSON.stringify({ animations: animations.length, first: [...document.querySelectorAll('#tree li[data-kind="session"] > .row .label')][0]?.textContent ?? null })
+      })()`),
+    )
+    assert.equal(reduced.animations, 0, `reduced motion skips the glide\nsaw: ${JSON.stringify(reduced)}`)
+    assert.notEqual(reduced.first, result.beforeOrder[1], 'while the order still changes')
   } finally {
     browser?.close()
     live?.kill()

@@ -218,7 +218,9 @@ badge is decidable from the name.
 
 **Expansion is explicit and remembered.** The disclosure control is a literal `+` when collapsed and
 `−` when expanded, in a boxed 14px hit target, with `role="treeitem"` and `aria-expanded` on the row
-and `role="group"` on the children. The whole row toggles; indentation is `depth * 14px`. Expansion
+and `role="group"` on the children. The whole row toggles; indentation is `depth * 14px`, and it is the row's
+**content** inset rather than its box — the row's paint spans the panel's width at every depth, so the highlight does
+not step inward with the tree. Expansion
 is persisted in `localStorage` under `heddle.tree.expanded.v1`, keyed by absolute path, pruned when a
 path disappears.
 
