@@ -240,6 +240,31 @@ What the owner still needs to do, and it is one gesture rather than a deployment
 open in a tab keeps the script it loaded, so a reader who had the UI open before `23:56` sees the previous behaviour
 until they refresh. That is the browser's own memory, not a stale service.
 
+## The fix that came back undone, and the check that caught it
+
+Cycle 3's change to `src/server/page.html` was **reverted on `main` by another session** at `10e7b20`, four minutes
+after `5cb3f22` landed it. The mechanism, measured from the commits rather than guessed: that session was editing
+`page.html` for the goal dock's width from a copy of the file taken **before** cycle 3 existed, so saving its version
+restored the three reading sites to `endpoint?.contextWindow` and dropped `windowFor` outright. Nothing in its commit
+message mentions the context gauge; from its own point of view the file never had the function.
+
+What caught it was the check cycle 3 added. `test/page-contract.test.ts` asserts that a resolver exists, that it asks
+about the selected model, and that **no reading site has gone back to the endpoint** — so the suite went red on `main`
+while nothing looked wrong in the diff a person would read. Re-applying the fix restored it, and the check went green.
+
+Three things follow, and they are the reason this section exists:
+
+- **A removal detector has to name the absence, not only the presence.** A check that only asserted "the gauge works"
+  would have passed on the reverted file, because the endpoint's number is a working denominator — just the wrong one.
+  The check that worked asserts a *negative*: no `const window = endpoint?.contextWindow` anywhere.
+- **A file edited by two sessions at once needs its own guard.** The page is one 9,000-line module that several
+  workstreams touch, and a whole-file save from a stale copy is indistinguishable, in review, from a deliberate
+  rewrite. The narrow guard is a per-file invariant — for this file, no duplicate top-level declaration and no
+  regression of a named behaviour — which is what the page-contract checks are.
+- **Re-landing is not re-doing.** The re-application is a few lines at their current positions, not a revert of the
+  other session's commit: `10e7b20`'s goal-dock work is correct and worth keeping, and only the accidental part of it
+  was undone.
+
 ## Loose ends a reader will ask about
 
 Three things look like unfinished work and are not. Each was measured rather than assumed, on 2026-10-18.

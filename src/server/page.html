@@ -6767,7 +6767,7 @@ function statPanelRows(kind) {
   } else {
     const used = stats.lastPromptTokens
     const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
-    const window = endpoint?.contextWindow
+    const window = windowFor(endpoint)
     const percent = typeof used === 'number' && typeof window === 'number' && window > 0 ? Math.min(100, Math.round((used / window) * 100)) : null
     if (percent !== null) push('percent', `${percent}%`)
     if (typeof used === 'number' && typeof window === 'number' && window > 0) push('used', `~${formatWindow(used)} / ${formatWindow(window)}`)
@@ -6813,7 +6813,7 @@ function renderStatPopover() {
     const usedRow = rows.find(([label]) => label === 'used')
     const sections = stats.contextBreakdown
     const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
-    const window = endpoint?.contextWindow
+    const window = windowFor(endpoint)
     popover.replaceChildren()
     if (percentRow === undefined && usedRow === undefined && sections === undefined) {
       const empty = document.createElement('div')
@@ -7051,7 +7051,7 @@ function updateStatusBar() {
    */
   const used = sessionStats?.lastPromptTokens
   const endpoint = endpointOptions.find((option) => option.name === (chosenEndpoint ?? endpointDefault))
-  const window = endpoint?.contextWindow
+  const window = windowFor(endpoint)
   const percent =
     typeof used === 'number' && typeof window === 'number' && window > 0
       ? Math.min(100, Math.round((used / window) * 100))
@@ -7789,6 +7789,26 @@ function selectedModelId(option) {
   if (option !== undefined && typeof option.model === 'string' && option.model.length > 0) return option.model
   const models = modelsOf(option)
   return models.length > 0 ? models[0].id : null
+}
+
+/**
+ * The context window of the **model the seat is showing**, not of its endpoint.
+ *
+ * A gateway can serve a 1M deployment beside 272k ones, so the endpoint's single number is a wrong denominator
+ * for whichever model is not the default: the gauge reads as nearly full for a conversation that is nowhere near
+ * it. The catalogue carries each model's own `contextWindow` (the server falls back to the endpoint's, so an
+ * endpoint-wide window still shows here), and a model that declares none leaves the answer undefined — no
+ * window, no percentage, which is the same rule the endpoint-wide case already followed.
+ *
+ * This function was removed once, by a concurrent session that edited this file from a copy taken before it
+ * existed — which silently reverted the fix. `test/page-contract.test.ts` caught it, and that check is why the
+ * removal cannot pass unnoticed a second time.
+ */
+function windowFor(option) {
+  if (option === undefined) return undefined
+  const entry = modelEntryOf(option, selectedModelId(option))
+  if (entry !== undefined && typeof entry.contextWindow === 'number') return entry.contextWindow
+  return typeof option.contextWindow === 'number' ? option.contextWindow : undefined
 }
 
 /** The name a person reads for a model, never blank. */
