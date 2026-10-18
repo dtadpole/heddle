@@ -18,6 +18,63 @@ export const name = 'sandbox'
  */
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
+/**
+ * The closed vocabulary, narrowest first.
+ *
+ * Order is part of the fact rather than a convenience: "wider" is what an escalation means, and the whole
+ * reason full access is the one transition that needs an owner's confirmation is that it ranks above the
+ * boundary the two confined modes keep.
+ */
+export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
+
+/** Whether a value is one of the three modes, so a stored or posted word cannot become a policy. */
+export function isSandboxMode(value: unknown): value is SandboxMode {
+  return typeof value === 'string' && (SANDBOX_MODES as readonly string[]).includes(value)
+}
+
+/** Where a mode sits on the ladder: 0 read-only, 1 workspace-write, 2 danger-full-access. */
+export function sandboxModeRank(mode: SandboxMode): number {
+  return SANDBOX_MODES.indexOf(mode)
+}
+
+/** What a session-mode change consists of, as a value rather than a side effect. */
+export type PermissionTransition =
+  | { readonly ok: true; readonly mode: SandboxMode; readonly changed: boolean }
+  | { readonly ok: false; readonly reason: string }
+
+/**
+ * The one rule that decides a session's mode change.
+ *
+ * It is a pure function on purpose: the Web UI, the HTTP route and the unit suite all judge the same rule
+ * instead of each re-deriving it. The rule is DSH's, with one deliberate strengthening:
+ *
+ * - a mode outside the vocabulary is refused;
+ * - choosing the mode already in effect changes nothing (`changed: false`), so a no-op appends no event;
+ * - a **narrowing** needs no confirmation;
+ * - widening to `workspace-write` needs no second prompt — the menu click is the owner's action, and
+ *   `workspace-write` stays inside the same boundary;
+ * - widening to **`danger-full-access`** is refused unless the request carries the explicit confirmation
+ *   token. The reference gates that in its client only; here the server refuses it too, so a stale page or
+ *   a script cannot widen access by accident.
+ *
+ * A tool call can never reach this function: no tool argument names a mode, and the only caller is the
+ * owner's API route. That is what "an escalation is an explicit owner action, never a side effect" means.
+ */
+export function permissionTransition(current: SandboxMode, target: unknown, confirmation: unknown): PermissionTransition {
+  if (!isSandboxMode(target)) {
+    return { ok: false, reason: `'${String(target)}' is not one of ${SANDBOX_MODES.join(', ')}` }
+  }
+  if (target === current) return { ok: true, mode: current, changed: false }
+  const escalates = sandboxModeRank(target) > sandboxModeRank(current)
+  if (escalates && target === 'danger-full-access' && confirmation !== 'full-access') {
+    return {
+      ok: false,
+      reason: "widening to 'danger-full-access' needs the owner's explicit confirmation; send confirm: 'full-access' only after the risk gate has been acknowledged",
+    }
+  }
+  return { ok: true, mode: target, changed: true }
+}
+
 /** One resolved policy, which is what a check is actually decided against. */
 export interface SandboxExecutionPolicy {
   readonly mode: SandboxMode
@@ -112,9 +169,9 @@ export class SandboxService extends Service {
   }
 
   /** The policy a call runs under, so a caller can report it. */
-  policy(): SandboxExecutionPolicy {
+  policy(mode: SandboxMode = this.mode): SandboxExecutionPolicy {
     return {
-      mode: this.mode,
+      mode,
       workspaceRoot: this.workspaceRoot,
       extraWritableRoots: this.extraWritableRoots,
       ...(this.tempRoot !== undefined ? { tempRootPath: this.tempRoot } : {}),
@@ -140,14 +197,19 @@ export class SandboxService extends Service {
    * A denial is thrown rather than returned because every caller must handle it;
    * a returned `false` that a caller could ignore is how a sandbox becomes
    * advisory.
+   *
+   * `mode` is the **policy for this call**, which is how a session's own access mode reaches the effect:
+   * the registry resolves it once per call from the session log and passes it in, so the same service can
+   * decide two calls under two sessions at the same instant. Left out, the deployment mode applies, which
+   * keeps every older call site's meaning.
    */
-  assertWritable(path: string): string {
+  assertWritable(path: string, mode: SandboxMode = this.mode): string {
     const target = this.resolvePath(path)
-    if (this.mode === 'danger-full-access') return target
-    if (this.mode === 'read-only') {
+    if (mode === 'danger-full-access') return target
+    if (mode === 'read-only') {
       throw new SandboxDenial(`the sandbox is read-only, so '${path}' cannot be written`, {
         path: target,
-        mode: this.mode,
+        mode,
         workspaceRoot: this.workspaceRoot,
       })
     }
@@ -155,14 +217,14 @@ export class SandboxService extends Service {
     if (allowed.some((root) => contains(root, target))) return target
     throw new SandboxDenial(
       `'${target}' is outside the sandbox root ${this.workspaceRoot}, so it cannot be written`,
-      { path: target, mode: this.mode, workspaceRoot: this.workspaceRoot },
+      { path: target, mode, workspaceRoot: this.workspaceRoot },
     )
   }
 
-  /** Refuse a read outside the workspace in the confined modes. */
-  assertReadable(path: string): string {
+  /** Refuse a read outside the workspace in the confined modes, under this call's policy. */
+  assertReadable(path: string, mode: SandboxMode = this.mode): string {
     const target = this.resolvePath(path)
-    if (this.mode === 'danger-full-access') return target
+    if (mode === 'danger-full-access') return target
     /**
      * Reading is wider than writing in one respect only: the harness's own configuration directory
      * is readable so a confined run can read the profile it was started from. Nothing else joins
@@ -177,15 +239,15 @@ export class SandboxService extends Service {
     ]
     if (allowed.some((root) => contains(root, target))) return target
     throw new SandboxDenial(
-      `'${target}' is outside the sandbox root ${this.workspaceRoot}, so it cannot be read in '${this.mode}' mode`,
-      { path: target, mode: this.mode, workspaceRoot: this.workspaceRoot },
+      `'${target}' is outside the sandbox root ${this.workspaceRoot}, so it cannot be read in '${mode}' mode`,
+      { path: target, mode, workspaceRoot: this.workspaceRoot },
     )
   }
 
   /** Whether a path would be permitted, without throwing. Used by the loop's report. */
-  writable(path: string): boolean {
+  writable(path: string, mode: SandboxMode = this.mode): boolean {
     try {
-      this.assertWritable(path)
+      this.assertWritable(path, mode)
       return true
     } catch {
       return false

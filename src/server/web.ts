@@ -20,6 +20,7 @@ import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
+import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
@@ -1179,6 +1180,54 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * Change one session's access mode — the owner's action, and the only writer of the mode event.
+   *
+   * The rule itself lives in `permissionTransition` so the unit suite, this route and the page's own dialog
+   * all judge one statement rather than three copies of it. What this route adds is the parts only the server
+   * can know: the session must exist, the current mode is the session's **effective** one (its own record
+   * over the deployment default), and the change is written as one append-only event before the response.
+   *
+   * Three refusals matter and each is deliberate:
+   *
+   * - an unknown mode is a `400`;
+   * - an escalation to `danger-full-access` without `confirm: 'full-access'` is a `409`, so the risk gate is
+   *   enforced on this side too rather than only in the page that draws it — a stale tab or a script cannot
+   *   widen access by accident;
+   * - an unknown session is a `404` rather than a quiet write.
+   *
+   * Nothing here reads a tool's arguments, and no tool can reach this route: a model-requested escalation is
+   * not a path this harness has, which is what makes escalation an owner action rather than a side effect.
+   */
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/permission') && request.method === 'POST') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/permission'.length))
+    if (!/^session-[0-9a-f-]{36}$/i.test(id)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
+      return
+    }
+    const handle = ctx.session.store.open(id)
+    if (handle === null) {
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    const current = ctx.session.effectiveMode(handle, ctx.sandbox.mode)
+    const decision = permissionTransition(current, body.mode, body.confirm)
+    if (!decision.ok) {
+      respond(response, 409, 'application/json', `${JSON.stringify({ error: decision.reason, session: id, mode: current })}\n`)
+      return
+    }
+    const written = ctx.session.setMode(handle, decision.mode, ctx.sandbox.mode)
+    respond(
+      response,
+      200,
+      'application/json',
+      `${JSON.stringify({ session: id, mode: written.mode, changed: written.changed, ...(written.event !== undefined ? { seq: written.event.seq } : {}) }, null, 2)}\n`,
+    )
+    return
+  }
+
+  /**
    * Switch a session onto one endpoint — the composer's model seat, committed.
    *
    * The same shape as the retitle above and for the same reason: a session's **record** changes and its
@@ -1412,6 +1461,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
           title: meta?.title ?? null,
           cwd: meta?.cwd ?? null,
           /**
+           * The access mode this session runs under, which is what the chip shows after a reload.
+           *
+           * It travels with the transcript for the same reason `endpoint` does: the mode belongs to the
+           * session, so a page that read only `/api/status` would show the server's default and silently
+           * misreport a session that had been switched.
+           */
+          permission: { mode: ctx.session.effectiveMode(handle, ctx.sandbox.mode) },
+          /**
            * An answer travels as the document it is, not only as its source.
            *
            * DSH renders an assistant row's markdown once the row is **settled**, and this is the same decision
@@ -1541,9 +1598,10 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   /**
    * What the composer needs to describe the machine it is talking to.
    *
-   * The access chip names the sandbox mode the server actually runs under: `read-only`, `workspace-write` or
-   * `danger-full-access`. It is read, not chosen, because the mode is fixed when the sandbox is constructed —
-   * the chip's job is to stop a person assuming they have write access they do not have.
+   * `sandbox.mode` here is the **deployment default**: the mode a session starts from and the one the chip
+   * reports while no session is open. A session that switched does not appear here — its own mode travels
+   * with `GET /api/sessions/<id>`, because a server-wide answer would misreport every session that chose
+   * otherwise.
    */
   if (url.pathname === '/api/status' && request.method === 'GET') {
     respond(

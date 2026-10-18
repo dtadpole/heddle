@@ -81,7 +81,7 @@ Measured the same way on Heddle's page after the port:
 | editor 14/24, grows to 336px, no manual resize | yes; padding is `4px 8px 8px 14px` rather than `4px 8px 0 14px` |
 | capability-hinted placeholder | yes (`Message or run a task, / commands, @ files or sessions`) |
 | `+` entry | yes — a file-path menu fed by `/api/tree` |
-| access chip | yes, but **read-only**: Heddle's sandbox mode is fixed at construction, so the chip reports rather than switches |
+| access chip | **yes as a control** since 2026-10-17 — shield glyph, mode name and chevron opening the three-mode menu with a risk gate for full access; the mode is a session fact (`permission/mode` in its log), and `Auto review EXP` is not ported because heddle has no auto-review substrate. Measured in [`dsh-permission-modes.md`](dsh-permission-modes.md) |
 | model + effort label | yes — the model's display name with its reasoning effort in the caption tone, the two-span anatomy measured above. Each configured endpoint lists the model types it offers and, per model, the reasoning levels its route was verified to accept; the level's own provider wire value is what the turn sends, and an endpoint/model that declares no levels shows no effort. The two-level seat and menu (root `Model`/`Effort` rows, endpoint-grouped model list, search, effort pane) are measured in [`dsh-model-selector.md`](dsh-model-selector.md) |
 | send / stop swap | yes; Stop aborts the turn's `AbortController`, the abort reaches the provider connection, and the turn ends with `event: cancelled` |
 | status row | turns and steps always; `tok/s` and `context %` only when the provider reported usage and the endpoint declares a `contextWindow`; nothing is invented |

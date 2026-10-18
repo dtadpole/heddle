@@ -7,7 +7,7 @@ import { after, test } from 'node:test'
 import { SessionStore, type SessionHandle } from '../src/session/store.ts'
 import { TeamService, type TeamDeps } from '../src/team/service.ts'
 import { teamTools, TEAM_TOOL_NAMES } from '../src/team/tool.ts'
-import type { ToolContext, ToolDefinition } from '../src/tools/service.ts'
+import type { ToolContext, ToolDefinition, ToolRunContext } from '../src/tools/service.ts'
 
 /**
  * The nine model-facing team tools: argument translation, the service's refusals surfacing as stable codes, the
@@ -52,7 +52,7 @@ function harness(): Harness {
 const call = async (h: Harness, name: string, args: Record<string, unknown> = {}, context?: Partial<ToolContext>) => {
   const tool = h.tools.get(name)
   assert.ok(tool !== undefined, `tool ${name} is registered`)
-  return tool.run(args, { cwd: root, session: h.lead, ...context } as ToolContext)
+  return tool.run(args, { cwd: root, session: h.lead, mode: 'workspace-write', ...context } as ToolRunContext)
 }
 
 const json = (result: { output: string }) => JSON.parse(result.output)

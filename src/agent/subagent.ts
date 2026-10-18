@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 
+import { inheritRecordedMode } from '../session/mode.ts'
 import type { SessionEvent, SessionHandle, SessionMeta, SessionStore } from '../session/store.ts'
 import { runTurn } from './loop.ts'
 
@@ -147,6 +148,8 @@ export async function delegateSubagent(
     origin: 'subagent',
     delegationDepth: childDepth,
   })
+  /** Delegation inherits the parent's mode, so a narrowed session cannot widen itself by spawning a child. */
+  inheritRecordedMode(deps.store, parent, child)
 
   options.active.add(parent.id)
   try {

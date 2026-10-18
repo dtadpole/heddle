@@ -7,7 +7,7 @@ import { after, test } from 'node:test'
 import { delegateSubagent, finalAssistantText, parentFacts, SubagentError, subagentRunner } from '../src/agent/subagent.ts'
 import { SessionStore } from '../src/session/store.ts'
 import { subagentTools } from '../src/tools/subagent.ts'
-import type { ToolContext } from '../src/tools/service.ts'
+import type { ToolRunContext } from '../src/tools/service.ts'
 
 /**
  * Subagent delegation: the child's session attribution, the answer extraction, and the refusals.
@@ -119,12 +119,12 @@ test('the tool returns the child’s answer and refuses without a session', asyn
   const tool = subagentTools(deps, { maxDepth: 2, maxActive: 1 })[0]
   assert.ok(tool !== undefined)
 
-  const ok = await tool.run({ prompt: 'a task' }, { cwd: root, session: parent } as ToolContext)
+  const ok = await tool.run({ prompt: 'a task' }, { cwd: root, session: parent, mode: 'workspace-write' } as ToolRunContext)
   assert.equal(ok.error, undefined)
   assert.match(ok.output, /from the child/)
   assert.equal((ok.data as { depth: number }).depth, 1)
 
-  const refused = await tool.run({ prompt: 'a task' }, { cwd: root } as ToolContext)
+  const refused = await tool.run({ prompt: 'a task' }, { cwd: root, mode: 'workspace-write' } as ToolRunContext)
   assert.equal(refused.error?.code, 'SUBAGENT_NO_SESSION')
 })
 

@@ -1,9 +1,10 @@
 ---
 title: DSH Mechanisms
-version: 1.1.0
-description: How DeepSeek Harness implements each mechanism heddle mirrors, read from the installed packages, with the context reading corrected and guarded by a check beside it.
+version: 1.2.0
+description: How DeepSeek Harness implements each mechanism heddle mirrors, read from the installed packages and measured in its browser, with the context reading corrected and guarded by a check beside it.
 grounded_in:
-  - source: the installed DSH packages under ~/.volta, read on 2026-10-11
+  - source: the installed DSH packages under ~/.volta, read on 2026-10-11 and 2026-10-17
+  - source: DSH's Web UI at http://127.0.0.1:8080, measured in a browser on 2026-10-17
   - source: the live store at ~/.dsh for the workspace and session shapes
 ---
 
@@ -40,6 +41,9 @@ the frontmatter every authored artifact carries.
   state (trigger anatomy, two-level menu, grouped model list and search, effort pane, keyboard, placement, running
   turn, the durable `model/selection` record), the two-tier endpoint → model-type configuration the owner asked
   for in `~/.heddle/`, Heddle's before→after numbers, and the divergences kept.
+- [`dsh-permission-modes.md`](dsh-permission-modes.md) — the access-mode chip, menu, full-access risk
+  gate and refusal approval measured in DSH's browser, with the session-scoped mode heddle implements
+  beside it, the designs discarded, and the loop document for that work.
 - [`dsh-input-area.md`](dsh-input-area.md) — the composer card and its measured geometry (712×98 card,
   radius 28, #2c2c2e), the editor's 4/8/0/14 inset and 336px cap, the control row's order and sizes, the
   status pills, and the resizable conversation column the text and the input share; with the values Heddle

@@ -1,7 +1,7 @@
 ---
 title: Verifier 8 — Permission Sandbox
-version: 1.0.0
-description: a permission sandbox distinguishes read-only, workspace write and full access.
+version: 1.1.0
+description: a permission sandbox distinguishes read-only, workspace write and full access, per session as well as per process.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
 ---
@@ -19,7 +19,13 @@ a display or a window.
 
 ## What decides it
 
-`check-sandbox.mjs` drives writes through the tools under each mode against a scripted endpoint.
+- [`check.mjs`](check.mjs) — the three modes under three profiles, judged by refusal: a write inside the
+  workspace, a write outside it and a read outside it, each under the mode that should permit or refuse it,
+  including the string-prefix and host-temp cases a sandbox is easy to get wrong.
+- [`check-session-mode.mjs`](check-session-mode.mjs) — the mode as a **session** fact: a session's own mode
+  outranks the deployment mode for that session and no other, the change is recorded once through the HTTP
+  API, an escalation to full access is refused by the server without the explicit confirmation, a
+  read-only session refuses the shell as well as a write, and no tool call writes the mode.
 
 ## Running it
 

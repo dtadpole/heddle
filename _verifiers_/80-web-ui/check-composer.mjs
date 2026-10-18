@@ -479,11 +479,15 @@ test('the access chip reports the server\u2019s sandbox mode', async (context) =
      * The mode arrives from `/api/status` after the page boots, so the chip's *text* is what is awaited — the
      * element itself exists before that answer does.
      */
-    await browser.waitFor('document.getElementById("access").textContent !== "Access"', 10_000)
+    /**
+     * The chip is a control now, so its `textContent` carries formatting whitespace around the glyph, label and
+     * chevron; the **label** is the mode's name, and that is what the page fills in after `/api/status` answers.
+     */
+    await browser.waitFor('(document.getElementById("access-label")?.textContent ?? "") !== "Access"', 10_000)
     const chip = JSON.parse(
-      await browser.evaluate('JSON.stringify({ text: document.getElementById("access").textContent, title: document.getElementById("access").title })'),
+      await browser.evaluate('JSON.stringify({ text: document.getElementById("access-label")?.textContent ?? "", title: document.getElementById("access").title })'),
     )
-    assert.match(chip.text, /^(Read only|Workspace write|Full access)$/, `the chip names the mode (${chip.text})`)
+    assert.match(chip.text, /^(Read Only|Workspace Write|Full access)$/, `the chip names the mode (${chip.text})`)
     assert.match(chip.title, /sandbox mode/, 'and says where the name comes from')
   } finally {
     browser.close()
@@ -667,6 +671,27 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
     assert.equal(second.steps, '2 steps')
     assert.equal(second.total, '2.1K tok', 'the total is cumulative over the session')
     assert.equal(second.cache, 'Cache hit 80%')
+
+    /**
+     * A reload prints the durable fold, not whichever transcript rows happened to be drawn first.
+     *
+     * Measured on the live page: a dock that counted rendered user rows showed `0 turns` beside `31 steps`
+     * while history was still arriving. The count now comes from the session's own stats, so it agrees with
+     * the backend from the first paint; the live turn is added on top while it runs.
+     */
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent !== ""', 20_000))
+    const reloaded = JSON.parse(await dock())
+    const durableTurns = await browser.evaluate(`(async () => {
+      const rows = await (await fetch('/api/sessions')).json()
+      const id = rows[0]?.id
+      const detail = id === undefined ? null : await (await fetch('/api/sessions/' + id)).json()
+      return detail?.stats?.turns ?? null
+    })()`)
+    assert.equal(durableTurns, 2, 'the backend fold counts two turns')
+    assert.equal(reloaded.turns, `${durableTurns} turns`, 'and the dock prints that count rather than a row count')
+    assert.equal(reloaded.total, '2.1K tok', 'the cumulative total survives the reload')
+    assert.equal(reloaded.context, '50%', 'and so does the context share')
   } finally {
     browser.close()
     await server.close()
