@@ -77,7 +77,13 @@ function harness(label, options) {
    * An absolute path outside the workspace, which is what a refusal is about. It is created before
    * the profile because the script that names it has to exist when the profile is written.
    */
-  const outsidePath = join(tempDir(`sandbox-outside-${label}-`), 'outside.txt')
+  /**
+   * The outside path must be **outside** the policy's writable roots, and since this cycle `workspace-write` admits
+   * the host temp areas (DSH's own set: the workspace plus `/tmp` and `tmpdir()`), a temp path is no longer outside.
+   * A fixture folder under the checkout is outside both the workspace and the temp roots and stays writable for
+   * the full-access case.
+   */
+  const outsidePath = join(fixtureDir(`sandbox-outside-${label}`), 'outside.txt')
   const steps = options.steps ?? [
     { toolCall: { name: 'write_file', arguments: { path: 'inside.txt', content: 'inside' } } },
     { toolCall: { name: 'write_file', arguments: { path: outsidePath, content: 'outside' } } },
@@ -208,43 +214,47 @@ test('a sibling directory with the workspace as a name prefix is outside it', as
   }
 })
 
-test('the host temp directory is not writable unless the policy admits it', async (context) => {
+test('workspace-write admits the host temp area, as DSH’s writable roots do, and read-only does not', async (context) => {
   if (!skipUnless(context, await supportsSandbox(), CAPABILITY)) return
   /**
-   * A confined mode that quietly permits the whole temp directory is not confining anything: on this
-   * machine that is every path under `/var/folders/...`, shared by every process the user runs.
-   *
-   * Measured, and this is why the policy changed: `workspace-write` allowed a write there because the
-   * temp root was always in the allow list. It is now opt-in, and this check holds both halves — the
-   * same write is refused by default and allowed when the policy asks for it — so "off by default"
-   * cannot quietly decay into "on".
+   * DSH's `writableRoots(policy)` is the workspace **plus the host temp areas** (`/tmp` and `tmpdir()`) under
+   * `workspace-write`; heddle now uses the same set for its fence and its kernel profiles, so this check replaces
+   * the earlier "temp is refused by default" claim with the parity claim. Read-only still refuses it, because that
+   * mode promises no file effects at all.
    */
   const scratch = join(tempDir('sandbox-scratch-'), 'scratch.txt')
   const writeSteps = [{ toolCall: { name: 'write_file', arguments: { path: scratch, content: 'scratch' } } }, { text: 'done' }]
 
-  const refused = harness('temp-off', { mode: 'workspace-write', steps: writeSteps })
+  const admitted = harness('temp-admitted', { mode: 'workspace-write', steps: writeSteps })
   try {
-    await runCli([...refused.baseArgs(refused.profileDir), '--turn', 'write to the temp directory'], { env: refused.env, timeoutMs: 60_000 })
+    const run = await runCli([...admitted.baseArgs(admitted.profileDir), '--turn', 'write to the temp directory'], {
+      env: admitted.env,
+      timeoutMs: 60_000,
+    })
+    assert.ok(existsSync(scratch), `workspace-write admits the host temp area\n${run.stdout}${run.stderr}`)
+  } finally {
+    removeDir(admitted.home)
+    removeDir(admitted.workspace)
+    removeDir(dirname(admitted.outsidePath))
+    removeDir(dirname(scratch))
+  }
+
+  const refused = harness('temp-read-only', { mode: 'read-only', steps: writeSteps })
+  try {
+    await runCli([...refused.baseArgs(refused.profileDir), '--turn', 'write to the temp directory'], {
+      env: refused.env,
+      timeoutMs: 60_000,
+    })
     const results = resultsOf(refused.home)
-    assert.equal(existsSync(scratch), false, 'the default policy does not admit the temp directory')
+    assert.equal(existsSync(scratch), false, 'read-only admits no temp write')
     assert.ok(
-      results.some((text) => /outside the sandbox root/i.test(text)),
+      results.some((text) => /read-only/i.test(text)),
       `and says so\nsaw: ${results.join(' | ').slice(0, 300)}`,
     )
   } finally {
     removeDir(refused.home)
     removeDir(refused.workspace)
     removeDir(dirname(refused.outsidePath))
-  }
-
-  const admitted = harness('temp-on', { mode: 'workspace-write', tempRoot: true, steps: writeSteps })
-  try {
-    const run = await runCli([...admitted.baseArgs(admitted.profileDir), '--turn', 'write to the temp directory'], { env: admitted.env, timeoutMs: 60_000 })
-    assert.ok(existsSync(scratch), `an admitted temp root permits the same write\n${run.stdout}${run.stderr}`)
-  } finally {
-    removeDir(admitted.home)
-    removeDir(admitted.workspace)
-    removeDir(dirname(admitted.outsidePath))
     removeDir(dirname(scratch))
   }
 })

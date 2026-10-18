@@ -1,41 +1,35 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import { realpathSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
+
+import { SandboxUnavailableError, selectBackend, type ConfinedArgv, type SandboxBackend } from './backend.ts'
+import { ESCALATION_TARGETS } from './escalation.ts'
+import { canonical, contains } from './paths.ts'
+import {
+  SANDBOX_MODES,
+  isSandboxMode,
+  sandboxModeRank,
+  writableRoots,
+  type SandboxExecutionPolicy,
+  type SandboxMode,
+} from './policy.ts'
 
 export const name = 'sandbox'
 
-/**
- * How much of the filesystem a call may touch.
- *
- * The vocabulary is DSH's, taken as-is because it is already the right three
- * words: `read-only` permits only the required sinks, `workspace-write` adds the
- * workspace and a private temp area, and `danger-full-access` is the escape hatch
- * a person asks for by name. Reusing the words means a reader who knows one
- * harness knows this one.
- */
-export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
-
-/**
- * The closed vocabulary, narrowest first.
- *
- * Order is part of the fact rather than a convenience: "wider" is what an escalation means, and the whole
- * reason full access is the one transition that needs an owner's confirmation is that it ranks above the
- * boundary the two confined modes keep.
- */
-export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
-
-/** Whether a value is one of the three modes, so a stored or posted word cannot become a policy. */
-export function isSandboxMode(value: unknown): value is SandboxMode {
-  return typeof value === 'string' && (SANDBOX_MODES as readonly string[]).includes(value)
-}
-
-/** Where a mode sits on the ladder: 0 read-only, 1 workspace-write, 2 danger-full-access. */
-export function sandboxModeRank(mode: SandboxMode): number {
-  return SANDBOX_MODES.indexOf(mode)
-}
+export { SANDBOX_MODES, isSandboxMode, sandboxModeRank, writableRoots, type SandboxExecutionPolicy, type SandboxMode } from './policy.ts'
+export { canonical } from './paths.ts'
+export {
+  SandboxUnavailableError,
+  classifyOutcome,
+  selectBackend,
+  type ConfinedArgv,
+  type SandboxBackend,
+  type SandboxEnforcement,
+  type RunnerFailureRule,
+  type SandboxOutcome,
+} from './backend.ts'
 
 /** What a session-mode change consists of, as a value rather than a side effect. */
 export type PermissionTransition =
@@ -75,26 +69,6 @@ export function permissionTransition(current: SandboxMode, target: unknown, conf
   return { ok: true, mode: target, changed: true }
 }
 
-/** One resolved policy, which is what a check is actually decided against. */
-export interface SandboxExecutionPolicy {
-  readonly mode: SandboxMode
-  readonly workspaceRoot: string
-  readonly extraWritableRoots: readonly string[]
-  /**
-   * The host's temp directory **when the policy admits it**, and `undefined` when it does not.
-   *
-   * It is **not** in the default policy. Measured: including it unconditionally meant
-   * `workspace-write` permitted a write to any path under `/var/folders/...` — a mode described as
-   * "the workspace and nothing else" that in fact allowed a large, shared, world-writable tree.
-   *
-   * Named `tempRootPath` rather than `tempRoot` because the configuration's own `tempRoot` is the
-   * **boolean** that asks for it, and two different types under one name is how the admission
-   * silently stopped working: measured, the resolved policy carried the boolean's position in the
-   * schema and the temp root never resolved to a path.
-   */
-  readonly tempRootPath?: string
-}
-
 /** Why a path was refused, with enough detail to show the user. */
 export class SandboxDenial extends Error {
   readonly path: string
@@ -119,38 +93,46 @@ export const Config = Schema.object({
   ]).default('workspace-write'),
   /** The directory writes are confined to. Defaults to the process's directory. */
   workspaceRoot: Schema.string(),
-  /** Extra absolute roots a write may also reach, named one by one. */
+  /** Extra absolute roots a write may also reach, named one by one (in addition to the host temp areas). */
   extraWritableRoots: Schema.array(Schema.string()).default([]),
   /**
-   * Admit the host's temp directory to the policy. Off by default, and `true` means the real one.
+   * Which runner may confine a shell call.
    *
-   * A boolean rather than a path because the useful value is always "the system temp directory",
-   * and naming it here keeps a profile from having to guess the platform's path.
+   * `auto` selects the platform's backend (Seatbelt on macOS; the Linux chain in its own cycle) and probes it
+   * once. `none` forces the absence of a backend, which is what the fail-closed check uses: a confined call must
+   * then refuse to run rather than run unconfined.
    */
-  tempRoot: Schema.boolean().default(false),
+  backend: Schema.union([Schema.const('auto' as const), Schema.const('none' as const)]).default('auto'),
+  /**
+   * Absolute path to the Landlock launcher on Linux.
+   *
+   * heddle does not bundle the versioned external binary DSH ships as a platform package, and which binary
+   * confines a process must not be decidable by an ambient environment variable, so the path is configuration.
+   * Unset means the Landlock rung is unavailable and the Linux chain fails closed without bubblewrap.
+   */
+  landlockRunner: Schema.string(),
 })
 
 export interface Config {
   readonly mode?: SandboxMode
   readonly workspaceRoot?: string
   readonly extraWritableRoots?: readonly string[]
-  readonly tempRoot?: boolean
+  readonly backend?: 'auto' | 'none'
+  readonly landlockRunner?: string
 }
 
 /**
  * The sandbox service.
  *
- * Its whole job is to answer one question twice — may this path be read, may it
- * be written — and to answer it by **comparison of canonical paths** rather than
- * string prefixes. That detail is the difference between a sandbox and a
- * suggestion: `/tmp/workspace-2` starts with `/tmp/workspace` as a string and is
- * not inside it, and a symlink from inside the workspace to `/etc` is the other
- * half of the same trap.
+ * Two jobs, one policy. For the harness's own file tools it is an **in-process fence**: may this path be written —
+ * answered by comparing canonical paths rather than string prefixes, because `/tmp/workspace-2` starts with
+ * `/tmp/workspace` as a string and a symlink inside the workspace to `/etc` is the other half of the same trap. For
+ * a shell it is a **backend seam**: it hands the caller a kernel-wrapped argv and the facts needed to classify the
+ * result.
  *
- * The service is deliberately **not** an OS-level confinement. DSH has those
- * backends (seatbelt, windows ACL) because it runs untrusted commands; this one
- * governs the harness's own file tools, and saying which of the two it is matters
- * more than appearing stronger than it is.
+ * It is deliberately still not an OS-level confinement of its own: on macOS that is Seatbelt, behind the backend
+ * seam; on Linux it will be bubblewrap/Landlock in their own cycle. Saying which of the two layers a call is
+ * governed by matters more than appearing stronger than it is.
  */
 export class SandboxService extends Service {
   static readonly provide = 'sandbox'
@@ -158,24 +140,41 @@ export class SandboxService extends Service {
   readonly mode: SandboxMode
   readonly workspaceRoot: string
   readonly extraWritableRoots: readonly string[]
-  readonly tempRoot: string | undefined
+  /** The selected platform runner, or `undefined` when the platform (or the config) has none. */
+  private readonly backend: SandboxBackend | undefined
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'sandbox')
     this.mode = config.mode ?? 'workspace-write'
     this.workspaceRoot = canonical(config.workspaceRoot ?? process.cwd())
     this.extraWritableRoots = (config.extraWritableRoots ?? []).map((root) => canonical(root))
-    this.tempRoot = config.tempRoot === true ? canonical(tmpdir()) : undefined
+    this.backend =
+      config.backend === 'none'
+        ? undefined
+        : selectBackend(process.platform, { ...(config.landlockRunner !== undefined ? { landlockRunner: config.landlockRunner } : {}) })
   }
 
-  /** The policy a call runs under, so a caller can report it. */
+  /** The policy a call runs under, so a caller can report it and every consumer shares one value. */
   policy(mode: SandboxMode = this.mode): SandboxExecutionPolicy {
-    return {
-      mode,
-      workspaceRoot: this.workspaceRoot,
-      extraWritableRoots: this.extraWritableRoots,
-      ...(this.tempRoot !== undefined ? { tempRootPath: this.tempRoot } : {}),
-    }
+    return { mode, workspaceRoot: this.workspaceRoot, extraWritableRoots: this.extraWritableRoots }
+  }
+
+  /** The selected runner's name, or `null` when this host can confine nothing — reported rather than guessed. */
+  backendName(): string | null {
+    return this.backend?.name ?? null
+  }
+
+  /**
+   * The modes one call may escalate to on this host.
+   *
+   * Empty when nothing can confine: advertising an escalation a host cannot enforce would offer a person a prompt
+   * whose grant could not be executed. DSH advertises the same closed target vocabulary whenever the composition
+   * confines, not only the targets above the deployment default, so a session switched below the default keeps its
+   * lever.
+   */
+  escalationTargets(): readonly SandboxMode[] {
+    if (this.backend === undefined || !this.backend.probe()) return []
+    return [...ESCALATION_TARGETS]
   }
 
   /**
@@ -192,7 +191,23 @@ export class SandboxService extends Service {
   }
 
   /**
-   * Refuse a write unless the path is inside the workspace or a named root.
+   * Wrap one exact argv for the shell under this call's policy.
+   *
+   * `danger-full-access` never consults the provider — that is the only bypass, and it is a mode the owner has to
+   * ask for. A confined mode with no usable backend throws `SandboxUnavailableError`, which the caller reports:
+   * failing closed is the whole point, because a command that runs unconfined after being asked to confine it is
+   * the silent widening this seam exists to prevent.
+   */
+  confine(argv: readonly string[], mode: SandboxMode = this.mode): ConfinedArgv {
+    if (mode === 'danger-full-access') {
+      return { argv: [...argv], enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }
+    }
+    if (this.backend === undefined || !this.backend.probe()) throw new SandboxUnavailableError(mode)
+    return this.backend.confine(argv, this.policy(mode))
+  }
+
+  /**
+   * Refuse a write unless the path is inside one of the policy's writable roots.
    *
    * A denial is thrown rather than returned because every caller must handle it;
    * a returned `false` that a caller could ignore is how a sandbox becomes
@@ -213,7 +228,7 @@ export class SandboxService extends Service {
         workspaceRoot: this.workspaceRoot,
       })
     }
-    const allowed = [this.workspaceRoot, ...this.extraWritableRoots, ...(this.tempRoot !== undefined ? [this.tempRoot] : [])]
+    const allowed = writableRoots(this.policy(mode))
     if (allowed.some((root) => contains(root, target))) return target
     throw new SandboxDenial(
       `'${target}' is outside the sandbox root ${this.workspaceRoot}, so it cannot be written`,
@@ -226,15 +241,12 @@ export class SandboxService extends Service {
     const target = this.resolvePath(path)
     if (mode === 'danger-full-access') return target
     /**
-     * Reading is wider than writing in one respect only: the harness's own configuration directory
-     * is readable so a confined run can read the profile it was started from. Nothing else joins
-     * the list, and the temp directory is not special-cased here either — a read of arbitrary
-     * scratch data is not something a confined mode should quietly permit.
+     * Reading follows the same roots the call may write, plus the harness's own configuration directory so a
+     * confined run can read the profile it was started from. `read-only` has no writable roots (the mode promises
+     * no file effects), so its readable set is the workspace and the named extra roots.
      */
     const allowed = [
-      this.workspaceRoot,
-      ...this.extraWritableRoots,
-      ...(this.tempRoot !== undefined ? [this.tempRoot] : []),
+      ...(mode === 'workspace-write' ? writableRoots(this.policy(mode)) : [this.workspaceRoot, ...this.extraWritableRoots]),
       join(homedir(), '.heddle'),
     ]
     if (allowed.some((root) => contains(root, target))) return target
@@ -253,51 +265,6 @@ export class SandboxService extends Service {
       return false
     }
   }
-}
-
-/**
- * Canonicalise a path for comparison.
- *
- * `realpath` is what defeats the symlink case: a link inside the workspace that
- * points at `/etc` resolves to `/etc` before the comparison, so it is refused. A
- * path that does not exist yet cannot be resolved, so its deepest existing
- * ancestor is resolved instead and the rest is kept — which is what makes this
- * usable for a file a tool is about to create.
- */
-export function canonical(path: string): string {
-  const absolute = resolve(path)
-  /**
-   * Resolve the deepest ancestor that exists, then put the missing tail back.
-   *
-   * The tail is the whole point, and the first version of this got it wrong in a way that made a
-   * **new** file look like it was outside the workspace: measured, `canonical` returned the path
-   * unresolved whenever any parent was missing, so `/var/folders/.../scratch.txt` stayed
-   * `/var/folders/...` instead of becoming `/private/var/folders/...`, and a write the policy had
-   * admitted was refused. A tool's most common path is a file that does not exist yet, so this is the
-   * common case rather than an edge one.
-   *
-   * `realpath` on the existing prefix is what defeats a symlink inside the workspace pointing out of
-   * it; the tail needs no resolution because it does not exist.
-   */
-  const missing: string[] = []
-  let current = absolute
-  for (;;) {
-    try {
-      return join(realpathSync(current), ...missing.reverse())
-    } catch {
-      const parent = dirname(current)
-      if (parent === current) return absolute
-      missing.push(basename(current))
-      current = parent
-    }
-  }
-}
-
-/** Whether `child` is `root` or sits under it, by path segment rather than prefix. */
-function contains(root: string, child: string): boolean {
-  if (child === root) return true
-  const rel = relative(root, child)
-  return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel)
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -325,4 +292,3 @@ export default class SandboxServicePlugin extends SandboxService {
    */
   static readonly Config = Config
 }
-

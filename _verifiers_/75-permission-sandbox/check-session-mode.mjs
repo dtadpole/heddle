@@ -21,8 +21,8 @@ import { fixtureDir, readTranscript, removeDir, repoRoot, runCli, sessionsUnder,
  *   script or a stale page cannot widen access by accident;
  * - a mode outside the vocabulary is refused;
  * - the mode is one appended event and the API is its only writer — a tool call records none;
- * - a read-only session refuses the shell as well as a write, because heddle's sandbox cannot confine a
- *   shell's file effects.
+ * - a read-only session refuses a write; whether its shell runs confined or is refused is the
+ *   shell-confinement check's claim, so this file does not repeat it.
  *
  * No browser: the API and a scripted endpoint are enough to judge enforcement, and the control itself is
  * judged in `_verifiers_/80-web-ui/check-access.mjs`.
@@ -83,7 +83,7 @@ function sessionProfile(home, options) {
 function harness(label, options) {
   const home = fixtureDir(`session-mode-home-${label}`)
   const workspace = fixtureDir(`session-mode-workspace-${label}`)
-  const outsideDir = tempDir(`session-mode-outside-${label}-`)
+  const outsideDir = fixtureDir(`session-mode-outside-${label}`)
   const outsidePath = join(outsideDir, 'outside.txt')
   const steps = typeof options.steps === 'function' ? options.steps({ outsidePath }) : options.steps
   const profileDir = sessionProfile(home, { ...options, steps, workspaceRoot: workspace })
@@ -230,21 +230,17 @@ test('a session mode outranks the deployment mode, and one session does not chan
     'override',
     {
       mode: 'read-only',
-      steps: [
-        { toolCall: { name: 'bash', arguments: { command: 'echo hello' } } },
-        { toolCall: { name: 'write_file', arguments: { path: 'inside.txt', content: 'inside' } } },
-        { text: 'done' },
-      ],
+      /**
+       * A shell is not in this check: whether read-only's shell runs confined or is refused is the shell-confinement
+       * check's claim (`check-shell-confinement.mjs`), and this file judges the session mode's write behaviour.
+       */
+      steps: [{ toolCall: { name: 'write_file', arguments: { path: 'inside.txt', content: 'inside' } } }, { text: 'done' }],
     },
     async (h, server) => {
       const first = await turn(server, { prompt: 'write inside' })
       assert.ok(
         first.results.some((text) => /read-only/.test(text)),
         `the read-only turn refused the write, naming the mode\nsaw: ${first.results.join(' | ').slice(0, 300)}`,
-      )
-      assert.ok(
-        first.results.some((text) => /shell/.test(text)),
-        `and refused the shell, because it cannot be confined\nsaw: ${first.results.join(' | ').slice(0, 300)}`,
       )
       assert.equal(existsSync(join(h.workspace, 'inside.txt')), false, 'nothing landed under the deployment mode')
       assert.equal((await sessionOf(server, first.session)).permission?.mode, 'read-only', 'the session reports the deployment mode')
@@ -256,8 +252,8 @@ test('a session mode outranks the deployment mode, and one session does not chan
 
       const second = await turn(server, { session: first.session, prompt: 'write again' })
       assert.ok(
-        second.results.some((text) => /hello/.test(text)),
-        `the shell now runs\nsaw: ${second.results.join(' | ').slice(0, 300)}`,
+        second.results.some((text) => /wrote/.test(text)),
+        `the write now lands under the session's own mode\nsaw: ${second.results.join(' | ').slice(0, 300)}`,
       )
       assert.equal(existsSync(join(h.workspace, 'inside.txt')), true, 'and the write the read-only turn refused landed')
 

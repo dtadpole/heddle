@@ -1472,6 +1472,24 @@
   #access-cancel:hover { background: var(--hover); }
   #access-enable { background: var(--text); color: #0f1115; border: 0; }
   #access-enable:disabled { opacity: .45; cursor: default; }
+  /**
+   * The approval card, DSH's own shape: amber border, a warm surface, the question in the reading size and the two
+   * actions right-aligned. It sits flush above the composer because that is where the person is already looking.
+   */
+  #approval-card {
+    width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto .35rem;
+    padding: 10px 12px; border: 1px solid #b7791f; border-radius: var(--radius);
+    background: color-mix(in oklab, #b7791f 8%, var(--surface)); color: var(--text);
+  }
+  #approval-card[hidden] { display: none; }
+  #approval-card .head { display: flex; align-items: center; gap: .45rem; font-size: 13px; font-weight: 600; color: #e0b15c; }
+  #approval-card .dot { width: 7px; height: 7px; border-radius: 50%; background: #e0b15c; }
+  #approval-card p { margin: .45rem 0 .6rem; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  #approval-card .actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  #approval-card button { height: 32px; padding: 0 .8rem; font: inherit; font-size: 13px; border-radius: 10px; cursor: pointer; }
+  #approval-reject { background: none; color: var(--text); border: 1px solid var(--border); }
+  #approval-reject:hover { background: var(--hover); }
+  #approval-allow { background: var(--text); color: #0f1115; border: 0; }
   /** The status line under the card: only what the page can actually know. */
   #composer-status {
     display: flex; justify-content: center; align-items: center; gap: .75rem;
@@ -2277,6 +2295,19 @@
   <button id="gutter-column-left" class="column-grip" data-side="left" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <button id="gutter-column" class="column-grip" data-side="right" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <div id="composer">
+  <!--
+    DSH's approval card: an amber-bordered question above the composer, with the model's justification verbatim and
+    one way to say no and one to allow exactly the call that asked. It is drawn from the server's
+    `approval/request` event and answered through `POST /api/approvals/<id>`.
+  -->
+  <div id="approval-card" role="alertdialog" aria-labelledby="approval-title" hidden>
+    <div class="head"><span class="dot" aria-hidden="true"></span><span id="approval-title">Waiting for approval</span></div>
+    <p id="approval-reason"></p>
+    <div class="actions">
+      <button type="button" id="approval-reject">Reject</button>
+      <button type="button" id="approval-allow">Allow once</button>
+    </div>
+  </div>
   <form id="prompt">
     <div id="composer-card">
       <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
@@ -8582,10 +8613,65 @@ document.getElementById('add-workspace').onclick = async () => {
  * its own recorded model has to be shown against a list that exists. Then the session, then the tree. The queue
  * is drawn last: it is empty at boot, and drawing it once is what gives the submit action its first label.
  */
+/**
+ * The approval card, DSH's question before a one-call escalation.
+ *
+ * The server pushes questions on the same event stream the session uses; the answer is one POST naming the id it
+ * sent. Only the session's own question is drawn, and a reload repaints whatever is still waiting.
+ */
+const approvalCard = document.getElementById('approval-card')
+let approvalPending = null
+function showApproval(request) {
+  if (request === null || typeof request !== 'object') return
+  if (request.session !== undefined && current !== null && request.session !== current) return
+  approvalPending = request
+  document.getElementById('approval-reason').textContent = request.displayReason ?? request.reason ?? ''
+  approvalCard.hidden = false
+}
+function hideApproval() {
+  approvalCard.hidden = true
+  approvalPending = null
+}
+async function answerApproval(outcome) {
+  const pending = approvalPending
+  if (pending === null) return
+  hideApproval()
+  try {
+    await fetch('/api/approvals/' + encodeURIComponent(pending.id), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ outcome }),
+    })
+  } catch (error) {
+    setNote(`could not answer the approval: ${(error && error.message) || error}`)
+  }
+}
+document.getElementById('approval-allow').addEventListener('click', () => void answerApproval('allowed-once'))
+document.getElementById('approval-reject').addEventListener('click', () => void answerApproval('rejected'))
+events.addEventListener('approval', (message) => {
+  try {
+    showApproval(JSON.parse(message.data))
+  } catch {
+    // a frame that is not a question is not this card's business
+  }
+})
+async function refreshApprovals() {
+  try {
+    const response = await fetch('/api/approvals')
+    if (!response.ok) return
+    const body = await response.json()
+    const request = (body.requests ?? []).find((entry) => entry.session === undefined || entry.session === current)
+    if (request !== undefined) showApproval(request)
+  } catch {
+    // a page that cannot read pending questions still answers the next one it is shown
+  }
+}
+
 await loadEndpoints()
 await loadStatus()
 growComposer()
 await refreshSessions()
+void refreshApprovals()
 document.getElementById('session-search').addEventListener('input', applySearch)
 renderTree().then(() => applySearch())
 renderQueue()

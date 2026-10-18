@@ -1,7 +1,7 @@
 ---
 title: Verifier 8 — Permission Sandbox
-version: 1.1.0
-description: a permission sandbox distinguishes read-only, workspace write and full access, per session as well as per process.
+version: 1.2.0
+description: a permission sandbox distinguishes read-only, workspace write and full access, per session as well as per process, for the file tools and for a shell.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
 ---
@@ -24,8 +24,20 @@ a display or a window.
   including the string-prefix and host-temp cases a sandbox is easy to get wrong.
 - [`check-session-mode.mjs`](check-session-mode.mjs) — the mode as a **session** fact: a session's own mode
   outranks the deployment mode for that session and no other, the change is recorded once through the HTTP
-  API, an escalation to full access is refused by the server without the explicit confirmation, a
-  read-only session refuses the shell as well as a write, and no tool call writes the mode.
+  API, an escalation to full access is refused by the server without the explicit confirmation, and no tool
+  call writes the mode.
+- [`check-escalation.mjs`](check-escalation.mjs) — one **approved wider retry**: a denial asks a person through
+  the approval route, Allow once runs exactly that call and leaves the session's mode where it was, Reject leaves
+  the effect undone, and a run with no one to answer refuses instead of waiting or widening.
+- [`check-policy-context.mjs`](check-policy-context.mjs) — the mode as **model-visible context**: the request the
+  provider receives carries one `Current heddle file policy` statement naming the mode and workspace, a mode
+  change replaces it rather than piling up, and the Web UI's transcript does not show the harness's note as a
+  person's turn.
+- [`check-shell-confinement.mjs`](check-shell-confinement.mjs) — the mode as a **kernel** fact for the shell:
+  the inside write is permitted and the outside one denied under workspace-write (including from a descendant
+  shell), read-only keeps the shell but denies its writes, danger-full-access is the only bypass, `/dev/null`
+  stays writable, a command that merely prints the denial sentence is not misclassified, and a missing backend
+  fails closed instead of running the command unconfined.
 
 ## Running it
 

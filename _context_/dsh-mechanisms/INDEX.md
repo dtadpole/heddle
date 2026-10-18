@@ -1,6 +1,6 @@
 ---
 title: DSH Mechanisms
-version: 1.2.0
+version: 1.3.0
 description: How DeepSeek Harness implements each mechanism heddle mirrors, read from the installed packages and measured in its browser, with the context reading corrected and guarded by a check beside it.
 grounded_in:
   - source: the installed DSH packages under ~/.volta, read on 2026-10-11 and 2026-10-17
@@ -44,6 +44,9 @@ the frontmatter every authored artifact carries.
 - [`dsh-permission-modes.md`](dsh-permission-modes.md) — the access-mode chip, menu, full-access risk
   gate and refusal approval measured in DSH's browser, with the session-scoped mode heddle implements
   beside it, the designs discarded, and the loop document for that work.
+- [`dsh-sandbox-backends.md`](dsh-sandbox-backends.md) — how DSH confines shell and file effects on each
+  platform (the seam, the bwrap/Landlock/Seatbelt/Windows-ACL profiles, writable roots, denial dialects,
+  enforcement and fail-closed), probed on this Mac, with a phased plan for heddle's own backend.
 - [`dsh-input-area.md`](dsh-input-area.md) — the composer card and its measured geometry (712×98 card,
   radius 28, #2c2c2e), the editor's 4/8/0/14 inset and 336px cap, the control row's order and sizes, the
   status pills, and the resizable conversation column the text and the input share; with the values Heddle

@@ -26,6 +26,9 @@ export * from './prune.ts'
 
 export const name = 'context'
 
+/** The origin of the one runtime-policy note; distinct from the system prompt and the instruction baseline. */
+export const SANDBOX_POLICY_ORIGIN = 'sandbox-policy'
+
 export const Config = Schema.object({
   /** The system prompt, written to the surface as its first node. */
   system: Schema.string(),
@@ -204,6 +207,40 @@ export class ContextService extends Service {
     }
     if (anchor === undefined || usage === undefined) return undefined
     return { ...usage, generation: anchor }
+  }
+
+  /**
+   * Keep exactly one standing file-policy note in the surface.
+   *
+   * DSH contributes a `sandbox:policy` runtime-context snapshot before each request; heddle writes the same
+   * statement as a `context/note` with its own origin, because it is neither the person's words nor a message the
+   * model produced — the Web UI's transcript must not show it as a turn, and the model must read it every round.
+   *
+   * A changed policy **replaces** the previous note rather than appending beside it, the same rule the
+   * instruction baseline follows: two policies in one request is a model asked to obey both. An unchanged policy
+   * writes nothing, so an ordinary round costs no event.
+   */
+  recordRuntimePolicy(handle: SessionHandle, statement: string): void {
+    const events = this.store.read(handle)
+    let current: { readonly seq: number; readonly identity?: unknown } | undefined
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type === 'context/note' && event.origin === SANDBOX_POLICY_ORIGIN) {
+        current = { seq: event.seq, ...(event.identity !== undefined ? { identity: event.identity } : {}) }
+        break
+      }
+    }
+    if (current !== undefined && current.identity === statement) return
+    const message = { role: 'user' as const, content: [{ type: 'text' as const, text: statement }] }
+    if (current === undefined) {
+      this.store.append(handle, { type: 'context/note', message, origin: SANDBOX_POLICY_ORIGIN, identity: statement }, { surfaceOp: 'append' })
+      return
+    }
+    this.store.append(
+      handle,
+      { type: 'context/note', message, origin: SANDBOX_POLICY_ORIGIN, identity: statement },
+      { surfaceOp: { op: 'replace', startSeq: current.seq, endSeq: current.seq }, sourceEventSeqs: [current.seq] },
+    )
   }
 
   /**
