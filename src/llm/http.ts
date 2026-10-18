@@ -208,19 +208,59 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
   const contentType = String(response.headers['content-type'] ?? '')
   const looksStreamed = contentType.includes('text/event-stream')
 
-  if (!streaming && !looksStreamed) {
-    const text = await readAll(response)
-    try {
-      return { json: text.length === 0 ? null : JSON.parse(text) }
-    } catch (error) {
-      throw new ModelError(`'${request.endpoint}' answered with a body that is not JSON — ${(error as Error).message}`, {
-        endpoint: request.endpoint,
-        code: 'BAD_BODY',
-      })
+  if (!looksStreamed) {
+    if (!streaming) return { json: await readJson(response, request.endpoint) }
+    /**
+     * A stream was asked for and the answer is **not labelled**. Two providers behave this way and they must not be
+     * confused: one ignores `stream` and answers a single JSON body (buffering it is the only way to read it), and
+     * one streams an event body with **no content type at all** (buffering it would turn a live answer into one
+     * burst). The first chunk decides, and it is replayed, so a stream is at most one chunk behind and nothing is
+     * held whole.
+     */
+    const iterator = response[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>
+    const first = await iterator.next()
+    if (first.done === true) return { json: null }
+    const head = first.value
+    if (Buffer.from(head).toString('utf8').trimStart().startsWith('{')) {
+      const parts: Buffer[] = [Buffer.from(head)]
+      for (;;) {
+        const next = await iterator.next()
+        if (next.done === true) break
+        parts.push(Buffer.from(next.value))
+      }
+      return { json: parseJsonBody(Buffer.concat(parts).toString('utf8'), request.endpoint) }
     }
+    return { stream: replay(head, iterator), status }
   }
 
   return { stream: iterate(response), status }
+}
+
+/** A whole body read as JSON, with the endpoint named in the error a person would see. */
+async function readJson(response: IncomingMessage, endpoint: string): Promise<unknown> {
+  return parseJsonBody(await readAll(response), endpoint)
+}
+
+/** Parse one body as JSON, or say which endpoint answered with something else. */
+function parseJsonBody(text: string, endpoint: string): unknown {
+  try {
+    return text.length === 0 ? null : JSON.parse(text)
+  } catch (error) {
+    throw new ModelError(`'${endpoint}' answered with a body that is not JSON — ${(error as Error).message}`, {
+      endpoint,
+      code: 'BAD_BODY',
+    })
+  }
+}
+
+/** The peeked chunk, then the rest of the body, so an unlabelled stream loses at most one chunk of latency. */
+async function* replay(head: Uint8Array, iterator: AsyncIterator<Uint8Array>): AsyncIterable<Uint8Array> {
+  yield head
+  for (;;) {
+    const next = await iterator.next()
+    if (next.done === true) return
+    yield next.value
+  }
 }
 
 /** Read a whole response body as text. */
