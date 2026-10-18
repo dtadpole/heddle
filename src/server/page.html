@@ -1196,6 +1196,34 @@
     cursor: pointer;
   }
   #sidebar-search:hover, #sidebar-search:focus-visible { opacity: 1; }
+  /**
+   * The primary action, DSH's measurements in this palette.
+   *
+   * Its own colour pair rather than a transparent row: a filled control is what makes it read as the panel's first act
+   * rather than another item in a list. The 12-pixel radius is DSH's `md`, the same one the rail's controls use, so the
+   * panel rounds by one rule.
+   */
+  #new-session {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: .4rem;
+    width: 100%;
+    margin: 0 0 .55rem;
+    padding: 8px 12px;
+    border: 1px solid color-mix(in oklab, var(--text) 16%, transparent);
+    border-radius: var(--radius-md);
+    background: color-mix(in oklab, var(--text) 12%, transparent);
+    color: inherit;
+    font: inherit;
+    font-size: .875rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  #new-session:hover, #new-session:focus-visible {
+    background: color-mix(in oklab, var(--text) 18%, transparent);
+  }
+  #new-session svg { width: 16px; height: 16px; flex: none; }
   #workspaces-row { display: flex; align-items: center; gap: .2rem; }
   /**
    * The row's controls are **icon buttons with no chrome**, which is what DSH's are.
@@ -1252,6 +1280,22 @@
   body[data-sidebar='collapsed'] #tree-note,
   body[data-sidebar='collapsed'] #history { display: none; }
   body[data-sidebar='collapsed'] #sidebar-search { display: inline-flex; }
+  /**
+   * In the rail the primary action is DSH's **second icon**, immediately after the control that opens the panel: its
+   * collapsed sidebar measures `Open sidebar` at y=18 and `New session` at y=66, which is the same 48-pixel pitch. The
+   * label is put away with the rest of the words, and the border and fill go with it — a filled 36-pixel square would
+   * be the loudest thing left on screen.
+   */
+  body[data-sidebar='collapsed'] #new-session {
+    width: 36px;
+    height: 36px;
+    margin: 0 0 12px;
+    padding: 0;
+    justify-content: center;
+    border: none;
+    background: none;
+  }
+  body[data-sidebar='collapsed'] #new-session-label { display: none; }
   body[data-sidebar='collapsed'] #gutter-left { display: none; }
   /**
    * The rail is arranged the way DSH arranges its own.
@@ -1574,6 +1618,21 @@
       </svg>
     </button>
   </header>
+  <!--
+    The panel's **primary action**, which DSH puts here and Heddle did not have at all.
+    Measured from DSH's sidebar on 2026-10-17: a full-width control, 252x38 inside its 280-pixel panel (14-pixel insets),
+    `border-radius: 12px`, a 1-pixel `rgba(255,255,255,.16)` border over a `rgb(67,69,74)` fill, `padding: 8px 12px`,
+    14-pixel text at weight 500, labelled `New session`, with the chord `Alt+Meta+N`. It is the first thing the eye
+    lands on after the brand, and the reason it belongs at the top is the same reason DSH puts it there: starting a
+    conversation is what the panel is for.
+  -->
+  <button id="new-session" type="button" title="New session (⌥⌘N)">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="3.5" y1="8" x2="12.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <span id="new-session-label">New session</span>
+  </button>
   <h1 id="workspaces-row">
     <span id="workspaces-label">Workspaces</span>
     <!--
@@ -4867,6 +4926,14 @@ function paintRunningMarks() {
 /** The folder the prompt box belongs to, so a run continues the folder a person selected. */
 let activeFolder = null
 
+/**
+ * The workspace rows the tree last drew, in its order.
+ *
+ * The tree's own render is the only place that knows them, and the primary action needs one when nothing is selected —
+ * so the last drawing keeps them rather than the button re-fetching the tree to find out what it already has.
+ */
+let treeTops = []
+
 function readExpanded() {
   try {
     return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) ?? '[]'))
@@ -5686,6 +5753,47 @@ async function startSessionAt(node) {
 }
 
 /**
+ * Which workspace a new session should start in.
+ *
+ * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
+ * context exists: the selected row's workspace, then the folder the prompt box was last aimed at, then the first
+ * workspace the tree draws. All three are answers to "where am I", and the first one that applies wins.
+ */
+function newSessionWorkspace() {
+  /** The top-level root that owns a path, if any. A session's definition lives under it. */
+  const owner = (path) => treeTops.find((node) => path === node.path || path.startsWith(node.path + '/')) ?? null
+  if (selectedPath !== null) {
+    const bySelection = owner(selectedPath)
+    if (bySelection !== null) return bySelection
+  }
+  if (activeFolder !== null) {
+    const byFolder = owner(activeFolder)
+    if (byFolder !== null) return byFolder
+  }
+  return treeTops[0] ?? null
+}
+
+/**
+ * Start a session from the panel's primary action, or say why it cannot.
+ *
+ * The act itself is `startSessionAt`, the same function a workspace row's `New session in …` calls: one path for the
+ * one thing, so the two entry points cannot drift. The only new decision is **which** workspace, which is what
+ * `newSessionWorkspace` answers.
+ */
+async function startNewSession() {
+  const workspace = newSessionWorkspace()
+  if (workspace === null) {
+    setNote('register a workspace first — the + beside Workspaces')
+    return
+  }
+  await startSessionAt(workspace)
+}
+
+document.getElementById('new-session').addEventListener('click', () => {
+  void startNewSession()
+})
+
+/**
  * The session shortcuts — DSH's own chords, read from its menu on 2026-10-17: `Alt+Meta+G` rename,
  * `Shift+Meta+F` fork, `Alt+Meta+A` archive, and `Alt+Meta+K` to reach the search box.
  *
@@ -5700,6 +5808,8 @@ const SESSION_SHORTCUTS = [
   { key: 'f', shift: true, action: 'fork' },
   /** DSH's own chord for the same control: `Alt+Meta+B`. */
   { key: 'b', alt: true, action: 'sidebar' },
+  /** DSH's chord for its primary action; read from its `New session` control on 2026-10-17. */
+  { key: 'n', alt: true, action: 'new-session' },
 ]
 
 /**
@@ -5739,6 +5849,10 @@ document.addEventListener('keydown', (event) => {
   if (action === 'sidebar') {
     setSidebarCollapsed(!sidebarCollapsed())
     sidebarToggle.focus()
+    return
+  }
+  if (action === 'new-session') {
+    void startNewSession()
     return
   }
   if (action === 'search') {
@@ -6311,6 +6425,7 @@ async function renderTree() {
     return
   }
   const tops = body.children ?? []
+  treeTops = tops
   /**
    * A **first visit** opens the first workspace, which is what DSH shows.
    *

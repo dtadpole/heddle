@@ -1032,6 +1032,18 @@ test('a folder opens and closes with the same control, including a leaf with not
      */
     const toggled = JSON.parse(
       await browser.evaluate(`(async () => {
+        /** Levels are opened only if closed: the page may or may not have expanded a root on load. */
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = [...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label')?.textContent === label)
+            if (row === undefined) { await new Promise((done) => setTimeout(done, 150)); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await new Promise((done) => setTimeout(done, 200))
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
         const rowFor = (label) => [...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === label)
         const state = (label) => {
           const row = rowFor(label)
@@ -1043,6 +1055,8 @@ test('a folder opens and closes with the same control, including a leaf with not
             group: li.querySelector('ul[role=group]') !== null,
           }
         }
+        /** Only the root: the branch's own open/closed states are what this check measures. */
+        await ensureOpen(document.querySelector('#tree .row .label')?.textContent ?? '')
         const before = state('_tools_')
         rowFor('_tools_').click()
         await new Promise((done) => setTimeout(done, 700))
@@ -1817,7 +1831,7 @@ test('a session is renamed from its own menu, and the row and its definition fol
         item.click(); await wait(1800)
         const after = rows().find((entry) => entry.parentElement.dataset.kind === 'session')
         return { label, items, renamed: after.querySelector('.label').textContent, folder: after.title }
-      })().then((value) => JSON.stringify(value))`),
+      })().then((value) => JSON.stringify(value))`, 30_000),
     )
 
     assert.equal(reading.error, undefined, `the session row offers its menu\nsaw: ${JSON.stringify(reading)}`)
@@ -2020,9 +2034,17 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     const reading = JSON.parse(
       await browser.evaluate(`(async () => {
         const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        /** Capture uncaught page errors: a render that throws is otherwise indistinguishable from missing data. */
+        window.__probeErrors = []
+        window.addEventListener('error', (event) => window.__probeErrors.push(String(event.message)))
+        window.addEventListener('unhandledrejection', (event) => window.__probeErrors.push(String(event.reason)))
         const rows = () => [...document.querySelectorAll('#tree .row')]
         const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
-        ;[...document.querySelectorAll('#tree .row')][0].click(); await wait(700)
+        /** The page and its first tree fetch are asynchronous; wait for a row before clicking one. */
+        for (let attempt = 0; attempt < 20 && document.querySelectorAll('#tree .row').length === 0; attempt += 1) await wait(150)
+        const firstRow = document.querySelectorAll('#tree .row')[0]
+        if (firstRow === undefined) return { error: 'the tree drew no rows' }
+        firstRow.click(); await wait(700)
         rowFor('_tools_').click(); await wait(700)
         rowFor('some-tool').click(); await wait(900)
         /**
@@ -2041,7 +2063,51 @@ test("a session row's controls appear on hover, and a search replaces the tree w
             workspaceSelected: workspaceItems.filter((li) => li.hasAttribute('aria-selected')).length,
           }
         }
+        /**
+         * Open a level only if it is closed. A blind click toggles: the tree may already have a level open (this UI
+         * remembers its expansion set in localStorage, and the page may have restored it), and clicking an open branch
+         * closes it — which is how an earlier probe "lost" the session rows and blamed the UI.
+         */
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rowFor(label)
+            if (row !== undefined) {
+              const li = row.parentElement
+              if (li !== null && li.dataset.open !== 'true') row.click()
+              await wait(250)
+              if (li !== null && li.dataset.open === 'true') return true
+              continue
+            }
+            await wait(150)
+          }
+          return false
+        }
+        await ensureOpen(rows()[0].querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
+        for (let attempt = 0; attempt < 25 && document.querySelectorAll('#tree li[data-kind="session"]').length === 0; attempt += 1) await wait(200)
         const sessions = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+        if (sessions.length === 0) {
+          return {
+            error: 'no session rows in the tree',
+            labels: [...document.querySelectorAll('#tree .row .label')].map((label) => label.textContent),
+            kinds: [...document.querySelectorAll('#tree li')].map((li) => li.dataset.kind),
+            note: document.getElementById('tree-note')?.textContent ?? null,
+
+            toolFound: rowFor('some-tool') !== undefined,
+            pageErrors: window.__probeErrors,
+            api: await (async () => {
+              const path = rowFor('some-tool')?.dataset.path
+              if (path === undefined) return null
+              try {
+                const body = await (await fetch('/api/tree?path=' + encodeURIComponent(path))).json()
+                return { children: (body.children ?? []).map((child) => ({ kind: child.kind, label: child.label, hasSession: child.session !== undefined })) }
+              } catch (error) {
+                return { error: String(error) }
+              }
+            })(),
+          }
+        }
         const controls = sessions.map((li) => ({
           label: li.querySelector(':scope > .row > .label')?.textContent,
           slots: [...li.querySelectorAll(':scope > .row .row-tools > *')].map((child) => child.className),
@@ -2061,7 +2127,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
         await wait(200)
         const focused = {
           opacity: getComputedStyle(target.querySelector(':scope > .row .row-tools')).opacity,
-          ageOpacity: (() => { const age = target.querySelector(':scope > .row > .age'); return age === null ? null : getComputedStyle(age).opacity })(),
+          ageOpacity: (() => { const age = target.querySelector(':scope > .row .age'); return age === null ? null : getComputedStyle(age).opacity })(),
           buttons: [...target.querySelectorAll(':scope > .row .session-actions button')].map((b) => b.getAttribute('aria-label')),
         }
 
@@ -2069,7 +2135,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
          * The right-hand slot, measured the way it was measured in DSH: the age ends 8px inside the row, and the
          * controls sit in that same slot rather than beside it.
          */
-        const quiet = target.querySelector(':scope > .row > .age')
+        const quiet = target.querySelector(':scope > .row .age')
         const rowRect = target.querySelector(':scope > .row').getBoundingClientRect()
         const ageRect = quiet === null ? null : quiet.getBoundingClientRect()
         const ageSlot = { rowRight: Math.round(rowRect.right), ageRight: ageRect === null ? null : Math.round(ageRect.right) }
@@ -2193,6 +2259,41 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           })(),
         }
 
+        /**
+         * The menu's own box, surface and glyphs. Measured bug: it was absolutely placed inside a scrolling sidebar and
+         * its left half was clipped by that overflow, which reads as a transparent menu with text over the rows behind
+         * it. A menu is now placed in viewport coordinates, opaque, and every item carries a mark.
+         */
+        const openViewMenu = document.querySelector('#view-options .menu:not([hidden])')
+        const viewMenuBox = openViewMenu === null ? null : openViewMenu.getBoundingClientRect()
+        const menuChrome = openViewMenu === null ? null : {
+          position: getComputedStyle(openViewMenu).position,
+          background: getComputedStyle(openViewMenu).backgroundColor,
+          insideViewport:
+            viewMenuBox.x >= 0 &&
+            viewMenuBox.y >= 0 &&
+            viewMenuBox.right <= window.innerWidth &&
+            viewMenuBox.bottom <= window.innerHeight,
+          itemGlyphs: [...openViewMenu.querySelectorAll('button')].map((button) => button.querySelector('svg') !== null),
+        }
+
+        /** A long name must never reach the controls: the row's right-hand slot reserves the space. */
+        const longNameRow = (() => {
+          const li = document.querySelector('#tree li[data-kind="session"]')
+          if (li === null) return { error: 'no session row' }
+          const row = li.querySelector(':scope > .row')
+          const label = row?.querySelector('.label')
+          const tools = row?.querySelector('.row-tools')
+          if (label === null || label === undefined || tools === null || tools === undefined) return { error: 'no label or tools' }
+          const original = label.textContent
+          label.textContent = 'a session whose name is long enough to reach the right edge of the row and keep going'
+          void label.offsetWidth
+          const labelRight = Math.round(label.getBoundingClientRect().right)
+          const toolsLeft = Math.round(tools.getBoundingClientRect().left)
+          label.textContent = original
+          return { labelRight, toolsLeft, overlaps: labelRight > toolsLeft }
+        })()
+
         const viewItems = [...document.querySelectorAll('#view-options .menu:not([hidden]) > *')].map((b) => ({
           heading: b.tagName === 'BUTTON' ? null : b.textContent.trim(),
           label: b.tagName === 'BUTTON' ? b.textContent.trim() : null,
@@ -2220,8 +2321,8 @@ test("a session row's controls appear on hover, and a search replaces the tree w
           treeHidden: document.getElementById('tree').hidden,
           resultsHidden: document.getElementById('search-results').hidden,
         }
-        return { controls, focused, ageSlot, selected, quietBackground, aria: ariaShape(), chrome, viewItems, search, cleared }
-      })().then((value) => JSON.stringify(value))`),
+        return { controls, focused, ageSlot, selected, quietBackground, aria: ariaShape(), chrome, viewItems, search, cleared, menuChrome, longNameRow }
+      })().then((value) => JSON.stringify(value))`, 30_000),
     )
 
     /**
@@ -2234,6 +2335,8 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      * do draws nothing rather than drawing dead buttons. (Measured: the first version of this check demanded the
      * controls on every row and failed on exactly those two.)
      */
+    /** A probe that could not reach the UI returns an explicit error instead of an object with holes. */
+    assert.equal(reading.error, undefined, `the probe reached the tree and a session\nsaw: ${JSON.stringify(reading)}`)
     const withControls = reading.controls.filter((row) => row.buttons.length > 0)
     const withoutControls = reading.controls.filter((row) => row.buttons.length === 0)
     assert.equal(withControls.length, 2, `the two sessions carry controls\nsaw: ${JSON.stringify(reading.controls)}`)
@@ -2297,6 +2400,19 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.deepEqual(reading.chrome.cursors.rowControls, ['pointer', 'pointer'], `so are the controls inside it\nsaw: ${JSON.stringify(reading.chrome.cursors.rowControls)}`)
     assert.deepEqual(reading.chrome.cursors.headerMenus, ['pointer', 'pointer'], `and both header menus\nsaw: ${JSON.stringify(reading.chrome.cursors.headerMenus)}`)
     assert.deepEqual(reading.chrome.cursors.tabs, ['pointer', 'pointer'], 'and the tabs')
+
+    /**
+     * **A menu is a floating, opaque, glyph-bearing surface.** The owner's two reports — "the dropdown is transparent" and
+     * "the items have no icons" — were one clipping bug and one missing mark.
+     */
+    assert.equal(reading.menuChrome.position, 'fixed', `a menu floats in viewport coordinates\nsaw: ${JSON.stringify(reading.menuChrome)}`)
+    assert.equal(reading.menuChrome.insideViewport, true, 'and is entirely on screen')
+    assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
+    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
+
+    /** **A long name ellipsizes before the controls**, never underneath them. */
+    assert.equal(reading.longNameRow.overlaps, false, `a long name stops before the controls\nsaw: ${JSON.stringify(reading.longNameRow)}`)
+    assert.ok(reading.longNameRow.toolsLeft - reading.longNameRow.labelRight >= 0, 'with at least no overlap between them')
 
     /**
      * **The view ring's shape**, measured from DSH's tablist: plain text, no background or border or radius, 13px at
@@ -2593,6 +2709,18 @@ test('View options groups the sessions the two ways DSH offers: the tree, or one
       await browser.evaluate(`(async () => {
         const wait = (ms) => new Promise((done) => setTimeout(done, ms))
         const rows = () => [...document.querySelectorAll('#tree .row')]
+        /** Levels are opened only if closed: the page may or may not have expanded a root on load. */
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rows().find((entry) => entry.querySelector('.label')?.textContent === label)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
         const openMenu = async () => { document.querySelector('#view-options button').click(); await wait(250) }
         const choose = async (label) => {
           await openMenu()
@@ -2605,10 +2733,10 @@ test('View options groups the sessions the two ways DSH offers: the tree, or one
          * A tree first: the workspaces are drawn, which is the grouping this UI had before the choice existed. The
          * sessions live under a type folder, so the tree is opened two levels before they are counted.
          */
-        rows()[0].click(); await wait(800)
         const rowFor = (label) => rows().find((row) => row.querySelector('.label')?.textContent === label)
-        rowFor('_tools_')?.click(); await wait(700)
-        rowFor('some-tool')?.click(); await wait(900)
+        await ensureOpen(document.querySelector('#tree .row .label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
         const inTree = { workspaces: document.querySelectorAll('#tree li[data-kind="workspace"]').length, sessions: document.querySelectorAll('#tree li[data-kind="session"]').length }
         const choseList = await choose('In one list')
         const inList = {
@@ -2681,6 +2809,18 @@ test('a running session says so before its name, and a workspace row offers the 
           }
           return null
         }
+        /** Levels are opened only if closed: the page may or may not have expanded a root on load. */
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rowFor(label)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
         /** The tree can be mid-repaint when the script starts, so the root itself is awaited too. */
         for (let attempt = 0; attempt < 40 && rows().length === 0; attempt += 1) await wait(200)
         const rootRow = rows()[0]
@@ -2692,11 +2832,9 @@ test('a running session says so before its name, and a workspace row offers the 
           url: location.href,
           rowsHtml: document.getElementById('tree')?.innerHTML.slice(0, 300) ?? null,
         })
-        rootRow.click(); await wait(800)
-        const toolsRow = await rowWhen('_tools_')
-        if (toolsRow !== null) { toolsRow.click(); await wait(700) }
-        const toolRow = await rowWhen('some-tool')
-        if (toolRow !== null) { toolRow.click(); await wait(900) }
+        await ensureOpen(rootRow.querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
 
         /**
          * A workspace row's controls: the menu first, then the one act its name is for. Read from DSH's own rows, whose

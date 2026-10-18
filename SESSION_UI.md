@@ -118,6 +118,18 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
 
+## The three reported defects (2026-10-17)
+
+The owner reported three things after the cursor fix, and each had a different cause:
+
+| Report | Measured cause | Fix |
+|---|---|---|
+| The `…` disappears when the session name is long | the controls were **absolutely placed over the row**, so the name's ellipsis still ran underneath them (label right 300, controls left 261 — an overlap); text showed between the icons | the age and the controls now share **one grid cell** in `.row-right`, whose width is the wider of the two: the name ellipsizes before the slot, and the slot is the same width whether the age or the controls are showing |
+| The dropdown is transparent and its text overlays other content | it was **not transparent**: every menu measured `rgb(35,35,36)`. It was **clipped by the sidebar's `overflow`** — `View options` is wider than the space to the right of its trigger, and `position: absolute; right: 0` pushed its left half outside the sidebar, where it was cut. The visible half sat over the row text, which reads as transparency | menus are placed in **viewport coordinates** when they open (`position: fixed`, clamped to the viewport, flipped above the trigger when there is no room below), so no ancestor clips them |
+| Menu items have no icons | every menu item measured `glyph: false` | each item carries a stroke glyph in the same 16px box the tree uses (`pin`, `rename`, `fork`, `archive`, `plus`, `download`, `unlist`, `clock`, `archive-restore`), drawn by `kindIcon` through a shared `menuMarks` set; `aria-hidden`, so the item's name stays the action |
+
+**One regression was mine and it was worse than the three reports:** moving the age into the slot left a `const rowRight` declared *after* its first use — a TDZ error that threw for **every session row**, so branches rendered but their sessions vanished. It was found by capturing the page's `window.onerror` inside the probe, and the lesson is in the skill: a render that throws looks exactly like missing data.
+
 ## The three-cycle loop
 
 ### Cycle 1 — the view ring and the user turn (2026-10-17)
@@ -378,6 +390,25 @@ The owner's report that the tree had "stopped showing" was the **remembered** co
 the tree had been put away rather than lost. DSH does **not** remember the state — its reload brings the wide panel
 back — and that behaviour is now copied rather than improved on. The **width** is the preference and survives; the
 collapse is a look at the content and does not. The browser check asserts the reload, not the storage key.
+
+The owner's other observation was the panel's missing **primary action**. DSH's sidebar carries a `New session`
+control between the brand row and the workspace list; Heddle had none — a conversation was started from a workspace
+row's `…` menu, which is a gesture for someone who already knows the tree. Measured from DSH and now matching:
+
+| Property | DSH | Heddle, now |
+|---|---|---|
+| box | 252×38 in its 280 panel (14px insets) | 328×39 in its 352 panel (12px insets) |
+| radius | 12px | 12px (`--radius-md`) |
+| border | 1px `rgba(255,255,255,.16)` | 1px `color-mix(text 16%)` |
+| fill | `rgb(67,69,74)` | `color-mix(text 12%)` |
+| text | 14px, weight 500 | 14px, weight 500 |
+| padding | 8px 12px | 8px 12px |
+| chord | `Alt+Meta+N` | `⌥⌘N` |
+| rail form | second icon, 36×36 at (10, 66) | 36×36 at (10, 66), label and fill put away |
+
+The action reuses `startSessionAt`, the same path a workspace row's `New session in …` takes, and the only new decision
+is **which** workspace: the selected row's root, then the folder the prompt box was last aimed at, then the first
+workspace the tree draws. With no workspace it says so instead of doing nothing.
 
 The workspaces row's controls were also unstyled `<button>`s: the `+` painted as a platform chip (a grey fill and a
 2-pixel border) beside a `…` that painted nothing. They are icon buttons with no chrome now, in both states.
