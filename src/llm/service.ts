@@ -2,6 +2,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { adapterFor } from './adapters.ts'
+import { projectAttachments } from './attachments.ts'
 import { ModelError, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
@@ -110,7 +111,16 @@ export class ModelService extends Service {
      * replayed and a provider rejects an assistant message with neither content nor tool calls.
      * Applied after the request hook, so a policy listener sees the request as it was recorded.
      */
-    const sendable = { ...effective, messages: requestMessages(effective.messages) }
+    /**
+     * The attachment projection sits between the recorded request and the adapter: files become
+     * handles, images become bytes only on a route that declared image input, and every other route
+     * sees deterministically-labelled text. It is applied after the `model/request` waterfall, so a
+     * listener that rewrites the request still sees the content as the session recorded it.
+     */
+    const sendable = {
+      ...effective,
+      messages: requestMessages(projectAttachments(effective.messages, resolved.endpoint)),
+    }
     const next = () => resolved.stream(sendable, signal)
     return this.ctx.waterfall('model/stream', sendable, next)
   }

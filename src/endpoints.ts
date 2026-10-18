@@ -198,6 +198,7 @@ export function describeEndpoint(endpoint: EndpointConfig): Record<string, unkno
     ...(endpoint.region !== undefined ? { region: endpoint.region } : {}),
     ...(endpoint.proxy !== undefined ? { proxy: endpoint.proxy } : {}),
     ...(endpoint.capabilities !== undefined ? { capabilities: endpoint.capabilities } : {}),
+    ...(endpoint.inputModalities !== undefined ? { inputModalities: endpoint.inputModalities } : {}),
     ...(endpoint.contextWindow !== undefined
       ? { contextWindow: endpoint.contextWindow, contextWindowSource: 'config' }
       : {}),

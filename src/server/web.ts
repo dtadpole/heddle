@@ -7,7 +7,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
-import { reasoningLevelFor } from '../llm/types.ts'
+import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload } from './uploads.ts'
 import { renderSource } from './code.ts'
@@ -923,9 +923,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
           messages: report.messages.map((message) => ({
             role: message.role,
             ...(message.toolCallId !== undefined ? { toolCallId: message.toolCallId } : {}),
-            text: message.content
-              .map((part) => (part.type === 'tool-call' ? `→ ${part.name} ${part.arguments}` : part.text))
-              .join(''),
+            text: describeContent(message.content),
           })),
         },
         null,

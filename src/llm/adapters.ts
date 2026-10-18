@@ -1,5 +1,15 @@
 import { anthropicUsage, openaiChatUsage, openaiResponsesUsage, type TokenUsage } from './usage.ts'
-import { ModelError, reasoningLevelFor, reasoningLevelsFor, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest } from './types.ts'
+import {
+  ModelError,
+  reasoningLevelFor,
+  reasoningLevelsFor,
+  type Adapter,
+  type Chunk,
+  type ContentPart,
+  type EndpointConfig,
+  type GenerateRequest,
+  type ImagePart,
+} from './types.ts'
 
 /**
  * The two wire shapes this project speaks, plus the scripted one the checks use.
@@ -228,15 +238,69 @@ export function openAiChatAdapter(
   })()
 }
 
-function toChatMessage(message: GenerateRequest['messages'][number]): Record<string, unknown> {
+/**
+ * One message's content in the Responses shape.
+ *
+ * Text becomes `input_text`; an image becomes `input_image` carrying a data URL. That is the only
+ * image form a Responses route accepts without the Files API, and it is what the recording double in
+ * the browser contract asserts.
+ */
+export function toResponsesContent(parts: readonly ContentPart[]): Record<string, unknown>[] {
+  return parts.flatMap((part): Record<string, unknown>[] => {
+    if (part.type === 'text') return [{ type: 'input_text', text: part.text }]
+    if (part.type === 'image' && part.data !== undefined) {
+      return [{ type: 'input_image', image_url: `data:${part.mimeType};base64,${part.data}` }]
+    }
+    return []
+  })
+}
+
+/**
+ * One message's content in the Anthropic shape.
+ *
+ * Text is a `text` block; an image is a `base64` source block, which is how a publisher route carries
+ * image input without a file reference.
+ */
+export function toAnthropicContent(parts: readonly ContentPart[]): Record<string, unknown>[] {
+  return parts.flatMap((part): Record<string, unknown>[] => {
+    if (part.type === 'text') return [{ type: 'text', text: part.text }]
+    if (part.type === 'image' && part.data !== undefined) {
+      return [{ type: 'image', source: { type: 'base64', media_type: part.mimeType, data: part.data } }]
+    }
+    return []
+  })
+}
+
+/**
+ * One message in the Chat Completions shape.
+ *
+ * Text-only messages keep the string `content` the wire has always taken; a message carrying images
+ * switches to the typed-parts form, which is the only shape that can carry an `image_url`. Exported so
+ * the mapping can be asserted without a network call.
+ */
+export function toChatMessage(message: GenerateRequest['messages'][number]): Record<string, unknown> {
   const text = message.content
     .filter((part): part is Extract<(typeof message.content)[number], { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
     .join('')
   const calls = message.content.filter((part) => part.type === 'tool-call')
+  const images = message.content.filter(
+    (part): part is ImagePart => part.type === 'image' && part.data !== undefined,
+  )
   return {
     role: message.role,
-    content: text.length > 0 ? text : null,
+    content:
+      images.length > 0
+        ? [
+            ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+            ...images.map((part) => ({
+              type: 'image_url' as const,
+              image_url: { url: `data:${part.mimeType};base64,${part.data}` },
+            })),
+          ]
+        : text.length > 0
+          ? text
+          : null,
     ...(calls.length > 0
       ? {
           tool_calls: calls.map((part) => ({
@@ -288,9 +352,7 @@ export function openAiResponsesAdapter(
     model: request.model ?? endpoint.model,
     input: request.messages.map((message) => ({
       role: message.role === 'system' ? 'developer' : message.role,
-      content: message.content
-        .filter((part) => part.type === 'text')
-        .map((part) => (part.type === 'text' ? { type: 'input_text', text: part.text } : part)),
+      content: toResponsesContent(message.content),
     })),
     store: false,
     stream: true,
@@ -511,10 +573,7 @@ function toAnthropicMessages(messages: GenerateRequest['messages']): Record<stri
       push('user', [{ type: 'tool_result', tool_use_id: message.toolCallId ?? '', content: text }])
       continue
     }
-    push(
-      'user',
-      message.content.flatMap((part) => (part.type === 'text' ? [{ type: 'text', text: part.text }] : [])),
-    )
+    push('user', toAnthropicContent(message.content))
   }
   return turns
 }

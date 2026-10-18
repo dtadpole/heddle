@@ -154,7 +154,8 @@ Cycle 1 — make the model receive the attachment as typed content, not a path
   step back:  the gap is a mechanism (typed user-message content + provider projection), not a value; keep the
               objective, narrow cycle 1 to the delivery path (types, projection, adapter mapping, turn body,
               minimal pending cards). Composer fidelity (queue/steer, limits, transcript cards) is cycle 2.
-  changed:    src/llm/types.ts — image/file content parts, endpoint inputModalities, sha identity;
+  checkpoint: 2ec59cd (plan) + the core projection commit on feat/attachments; cycle 1 is mid-implement.
+  changed:    src/llm/types.ts — image/file content parts, endpoint inputModalities, sha identity, describeContent;
               src/llm/attachments.ts (new) — DSH's file handle, text-only placeholder, vision materialisation;
               src/llm/service.ts — project attachments before the adapter;
               src/llm/adapters.ts — image parts for chat/responses/anthropic;
@@ -164,8 +165,10 @@ Cycle 1 — make the model receive the attachment as typed content, not a path
               src/server/page.html — pending cards, send/queue/steer carry attachments;
               tests + _verifiers_/80-web-ui/check-composer.mjs.
   delivered:  pending — the cycle is mid-implement; the branch carries a checkpoint, the deployment follows.
-  evidence:   pending — failing-first unit tests for the projection and adapter mapping are being added, then the
-              browser contract with a recording chat double.
+  evidence:   unit tests written first (test/attachments.test.ts): the first run failed with ERR_MODULE_NOT_FOUND
+              because src/llm/attachments.ts did not exist; 10 of 10 pass now that the projection and the three
+              adapter mappings exist, and `npx tsc --noEmit` is clean while the full suite is 393/393. The browser
+              contract with a recording chat double, and the compositor's cards, are the next step.
   reds:       none yet.
   coverage:   to visit: image on a vision route, image on a text-only route, non-image file, missing file,
               multiple files, send/queue/steer paths, the owner's address.
