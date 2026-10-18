@@ -3,12 +3,15 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
 import { canonicalPath } from '../paths.ts'
+import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
 import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import type { Message } from '../llm/types.ts'
+import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 
-import { SessionStore, defaultSessionRoot, type RecordedMessage, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
+import { SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
 
 export * from './store.ts'
+export * from './mode.ts'
 
 export const name = 'session'
 
@@ -264,6 +267,45 @@ export class SessionService extends Service {
   /** The last complete answer, which is what a transcript read returns. */
   lastAnswer(handle: SessionHandle): string {
     return this.store.lastAnswer(handle)
+  }
+
+  /**
+   * The access mode this session recorded, or `undefined` when it never chose one.
+   *
+   * Exposed on the service rather than left to each caller's own event walk: the fold is one rule (the last
+   * `permission/mode` event wins, and a word outside the vocabulary throws), and two implementations of it
+   * would be two answers to the question the gate asks on every call.
+   */
+  recordedMode(handle: SessionHandle): SandboxMode | undefined {
+    return foldRecordedMode(this.store.read(handle))
+  }
+
+  /** The mode a call in this session runs under: its own record, else the deployment mode the caller names. */
+  effectiveMode(handle: SessionHandle, fallback: SandboxMode): SandboxMode {
+    return foldEffectiveMode(this.store.read(handle), fallback)
+  }
+
+  /**
+   * Record a change of this session's access mode, and answer with what changed.
+   *
+   * One event, written **before** the change takes effect, which is the store's rule for everything that
+   * matters: an interrupted switch is then either not recorded (and the old mode still applies) or recorded
+   * (and the new one does), never half of each. Choosing the mode already in effect appends nothing, so a
+   * no-op is not a log entry and the transcript keeps only real decisions.
+   *
+   * The validation here is a second line rather than the first: the HTTP route decides with
+   * `permissionTransition` (which also owns the escalation confirmation), and this method refuses a word
+   * that is not a mode at all so no caller can put one in the log.
+   */
+  setMode(
+    handle: SessionHandle,
+    mode: SandboxMode,
+    fallback: SandboxMode,
+  ): { readonly mode: SandboxMode; readonly changed: boolean; readonly event?: SessionEvent } {
+    if (!isSandboxMode(mode)) throw new Error(`'${String(mode)}' is not a sandbox mode`)
+    if (this.effectiveMode(handle, fallback) === mode) return { mode, changed: false }
+    const event = this.store.append(handle, { type: MODE_EVENT, mode })
+    return { mode, changed: true, event }
   }
 }
 

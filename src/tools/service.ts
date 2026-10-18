@@ -1,13 +1,15 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 
-import { SandboxDenial, type SandboxService } from '../sandbox/service.ts'
+import { SandboxDenial, type SandboxMode, type SandboxService } from '../sandbox/service.ts'
 import type { ToolSpec } from '../llm/types.ts'
 import type { ApprovalService } from '../approvals/service.ts'
 
 /** What a tool is given when it runs. */
 import type { SessionHandle } from '../session/store.ts'
+import type { SessionService } from '../session/service.ts'
 
+/** The context a caller passes in; the registry completes it with the call's resolved access mode. */
 export interface ToolContext {
   /** Where the effect lands, already resolved and permitted. */
   readonly cwd: string
@@ -24,6 +26,19 @@ export interface ToolContext {
   readonly log: (message: string) => void
 }
 
+/**
+ * The context a tool actually runs with: everything above, plus the access mode **this call** was resolved
+ * under.
+ *
+ * Separate from {@link ToolContext} on purpose. A tool author cannot forget the mode because the type has
+ * one, and a caller cannot pass one because {@link ToolRegistry.call} owns the field — the model's arguments
+ * are not a policy input, which is what stops a tool call from widening its own access.
+ */
+export interface ToolRunContext extends ToolContext {
+  /** The mode this call runs under: the session's own record, or the deployment mode. */
+  readonly mode: SandboxMode
+}
+
 /** What a tool answers with. */
 export interface ToolResult {
   /** The text a model reads back. */
@@ -37,7 +52,7 @@ export interface ToolResult {
 /** One tool. `spec` is what the model is told; `run` is what happens. */
 export interface ToolDefinition {
   readonly spec: ToolSpec
-  readonly run: (args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>
+  readonly run: (args: Record<string, unknown>, context: ToolRunContext) => Promise<ToolResult>
 }
 
 /** One command: a name a person types, and the same execution path as a tool. */
@@ -73,11 +88,14 @@ export class ToolRegistry extends Service {
    */
   private readonly approvals: ApprovalService
   private readonly sandbox: SandboxService
+  /** The session service, which owns the per-session access mode this gate resolves. */
+  private readonly session: SessionService
 
-  constructor(ctx: Context, approvals: ApprovalService, sandbox: SandboxService) {
+  constructor(ctx: Context, approvals: ApprovalService, sandbox: SandboxService, session: SessionService) {
     super(ctx, 'tools')
     this.approvals = approvals
     this.sandbox = sandbox
+    this.session = session
   }
 
   /**
@@ -187,8 +205,22 @@ export class ToolRegistry extends Service {
       return { output: '', error: { code: 'HOOKED', message: pre.reason ?? `a hook refused '${name}'` } }
     }
 
+    /**
+     * The access mode is resolved **once, here**, before anything runs.
+     *
+     * This is the one place every tool call passes through, so it is the only place that can make "every
+     * call is gated by the session's mode" true: a tool that touches files gets the mode from its context
+     * instead of reading a process-wide field, and a tool with no effects still records which policy it ran
+     * under. Resolving once per call (rather than once per turn) is what lets a change take effect on the
+     * next call and never retroactively widen the call already in flight.
+     *
+     * The mode is never taken from `args`: the model's arguments are not a policy input, so no tool call can
+     * name a wider mode for itself.
+     */
+    const runContext: ToolRunContext = { ...context, mode: this.effectiveMode(context.session) }
+
     try {
-      const result = await tool.run(args, context)
+      const result = await tool.run(args, runContext)
       /**
        * The hook point after a tool runs, modelled on DSH's `tools/post-execute`: a
        * waterfall over the result, so a listener may replace it — which is how a policy
@@ -220,6 +252,17 @@ export class ToolRegistry extends Service {
   /** The sandbox this registry gates against, so a caller can report its mode. */
   sandboxPolicy() {
     return this.sandbox.policy()
+  }
+
+  /**
+   * The access mode a call in this session runs under.
+   *
+   * A session's own record outranks the deployment default; a call with no session (an agentless tool call)
+   * runs under the default. Public because the HTTP status route reports the same resolution rather than
+   * re-deriving it.
+   */
+  effectiveMode(session?: SessionHandle): SandboxMode {
+    return session === undefined ? this.sandbox.mode : this.session.effectiveMode(session, this.sandbox.mode)
   }
 }
 
