@@ -146,3 +146,41 @@ Cycle 3 — the deployed page paints incrementally; committed main does not
    not just the page. The deployment-checkout rule exists for exactly this.
 4. A peek that pauses the response must replay the peeked chunk; a `pause()` without a matching consumer reads as
    "pending forever" on a provider that answers one JSON body.
+
+## Landed and deployed (the completion)
+
+```
+Landing — the fix is on main and the owner's address streams
+  measured:   the deployment checkout was made clean by preserving another session's uncommitted streaming WIP on
+              its own branch (`wip/streaming-other-session`, commit fe70410) rather than sweeping it into a merge.
+              `feat/stream-arrival` then merged onto main (`28ca2a8`), the strict-test type fix followed
+              (`9dc9acd`), and two commits from the other session landed on top (`79ca68a`, `eed5a16`) — the pair
+              that fixed the page half of the running-clock work. origin/main = eed5a16 at this reading.
+  deployment chain, measured: 3082 was held by the workspace build started by the dsh-web-ops keepalive
+              (`* * * * * … keepalive.sh --name heddle-web --port 127.0.0.1:3082 -- node /Users/zhenc/heddle/dist/cli.js …`),
+              which runs a checkout **without a profile**; that process answered turns with 500
+              `Cannot read properties of undefined (reading 'names')`. The keepalive was repointed to the deployment
+              checkout with its profile:
+              `node /Users/zhenc/heddle-deploy/dist/cli.js web --host 127.0.0.1 --port 3082 --config /Users/zhenc/heddle-deploy/cordis.yml`
+              (crontab backed up first), and the launchd agent was restarted from the same checkout. The serving
+              process is `/Users/zhenc/heddle-deploy/dist/cli.js` (PID 50808 at 01:09), 96-deployment 3/3.
+  evidence:   `streaming-probe.mjs` at http://127.0.0.1:8082/, two fresh runs each:
+              deepseek-flash 187 text deltas, spans 748ms / 247ms, first text 2116ms / 3386ms;
+              deepseek-v4-pro 187 text deltas, spans 1085ms / 1047ms, first text 1737ms / 1997ms.
+              Page-level, trusted input, fresh session: 11 DOM growth steps, first content at 3034ms, a
+              mid-stream screenshot at 360 characters, turn ended 6088ms with the answer complete
+              (`heddle-stream-landed-midstream.png`). `_verifiers_/96-deployment` 3/3 after the evidence commit.
+  reds:       `npm test` 469/470: the one red is the pre-existing page-contract context-gauge resolver check, which
+              fails on main independently of streaming (and which its own workstream is landing the page half for).
+              A transient 502 from the plugboard route was observed once for deepseek-v4-pro and cleared on retry;
+              a turn's own failure is not a streaming-failure and the probe's red reads as such.
+  landed:     merge commit `28ca2a8` (feat/stream-arrival) + `9dc9acd`; main pushed to origin, later commits
+              `79ca68a`, `eed5a16` from the other session on top; deployment checkout clean on main and serving
+              from `/Users/zhenc/heddle-deploy` (crontab keepalive and launchd agent both name it).
+  lessons:    the deployment chain had a second supervisor (the dsh-web-ops crontab keepalive) that the
+              deployment-checkout rule had not covered; a service is only "from the deployment checkout" when
+              **every** starter of it says so. And a landing that races another session's loop can observe a
+              transiently broken main: the page regression measured here (turns not painting) was the other
+              session's in-flight running-clock change, fixed by their next two commits; the probe was the
+              instrument that noticed the deployment was not serving what it claimed.
+```
