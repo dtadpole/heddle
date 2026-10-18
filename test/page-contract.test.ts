@@ -158,7 +158,8 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
   assert.match(page, /const nothingOpen = view === 'chat' && current === null/, 'from the panel\'s own state')
   assert.ok(page.includes('paintEmptyState()\n}'), 'the view switch ends by painting it')
   assert.ok(page.includes('current = id\n  paintEmptyState()'), 'opening a session paints it')
-  assert.ok(page.includes('paintEmptyState()\n</script>'), 'and boot ends by painting it')
+  assert.ok(page.includes("document.body.dataset.ready = 'true'\n</script>"), 'and boot ends by announcing that it finished')
+  assert.match(page, /paintEmptyState\(\)\n\/\*\*[\s\S]*?document\.body\.dataset\.ready/, 'which happens after the invitation is painted')
   /** A session that no longer exists must not keep the invitation hidden. */
   assert.ok(page.includes('current = null\n      const title'), 'a vanished session releases the pointer')
 })

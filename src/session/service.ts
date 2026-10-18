@@ -120,10 +120,22 @@ export class SessionService extends Service {
    * The folder keeps the conventions' instance naming rule — a title with spaces and brackets is a label, not
    * an instance name — so the identity is generated as for any other session while the title carries the name.
    */
-  fork(id: SessionId): { readonly handle: SessionHandle; readonly definition: SessionDefinition } | null {
+  fork(id: SessionId): { readonly handle: SessionHandle; readonly definition: SessionDefinition } | null | { readonly error: 'unavailable' } {
     const source = this.store.list().find((one) => one.id === id)
     if (source === undefined) return null
-    const handle = this.store.fork(id)
+    /**
+     * A fork is cut at the last **completed** turn, as DSH's is: a session with none has nothing to fork from, and a child
+     * carrying a half-finished turn would invite the model to continue work it never saw finish.
+     *
+     * The check is for a completed answer, not for `turns`. Measured: `turns` counts **user messages** — the store bumps
+     * it when a user message is written — so a session whose question was recorded and whose answer never arrived passed
+     * the old guard and forked a half-finished turn. The part that judges the refusal found the fork answering `200`
+     * where the reference answers `409`.
+     */
+    const sourceHandle = this.store.open(id)
+    if (sourceHandle === null || this.store.lastAnswer(sourceHandle) === '') return { error: 'unavailable' }
+    /** The child records its parent, which is the provenance DSH's header keeps (`parentSession`). */
+    const handle = this.store.fork(id, { parentSession: id })
     if (handle === null) return null
     const created = this.store.list().find((one) => one.id === handle.id)
     const base = source.title !== undefined && source.title.trim().length > 0 ? source.title.trim() : 'session'

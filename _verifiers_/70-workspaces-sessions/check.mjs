@@ -1926,7 +1926,16 @@ test('a session is pinned and archived in the store, and the tree follows both',
     const withArchived = await listed(true)
     const back = withArchived.find((node) => node.label === older.name)
     assert.equal(back?.archived, true, 'and is drawn when asked for, marked as archived')
-    assert.equal(back?.pinned, true, 'with its pin intact')
+    /**
+     * Archiving **drops the pin**: the two flags are mutually exclusive in the reference, and this check used to
+     * assert the opposite until the store learned the rule. The pin is gone with the archive, not restored by it.
+     */
+    assert.equal(back?.pinned, undefined, 'and the pin went with the archive')
+
+    /** And pinning an archived session is refused, which is the same rule seen from the other side. */
+    const refusedPin = await commit(older.session, { pinned: true })
+    assert.equal(refusedPin.status, 409, 'an archived session cannot be pinned')
+    assert.equal((await refusedPin.json()).code, 'archived', 'and the refusal names the reason')
 
     /** The flags live in the store alone: the definition a reader of the repository sees never claims them. */
     const definition = JSON.parse(readFileSync(join(String(older.definition).replace('/session.json', ''), 'session.json'), 'utf8'))
@@ -1947,10 +1956,14 @@ test('a session is pinned and archived in the store, and the tree follows both',
     assert.deepEqual(only.map((node) => node.label), [older.name], `archived only draws the archived sessions, and none of the live ones\nsaw: ${only.map((node) => node.label).join(', ')}`)
 
     /** And both are reversible, which is what makes them safe items in a menu. */
-    await commit(older.session, { archived: false, pinned: false })
+    await commit(older.session, { archived: false })
     const restored = await listed(false)
     assert.ok(restored.some((node) => node.label === older.name), 'unarchiving brings it back')
-    assert.equal(restored.find((node) => node.label === older.name)?.pinned, undefined, 'and unpinning leaves no mark')
+    assert.equal(restored.find((node) => node.label === older.name)?.pinned, undefined, 'still unpinned, since the archive dropped it')
+    /** And a pin after unarchiving is accepted and carries its time, which is the order among several pins. */
+    assert.equal((await commit(older.session, { pinned: true })).status, 200, 'a session can be pinned again once it is back')
+    const rePinned = (await listed(false)).find((node) => node.label === older.name)
+    assert.match(String(rePinned?.pinnedAt), /^\d{4}-\d{2}-\d{2}T/, 'with the time it was pinned')
   } finally {
     live?.kill()
     removeDir(h.home)
@@ -2532,6 +2545,13 @@ test('the four session shortcuts act on the selected session, and say so when th
     const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
     assert.equal(made.code, 0, made.stderr)
     const created = parseJson(made.stdout)
+    /**
+     * The session the chords act on needs a **completed turn**, because a fork is cut at one: a session whose question
+     * was recorded and whose answer never arrived now answers `409` rather than forking a half-finished turn. Without
+     * this the fork chord is refused and the check reads that refusal as a missing chord.
+     */
+    const turn = await runCli(adminArgs(h, ['--turn', 'a turn worth forking']), { env: h.env, cwd: join(h.work, '_tools_', 'some-tool') })
+    assert.equal(turn.code, 0, turn.stderr)
 
     live = await startServer(
       ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
@@ -2553,9 +2573,21 @@ test('the four session shortcuts act on the selected session, and say so when th
           document.dispatchEvent(event)
           return event.defaultPrevented
         }
-        rows()[0].click(); await wait(700)
-        rowFor('_tools_').click(); await wait(700)
-        rowFor('some-tool').click(); await wait(800)
+        /** Open a level only if it is closed: a blind click closes what the page may already have opened. */
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rowFor(label)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
+        await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
 
         /** Nothing is selected: the chords that need a session refuse, and say why. */
         const beforeSelect = { note: '', prevented: press('a', { altKey: true, metaKey: true }) }
@@ -2920,11 +2952,27 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
     await conventionsFixture(h)
     const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
     assert.equal(made.code, 0, made.stderr)
+    const second = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(second.code, 0, second.stderr)
+    const pinnedId = parseJson(made.stdout).session
+    const archivedId = parseJson(second.stdout).session
 
     live = await startServer(
       ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
       { ...h.env, HOME: h.home },
     )
+    /** Pin one session and archive the other through the same routes the menu calls, before the page is read. */
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const flag = (id, body) =>
+      fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    assert.equal((await flag(pinnedId, { pinned: true })).status, 200, 'the first session is pinned')
+    assert.equal((await flag(archivedId, { archived: true })).status, 200, 'the second is archived')
+
     browser = await openBrowser()
     await browser.goto(live.url)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
@@ -3096,7 +3144,39 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           return { labelRight, toolsLeft, overlaps: labelRight > toolsLeft }
         })()
 
-        return JSON.stringify({ inventory: inventory(), menus, rowControls, longName, pageErrors: window.__probeErrors ?? [] })
+        /**
+         * The two flag rules the reference states: a pinned row carries a **rest-state mark**, and an archived row offers no
+         * pin at all — not in its quick controls and not in its menu. Both are read from the drawn tree.
+         */
+        const flagStates = (async () => {
+          /** Archived rows are hidden by default; the filter is switched on first so the rule can be read. */
+          document.querySelector('#view-options .menu-wrap > button')?.click()
+          const showArchived = [...document.querySelectorAll('#view-options .menu button')].find((button) => (button.textContent || '').trim() === 'All conversations (show archived)')
+          showArchived?.click()
+          document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+          /** The filter re-reads the tree asynchronously; the archived rows appear after that fetch. */
+          await wait(1200)
+          const sessionRows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
+          const pinnedRow = sessionRows.find((li) => li.querySelector(':scope > .row .pin-mark') !== null)
+          const pinnedMark = pinnedRow === undefined ? null : pinnedRow.querySelector(':scope > .row .pin-mark').getBoundingClientRect()
+          /** An archived row is one the row itself says archived; the tree draws it only when the archive filter shows it. */
+          const archivedRows = sessionRows.filter((li) => li.querySelector(':scope > .row .label')?.textContent?.includes('archived') !== true)
+          return {
+            archivedRows: sessionRows.filter((li) => li.getAttribute('data-archived') === 'true').length,
+            pinnedMark: pinnedMark === null ? null : [Math.round(pinnedMark.width), Math.round(pinnedMark.height)],
+            archivedPinControls: (() => {
+              const archived = sessionRows.find((li) => li.getAttribute('data-archived') === 'true')
+              if (archived === undefined) return null
+              return {
+                quick: [...archived.querySelectorAll(':scope > .row .session-actions button')].map((button) => button.getAttribute('aria-label')),
+                menu: [...archived.querySelectorAll(':scope > .row .menu button')].map((button) => (button.textContent || '').trim()),
+              }
+            })(),
+            archivedRows: archivedRows.length,
+          }
+        })()
+
+        return JSON.stringify({ inventory: inventory(), menus, rowControls, longName, flagStates: await flagStates, pageErrors: window.__probeErrors ?? [] })
       })().then((value) => JSON.stringify(value))`, 30_000),
     )
     const result = JSON.parse(reading)
@@ -3146,11 +3226,212 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
       assert.deepEqual(button.box, [28, 28], `an icon button is DSH's 28x28\nsaw: ${JSON.stringify(button)}`)
     }
 
+    /** A pinned row says so at rest; an archived row offers no pin, because the store would refuse it. */
+    assert.deepEqual(result.flagStates.pinnedMark, [14, 14], `a pinned row carries a 14px pin mark\nsaw: ${JSON.stringify(result.flagStates)}`)
+    assert.ok(result.flagStates.archivedRows >= 1, `the archived row is drawn once the filter shows it\nsaw: ${JSON.stringify(result.flagStates)}`)
+    assert.notEqual(result.flagStates.archivedPinControls, null, 'and its controls are readable')
+    {
+      assert.ok(
+        result.flagStates.archivedPinControls.quick.every((label) => !String(label).includes('Pin session')),
+        `an archived row's quick controls offer no pin\nsaw: ${JSON.stringify(result.flagStates.archivedPinControls)}`,
+      )
+      assert.ok(
+        result.flagStates.archivedPinControls.menu.every((label) => !label.includes('Pin session')),
+        `nor does its menu\nsaw: ${JSON.stringify(result.flagStates.archivedPinControls)}`,
+      )
+    }
+
     /** A long name ellipsizes before the controls, never underneath them. */
     assert.equal(result.longName.overlaps, false, `a long name stops before the controls\nsaw: ${JSON.stringify(result.longName)}`)
 
     /** And the page threw nothing while all of that was measured. */
     assert.deepEqual(result.pageErrors, [], `the page reported no errors\nsaw: ${JSON.stringify(result.pageErrors)}`)
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('pin, archive and fork refuse what the reference refuses, and record their provenance', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  const h = harness('session-actions')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = []
+    for (let index = 0; index < 2; index += 1) {
+      const one = await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(one.code, 0, one.stderr)
+      made.push(parseJson(one.stdout).session)
+    }
+    const given = await runCli(adminArgs(h, ['--turn', 'a turn worth forking']), { env: h.env, cwd: branch })
+    assert.equal(given.code, 0, given.stderr)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const call = (path, body) =>
+      fetch(new URL(path, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const metas = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+
+    /** Pin records its time, so several pinned sessions order by the pin rather than by their names. */
+    /** Which session the `--turn` landed on is a property of the data, not of creation order: read it. */
+    const initial = await metas()
+    const withTurn = initial.find((meta) => made.includes(meta.id) && meta.turns >= 1)?.id
+    const withoutTurn = initial.find((meta) => made.includes(meta.id) && meta.turns === 0)?.id
+    assert.ok(withTurn !== undefined && withoutTurn !== undefined, `one session has a turn and one does not\nsaw: ${JSON.stringify(initial.filter((meta) => made.includes(meta.id)))}`)
+    const pinned = await call(`/api/sessions/${withTurn}/flags`, { pinned: true })
+    assert.equal(pinned.status, 200, 'the pin is accepted')
+    const pinnedMeta = (await metas()).find((meta) => meta.id === withTurn)
+    assert.equal(pinnedMeta?.pinned, true, 'and recorded')
+    assert.match(String(pinnedMeta?.pinnedAt), /^\d{4}-\d{2}-\d{2}T/, 'with the time it was pinned')
+
+    /** Archiving drops the pin in the same write — the two flags are exclusive. */
+    const archived = await call(`/api/sessions/${withTurn}/flags`, { archived: true })
+    assert.equal(archived.status, 200, 'the archive is accepted')
+    const archivedMeta = (await metas()).find((meta) => meta.id === withTurn)
+    assert.equal(archivedMeta?.archived, true, 'and recorded')
+    assert.equal(archivedMeta?.pinned, undefined, 'with the pin removed')
+
+    /** Pinning an archived session is refused with a reason a caller can act on. */
+    const refused = await call(`/api/sessions/${withTurn}/flags`, { pinned: true })
+    assert.equal(refused.status, 409, 'an archived session cannot be pinned')
+    assert.equal((await refused.json()).code, 'archived', 'and says why')
+
+    /** A fork is cut at the last completed turn: the untouched session has none, so it is refused. */
+    const noTurn = await call(`/api/sessions/${withoutTurn}/fork`, {})
+    assert.equal(noTurn.status, 409, 'a session with no completed turn cannot be forked')
+    assert.equal((await noTurn.json()).code, 'unavailable', 'and says why')
+
+    /** A session with a turn forks, and the child records its parent — the provenance the reference keeps. */
+    const forked = await call(`/api/sessions/${withTurn}/fork`, {})
+    assert.equal(forked.status, 200, `a session with a completed turn forks\n${await forked.clone().text()}`)
+    const child = (await forked.json()).session
+    const childMeta = (await metas()).find((meta) => meta.id === child)
+    assert.equal(childMeta?.parentSession, withTurn, `the child records the session it was cut from\nsaw: ${JSON.stringify(childMeta)}`)
+    assert.ok(childMeta?.title !== undefined, 'and is named, so two rows with one title cannot be confused')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a clipped session title crawls on hover and returns on leave', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-title-marquee')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const long = await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(long.code, 0, long.stderr)
+    const longRecord = parseJson(long.stdout)
+    const longId = longRecord.session
+    const short = await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(short.code, 0, short.stderr)
+    const shortRecord = parseJson(short.stdout)
+    const shortId = shortRecord.session
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    /** Titles through the route the rename uses; the long one is chosen to overflow the sidebar by far more than 8px. */
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const title = (id, text, folder) =>
+      fetch(new URL(`/api/sessions/${id}/title`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ title: text, folder }),
+      })
+    const longTitle = 'a session name long enough to overflow the sidebar and crawl while the pointer rests on its row'
+    /** Each session's definition folder comes from the CLI's own record, not from a guessed name. */
+    assert.equal((await title(longId, longTitle, dirname(longRecord.definition))).status, 200, 'the long title is written')
+    assert.equal((await title(shortId, 'short', dirname(shortRecord.definition))).status, 200, 'the short title is written')
+
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const probe = async (label) => JSON.parse(await browser.evaluate(`(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const rows = () => [...document.querySelectorAll('#tree .row')]
+      const ensureOpen = async (text) => {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const row = rows().find((candidate) => candidate.querySelector('.label')?.textContent === text)
+          if (row === undefined) { await wait(150); continue }
+          const li = row.closest('li')
+          if (li.dataset.open !== 'true') row.click()
+          await wait(200)
+          if (li.dataset.open === 'true') return true
+        }
+        return false
+      }
+      for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
+      await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
+      await ensureOpen('_tools_')
+      await ensureOpen('some-tool')
+      const row = rows().find((candidate) => candidate.querySelector('.label')?.textContent === ${JSON.stringify(label)})
+      if (row === undefined) return JSON.stringify({ error: 'row not found' })
+      const labelEl = row.querySelector('.label')
+      const rect = row.getBoundingClientRect()
+      return JSON.stringify({
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        overflowing: labelEl.scrollWidth - labelEl.clientWidth,
+        before: { left: labelEl.scrollLeft, scrolled: labelEl.dataset.scrolled ?? null, clipped: labelEl.dataset.clipped ?? null },
+      })
+    })()`))
+
+    /** Trusted pointer onto the long row: the marquee is a hover behaviour and a synthetic event would not prove it. */
+    const target = await probe(longTitle)
+    assert.equal(target.error, undefined, `the long row is drawn\nsaw: ${JSON.stringify(target)}`)
+    assert.ok(target.overflowing > 8, `the title overflows by more than the reference's 8px floor\nsaw: ${target.overflowing}`)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y })
+    await new Promise((done) => setTimeout(done, 900))
+    const during = JSON.parse(await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find((candidate) => candidate.querySelector('.label')?.textContent === ${JSON.stringify(longTitle)})
+      const label = row.querySelector('.label')
+      return JSON.stringify({ left: label.scrollLeft, scrolled: label.dataset.scrolled ?? null, clipped: label.dataset.clipped ?? null })
+    })()`))
+    assert.ok(during.left > 0, `hovering crawls the title\nsaw: ${JSON.stringify(during)}`)
+    assert.equal(during.scrolled, '', 'and marks the left edge as scrolled')
+
+    /** Leaving returns it to the start in one step — the resting ellipsis must not meet a travelling title. */
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 })
+    await new Promise((done) => setTimeout(done, 400))
+    const after = JSON.parse(await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find((candidate) => candidate.querySelector('.label')?.textContent === ${JSON.stringify(longTitle)})
+      const label = row.querySelector('.label')
+      return JSON.stringify({ left: label.scrollLeft, scrolled: label.dataset.scrolled ?? null, clipped: label.dataset.clipped ?? null })
+    })()`))
+    assert.equal(after.left, 0, `leaving returns the title to its start\nsaw: ${JSON.stringify(after)}`)
+    assert.equal(after.scrolled, null, 'and clears the fade marks')
+
+    /** A short title never moves: the reference's floor exists so a few clipped pixels do not read as jitter. */
+    const shortTarget = await probe('short')
+    assert.equal(shortTarget.error, undefined)
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: shortTarget.x, y: shortTarget.y })
+    await new Promise((done) => setTimeout(done, 500))
+    const shortAfter = JSON.parse(await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find((candidate) => candidate.querySelector('.label')?.textContent === 'short')
+      return JSON.stringify({ left: row.querySelector('.label').scrollLeft })
+    })()`))
+    assert.equal(shortAfter.left, 0, 'a title that fits does not crawl')
   } finally {
     browser?.close()
     live?.kill()

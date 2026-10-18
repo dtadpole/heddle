@@ -275,7 +275,7 @@
     --chat-code: #1e1e21;
     flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
     /**
-     * **No visible scrollbar in the main chat.** the reference's transcript keeps a scrollbar in the box model
+     * **No visible scrollbar in the main chat.** The reference's transcript keeps a scrollbar in the box model
      * (`::-webkit-scrollbar` 6px, `scrollbar-gutter: stable`) but paints it **transparent**, so nothing appears while
      * reading or scrolling; heddle was left on the platform's overlay bar, which slides in over the text on every
      * scroll — the distraction the owner reported. The rail already scrubs, so the bar is redundant; `overflow` stays
@@ -992,6 +992,21 @@
   #tree .kind { display: inline-flex; opacity: .8; }
   #tree .badge { font-size: .66rem; letter-spacing: .04em; padding: 0 .25rem; border: 1px solid var(--line); border-radius: .25rem; opacity: .8; }
   #tree .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /**
+   * The title marquee, measured from DSH's own rows: while a row is hovered its title clips instead of ellipsizing (so it
+   * can scroll), and two masks mark the edges it has left — `data-scrolled` for the left fade, `data-clipped` for text still
+   * beyond the right edge. The movement itself is scripted, at DSH's 30px per second.
+   */
+  @media (hover: hover) {
+    #tree .label { transition: mask-image .12s ease; }
+    #tree li:hover > .row > .label, #tree li:focus-within > .row > .label { text-overflow: clip; }
+    #tree .label[data-scrolled] { mask-image: linear-gradient(90deg, transparent 0, #000 12px); }
+    #tree .label[data-clipped] { mask-image: linear-gradient(270deg, transparent 0, #000 12px); }
+    #tree .label[data-scrolled][data-clipped] { mask-image: linear-gradient(90deg, transparent 0, #000 12px calc(100% - 12px), transparent 100%); }
+    /** The reference hides the time and the pin mark on hover, so the title gets their room to reveal itself. */
+    #tree li:hover > .row .pin-mark { opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { #tree .label { transition: none; } }
   #tree .turns { font-size: .72rem; opacity: .5; }
   #tree li[data-kind='generated'] .label { opacity: .55; }
   #tree li[data-kind='folder'] .label { opacity: .8; }
@@ -1154,15 +1169,15 @@
    */
   #composer-status {
     display: flex; justify-content: center; align-items: center; gap: .75rem;
-    max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
-    padding: 4px 14px 0; font-size: 12px; line-height: 20px; color: var(--text-3);
+    width: fit-content; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
+    padding: 4px 0 0; font-size: 12px; line-height: 20px; color: var(--text-3);
     font-variant-numeric: tabular-nums;
   }
   #composer-status[hidden] { display: none; }
   #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
   #composer-status .stat-icon { flex: none; width: 16px; height: 16px; }
   #composer-status .stat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #composer-status .stat-sep { margin: 0 6px; color: var(--border-strong); }
+  #composer-status .stat-sep { margin: 0 6px; color: inherit; }
   #composer-status .stat-context { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 8px; font-size: 13px; line-height: 20px; }
   #composer-status .stat-ring-track { fill: none; stroke: var(--border-strong); stroke-width: 2; }
   #composer-status .stat-ring-fill { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; }
@@ -1968,7 +1983,7 @@
       <span class="stat-label"><span data-stat="total"></span><span class="stat-sep" data-stat="cache-sep" aria-hidden="true">·</span><span data-stat="cache"></span></span>
     </span>
     <span class="stat-context" data-stat-pill="context">
-      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle class="stat-ring-track" cx="7" cy="7" r="5"/><circle class="stat-ring-fill" data-stat="context-ring" cx="7" cy="7" r="5" stroke-dasharray="0 31.416"/></svg>
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle class="stat-ring-track" cx="7" cy="7" r="5.5"/><circle class="stat-ring-fill" data-stat="context-ring" cx="7" cy="7" r="5.5" stroke-dasharray="0 34.56"/></svg>
       <span data-stat="context"></span>
     </span>
   </div>
@@ -4879,7 +4894,7 @@ function updateStatusBar() {
   if (percent !== null) {
     const ring = cell('context-ring')
     if (ring !== null) {
-      const circumference = 2 * Math.PI * 5
+      const circumference = 2 * Math.PI * 5.5
       ring.setAttribute('stroke-dasharray', `${((percent / 100) * circumference).toFixed(2)} ${circumference.toFixed(2)}`)
     }
   }
@@ -6465,6 +6480,8 @@ function nodeRow(node) {
    * the pointer or the keyboard arrives rather than always. The two direct ones are the acts frequent enough to
    * skip the menu — pin and archive — and the `…` holds the rest. A row with nothing to do still draws nothing.
    */
+  /** The archived state on the item itself, so a check (and a future style) can tell an archived row without reading text. */
+  if (node.archived === true) li.dataset.archived = 'true'
   const rowTools = document.createElement('span')
   rowTools.className = 'row-tools'
   /**
@@ -6564,10 +6581,74 @@ function nodeRow(node) {
       row.onclick()
     }
   }
+  /**
+   * A clipped title reveals itself on the pointer arriving, and returns on the pointer leaving — the same two moments DSH's
+   * row uses. It is attached to the row, not the label, so the handlers survive the label never moving under the pointer.
+   */
+  const titleLabel = row.querySelector(':scope > .label')
+  if (titleLabel !== null && (node.kind === 'session' || node.kind === 'workspace' || node.kind === 'instance')) {
+    const marquee = titleMarquee(titleLabel)
+    row.addEventListener('pointerenter', marquee.enter)
+    row.addEventListener('pointerleave', marquee.leave)
+  }
 
   li.append(row)
   rowIndex.set(node.path, { node, li, icon })
   return li
+}
+
+/**
+ * The title marquee — DSH's own numbers, read from its `useTitleMarquee`.
+ *
+ * A title that overflows by more than **8px** crawls at **30px per second** while its row is hovered, until the far edge is
+ * in view, and then rests there; leaving returns it to the start in one step, because the resting ellipsis would otherwise
+ * meet the text while it travelled back. Reduced motion jumps to the far edge instead of crawling. The two data attributes
+ * are the stylesheet's cue for the edge fades.
+ */
+const TITLE_MARQUEE_PX_PER_MS = 0.03
+const MIN_TITLE_REVEAL_PX = 8
+
+function placeTitle(title, left, range) {
+  title.scrollLeft = left
+  if (left > 0) title.dataset.scrolled = ''
+  else delete title.dataset.scrolled
+  if (left < range) title.dataset.clipped = ''
+  else delete title.dataset.clipped
+}
+
+function restTitle(title) {
+  title.scrollLeft = 0
+  delete title.dataset.scrolled
+  delete title.dataset.clipped
+}
+
+/** Start a row's title marquee when needed; the returned function stays as the leave handler. */
+function titleMarquee(label) {
+  let frame = 0
+  const leave = () => {
+    cancelAnimationFrame(frame)
+    restTitle(label)
+  }
+  const enter = () => {
+    const range = label.scrollWidth - label.clientWidth
+    /** A barely-clipped title moving a few pixels reads as jitter, not a reveal. */
+    if (range <= MIN_TITLE_REVEAL_PX) return
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      placeTitle(label, range, range)
+      return
+    }
+    cancelAnimationFrame(frame)
+    let previous
+    let position = 0
+    const step = (now) => {
+      position += previous === undefined ? 0 : (now - previous) * TITLE_MARQUEE_PX_PER_MS
+      previous = now
+      placeTitle(label, Math.min(position, range), range)
+      if (position < range) frame = requestAnimationFrame(step)
+    }
+    frame = requestAnimationFrame(step)
+  }
+  return { enter, leave }
 }
 
 /** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
@@ -6775,7 +6856,20 @@ async function renderFlatList() {
       place.className = 'age'
       place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       row.append(icon, label, place)
-      row.onclick = () => showSession(meta.id)
+      /**
+       * A row in the flat list is also **the selected row**.
+       *
+       * It used to call `showSession` and stop there, so the list showed a conversation while no row carried
+       * `aria-selected` — and the team panel, which resolves its session from the selected row, could not find it.
+       * Measured: the panel rendered empty while the conversation beside it was open. The tree's own session row marks
+       * the selection through `chooseSelected`; the flat list is a view of the same selection and must say so too.
+       */
+      row.onclick = async () => {
+        await showSession(meta.id)
+        for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
+          item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
+        }
+      }
       li.append(row)
       return li
     }),
@@ -6972,6 +7066,15 @@ renderQueue()
 renderComposerState()
 /** The panel's first word: a conversation, or an invitation to start one. */
 paintEmptyState()
+/**
+ * The page is **ready** when boot has finished.
+ *
+ * A check that waits for an element is waiting for the markup, not for the behaviour: measured in part 9's action-states
+ * test, reading `#send` as soon as `#composer-card` existed saw `opacity: 1` because `renderComposerState()` had not run
+ * yet — the disabled state the test asserts is set by boot, not by the markup. One attribute at the end of boot is what
+ * lets a check wait for the real thing.
+ */
+document.body.dataset.ready = 'true'
 </script>
 <script>
 /**

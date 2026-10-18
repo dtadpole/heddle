@@ -33,10 +33,20 @@ export const scratchRoot = join(repoRoot, '.heddle-tmp')
 
 const scratchCounter = { value: 0 }
 
-/** A fresh fixture directory under the scratch root. */
+/**
+ * This run's own token, so two runs of the same check cannot share a fixture.
+ *
+ * Measured on 2026-10-17: a second verifier run in the same checkout (another session was running the same part)
+ * produced `ENOTEMPTY` on `.heddle-tmp/session-work-…`, `spawn … ENOENT` as one run's cleanup removed the other's
+ * binary path, and a session id with a `-2` suffix because two runs created one in the same second. The scratch root
+ * is a shared directory by design; the **names inside it** are what must be per-process.
+ */
+const runToken = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+
+/** A fresh fixture directory under the scratch root, named for this process. */
 export function fixtureDir(label) {
   scratchCounter.value += 1
-  const dir = join(scratchRoot, `${label}-${scratchCounter.value}`)
+  const dir = join(scratchRoot, `${label}-${runToken}-${scratchCounter.value}`)
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
   return dir

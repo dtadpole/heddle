@@ -808,6 +808,12 @@ test('the action controls carry DSH\u2019s states', async (context) => {
   try {
     await browser.goto(server.url)
     await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    /**
+     * Wait for **boot**, not for the markup. Measured under a full suite: the disabled send button was read as
+     * `opacity: 1` because `renderComposerState()` had not run — the element existed, so an element wait passed. The
+     * page sets `body[data-ready]` as its last boot act for exactly this.
+     */
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page finished booting')
     const style = (selector, props) =>
       browser.evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)})
