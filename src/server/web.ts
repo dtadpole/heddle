@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { runTurn } from '../agent/loop.ts'
 import { reasoningLevelFor } from '../llm/types.ts'
 import { logFileName } from './log-download.ts'
+import { MAX_UPLOAD_BYTES, saveUpload } from './uploads.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
@@ -684,6 +685,39 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       const status = message.includes('is not a file') ? 404 : 415
       respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
     }
+    return
+  }
+
+  /**
+   * A file the person chose on their own computer, stored where the agent can read it.
+   *
+   * `POST /api/uploads?name=<encoded>` with the bytes as the body, and the answer is the absolute path
+   * the composer puts in the draft. This is the route behind the `+` menu's **File** item: a browser's
+   * native picker does not tell a page where the file lives (by design), so the only honest way to turn
+   * "this file on my computer" into heddle's substrate — a path `read_file` can open — is to copy the
+   * bytes into the harness's own store and name that copy.
+   *
+   * Three rules the route keeps rather than trusting the page: the body is capped at the same ceiling
+   * as a turn; an empty body is refused instead of creating an empty file; and the name is sanitised by
+   * `saveUpload` before any path is built, so a hand-made request cannot choose where the file lands.
+   */
+  if (url.pathname === '/api/uploads' && request.method === 'POST') {
+    const chunks: Buffer[] = []
+    let bytes = 0
+    for await (const chunk of request) {
+      bytes += (chunk as Buffer).length
+      if (bytes > MAX_UPLOAD_BYTES) {
+        respond(response, 413, 'text/plain', 'the file is larger than this server accepts\n')
+        return
+      }
+      chunks.push(Buffer.from(chunk))
+    }
+    if (bytes === 0) {
+      respond(response, 400, 'text/plain', 'an empty file has nothing to add\n')
+      return
+    }
+    const saved = saveUpload(url.searchParams.get('name') ?? 'file', Buffer.concat(chunks))
+    respond(response, 200, 'application/json', `${JSON.stringify(saved)}\n`)
     return
   }
 

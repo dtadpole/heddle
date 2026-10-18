@@ -1506,7 +1506,7 @@
   #composer-status .stat-ring-track { fill: none; stroke: var(--border-strong); stroke-width: 2; }
   #composer-status .stat-ring-fill { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; }
   #composer-status [hidden] { display: none; }
-  /** The file-path menu opened by `+`, floating above the card on the raised surface. */
+  /** The menu opened by `+`: the file picker's action and the workspace tree, floating above the card. */
   #attach-menu {
     position: absolute; z-index: 6; left: 50%; bottom: calc(100% - .2rem); transform: translateX(-50%);
     width: min(92%, 512px); max-height: 15rem; overflow-y: auto; padding: .25rem;
@@ -2317,7 +2317,7 @@
         turn does — one action at a time, in one place, which is DSH's own rule.
       -->
       <div id="prompt-tools">
-        <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" title="Insert a file path">+</button>
+        <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" title="Add a file or insert a workspace path">+</button>
         <!--
           The access mode this session runs under, and the control that changes it. DSH's permission select:
           a shield glyph, the mode's name and a chevron, opening a menu whose current entry carries a check.
@@ -2368,7 +2368,13 @@
       <span data-stat="context"></span>
     </span>
   </div>
-  <div id="attach-menu" role="menu" aria-label="Insert a file path" hidden></div>
+  <div id="attach-menu" role="menu" aria-label="Add a file or insert a file path" hidden></div>
+  <!--
+    The `+` menu's computer-side half: the operating system's file picker. A browser does not reveal
+    where a chosen file lives, so the page uploads the bytes and receives back the path the harness
+    stored them at — a path the agent's `read_file` can open.
+  -->
+  <input type="file" id="attach-file" multiple hidden>
   <!--
     The access menu and the full-access risk gate. Both live outside the form and above the card: the menu
     belongs in viewport coordinates (it opens upward from a chip at the bottom), and the gate is a modal asked
@@ -4494,6 +4500,7 @@ const sendButton = document.getElementById('send')
 const stopButton = document.getElementById('stop')
 const attachButton = document.getElementById('attach')
 const attachMenu = document.getElementById('attach-menu')
+const attachFileInput = document.getElementById('attach-file')
 const accessButton = document.getElementById('access')
 const statusBar = document.getElementById('composer-status')
 
@@ -5483,11 +5490,13 @@ async function stopTurn() {
 stopButton.addEventListener('click', () => void stopTurn())
 
 /**
- * The `+` menu: insert a workspace file's path at the cursor.
+ * The `+` menu: add a file from this computer, or insert a workspace file's path at the cursor.
  *
- * DSH's `+` opens files and commands; heddle's agent already reads files by path, so the useful half here is
- * the path itself — one level at a time, the same shape `/api/tree` serves, so a large workspace is never
- * walked to open a menu.
+ * DSH's `+` opens files and commands. Heddle adds exactly the file half — no commands, no goal or plan
+ * entries — because the agent already reads files by path. The `File` item is the computer-side source
+ * (the operating system's picker; the bytes are stored and the stored path is inserted), and the
+ * workspace tree below it is the existing source, walked one level at a time so a large folder is never
+ * read to open a menu.
  */
 let attachTrail = []
 function closeAttachMenu() {
@@ -5505,6 +5514,26 @@ function insertAtCursor(text) {
 }
 function renderAttachMenu(node) {
   attachMenu.replaceChildren()
+  /**
+   * The menu's one computer-side action, and DSH's first item on its own `+`: choose a file with the
+   * operating system's picker. It sits above the workspace tree because the tree can only offer files
+   * already inside a registered root, while this is how a file from anywhere else gets in.
+   *
+   * It is drawn at **every level of the tree**, not only at the root. Measured in cycle 2: descending
+   * into a folder replaced the menu with that folder's children, so a person already inside the tree
+   * had to walk back up before they could add a file from their computer; DSH's flat menu never takes
+   * its `File` away, and neither does this one now.
+   */
+  const file = document.createElement('button')
+  file.type = 'button'
+  file.className = 'attach-add-file'
+  file.textContent = 'File'
+  file.title = 'Add a file from this computer'
+  file.addEventListener('click', () => {
+    closeAttachMenu()
+    attachFileInput.click()
+  })
+  attachMenu.append(file)
   if (attachTrail.length > 0) {
     const up = document.createElement('button')
     up.type = 'button'
@@ -5574,6 +5603,49 @@ document.addEventListener('click', (clickEvent) => {
 })
 document.addEventListener('keydown', (keyEvent) => {
   if (keyEvent.key === 'Escape' && !attachMenu.hidden) closeAttachMenu()
+})
+
+/**
+ * Put files chosen with the picker into the draft, as the stored paths the agent can read.
+ *
+ * One request per file rather than one multipart body: the server's route takes the raw bytes of one
+ * file and answers with one path, and a failed file names itself in the note instead of failing the
+ * batch silently. The draft is touched only after every file has a path, so a partial upload never
+ * leaves a conversation pointing at a file that was not stored.
+ */
+async function addPickedFiles(files) {
+  const paths = []
+  for (const file of files) {
+    try {
+      const response = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
+      if (!response.ok) {
+        const detail = (await response.text()).trim()
+        throw new Error(detail.length > 0 ? detail : `the server answered ${response.status}`)
+      }
+      paths.push((await response.json()).path)
+    } catch (error) {
+      showAttachFailure(files, error)
+      return
+    }
+  }
+  if (paths.length > 0) insertAtCursor(paths.join('\n'))
+}
+
+/** Say why a chosen file could not be added, in the menu the person opened. */
+function showAttachFailure(files, error) {
+  attachMenu.replaceChildren()
+  const note = document.createElement('div')
+  note.className = 'meta'
+  note.textContent = `could not add ${files.map((file) => file.name).join(', ')}: ${(error && error.message) || error}`
+  attachMenu.append(note)
+  attachMenu.hidden = false
+  attachButton.setAttribute('aria-expanded', 'true')
+}
+
+attachFileInput.addEventListener('change', () => {
+  const files = [...(attachFileInput.files ?? [])]
+  attachFileInput.value = ''
+  if (files.length > 0) void addPickedFiles(files)
 })
 
 /**

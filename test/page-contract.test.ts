@@ -267,3 +267,17 @@ test('the model seat keeps the two tiers, the effort caption and the record that
   )
   assert.match(page, /placeModelMenu\(\)/, 'the menu is placed by script rather than by a css ancestor')
 })
+
+test('the + menu carries the computer-side File action and the input it drives', () => {
+  /**
+   * The Add File gesture is three pieces that a rewrite can silently drop while the page still looks
+   * right: the menu item that names DSH's own label (`File`), the hidden input the item invokes (a
+   * browser only reveals a chosen file through that input's change event), and the route that stores
+   * the bytes and answers with the path. The browser check in `_verifiers_/80-web-ui/check-composer.mjs`
+   * judges the gesture end to end; this is the removal detector underneath it.
+   */
+  assert.match(page, /<input type="file" id="attach-file" multiple hidden>/, 'the picker input exists')
+  assert.match(page, /file\.textContent = 'File'/, 'the menu item is labelled File, as DSH labels it')
+  assert.match(page, /`\/api\/uploads\?name=\$\{encodeURIComponent\(file\.name\)\}`/, 'the bytes go to the upload route')
+  assert.match(page, /paths\.push\(\(await response\.json\(\)\)\.path\)/, 'and the answer path is what the draft receives')
+})

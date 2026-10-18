@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, isolatedHome, removeDir, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The composer's submission gestures and the queue buffer, judged in a browser.
@@ -78,6 +78,8 @@ async function startServer(label, options = {}) {
     double,
     /** The fixture folder, for a test that needs a real file for the attach menu to offer. */
     work,
+    /** The fixture home, so a test can say where an uploaded file must land. */
+    home,
     url: child.url,
     close: async () => {
       child.kill()
@@ -989,5 +991,149 @@ test('the context gauge uses a window the provider reports, and stays blank when
   } finally {
     browser2.close()
     await bare.close()
+  }
+})
+
+/**
+ * The `+` menu's one new capability: **Add File**, chosen from this computer.
+ *
+ * Measured from DSH's own `+` on 2026-10-17: its first item is `File`, choosing it invokes a hidden
+ * `<input type="file" multiple>` (the operating system's picker, not a workspace browser), and the
+ * composer receives the files as pending attachments. Heddle's substrate is a path the agent's
+ * `read_file` can open, not a provider attachment, so the honest form of the same gesture is: the
+ * picker's file is uploaded to `$HEDDLE_HOME/uploads/`, and **that path lands in the draft**.
+ *
+ * The test drives the real gesture — open the menu, choose File, put a real file in the input the way
+ * the picker's change event does — and judges both halves: the draft names a stored file, and the bytes
+ * on disk are the file that was chosen.
+ */
+test('the + menu adds a file from this computer, and the draft receives its stored path', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('add-file')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    /** A real file outside the workspace, which is the case a workspace-only menu cannot serve. */
+    const chosen = join(server.work, 'from-picker.md')
+    writeFileSync(chosen, '# from the picker\n\nhello\n')
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+
+    /**
+     * Count the picker invocations without opening one: headless Chrome has no native dialog to show,
+     * and the claim is that the handler asks for the picker, not that a window appeared.
+     */
+    await browser.evaluate(`(() => {
+      window.__filePickerClicks = 0
+      const original = HTMLInputElement.prototype.click
+      HTMLInputElement.prototype.click = function (...args) {
+        if (this.type === 'file') {
+          window.__filePickerClicks += 1
+          return undefined
+        }
+        return original.apply(this, args)
+      }
+      return true
+    })()`)
+
+    await browser.evaluate('document.getElementById("attach").click()')
+    assert.ok(await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000), 'the + menu opens')
+    const findFile = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File')`
+    assert.ok(await browser.waitFor(`${findFile} !== undefined`, 10_000), 'the menu offers File')
+    await browser.evaluate(`${findFile}.click()`)
+    assert.equal(await browser.evaluate('window.__filePickerClicks'), 1, 'choosing File asks for the file picker')
+    assert.equal(await browser.evaluate('document.getElementById("attach-menu").hidden'), true, 'and closes the menu')
+
+    /** Put the file into the hidden input the way the picker's own change event does. */
+    const documentNode = await browser.send('DOM.getDocument', { depth: 2, pierce: true })
+    const found = await browser.send('DOM.querySelector', { nodeId: documentNode.result.root.nodeId, selector: '#attach-file' })
+    assert.ok(found.result?.nodeId, 'the composer carries a file input for the picker')
+    await browser.send('DOM.setFileInputFiles', { files: [chosen], nodeId: found.result.nodeId })
+
+    assert.ok(
+      await browser.waitFor(`document.querySelector('#prompt textarea').value.includes('from-picker.md')`, 15_000),
+      'the draft receives a path for the chosen file',
+    )
+    const draft = await browser.evaluate('document.querySelector("#prompt textarea").value')
+    assert.ok(draft.startsWith(server.home), `the path is inside the harness home (${draft})`)
+    assert.match(draft, /[/\\]uploads[/\\]/, 'and inside the upload directory the endpoint owns')
+    assert.ok(existsSync(draft), 'the stored file exists')
+    assert.equal(readFileSync(draft, 'utf8'), '# from the picker\n\nhello\n', 'with the bytes that were chosen')
+
+    /** Evidence for the loop's document: the draft holding the path, the menu closed. */
+    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-1-add-file.png')
+    mkdirSync(dirname(evidence), { recursive: true })
+    await browser.screenshot(evidence)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The File action is not a property of the menu's root level.
+ *
+ * Measured from DSH's `+` on 2026-10-17: it is a flat menu and `File` is always its first entry. Heddle's
+ * menu also walks the workspace tree, and cycle 2's measurement found the consequence: descending into a
+ * folder replaced everything with that folder's children, so a person already inside the tree had to walk
+ * back up before they could add a file from their computer. The claim is the same at every level: `File`
+ * is offered, and choosing it asks for the picker.
+ */
+test('the File action stays available while the workspace tree is open', async (context) => {
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('add-file-nested')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  try {
+    writeFileSync(join(server.work, 'note.md'), '# a note\n')
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("attach") !== null', 20_000)
+    const registered = await browser.evaluate(`(async () => {
+      const response = await fetch('/api/workspaces', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: ${JSON.stringify(server.work)} }),
+      })
+      return response.status
+    })()`)
+    assert.equal(registered, 200, 'the fixture folder is a workspace root')
+
+    await browser.evaluate(`(() => {
+      window.__filePickerClicks = 0
+      const original = HTMLInputElement.prototype.click
+      HTMLInputElement.prototype.click = function (...args) {
+        if (this.type === 'file') {
+          window.__filePickerClicks += 1
+          return undefined
+        }
+        return original.apply(this, args)
+      }
+      return true
+    })()`)
+
+    await browser.evaluate('document.getElementById("attach").click()')
+    assert.ok(await browser.waitFor('document.getElementById("attach-menu").hidden === false', 10_000), 'the + menu opens')
+    const rootLabel = server.work.split('/').filter(Boolean).pop() + '/'
+    const root = `Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === ${JSON.stringify(rootLabel)})`
+    assert.ok(await browser.waitFor(`${root} !== undefined`, 10_000), 'the workspace root is listed')
+    await browser.evaluate(`${root}.click()`)
+    /** Wait for the **descended** level to be drawn, or the stale root menu answers for it. */
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#attach-menu button')).some((item) => item.textContent === '↑ up')`, 10_000),
+      'the folder level is drawn',
+    )
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#attach-menu button')).some((item) => item.textContent === 'File')`, 10_000),
+      'descending into a folder still offers File',
+    )
+    await browser.evaluate(`Array.from(document.querySelectorAll('#attach-menu button')).find((item) => item.textContent === 'File').click()`)
+    assert.equal(await browser.evaluate('window.__filePickerClicks'), 1, 'and choosing it still asks for the picker')
+    assert.equal(await browser.evaluate('document.getElementById("attach-menu").hidden'), true, 'and closes the menu')
+
+    const evidence = join(repoRoot, '_context_', 'add-file', 'cycle-2-file-inside-folder.png')
+    mkdirSync(dirname(evidence), { recursive: true })
+    await browser.screenshot(evidence)
+  } finally {
+    browser.close()
+    await server.close()
   }
 })

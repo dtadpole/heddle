@@ -1,9 +1,9 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 
+import { heddleHome } from '../config/schema.ts'
 import { SandboxUnavailableError, selectBackend, type ConfinedArgv, type SandboxBackend } from './backend.ts'
 import { ESCALATION_TARGETS } from './escalation.ts'
 import { canonical, contains } from './paths.ts'
@@ -247,7 +247,15 @@ export class SandboxService extends Service {
      */
     const allowed = [
       ...(mode === 'workspace-write' ? writableRoots(this.policy(mode)) : [this.workspaceRoot, ...this.extraWritableRoots]),
-      join(homedir(), '.heddle'),
+      /**
+       * The harness's own directory, resolved the way the rest of the program resolves it.
+       *
+       * It used to be hard-coded to `~/.heddle`, which is the same path only when `$HEDDLE_HOME` is
+       * unset: with an override, a confined run could not read the profile it was started from — or an
+       * upload this server had just stored under `$HEDDLE_HOME/uploads/`. The rule the comment above
+       * states is about the harness's directory, so it now follows that directory.
+       */
+      canonical(heddleHome()),
     ]
     if (allowed.some((root) => contains(root, target))) return target
     throw new SandboxDenial(
