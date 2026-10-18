@@ -214,3 +214,30 @@ and the probe clicks and reads in the same task, so the unchanged counts prove n
 settle wait after each toggle and after typing (plus the async render), the same class of bug the split-bar
 check hit earlier. Until then those two states are unknown on the DSH side; heddle's side is measured and
 works.
+
+## Round 9: settle waits turned the async states into numbers, and the sidebar collapse is confirmed
+
+With a 600–700ms settle after every toggle and keystroke, the DSH side reads:
+
+| State | DSH | heddle |
+|---|---|---|
+| collapse turns | 34 → **28** rows (the label flips to "Expand turns", so the restore click in the probe found no control) | 15 → **6** → 15 |
+| collapse calls | 28 → **11** rows (same label flip) | 15 → 15 (no call rows in this session) |
+| search "not-a-real-term-xyz" | 11 → 11 (still unfiltered) | 15 → **4** → 15 |
+| sidebar at 1000px | **35px** (collapsed to a rail) | 352px (unchanged) |
+| sidebar at 1600px | 256px | 352px |
+
+What this settles:
+
+- **DSH's collapse controls really do fold rows** (turns 34→28, calls 28→11). Heddle's turns collapse is
+  measured and works (15→6); its calls collapse changes nothing on a session with no call rows, so it is not
+  yet evidence of disagreement — a session with tool calls is needed to compare this state.
+- **DSH's search is still unmeasured**: a native value setter plus an `input` event left the row count at 11
+  under a nonsense term. Its input is likely controlled and needs real key events (`Input.insertText` /
+  `Input.dispatchKeyEvent`) before the debounce; that is the probe's next fix, not a heddle finding.
+- **The narrow-width difference is now named**: DSH collapses its navigation to a **35px rail** at 1000px;
+  heddle keeps its 352px sidebar and squeezes the trajectory content column to 522px against DSH's 815px.
+  The driver is a responsive sidebar collapse in the shell, which heddle does not have.
+
+Deliberate difference still open: **virtualisation** (DSH keeps ~34 DOM rows at every scroll position; heddle
+renders the ledger whole). Recorded for the owner's decision rather than copied silently.

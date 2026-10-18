@@ -19,7 +19,8 @@
           815
         ],
         "rowHeight": 30,
-        "panel": null
+        "panel": null,
+        "sidebar": 35
       },
       "1600": {
         "table": 1313,
@@ -28,7 +29,8 @@
           1191
         ],
         "rowHeight": 30,
-        "panel": null
+        "panel": null,
+        "sidebar": 256
       },
       "base": {
         "table": 1153,
@@ -37,7 +39,8 @@
           1031
         ],
         "rowHeight": 30,
-        "panel": null
+        "panel": null,
+        "sidebar": 256
       }
     },
     "scroll": {
@@ -69,21 +72,23 @@
     "collapse": {
       "base": 34,
       "turns": {
-        "after": 34,
-        "restored": 34,
-        "pressed": "false"
+        "clicked": "clicked",
+        "after": 28,
+        "restored": 11
       },
       "calls": {
-        "after": 34,
-        "restored": 34,
-        "pressed": "false"
+        "clicked": "clicked",
+        "after": 11,
+        "restored": 11
       }
     },
     "search": {
-      "base": 28,
-      "filtered": 28,
-      "cleared": 28
-    }
+      "base": 11,
+      "typed": "typed",
+      "filtered": 11,
+      "cleared": 11
+    },
+    "sidebar": 256
   },
   "heddle": {
     "label": "heddle",
@@ -104,7 +109,8 @@
           522
         ],
         "rowHeight": 30,
-        "panel": 352
+        "panel": 352,
+        "sidebar": 352
       },
       "1600": {
         "table": 1244,
@@ -113,7 +119,8 @@
           1122
         ],
         "rowHeight": 30,
-        "panel": 352
+        "panel": 352,
+        "sidebar": 352
       },
       "base": {
         "table": 1084,
@@ -122,7 +129,8 @@
           962
         ],
         "rowHeight": 30,
-        "panel": 352
+        "panel": 352,
+        "sidebar": 352
       }
     },
     "scroll": {
@@ -132,20 +140,22 @@
     "collapse": {
       "base": 15,
       "turns": {
+        "clicked": "clicked",
         "after": 6,
-        "restored": 15,
-        "pressed": "false"
+        "restored": 15
       },
       "calls": {
+        "clicked": "clicked",
         "after": 15,
-        "restored": 15,
-        "pressed": "false"
+        "restored": 15
       }
     },
     "search": {
       "base": 15,
+      "typed": "typed",
       "filtered": 4,
       "cleared": 15
-    }
+    },
+    "sidebar": 352
   }
 }
