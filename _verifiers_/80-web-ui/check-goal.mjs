@@ -453,11 +453,40 @@ test('an active goal is visible in the chat window, live, without a reload', asy
         'Goal objective',
         'the objective is named',
       )
-      assert.equal(
-        await browser.evaluate('document.querySelector(\'#goal-actions button[data-goal-action="pause"]\').getAttribute("aria-label")'),
-        'Pause goal',
-        'an action says what it acts on, like DSH\'s "Pause goal"',
-      )
+      /**
+       * The ledger in `_context_/dsh-mechanisms/goal-ui-parity.md` is what these assertions encode: DSH's own
+       * dock was measured live (127.0.0.1:8080) and each row is either matched here or kept with a reason.
+       */
+      assert.equal(await browser.evaluate('document.getElementById("goal-phase").textContent'), 'Ongoing Goal', 'DSH words the phrase, not the phase name')
+      const verb = JSON.parse(await browser.evaluate(`(() => {
+        const b = document.querySelector('#goal-actions button[data-goal-action="pause"]')
+        const s = getComputedStyle(b)
+        const r = b.getBoundingClientRect()
+        return JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height), radius: s.borderRadius, border: s.borderStyle, svg: b.querySelector('svg') !== null, aria: b.getAttribute('aria-label') })
+      })()`))
+      assert.deepEqual(verb, { w: 28, h: 28, radius: '999px', border: 'none', svg: true, aria: 'Pause goal' }, 'the verb is a 28px round icon button, as measured on DSH')
+      const textVerbs = JSON.parse(await browser.evaluate(`JSON.stringify(Array.from(document.querySelectorAll('#goal-actions button')).filter((b) => (b.textContent || '').trim().length > 0).map((b) => b.textContent.trim()))`))
+      assert.deepEqual(textVerbs, [], 'every verb is an icon button, none of them text')
+      const dockStyle = JSON.parse(await browser.evaluate(`(() => {
+        const el = document.getElementById('goal-bar')
+        const s = getComputedStyle(el)
+        const r = el.getBoundingClientRect()
+        return JSON.stringify({ border: s.borderStyle, radius: s.borderRadius, gap: s.gap, h: Math.round(r.height) })
+      })()`))
+      assert.equal(dockStyle.border, 'none', 'the dock has no border, like DSH\'s')
+      assert.equal(dockStyle.radius, '12px', 'and DSH\'s 12px radius')
+      assert.equal(dockStyle.gap, '10px', 'and its 10px gap')
+      assert.ok(dockStyle.h <= 40, 'the row stays a single composer-height row')
+      const surface = await browser.evaluate('getComputedStyle(document.getElementById("goal-bar")).boxShadow')
+      assert.notEqual(surface, 'none', 'DSH gives the row a hairline ring and a soft shadow rather than a fill')
+      assert.equal(await browser.evaluate('getComputedStyle(document.getElementById("goal-bar")).backgroundColor'), 'rgba(0, 0, 0, 0)', 'and no fill behind it')
+      const rounds = JSON.parse(await browser.evaluate(`(() => {
+        const el = document.getElementById('goal-rounds')
+        const r = el.getBoundingClientRect()
+        return JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height), title: document.getElementById('goal-bar').title })
+      })()`))
+      assert.ok(rounds.w <= 1 && rounds.h <= 1, 'the round count is not visible text — DSH keeps it in its info popover')
+      assert.match(rounds.title, /round \d+\/500/, 'but it is still exposed, as the dock\'s title')
 
       // The driver is already pushing rounds: the count must move without a reload.
       await browser.waitFor('Number(document.getElementById("goal-rounds").textContent.split(" ")[1].split("/")[0]) >= 1', 20_000)
