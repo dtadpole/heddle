@@ -1451,3 +1451,49 @@ test('a long turn is not cut at eight rounds, and a turn the loop does stop says
     await short.close()
   }
 })
+
+test('the live state is a shimmer on the words, not a band across the row', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's `TextShimmer` (`dsh-client-ui-primitives/TextShimmer.module.css`) tints a **copy of the text**: a 105° mask
+   * with a 40%–60% band, 1.5s, a 0.3s delay, `steps(48, end)`, holding its end position for the last third. A first
+   * pass here reproduced the mask as a full-row overlay, which painted a bright horizontal ribbon sweeping across a
+   * streaming answer — the owner saw it as a flashing band. This pins the corrected shape: the answer row carries no
+   * sweep pseudo-element, and a running process row's title is what shimmers.
+   */
+  const server = await startServer('shimmer-live')
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        document.getElementById('log').insertAdjacentHTML('beforeend', '<div class="turn assistant" data-kind="assistant" data-state="running"><div class="markdown">a streaming answer</div></div><details class="turn tool" data-kind="tool" data-state="running"><summary><span class="title">bash</span><span class="hint">running</span></summary></details>')
+        const answer = document.querySelector('.turn.assistant[data-state="running"]')
+        const title = document.querySelector('details.turn.tool[data-state="running"] > summary .title')
+        const before = getComputedStyle(answer, '::before')
+        const shimmer = getComputedStyle(title)
+        return {
+          ribbon: before.content,
+          ribbonAnimation: before.animationName,
+          caret: getComputedStyle(answer, '::after').content,
+          titleAnimation: shimmer.animationName,
+          duration: shimmer.animationDuration,
+          timing: shimmer.animationTimingFunction,
+          clip: shimmer.backgroundClip || shimmer.webkitBackgroundClip,
+        }
+      })())`),
+    )
+    assert.equal(state.ribbon, 'none', 'the streaming answer has no row-wide sweep')
+    assert.equal(state.ribbonAnimation, 'none', 'and nothing animates across it')
+    assert.equal(state.caret, '"▍"', 'the caret alone marks the arriving answer, as the reference keeps for reduced motion')
+    assert.equal(state.titleAnimation, 'heddle-row-shimmer', 'the running process row’s title is what shimmers')
+    assert.equal(state.duration, '1.5s', 'at the reference’s duration')
+    assert.match(state.timing, /^steps\(48/, `with its stepped timing (${state.timing})`)
+    assert.equal(state.clip, 'text', 'through a text clip, so the band moves under the glyphs and nowhere else')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

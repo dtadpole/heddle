@@ -640,28 +640,44 @@
   .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: 12.5px; line-height: 19px; background: none; padding: 0; }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
   /**
-   * **The live state**, read from DSH's own stylesheets: a row that is still arriving carries a slow masked sweep — its
-   * `.sweep` is `mask-image: linear-gradient(105deg, transparent 0, black 40%, black 60%, transparent 100%)` driven by a
-   * `shimmer-sweep` keyframe — rather than only a static caret. This adds that sweep on top of the caret, at the same
-   * 105° angle, and lets a reader who asked for reduced motion keep the caret alone.
+   * **The live state is a shimmer on the words, never a band across the row.**
+   *
+   * The reference's `TextShimmer` (`dsh-client-ui-primitives/TextShimmer.module.css`) layers a **tinted copy of the
+   * text itself**: a 105° mask with a 40%–60% band, `color: var(--dsw-alias-label-shimmer)` (a deep-blue mix in the
+   * dark theme), 1.5s, a 0.3s delay, `steps(48, end)`, and a keyframe that holds its end position for the last third
+   * of the cycle. Its own values are for a text label, and it is used on a tool row's summary text — not on the
+   * answer body. A first pass here copied the mask as a **full-row overlay**, which painted a bright horizontal
+   * ribbon sweeping across the answer; the owner saw it as a flashing band. The text-only equivalent below paints
+   * the same band under the glyphs of a running process row's title.
    */
-  .turn.assistant[data-state='running'] { position: relative; }
-  .turn.assistant[data-state='running']::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: linear-gradient(105deg, transparent 0%, color-mix(in oklab, var(--chat-text) 10%, transparent) 50%, transparent 100%);
-    -webkit-mask-image: linear-gradient(105deg, transparent 0%, #000 40%, #000 60%, transparent 100%);
-    mask-image: linear-gradient(105deg, transparent 0%, #000 40%, #000 60%, transparent 100%);
-    animation: heddle-shimmer-sweep 1.6s linear infinite;
+  details.turn[data-state='running'] > summary .title {
+    background-image: linear-gradient(
+      105deg,
+      currentColor 0%,
+      currentColor 42%,
+      color-mix(in oklab, var(--accent) 55%, currentColor) 50%,
+      currentColor 58%,
+      currentColor 100%
+    );
+    background-size: 260% 100%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    animation: heddle-row-shimmer 1.5s steps(48, end) 0.3s infinite;
   }
-  @keyframes heddle-shimmer-sweep {
-    from { transform: translateX(-100%); }
-    to { transform: translateX(100%); }
+  @keyframes heddle-row-shimmer {
+    0% { background-position: 200% 0; }
+    66.6667%, 100% { background-position: -60% 0; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .turn.assistant[data-state='running']::before { animation: none; }
+    details.turn[data-state='running'] > summary .title {
+      animation: none;
+      background: none;
+      color: inherit;
+      -webkit-text-fill-color: currentColor;
+    }
   }
   /**
    * A drawn answer is a document, so it follows the document's whitespace rather than the row's `pre-wrap`
