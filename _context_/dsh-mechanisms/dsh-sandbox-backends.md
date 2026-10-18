@@ -240,6 +240,79 @@ needs them.
 | the model believes it has write access it lacks | the denial marker gives the mode; the existing `sandbox:policy` context can be added in phase 1's docs pass |
 | `danger-full-access` accidentally wrapped | the provider is not consulted at all in that mode, and a unit test pins it |
 
+## Cycle 1 — the seam and the macOS rung
+
+### measured
+
+The gap was measured, not read: a scripted turn under a `workspace-write` profile ran
+`bash` with `echo escaped > <outsidePath>`, and the file landed **outside** the workspace
+(the turn reported the tool `ok`). That is the baseline this cycle removes. The reference
+facts re-measured while writing this: macOS `/usr/bin/sandbox-exec` applies DSH's exact
+profile forms here — read-only denies a `/tmp` write with `Operation not permitted` while
+`/dev/null` stays writable; a `(subpath "<workspace>")` grant allows the inside write and
+denies the outside one, including from a **grandchild** shell.
+
+### brainstorm
+
+| # | Candidate | Verdict |
+|---|---|---|
+| 1 | Inline `sandbox-exec` call inside the `bash` tool | **Discarded** — the profile, selection and classification would live in a tool; the fs fence and any future executor would duplicate them, and there is nowhere to hang the probe or the fail-closed error |
+| 2 | A backend seam with pure profile builders, a platform chain, a cached probe, per-call wrap, and a shared `writableRoots` (DSH's shape) | **Chosen** — one policy home, unit-testable profile text, one place to fail closed, and the fence and kernel profile cannot drift |
+| 3 | Operator-supplied `runnerCommand`/shell-script wrapper | **Discarded** — an assertion without a probe, and a shell interpreter starts before the profile applies (DSH records the same caveat) |
+| 4 | Use a backend when present and silently run unconfined when absent | **Discarded** — the silent widening the whole mechanism exists to prevent; DSH fails closed with `SANDBOX_UNAVAILABLE` instead |
+| 5 | Keep refusing the shell in confined modes (status quo) | **Discarded as the end state** — safe but gives up the tool; it remains only as the fail-closed answer when no runner is usable |
+| 6 | Container / microVM / remote executor | **Discarded for this seam** — replaces the environment rather than adding a backend; same-world confinement is DSH's stated boundary too |
+| 7 | Node's permission model or `chroot` | **Discarded** — neither confines a descendant process tree to a writable-root set without a platform runner; `chroot` needs root |
+| 8 | Vendor DSH's packages as dependencies | **Discarded** — heddle does not depend on DSH; the job is the mechanism, and the seam is portable enough to implement here |
+| 9 | Landlock first (native addon) | **Discarded for cycle 1** — its launcher is a versioned external binary; the bwrap rung is the Linux phase-2 candidate |
+
+### understand and step back
+
+DSH's split is what makes the mode honest: the policy is a value resolved per call, the
+backend turns that value into a kernel profile and reports what it actually governed, and
+the consumer reports the model-visible fact. Heddle already has the policy row (the
+`permission/mode` event, resolution at the tool registry) and the in-process fence; it has
+no backend seam at all, and its `bash` is the unconfined shell.
+
+The step back changed the scope in two ways and kept one:
+
+- **Widened:** the previous cycle's claim "read-only refuses the shell" was a stand-in for
+  a confinement heddle did not have. With a backend, read-only can keep the shell and let
+  the kernel deny writes — a better answer, and the old checks must be rewritten rather
+  than left passing on a claim that is no longer the mechanism.
+- **Widened again:** a denied command must be reported as denied (model-visible marker and
+  `sandbox: { denied }` fact) and a runner failure must outrank that classification, or the
+  model learns the wrong lesson from an ordinary exit code.
+- **Kept narrow:** Linux rungs, the model-visible policy context and the escalation ladder
+  are cycle 2 and 3 work; the Windows ACL rung stays out because DSH itself ships it as a
+  separate external runner with partial enforcement, so heddle will fail closed and name it
+  as a remaining difference.
+
+### plan
+
+1. `src/sandbox/paths.ts` — move `canonical`/`contains` to one home used by the fence, the
+   policy and the profiles.
+2. `src/sandbox/policy.ts` — the mode vocabulary, `SandboxExecutionPolicy`, and the one
+   `writableRoots(policy)` the fence and every profile consume.
+3. `src/sandbox/backend.ts` — the contract (`ConfinedArgv` with enforcement, denial
+   signatures and runner-failure rules), `SandboxUnavailableError`, platform selection, and
+   the pure outcome classifier.
+4. `src/sandbox/seatbelt.ts` — the measured SBPL profile, probe, and the darwin backend.
+5. `src/sandbox/service.ts` — keep the public face, re-export the moved vocabulary, add a
+   `backend` config knob (`auto`/`none`, the latter for the fail-closed check) and
+   `confine(argv, mode)`.
+6. `src/tools/builtin.ts` — `bash` spawns the confined argv, classifies the result, reports
+   `sandbox` facts, and keeps the shell under read-only instead of refusing it.
+7. Tests: `test/sandbox-backend.test.ts` (roots, profile text, selection, classification,
+   fail-closed, full-access bypass) and `_verifiers_/75-permission-sandbox/check-shell-confinement.mjs`
+   (inside/outside, read-only, full access, descendant, `/dev/null`, false positive, no-backend).
+8. Docs: this block, the sandbox/verifier INDEX entries, and the limitation sentence in the
+   service that says the shell is not confined.
+
+### evidence
+
+Filled in after the implementation run below.
+
 ## Read next
 
 [`dsh-permission-modes.md`](dsh-permission-modes.md) for the session mode and the UI control this plan
