@@ -5054,6 +5054,32 @@ async function refreshSessions() {
   if (!response.ok) return
   const sessions = await response.json()
   /**
+   * The server's `running` flag is the authority: a turn whose end this page never saw — a failed turn, a reload
+   * mid-turn, a dropped stream — must not leave a session looking active, and a turn already running when the page
+   * loaded must look active now. The page used to keep only what the event stream told it, which is why a session
+   * that was not running at all could still show the running row.
+   */
+  if (Array.isArray(sessions)) {
+    const live = new Set(sessions.filter((entry) => entry !== null && typeof entry === 'object' && entry.running === true).map((entry) => String(entry.id ?? '')))
+    let changed = false
+    for (const id of [...runningSessions]) {
+      if (!live.has(id)) {
+        runningSessions.delete(id)
+        changed = true
+      }
+    }
+    for (const id of live) {
+      if (id.length > 0 && !runningSessions.has(id)) {
+        runningSessions.add(id)
+        changed = true
+      }
+    }
+    if (changed) {
+      paintRunningMarks()
+      refreshRunningStatus()
+    }
+  }
+  /**
    * The newest session is selected when nothing is yet.
    *
    * Without this the page starts attached to nothing: the tree appears, the log stays empty even though
@@ -6281,7 +6307,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         hideApproval()
         add('denied', payload.message)
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
-        if (typeof payload.session === 'string') runningSessions.delete(payload.session)
+        if (typeof payload.session === 'string') {
+          runningSessions.delete(payload.session)
+          paintRunningMarks()
+        }
         renderComposerState()
       }
     }

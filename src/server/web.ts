@@ -629,7 +629,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   if (url.pathname === '/api/sessions' && request.method === 'GET') {
-    respond(response, 200, 'application/json', `${JSON.stringify(ctx.session.list(), null, 2)}\n`)
+    /**
+     * Whether a session is running is the **server's** fact, and it is what the page's running marks and its
+     * "Weaving" row reconcile against. A page can miss the end of a turn (an error event, a reload mid-turn, a
+     * dropped stream); without an authoritative answer that miss became a session that never stops looking active.
+     */
+    const sessions = ctx.session.list().map((entry) => ({ ...entry, running: (state.running.get(entry.id) ?? 0) > 0 }))
+    respond(response, 200, 'application/json', `${JSON.stringify(sessions, null, 2)}\n`)
     return
   }
 

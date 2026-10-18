@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, httpConfig, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The chat view: one element per tool **call**, carrying its result.
@@ -23,10 +23,16 @@ const CAPABILITY = 'the Web UI'
 async function startServer(label, steps, options = {}) {
   const home = isolatedHome(`chat-${label}`)
   const work = fixtureDir(`chat-${label}-work`)
-  const { config } = scriptedConfig({
-    home,
-    steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
-  })
+  /**
+   * A failing endpoint, for the turn-failure path: a listening address nothing answers on is the cheapest way to make
+   * the provider call throw, which is the case where a page used to keep a session looking active forever.
+   */
+  const { config } = options.failing === true
+    ? { config: httpConfig({ home, name: 'bad', baseUrl: 'http://127.0.0.1:9', stream: true }) }
+    : scriptedConfig({
+        home,
+        steps: typeof steps === 'function' ? steps(work) : steps ?? [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'it listed the folder' }],
+      })
   const child = await startCli(
     /**
      * `HEDDLE_CHECK_PATCH` names a patch layer to use **instead of** the project's, so this check can run while
@@ -44,7 +50,7 @@ async function startServer(label, steps, options = {}) {
       join(repoRoot, 'cordis.yml'),
       ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []),
       '--endpoint',
-      'scripted',
+      options.failing === true ? 'bad' : 'scripted',
       '--session-root',
       join(home, 'sessions'),
       ...(options.maxRounds !== undefined ? ['--max-rounds', String(options.maxRounds)] : []),
@@ -1741,8 +1747,10 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
 
     /** Scrolling back to the floor re-engages following, as the reference's near-bottom test does. */
     await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    assert.ok((await distance()) <= 1, 'the floor is reachable again')
+    assert.ok(
+      await browser.waitFor('Math.round((() => { const log = document.getElementById("log"); return log.scrollHeight - log.scrollTop - log.clientHeight })()) <= 1', 10_000),
+      'the floor is reachable again',
+    )
     const markFollow = await rows()
     assert.ok(
       await browser.waitFor(`document.querySelectorAll("#log .turn").length > ${markFollow}`, 15_000),
@@ -1792,8 +1800,42 @@ test('a turn this page did not start still says Weaving', async (context) => {
     )
     const label = await browser.evaluate('document.querySelector("[data-chat-running] .label")?.textContent ?? null')
     assert.match(String(label), /^Weaving for \d+s ···$/, `with the reference's phrase (${label})`)
+    /**
+     * The list says the same thing the row does, which is what the page reconciles against: running while the turn
+     * runs, not running once it ends.
+     */
+    const during = await browser.evaluate("fetch('/api/sessions').then((r) => r.json()).then((list) => list[0]?.running ?? null)")
+    assert.equal(during, true, 'the session list reports the session running while the watched turn runs')
     await browser.waitFor('document.querySelector("[data-chat-running]") === null', 30_000)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("a watched answer")', 15_000), 'and the watched turn answers')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a failed turn leaves no session looking active, and no running row', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner's report: the running row showed for sessions that were not active at all. The mechanism was a turn
+   * that **failed**: the page had marked the session running on `model/request`, the failure event carried no session
+   * id, so nothing cleared the mark and a finished session kept its running row (and its sidebar spinner) until
+   * something else touched it. The server now names the session on the failure event and lists `running` per session,
+   * which the page reconciles against whenever it reads the list.
+   */
+  const server = await startServer('weaving-failure', undefined, { failing: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'this turn will fail')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.denied") !== null', 20_000), 'the failure is shown as a sentence')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 15_000), 'and the composer returns to Send')
+    assert.equal(await browser.evaluate('document.querySelectorAll("[data-chat-running]").length'), 0, 'no running row survives a failed turn')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 5_000), 'the page is idle again')
+    const running = await browser.evaluate("fetch('/api/sessions').then((r) => r.json()).then((list) => list[0]?.running ?? null)")
+    assert.equal(running, false, 'and the server does not call the session running')
   } finally {
     browser.close()
     await server.close()
