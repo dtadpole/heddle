@@ -190,13 +190,37 @@ test('a local configuration can exclude the repository’s offline default from 
   ]
   assert.deepEqual(defaultEndpoints().map((endpoint) => endpoint.name), ['scripted'], 'the only default is the offline fixture')
   const all = resolveEndpoints(configured, [])
-  assert.deepEqual(all.map((endpoint) => endpoint.name), ['scripted', 'claude-opus', 'plugboard-d'], 'the fixture is offered by default')
+  assert.deepEqual(
+    all.map((endpoint) => endpoint.name),
+    ['claude-opus', 'plugboard-d', 'scripted'],
+    'the fixture is offered by default, and the list is ordered by name rather than by which layer declared it',
+  )
   const filtered = resolveEndpoints(configured, [], {}, ['scripted'])
   assert.deepEqual(
     filtered.map((endpoint) => endpoint.name),
     ['claude-opus', 'plugboard-d'],
     'excluding it leaves the operator’s catalogue only',
   )
+})
+
+test('the endpoint list is ordered by name, wherever a row was declared', () => {
+  /**
+   * The order a person reads is the order the configuration **declared** things in — the repository's defaults
+   * first, then the configured layer, then the machine's own file — so the same set of backends appeared in a
+   * different order depending on which file mentioned them. Sorting by name makes the CLI listing, the Web UI's
+   * switcher and the "configured: …" half of an error message agree, and makes them predictable across machines.
+   */
+  const declared = [
+    { name: 'zeta', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:1' },
+    { name: 'alpha', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:2' },
+  ]
+  const machine = [{ name: 'mike', kind: 'openai-chat' as const, baseUrl: 'http://127.0.0.1:3' }]
+  assert.deepEqual(
+    resolveEndpoints(declared, machine).map((endpoint) => endpoint.name),
+    ['alpha', 'mike', 'scripted', 'zeta'],
+    'configured and machine rows interleave by name, and the offline fixture sorts with them',
+  )
+  assert.deepEqual(resolveEndpoints([], []).map((endpoint) => endpoint.name), ['scripted'])
 })
 
 test('a switch records the reasoning level with the model, and a switch that names neither clears both', () => {

@@ -155,7 +155,18 @@ export function resolveEndpoints(
     if (endpoint.apiKeyFile !== undefined) byName.set(endpoint.name, materializeKey(endpoint))
   }
   for (const name of exclude) byName.delete(name)
-  return [...byName.values()]
+  /**
+   * Sorted by name, always.
+   *
+   * Declaration order was the order this happened to merge in — defaults first, then the configured layer, then
+   * the machine's own file — so where a backend appeared in the CLI's listing, the Web UI's switcher and the
+   * "configured: …" half of an error message depended on **which file mentioned it**, not on anything a reader
+   * could predict. Two runs of the same configuration could even disagree, because the local file's rows are
+   * appended after the repository's. Sorting makes the one list a person picks a backend from stable and
+   * scannable, and the comparison is a plain code-unit one rather than a locale collation so the order does not
+   * depend on the machine's language settings.
+   */
+  return [...byName.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
 }
 
 /**
