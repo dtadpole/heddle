@@ -20,6 +20,24 @@ import { repoRoot } from '../_tools_/verify-runner/lib.mjs'
 
 const page = readFileSync(join(repoRoot, 'src', 'server', 'page.html'), 'utf8')
 
+test('the context gauge divides by the selected model\'s window, not the endpoint\'s', () => {
+  /**
+   * A gateway can serve a 1M deployment beside 272k ones, so the endpoint's single number is the wrong denominator
+   * for every model that is not the default — the gauge then reads as nearly full for a conversation nowhere near
+   * it. Measured 2026-10-18: `meta-codex` declares 272000 for the endpoint and 1000000 for `gpt-5.6-sol-ptu`, and
+   * the page divided by 272000 whichever model was selected.
+   *
+   * The page cannot be executed here, so this is a removal detector in the same sense as the checks around it: it
+   * asserts that the window comes from a resolver that consults the model's entry, and that no reading site still
+   * takes `endpoint.contextWindow` directly.
+   */
+  assert.match(page, /function windowFor\(option\)/, 'a resolver exists')
+  assert.match(page, /modelEntryOf\(option, selectedModelId\(option\)\)/, 'and it asks about the selected model')
+  const direct = [...page.matchAll(/(?:const|let)\s+window\s*=\s*endpoint\?\.contextWindow/g)]
+  assert.deepEqual(direct, [], 'no reading site falls back to the endpoint window behind the resolver\'s back')
+  assert.equal([...page.matchAll(/const window = windowFor\(endpoint\)/g)].length, 3, 'the gauge, its popover and the status bar all use it')
+})
+
 test('the sidebar toggle names the panel it controls and states both of its names', () => {
   /**
    * Measured from DSH on 2026-10-17: its control is at the top of the panel, its label is `Collapse sidebar` /

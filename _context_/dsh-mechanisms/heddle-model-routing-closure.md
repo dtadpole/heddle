@@ -163,6 +163,51 @@ Cycle 2 — where a model lives, not where its endpoint does
               displayed; three readers had taken it from the endpoint and none of them failed loudly.
 ```
 
+```
+Cycle 3 — the denominator a person reads
+  measured:   the last reading site of cycle 2's class, one layer out: the page. Three places chose a denominator
+              with `endpoint?.contextWindow` — the status bar's gauge, its popover, and the popover's rows — while
+              the catalogue the server sends already carries each model's own window. Measured from the built
+              server: meta-codex's endpoint declares 272000 and gpt-5.6-sol-ptu declares 1000000, so selecting
+              that model and sending a long conversation drew the gauge against 272k — "nearly full" for a
+              conversation nowhere near it. The same reading is what the popover printed as "used / window".
+  brainstorm: (a) divide by the largest window the endpoint offers — cheap, and wrong in the safe-looking
+              direction: it would understate every small model. (b) a page-side resolver that asks the catalogue
+              for the selected model's window and falls back to the endpoint's (chosen). (c) have the server send
+              a single `effectiveContextWindow` per session — right for the gauge, but the page also needs it
+              before a session exists (the composer, a fresh seat), so it cannot be the only source.
+              (d) remove the endpoint-level window from the payload so the mistake is unrepresentable — would break
+              the settings list, which legitimately describes an endpoint rather than a model.
+              chosen: (b)  discarded: (a) understates small models, (c) not available before a turn, (d) the
+              endpoint is still a fact worth showing
+  step back:  keep — this closes the class rather than adding a fourth fix to it. The three readers were the last
+              of them: a sweep for `endpoint?.contextWindow` and for `endpoint.model` in the page and the server
+              finds no other reading site that should have asked about the model, and the remaining
+              `request.model ?? endpoint.model` uses are correct (the request's model, falling back to the
+              default).
+  changed:    src/server/page.html — `windowFor(option)` resolves the selected model's window from the catalogue
+              and falls back to the endpoint's, and the three reading sites use it; src/server/page.html's
+              `window` in the status bar, the popover rows and the popover header no longer read the endpoint
+              directly. test/page-contract.test.ts — a removal detector that fails if a reading site goes back to
+              `endpoint?.contextWindow`.
+  delivered:  not restarted; the owner gated it. The built server's catalogue was read to confirm the data the
+              page now uses is present in ~/heddle-deploy/dist.
+  evidence:   before → after: the built catalogue reports gpt-5.6-sol-ptu at 1000000 while the endpoint says
+              272000, which is the number the page now divides by. The assertion shown to fail without the fix:
+              the new page-contract check went red against the reverted page.html and green against the fix; the
+              extracted module still parses under `node --check`.
+  reds:       none.
+  coverage:   the three reading sites and the catalogue data they consume. Not covered: the gauge's pixels, because
+              that is the browser's job and the verifier that judges the status bar needs a running daemon; and the
+              case of a model that declares a window the endpoint does not, which the resolver handles by
+              construction but no fixture exercises.
+  invariants: 456 unit checks green; page-contract 17/17; the page module parses, so a rename did not leave the UI
+              without behaviour — which is exactly what cycle 2's red taught.
+  landed:    committed in this cycle; the push and the deployment stay open until the owner allows the restart.
+  lessons:    the same fact has a reading site in the page as well as in the server. Sweeping one layer is not
+              sweeping the class, and a denominator that is wrong quietly is still wrong.
+```
+
 ## Read next
 
 [`../../_skills_/full-loop-goal/INDEX.md`](../../_skills_/full-loop-goal/INDEX.md) for the procedure this follows,
