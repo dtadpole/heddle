@@ -45,6 +45,12 @@ panel's right edge.
 the tree fills the panel's width, the session row's age is the right tail's only child (the pinned slot collapses when
 empty), and there is no "ad hoc" group at the bottom.
 
+## Tree item inset
+
+`tree-item-inset.png` — a hovered row at 1200×800 whose tint starts 12 pixels inside the panel and ends 12 pixels from
+the other edge, with the 5-pixel scrollbar still at the panel's right and the row's content in the search field's text
+column. The scrollable pane keeps the panel's full width; only the items are narrower.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

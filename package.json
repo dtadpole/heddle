@@ -38,7 +38,7 @@
     "plugin"
   ],
   "scripts": {
-    "build": "tsc && cp src/server/page.html dist/server/page.html",
+    "build": "tsc && cp src/server/page.html dist/server/page.html && cp node_modules/dompurify/dist/purify.min.js dist/purify.min.js",
     "check": "tsc --noEmit && tsc -p tsconfig.test.json",
     "start": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
@@ -48,6 +48,7 @@
     "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.5",
     "@deepseek-ai/schemastery": "^3.18.4",
+    "dompurify": "^3.4.16",
     "highlight.js": "^11.12.0",
     "js-yaml": "^4.3.2",
     "marked": "^18.1.0",

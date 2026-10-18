@@ -481,11 +481,11 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(panel.regionScrolls, true, `and it does scroll, because the fixture overflows (${panel.region.scrollHeight}/${panel.region.clientHeight})`)
 
     /**
-     * The list **fills the panel**: every row's paint runs from the panel's left edge to the scrollbar at its right
-     * one, at every depth, and its content uses the widest column that keeps it aligned — 12px in, where the
-     * `Workspaces` heading and the search field's box start, and 8px inside its own right edge, the reference's row
-     * rule. The tree's per-depth indent is the **content** inset (`depth * 14px`, the tree's documented rule), so a
-     * nested row's highlight does not step inward with it.
+     * The list spans the panel; the **rows are inset inside it**. The owner's report: a selected row's tint covered the
+     * full width, and it should stop inside the panel. Measured from the reference on 2026-10-17: panel 0→280, its
+     * workspace list 8→278, every row **12→268** — a 12-pixel inset on each side, radius 12. Heddle's pane keeps the full
+     * width (the 5px scrollbar stays at the panel's edge), so the rows take the same inset, and their content column
+     * lands on the search field's text: 20px in, 332px out.
      */
     const span = JSON.parse(
       await browser.evaluate(`(() => {
@@ -494,32 +494,37 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
         const regionBox = region.getBoundingClientRect()
         const root = document.querySelector('#tree .row')
         const child = document.querySelector('#tree li[data-kind="file"] > .row')
-        const heading = document.getElementById('workspaces-row').getBoundingClientRect()
+        const search = document.getElementById('session-search')
+        const searchBox = search.getBoundingClientRect()
+        const style = getComputedStyle(root)
         const round = Math.round
         return JSON.stringify({
           asideLeft: round(aside.left),
           asideRight: round(aside.right),
           regionLeft: round(regionBox.left),
           regionRight: round(regionBox.right),
-          contentRight: round(regionBox.left + region.clientWidth),
-          rootLeft: round(root.getBoundingClientRect().left),
-          rootRight: round(root.getBoundingClientRect().right),
-          rootPadLeft: parseFloat(getComputedStyle(root).paddingLeft),
-          rootPadRight: parseFloat(getComputedStyle(root).paddingRight),
+          scrollbarAt: round(regionBox.left + region.clientWidth),
+          rootBox: [round(root.getBoundingClientRect().left), round(root.getBoundingClientRect().right)],
+          rootRadius: style.borderRadius,
+          rootPadLeft: parseFloat(style.paddingLeft),
+          rootPadRight: parseFloat(style.paddingRight),
           childPadLeft: child === null ? null : parseFloat(getComputedStyle(child).paddingLeft),
-          headingLeft: round(heading.left)
+          searchTextLeft: round(searchBox.left + parseFloat(getComputedStyle(search).paddingLeft)),
+          searchTextRight: round(searchBox.right - parseFloat(getComputedStyle(search).paddingRight))
         })
       })()`),
     )
+    const contentLeft = Math.round(span.rootBox[0] + span.rootPadLeft)
+    const contentRight = Math.round(span.rootBox[1] - span.rootPadRight)
     assert.equal(span.regionLeft, span.asideLeft, 'the scrolling pane starts at the panel\'s left edge')
     assert.equal(span.regionRight, span.asideRight, 'and ends at its right edge')
-    assert.equal(span.rootLeft, span.asideLeft, 'a row\'s paint starts at the panel\'s left edge')
-    assert.equal(span.rootRight, span.contentRight, 'and ends at the scrollbar, not before it')
-    assert.equal(
-      Math.round(span.rootLeft + span.rootPadLeft), span.headingLeft,
-      `while its content starts where the Workspaces heading does (${span.rootPadLeft}px in)`,
-    )
-    assert.equal(span.rootPadRight, 8, 'and ends 8px inside its own edge, the reference\'s row rule')
+    assert.equal(span.scrollbarAt, span.asideRight - 5, 'so the 5-pixel scrollbar stays at the panel\'s edge')
+    assert.equal(span.rootBox[0], span.asideLeft + 12, 'a row\'s box is inset 12px from the panel\'s left edge')
+    assert.equal(span.rootBox[1], span.asideRight - 12, 'and 12px from its right edge — the reference\'s inset')
+    assert.equal(span.rootRadius, '12px', 'with the reference\'s rounding, so the tint stops inside the panel')
+    /** Rounded pixels on both sides: the field's padding is 7.2px, the row's is 8, so a one-pixel difference is rounding. */
+    assert.ok(Math.abs(contentLeft - span.searchTextLeft) <= 2, `the row\'s content starts at the search field\'s text column (${contentLeft} vs ${span.searchTextLeft})`)
+    assert.ok(Math.abs(contentRight - span.searchTextRight) <= 2, `and ends there (${contentRight} vs ${span.searchTextRight})`)
     assert.equal(
       Math.round(span.childPadLeft - span.rootPadLeft), 14,
       `with a child indenting its content by the tree\'s 14 pixels (${span.rootPadLeft} -> ${span.childPadLeft})`,

@@ -1100,6 +1100,16 @@
    * which is what made it easy to miss.
    */
   #tree, #tree ul, #tree ol { list-style: none; margin: 0; padding: 0; }
+  /**
+   * The rows are inset **inside** the scrolling pane; the pane itself still spans the panel.
+   *
+   * Measured from the reference at 1200×800 on 2026-10-17: panel 0→280, its workspace list 8→278, and every row
+   * **12→268** — a 12-pixel inset on each side, radius 12, so a selected row's tint stops inside the panel instead of
+   * running to its edges. Heddle's pane spans 0→352 as the owner asked, so the rows take the same 12-pixel inset: the
+   * left padding is 12, and the right is `12px - 5px` because the 5-pixel scrollbar sits in that space — 340 is the
+   * same 12 pixels from the panel's right edge.
+   */
+  #tree { padding-inline: 12px calc(12px - 5px); }
   #tree li { display: block; padding: 0; }
   /**
    * A group lays its children out at the **same** width as their parent: the indent is the row's content padding
@@ -1136,7 +1146,7 @@
      * row rule. The earlier 19.2/14.2 numbers lined the content up with the search *text*, which cost seven pixels on
      * the left and six on the right and made the rows read as a narrower column floating inside the panel.
      */
-    padding: 0 .5rem 0 calc(.75rem + var(--tree-depth, 0) * 14px);
+    padding: 0 .5rem 0 calc(.5rem + var(--tree-depth, 0) * 14px);
     border-radius: var(--radius-md);
     cursor: pointer;
   }
@@ -7951,8 +7961,14 @@ function kindIcon(kind, open = false) {
     const body = svgPath(
       'M9.96976 1.70572L13.1554 3.93629L10.9019 8.12317L11.5158 11.605L10.7192 12.7427L2.52767 7.00693L3.3243 5.86922L6.80612 5.25528L9.96976 1.70572Z',
     )
+    /**
+     * The needle's `d` is copied **verbatim**, spaces included. A hand-compacted version that broke each cubic into its own `C`
+     * (one coordinate pair per command) is an invalid path: the browser painted nothing, so the pin's head showed and its tail
+     * did not — the owner's report that the thin tail was missing. Verified by rendering the two paths in separate colours: the
+     * body painted, the malformed needle was blank.
+     */
     const needle = svgPath(
-      'M6.05285 9.47511C6.27284 9.16094C6.70586 9.08458C7.02003 9.30457C7.3342 9.52455C7.41055 9.95757C7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
+      'M6.05285 9.47511C6.27284 9.16094 6.70586 9.08458 7.02003 9.30457C7.3342 9.52455 7.41055 9.95757 7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
     )
     needle.setAttribute('fill', 'currentColor')
     if (kind === 'pin-fill') {

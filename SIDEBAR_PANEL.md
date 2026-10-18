@@ -351,6 +351,76 @@ reachable from the panel — recorded here as the consequence of the removal.
 
 Screenshot: [`_context_/sidebar-panel/parallel-roots.png`](_context_/sidebar-panel/parallel-roots.png).
 
+## Cycle: the row inset — the tint stops inside the panel
+
+**measured:** the reference at 1200×800, 2026-10-17. Panel 0→280; its workspace list 8→278 with
+`padding: 0 5px 16px 4px`; every tree row **12→268** — a **12-pixel inset on each side** — radius 12, `padding: 0 8px`,
+and its selected row's `rgba(255,255,255,.08)` tint painted **inside that box**, not across the panel. Row content starts
+at 20 from the panel's edge.
+
+**brainstorm:**
+
+1. **Inset the rows inside a full-width pane** — `#tree { padding-inline: 12px calc(12px - 5px) }`, so the rows' boxes
+   are 12→340 in a 0→352 pane and the 5px scrollbar stays at the panel's edge. *Chosen:* it is the reference's own
+   arrangement (its list is inset inside the panel and its rows inside the list), and it keeps the pane full-width as the
+   owner asked.
+2. **Inset the pane instead** (panel → 8px margins, list inside). *Discarded:* the owner's earlier requirement is that the
+   scrollable area fills the panel, and this moves the scrollbar away from its edge.
+3. **Give the row a margin instead of the list padding.** *Discarded:* equivalent geometry with two facts in two places;
+   one padding on the list states the inset once.
+4. **A wrapper `div` around the rows.** *Discarded:* a third element for a padding.
+5. **Inset only the hover/selected paint with a pseudo-element.** *Discarded:* the row's box is what the eye reads as the
+   item; painting the state elsewhere would leave the clickable area and the highlight disagreeing.
+
+**understand:** the reference insets the **row**, not the pane, because the pane must keep its scrollbar against the
+panel's edge while the items must read as discrete objects inside it. Heddle already had a full-width pane from the
+previous cycle; what it lacked was the row inset, so the tint ran edge to edge. This is a value/arrangement change.
+
+**step back:** the objective holds; one fact (the inset) with two consumers (box and radius) and one new property (the
+content column moves with it, 20/332). Nothing widens: the item's own padding and the list's inset together put the text
+back where the search field's text is.
+
+**plan:**
+
+- `#tree { padding-inline: 12px calc(12px - 5px) }` — 12 from the panel's left; 12 from its right less the 5px bar, so the
+  row's right edge is 12 from the panel's edge and the bar keeps its place.
+- the row's own padding becomes `.5rem` (8px) on both sides plus the depth indent: content at 20 (the search text's
+  column) and 332 (its right).
+- judged by part 11 (pane edges, row inset, radius, scrollbar at the edge, content column, 14px indent) and by the unit
+  contracts for the two CSS rules.
+
+**changed:** `src/server/page.html` — the list's padding and the row's padding;
+`_verifiers_/87-resizable-panels/check.mjs` — the geometry claims; `test/page-contract.test.ts` — the two rules.
+
+**evidence:** measured on the live daemon at 1200×800.
+
+| Element | Before | After | Reference |
+|---|---|---|---|
+| pane | 0→352 | 0→352 | 8→278 inside 280 |
+| row box | 0→347 | **12→340** | 12→268 |
+| row inset from the panel | 0 / 5 | **12 / 12** | 12 / 12 |
+| row radius | 12px | 12px | 12px |
+| hover/selected paint | 0→347 | **12→340** | inside the row box |
+| row content | 12 / 332 | **20 / 332** | 20 |
+| scrollbar | at 347 | at 347 | at the list's edge |
+
+Screenshot: [`_context_/sidebar-panel/tree-item-inset.png`](_context_/sidebar-panel/tree-item-inset.png) — a hovered row
+whose tint starts 12 pixels inside the panel.
+
+**reds:** none in part 11. Part 7's four reds are the concurrent session's in-flight row-tail and glide changes, named in
+the previous cycle.
+
+**coverage:** the inset at the collapsed rail (the rail has no rows, so it is vacuous), the search-results list (its own
+12px padding already insets its rows), and the transient selected state were read; the pinned row's tail was not
+re-measured this cycle.
+
+**invariants:** the pane still spans the panel and its scrollbar sits at the edge (asserted); the row content column is
+still the search field's text column (asserted within a rounded pixel); a child still indents 14px of content (asserted);
+hover and selection still paint on the row itself.
+
+**lessons:** a "full width" requirement is about the **scrollable region**; the items inside it are objects with their own
+edge. The two are separate facts and the reference states both.
+
 **lessons:** a scrollbar is geometry as well as paint. The measurable facts are `offsetWidth - clientWidth`,
 `scrollbar-gutter` and the end padding — and the first attempt failed on a property (`scrollbar-width: thin`) whose
 only effect was to switch the mechanism off, which is why the new contract asserts its **absence**.
