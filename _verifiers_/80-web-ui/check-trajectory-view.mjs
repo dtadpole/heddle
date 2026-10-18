@@ -275,6 +275,40 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(state.toolRowHeight, '30px', 'including the tool row — one line, as DSH draws it')
     assert.equal(state.tableFont, '12px', 'at DSH’s 12px table font')
 
+    // Batch D: the toolbar, the search field and the lane strip, against DSH's measured numbers.
+    const chrome = JSON.parse(
+      await browser.evaluate(`(() => {
+        const toolbar = document.getElementById('tr-toolbar')
+        const button = toolbar.querySelector('button')
+        const search = document.getElementById('tr-search')
+        const input = document.getElementById('tr-search-input')
+        const timeline = document.getElementById('timeline')
+        const laneLabel = document.querySelector('.tr-lane-label')
+        const style = (element) => getComputedStyle(element)
+        return JSON.stringify({
+          toolbarHeight: Math.round(toolbar.getBoundingClientRect().height),
+          buttonRadius: style(button).borderRadius,
+          buttonHeight: Math.round(button.getBoundingClientRect().height),
+          buttonColor: style(button).color,
+          searchHeight: Math.round(search.getBoundingClientRect().height),
+          searchWidth: Math.round(input.getBoundingClientRect().width),
+          timelineHeight: Math.round(timeline.getBoundingClientRect().height),
+          laneLabel: { font: style(laneLabel).fontSize + '/' + style(laneLabel).fontWeight, color: style(laneLabel).color, transform: style(laneLabel).textTransform, spacing: style(laneLabel).letterSpacing },
+        })
+      })()`),
+    )
+    assert.equal(chrome.toolbarHeight, 28, 'the toolbar is DSH’s 28px tall')
+    assert.equal(chrome.buttonRadius, '8px', 'its buttons are 8px rounded')
+    assert.equal(chrome.buttonHeight, 20, 'at the 20px control height')
+    assert.equal(chrome.buttonColor, 'rgb(173, 178, 184)', 'in DSH’s muted control colour')
+    assert.equal(chrome.searchHeight, 18, 'the search field is DSH’s 18px tall')
+    assert.equal(chrome.searchWidth, 149, 'and 149px wide')
+    assert.ok(Math.abs(chrome.timelineHeight - 51) <= 5, `the lane strip is DSH’s 51px within the stated 5px tolerance (${chrome.timelineHeight}px)`)
+    assert.equal(chrome.laneLabel.font, '10px/400', 'lane labels are DSH’s 10px/400')
+    assert.equal(chrome.laneLabel.color, 'rgb(129, 133, 140)', 'in DSH’s muted label colour')
+    assert.equal(chrome.laneLabel.transform, 'none', 'not uppercased')
+    assert.equal(chrome.laneLabel.spacing, 'normal', 'and not letter-spaced')
+
     // Kind tags, per element: DSH's measured 4px radius and palette, not an approximation.
     const tags = JSON.parse(
       await browser.evaluate(`(() => {
