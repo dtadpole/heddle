@@ -629,9 +629,11 @@
   .turn .actions .turn-time { font-size: 13px; line-height: 24px; color: var(--chat-caption); padding-right: 12px; white-space: nowrap; }
   .turn .action {
     width: 28px; height: 28px; display: grid; place-items: center; padding: 0;
-    font: inherit; font-size: .8rem; color: inherit; background: none; border: none;
+    font: inherit; color: inherit; background: none; border: none;
     border-radius: .3rem; opacity: 0; cursor: pointer; transition: opacity .12s, background-color .12s;
   }
+  /** DSH's `.action svg` rule: the artwork renders at 15px, whatever the button's 28px box. */
+  .turn .action svg { width: 15px; height: 15px; display: block; }
   .turn .action:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
   .turn:hover .action, .turn .action:focus-visible, .turn .action[data-copied='true'] { opacity: .6; }
   .turn .action:hover { opacity: 1; background: color-mix(in oklab, currentColor 10%, transparent); }
@@ -1236,7 +1238,16 @@
   #view-options .menu button:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
   /** The chosen state's tick: drawn by the sheet so the item's name stays the action. */
   #view-options .menu button[data-current='true'] { font-weight: 500; }
-  #view-options .menu button[data-current='true']::before { content: '✓'; display: inline-block; width: 1rem; opacity: .8; }
+  /**
+   * The current-view mark is DSH's check **stroke**, not a font check: `content` cannot carry an SVG, so the
+   * artwork is a mask filled with the current ink, which also inherits colour and theme like a vector.
+   */
+  #view-options .menu button[data-current='true']::before {
+    content: ''; display: inline-block; width: 1rem; height: 1rem; opacity: .8;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.25 8.5L5.49732 11.7473C5.90519 12.1552 6.57263 12.1344 6.95426 11.7018L13.75 4'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.25 8.5L5.49732 11.7473C5.90519 12.1552 6.57263 12.1344 6.95426 11.7018L13.75 4'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
   #tree .menu-wrap { position: relative; display: inline-flex; }
   #tree .menu { position: absolute; right: 0; top: 1.35rem; z-index: 5; display: flex; flex-direction: column; min-width: 10rem; padding: .2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-menu); }
   #tree .menu[hidden] { display: none; }
@@ -1633,6 +1644,8 @@
     font-size: .78rem; color: inherit; background: none; border: none; border-radius: .3rem;
     opacity: .6; cursor: pointer;
   }
+  /** DSH's `.action svg` size, for the queue's outline marks. */
+  #queue .action svg { width: 15px; height: 15px; display: block; }
   #queue .action:hover:not(:disabled) { opacity: 1; background: color-mix(in oklab, currentColor 10%, transparent); }
   #queue .action:disabled { opacity: .3; cursor: default; }
   h1 button { font: inherit; padding: 0 .35rem; line-height: 1.2; }
@@ -2664,6 +2677,92 @@ function add(kind, text, merge = true, label, tool) {
  * pasting it somewhere expects.
  */
 /**
+ * DSH's own one-pixel outline artwork, taken from its `@deepseek-ai/dsh-client-ui-primitives` bundle
+ * (`IconCopyOutlineArtwork` and `IconCheckOutlineArtwork`, read 2026-10-17): both are 16×16 `viewBox` drawings
+ * with `fill: none` and `stroke: currentColor`, and its `.action svg` rule renders them at **15px**. The copy mark
+ * is two overlapping rounded rectangles; the success mark is one check stroke. They replace the `⧉` and `✓` text
+ * glyphs this page used, which carried the wrong weight and drew from a fallback font rather than the icon set.
+ */
+const ICON_NS = 'http://www.w3.org/2000/svg'
+
+function iconSvg() {
+  const svg = document.createElementNS(ICON_NS, 'svg')
+  svg.setAttribute('width', '15')
+  svg.setAttribute('height', '15')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke-width', '1')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('focusable', 'false')
+  return svg
+}
+
+/** DSH's `IconCopyOutlineRegular`: the back sheet as a stroked rect, the front sheet as a filled path. */
+function copyIcon() {
+  const svg = iconSvg()
+  const back = document.createElementNS(ICON_NS, 'rect')
+  back.setAttribute('x', '1.52075')
+  back.setAttribute('y', '4.07373')
+  back.setAttribute('width', '10.3932')
+  back.setAttribute('height', '10.3932')
+  back.setAttribute('rx', '2')
+  back.setAttribute('stroke', 'currentColor')
+  const front = document.createElementNS(ICON_NS, 'path')
+  front.setAttribute('d', 'M11.9792 1.53296C13.36 1.53296 14.4792 2.65225 14.4792 4.03296V9.42847C14.4792 10.3756 13.9521 11.1987 13.1755 11.6228V10.3298C13.3652 10.0787 13.4792 9.7674 13.4792 9.42847V4.03296C13.4792 3.20453 12.8077 2.53296 11.9792 2.53296H6.58374C6.27966 2.53301 5.99684 2.6235 5.7605 2.77905H4.42358C4.85652 2.03463 5.66056 1.53304 6.58374 1.53296H11.9792Z')
+  front.setAttribute('fill', 'currentColor')
+  svg.append(back, front)
+  return svg
+}
+
+/** DSH's `IconCloseOutlineArtwork`: two crossing strokes. */
+function closeIcon() {
+  const svg = iconSvg()
+  for (const d of ['M2.5 2.5L13.5 13.5', 'M13.5 2.5L2.5 13.5']) {
+    const path = document.createElementNS(ICON_NS, 'path')
+    path.setAttribute('d', d)
+    path.setAttribute('stroke', 'currentColor')
+    svg.append(path)
+  }
+  return svg
+}
+
+/** DSH's `IconEditOutlineArtwork`: a sheet outline and one stroke of the pen. */
+function editIcon() {
+  const svg = iconSvg()
+  const sheet = document.createElementNS(ICON_NS, 'path')
+  sheet.setAttribute('d', 'M8.85596 2.69971H4.19971C3.37141 2.69971 2.69992 3.37146 2.69971 4.19971V11.8003C2.69992 12.6285 3.37141 13.3003 4.19971 13.3003H11.8003C12.6283 13.2999 13.3001 12.6283 13.3003 11.8003V7.89893H14.3003V11.8003C14.3001 13.1806 13.1806 14.2999 11.8003 14.3003H4.19971C2.81913 14.3003 1.69992 13.1808 1.69971 11.8003V4.19971C1.69992 2.81918 2.81913 1.69971 4.19971 1.69971H8.85596V2.69971Z')
+  sheet.setAttribute('fill', 'currentColor')
+  const pen = document.createElementNS(ICON_NS, 'path')
+  pen.setAttribute('d', 'M7.7849 8.23878L13.888 2.13574')
+  pen.setAttribute('stroke', 'currentColor')
+  svg.append(sheet, pen)
+  return svg
+}
+
+/** DSH's `IconSendOutlineArtwork`: the arrow head and its shaft. */
+function sendIcon() {
+  const svg = iconSvg()
+  const head = document.createElementNS(ICON_NS, 'path')
+  head.setAttribute('d', 'M6.97211 1.94476C7.55785 1.35914 8.50767 1.35919 9.09343 1.94476L13.921 6.77228L13.2138 7.47939L8.38632 2.65187C8.19108 2.45682 7.87443 2.45677 7.67922 2.65187L2.74397 7.58711L2.03687 6.88L6.97211 1.94476Z')
+  head.setAttribute('fill', 'currentColor')
+  const shaft = document.createElementNS(ICON_NS, 'path')
+  shaft.setAttribute('d', 'M7.97571 14.5732L8.02421 2.34139')
+  shaft.setAttribute('stroke', 'currentColor')
+  svg.append(head, shaft)
+  return svg
+}
+
+/** DSH's `IconCheckOutlineRegular`: one centred check stroke. */
+function copiedIcon() {
+  const svg = iconSvg()
+  const path = document.createElementNS(ICON_NS, 'path')
+  path.setAttribute('d', 'M2.25 8.5L5.49732 11.7473C5.90519 12.1552 6.57263 12.1344 6.95426 11.7018L13.75 4')
+  path.setAttribute('stroke', 'currentColor')
+  svg.append(path)
+  return svg
+}
+
+/**
  * The copy button, shared by the answer's actions and the person's message actions.
  *
  * DSH's `MessageIconActions` keeps the toolbar button's label honest: it reads `Copy`, becomes `Copied` on
@@ -2682,11 +2781,11 @@ function copyAction(row, label) {
     try {
       await navigator.clipboard.writeText(text)
       button.dataset.copied = 'true'
-      button.textContent = '✓'
+      button.replaceChildren(copiedIcon())
       button.setAttribute('aria-label', 'Copied')
       setTimeout(() => {
         delete button.dataset.copied
-        button.textContent = '⧉'
+        button.replaceChildren(copyIcon())
         button.setAttribute('aria-label', label)
       }, 1000)
     } catch (error) {
@@ -5022,21 +5121,21 @@ function queueActions(item, isEditing) {
     wrap.append(button)
   }
   if (isEditing) {
-    action('✓', 'Save queued message', false, () => {
+    action(copiedIcon(), 'Save queued message', false, () => {
       const text = editing.text.trim()
       if (text === '') return
       item.text = text
       editing = null
       renderQueue()
     })
-    action('✕', 'Cancel edit', false, () => {
+    action(closeIcon(), 'Cancel edit', false, () => {
       editing = null
       renderQueue()
     })
     return wrap
   }
-  action('↥', 'Steer queued message', sending, () => void steerItem(item.id))
-  action('✎', 'Edit queued message', sending, () => {
+  action(sendIcon(), 'Steer queued message', sending, () => void steerItem(item.id))
+  action(editIcon(), 'Edit queued message', sending, () => {
     editing = { id: item.id, text: item.text }
     renderQueue()
   })

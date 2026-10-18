@@ -416,6 +416,8 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
           timeLine: timeStyle ? timeStyle.lineHeight : null,
           timeColor: timeStyle ? timeStyle.color : null,
           buttonLabel: button ? button.getAttribute('aria-label') : null,
+          buttonArt: button !== null && button.querySelector('svg rect') !== null,
+          svgWidth: button && button.querySelector('svg') ? Math.round(button.querySelector('svg').getBoundingClientRect().width) : null,
           buttonWidth: button ? Math.round(button.getBoundingClientRect().width) : null,
           buttonHeight: button ? Math.round(button.getBoundingClientRect().height) : null,
         }
@@ -430,6 +432,8 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     assert.equal(actions.timeLine, '24px', 'on a 24px line')
     assert.equal(actions.timeColor, 'rgb(129, 133, 140)', "in the caption ink DSH uses for a message's clock")
     assert.equal(actions.buttonLabel, 'Copy', 'the button says what it does')
+    assert.equal(actions.buttonArt, true, "its mark is DSH's copy artwork")
+    assert.equal(actions.svgWidth, 15, "at DSH's 15px")
     assert.equal(actions.buttonWidth, 28, 'and is 28px wide')
     assert.equal(actions.buttonHeight, 28, 'by 28px tall')
 
@@ -454,18 +458,33 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     const afterCopy = JSON.parse(
       await browser.evaluate(`JSON.stringify((() => {
         const button = document.querySelector('#log .turn.user .actions button')
-        return { text: window.__copied, label: button.getAttribute('aria-label'), glyph: button.textContent, feedback: button.dataset.copied === 'true' }
+        const svg = button.querySelector('svg')
+        const path = svg ? svg.querySelector('path') : null
+        return {
+          text: window.__copied,
+          label: button.getAttribute('aria-label'),
+          feedback: button.dataset.copied === 'true',
+          /* DSH's IconCheckOutlineRegular artwork, not a text glyph. */
+          checkArt: path !== null && String(path.getAttribute('d')).startsWith('M2.25 8.5'),
+          svgWidth: svg ? Math.round(svg.getBoundingClientRect().width) : null,
+        }
       })())`),
     )
     assert.equal(afterCopy.text, 'what is in here', `the button writes the message's own text (${JSON.stringify(afterCopy.text)})`)
     assert.equal(afterCopy.label, 'Copied', 'the label says it copied')
     assert.equal(afterCopy.feedback, true, 'and the row marks the state')
+    assert.equal(afterCopy.checkArt, true, "the success mark is DSH's check artwork, not a text glyph")
+    assert.equal(afterCopy.svgWidth, 15, "and the artwork renders at DSH's 15px")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const restored = JSON.parse(
-      await browser.evaluate(`JSON.stringify((() => { const button = document.querySelector('#log .turn.user .actions button'); return { label: button.getAttribute('aria-label'), glyph: button.textContent } })())`),
+      await browser.evaluate(`JSON.stringify((() => {
+        const button = document.querySelector('#log .turn.user .actions button')
+        const svg = button.querySelector('svg')
+        return { label: button.getAttribute('aria-label'), hasCopyArt: svg !== null && svg.querySelector('rect') !== null }
+      })())`),
     )
     assert.equal(restored.label, 'Copy', 'the label returns after the reference\'s one second')
-    assert.equal(restored.glyph, '⧉', 'and so does the copy glyph')
+    assert.equal(restored.hasCopyArt, true, 'and so does the copy artwork')
 
     /** The keyboard reaches the button and activates it, as a button must. */
     const viaKeyboard = JSON.parse(
