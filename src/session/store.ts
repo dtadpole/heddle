@@ -988,6 +988,20 @@ export class SessionStore {
    * the answer finished.
    */
   assistantChunk(handle: SessionHandle, chunk: Chunk): void {
+    /**
+     * A tool call's fragments are **published, never recorded**.
+     *
+     * They exist so a live reader can show a call being written; the complete call follows as one `tool-call`
+     * chunk, and that is the record. Writing the fragments too would put hundreds of events per call into the log
+     * — measured, 793 for one `write_file` — and every history projection (the transcript, the trajectory, the
+     * surface) would have to learn to skip them. DSH draws the same line: a transient frame per chunk, one durable
+     * settlement. The event carries `transient: true` and the next real `seq`, so a client can tell it from a
+     * record and order it among them, and the log's own sequence never has a hole.
+     */
+    if (chunk.type === 'tool-call-delta') {
+      this.onEvent?.(handle, { seq: this.count(handle), at: new Date().toISOString(), type: 'assistant/chunk', chunk, transient: true })
+      return
+    }
     this.append(handle, { type: 'assistant/chunk', chunk })
   }
 

@@ -237,6 +237,17 @@ export function openAiChatAdapter(
         if (fragment.function?.name) call.name = fragment.function.name
         if (fragment.function?.arguments) call.arguments += fragment.function.arguments
         calls.set(index, call)
+        /**
+         * Each fragment is passed on as it lands, so a reader can show the call being written. The assembly above
+         * still produces the one complete `tool-call` below; this is the live half beside it, not a replacement.
+         */
+        yield {
+          type: 'tool-call-delta',
+          index,
+          ...(fragment.id ? { id: fragment.id } : {}),
+          ...(fragment.function?.name ? { name: fragment.function.name } : {}),
+          argumentsDelta: fragment.function?.arguments ?? '',
+        }
       }
       if (choice?.finish_reason) {
         for (const call of calls.values()) {

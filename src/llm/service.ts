@@ -209,7 +209,12 @@ export class ModelService extends Service {
       if (chunk.type === 'text-delta') text += chunk.text
       else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
       else if (chunk.type === 'tool-call') toolCalls.push({ id: chunk.id, name: chunk.name, arguments: chunk.arguments })
-      else finishReason = chunk.finishReason
+      /**
+       * Named, not the fall-through: a `tool-call-delta` is a live fragment of a call that arrives whole as
+       * `tool-call` above, and an `else` that took everything left over read it as the finish — the type checker
+       * caught it the moment the variant existed, which is exactly why this branch names what it means.
+       */
+      else if (chunk.type === 'done') finishReason = chunk.finishReason
     }
     return { text, reasoning, toolCalls, finishReason }
   }

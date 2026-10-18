@@ -180,6 +180,25 @@ export function canonicalFinishReason(raw: string | null | undefined, toolCalls 
 export type Chunk =
   | { readonly type: 'text-delta'; readonly text: string }
   | { readonly type: 'reasoning-delta'; readonly text: string }
+  /**
+   * A fragment of a tool call **while the model is still writing it**, DSH's `tool-call-delta`.
+   *
+   * Live only: it lets a reader show the call taking shape, and it is never the record. The complete call still
+   * arrives as one `tool-call` chunk when the round finishes, and that is what the loop runs, the transcript keeps
+   * and every history projection reads — so a consumer that ignores this variant loses nothing but the wait.
+   *
+   * `index` is the provider's slot for the call, which is the only stable key before the id is known (a provider
+   * may send the id in the first fragment only). Measured 2026-10-18 on the DeepSeek route behind the plugboard
+   * interface: a `write_file` call's 4060-character argument arrived as 793 fragments over 2.7s, and with no variant
+   * to carry them the page sat silent for 3.7s (flash) to 14.1s (pro) and then drew a finished card in one step.
+   */
+  | {
+      readonly type: 'tool-call-delta'
+      readonly index: number
+      readonly id?: string
+      readonly name?: string
+      readonly argumentsDelta: string
+    }
   | { readonly type: 'tool-call'; readonly id: string; readonly name: string; readonly arguments: string }
   | {
       readonly type: 'done'

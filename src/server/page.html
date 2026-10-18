@@ -3850,6 +3850,77 @@ function addBlock(kind, text, merge, label, tool) {
 }
 
 /**
+ * The card of a tool call still being written, keyed by the provider's slot.
+ *
+ * The slot (`index`) is the only key a fragment always carries: a provider may send the call's id and name in the
+ * first fragment and never again. The card is an ordinary tool row in state `running`, so everything that styles,
+ * pairs or fills a tool row already applies to it.
+ */
+function liveToolCard(index) {
+  return log.querySelector('.turn.tool[data-live-call="' + String(index) + '"]')
+}
+
+function growLiveToolCall(chunk) {
+  let card = liveToolCard(chunk.index)
+  if (card === null) {
+    add('tool', '', false, '→ ' + (chunk.name || 'tool'), {
+      name: chunk.name || 'tool',
+      toolCallId: chunk.id,
+      state: 'running',
+    })
+    card = lastTurnRow()
+    if (card === null || card.dataset.kind !== 'tool') return
+    card.dataset.liveCall = String(chunk.index)
+  }
+  if (chunk.id && !card.dataset.toolCallId) card.dataset.toolCallId = chunk.id
+  if (chunk.name && card.dataset.toolName !== chunk.name) {
+    card.dataset.toolName = chunk.name
+    const title = card.querySelector('summary .title')
+    if (title) title.textContent = chunk.name
+  }
+  if (chunk.argumentsDelta) {
+    const args = card.querySelector('[data-args]')
+    if (args) args.textContent += chunk.argumentsDelta
+  }
+  followChatTail()
+}
+
+/**
+ * The finished call settles the card that was being written, rather than adding a second one.
+ *
+ * Matched by id when the card learned it, else by being the oldest card still live — the order the provider's
+ * slots finish in. The complete arguments replace the grown text, because the record is the complete call and a
+ * fragment the stream dropped must not survive on screen.
+ */
+function settleLiveToolCall(chunk) {
+  const live = Array.from(log.querySelectorAll('.turn.tool[data-live-call]'))
+  if (live.length === 0) return false
+  const card = live.find((node) => chunk.id && node.dataset.toolCallId === chunk.id) || live[0]
+  delete card.dataset.liveCall
+  if (chunk.id) card.dataset.toolCallId = chunk.id
+  if (chunk.name) {
+    card.dataset.toolName = chunk.name
+    const title = card.querySelector('summary .title')
+    if (title) title.textContent = chunk.name
+  }
+  const args = card.querySelector('[data-args]')
+  if (args) args.textContent = chunk.arguments ?? '{}'
+  const hint = card.querySelector('summary .hint')
+  const hintText = toolHint(chunk.arguments ?? '{}')
+  if (hint) hint.textContent = hintText
+  else if (hintText) {
+    const sep = document.createElement('span')
+    sep.className = 'sep'
+    sep.setAttribute('aria-hidden', 'true')
+    const fresh = document.createElement('span')
+    fresh.className = 'hint'
+    fresh.textContent = hintText
+    card.querySelector('summary').append(sep, fresh)
+  }
+  return true
+}
+
+/**
  * Put a tool's result into the element of the call it answers.
  *
  * The live stream delivers the call and its result as two events, which is the transport's shape rather
@@ -5434,13 +5505,26 @@ events.addEventListener('session', (message) => {
     settleReasoning()
     add('assistant', event.chunk.text)
   } else if (event.type === 'assistant/chunk' && event.chunk.type === 'reasoning-delta') add('reasoning', event.chunk.text)
+  else if (event.type === 'assistant/chunk' && event.chunk.type === 'tool-call-delta') {
+    /**
+     * A call being written: the card appears at the first fragment and its arguments grow in place.
+     *
+     * Measured 2026-10-18 at the owner's address: a `write_file` call's arguments took 3.7s (flash) to 14.1s (pro)
+     * to arrive, and the page showed nothing until a finished card appeared in one step. The fragments are live
+     * only — the server never records them — so a reload draws the finished card from the log, as before.
+     */
+    settleReasoning()
+    growLiveToolCall(event.chunk)
+  }
   else if (event.type === 'assistant/chunk' && event.chunk.type === 'tool-call') {
     settleReasoning()
-    add('tool', event.chunk.arguments ?? '{}', false, '→ ' + event.chunk.name, {
-      name: event.chunk.name,
-      toolCallId: event.chunk.id,
-      state: 'running',
-    })
+    if (!settleLiveToolCall(event.chunk)) {
+      add('tool', event.chunk.arguments ?? '{}', false, '→ ' + event.chunk.name, {
+        name: event.chunk.name,
+        toolCallId: event.chunk.id,
+        state: 'running',
+      })
+    }
   } else if (event.type === 'message' && event.message.role === 'user') {
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
