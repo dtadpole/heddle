@@ -50,7 +50,30 @@ bin_for() {
   exit 2
 }
 
+require_committed_main() {
+  # The daemon serves one checkout, and that checkout must contain only committed `main`: a working tree with a
+  # feature branch or uncommitted changes is a workspace, not a deployment. `HEDDLE_ALLOW_DIRTY_INSTALL=1` is the
+  # development escape hatch; it is never what a deployment uses.
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  [ "${HEDDLE_ALLOW_DIRTY_INSTALL:-0}" = "1" ] && return 0
+  branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [ "$branch" != "main" ]; then
+    echo "install.sh: $repo is on '$branch', not main." >&2
+    echo "  The daemon must run from a checkout that only contains committed main." >&2
+    echo "  (HEDDLE_ALLOW_DIRTY_INSTALL=1 overrides, for a development machine.)" >&2
+    exit 2
+  fi
+  dirty=$(git -C "$repo" status --porcelain 2>/dev/null || true)
+  if [ -n "$dirty" ]; then
+    echo "install.sh: $repo has uncommitted changes, so it is a workspace rather than a deployment checkout." >&2
+    echo "  Commit or stash them, then install from a clean checkout of main." >&2
+    echo "  (HEDDLE_ALLOW_DIRTY_INSTALL=1 overrides, for a development machine.)" >&2
+    exit 2
+  fi
+}
+
 write_plist() {
+  require_committed_main
   node=$(node_bin)
   bin=$(bin_for)
   mkdir -p "$HOME/.heddle" "$HOME/Library/LaunchAgents"

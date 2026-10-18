@@ -17,7 +17,7 @@ supervisor needs.
 | File | What it is |
 |---|---|
 | [`heddle-web.plist.template`](heddle-web.plist.template) | the agent, with placeholders for the node binary, the checkout and the port |
-| [`install.sh`](install.sh) | writes the agent for this machine and loads it; `--status`, `--restart`, `--uninstall` |
+| [`install.sh`](install.sh) | writes the agent for this machine and loads it; `--status`, `--restart`, `--uninstall`. It **refuses** a checkout that is not on `main` or has uncommitted changes, so the agent cannot be installed from a workspace (`HEDDLE_ALLOW_DIRTY_INSTALL=1` is the development override). |
 
 ## Why an agent and not a daemon
 

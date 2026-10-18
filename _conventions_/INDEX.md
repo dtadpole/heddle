@@ -1,6 +1,6 @@
 ---
 title: Conventions
-version: 1.4.0
+version: 1.5.0
 description: Heddle's own conventions — one instance per subject, a shared reentrancy standard, and per-component applications of it.
 grounded_in:
   - source: human-authored
@@ -62,7 +62,7 @@ subject; a collaborator assumed present and unchanged; a record shape bumped wit
 | Instance | Subject | Status |
 |---|---|---|
 | [`goal-reentrant/`](goal-reentrant/INDEX.md) | the goal subsystem — a persisted goal, its verbs and its round driver | **written** — the worked example, with five defects named |
-| [`landed-and-deployed/`](landed-and-deployed/INDEX.md) | delivery — a green branch is a checkpoint; merged to main and the running deployment verified is "done" | **written** — the instance: a green suite beside a page serving another worktree's build |
+| [`landed-and-deployed/`](landed-and-deployed/INDEX.md) | delivery — a green branch is a checkpoint; merged to main and the running deployment verified from a checkout that contains only committed main is "done" | **written** — the instance: a green suite beside a page serving another worktree's build, and a shared checkout that could not be landed into |
 | `ui-reentrant/` | the Web UI: is the page's state re-derived at boot and on a dropped stream, or does it only follow events? | planned — the named gap: the page follows the stream and re-reads on selection, but has no boot resync |
 | `agent-team-reentrant/` | a team of agents: can a member be removed, replaced or added while a team goal runs? | planned — no team subsystem exists yet; the convention is written when the first one does |
 | `context-management-reentrant/` | context assembly: does a re-created context service reproduce the same request from the log? | planned — reentrant by construction today (the surface is folded and re-derived per request); needs a reload check rather than a rewrite |
