@@ -1676,6 +1676,7 @@
   #stat-popover .stat-panel-row dd { margin: 0; color: #f9fafb; text-align: right; }
   #stat-popover .stat-panel-headline { font-size: 15px; line-height: 20px; color: #f9fafb; font-weight: 500; }
   #stat-popover .stat-panel-sub { color: #adb2b8; margin-bottom: 4px; }
+  #stat-popover .stat-panel-empty { color: #adb2b8; }
   /** The menu opened by `+`: the file picker's action and the workspace tree, floating above the card. */
   #attach-menu {
     position: absolute; z-index: 6; left: 50%; bottom: calc(100% - .2rem); transform: translateX(-50%);
@@ -5896,6 +5897,12 @@ function renderStatPopover() {
     figures.className = 'stat-panel-sub'
     figures.textContent = usedRow === undefined ? '' : usedRow[1]
     popover.append(headline, sub, figures)
+    if (percentRow === undefined && usedRow === undefined) {
+      const empty = document.createElement('div')
+      empty.className = 'stat-panel-empty'
+      empty.textContent = 'No context figures yet — send a message to start measuring.'
+      popover.append(empty)
+    }
     positionStatPopover()
     return
   }
@@ -5922,6 +5929,12 @@ function renderStatPopover() {
     list.append(row)
   }
   popover.replaceChildren(head, rule, list)
+  if (list.children.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'stat-panel-empty'
+    empty.textContent = 'No statistics yet — send a message to start measuring.'
+    popover.append(empty)
+  }
   positionStatPopover()
 }
 
