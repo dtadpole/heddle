@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -917,13 +918,18 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     assert.ok(shape.turns >= 24, `the transcript has more turns than sections once the tool steps are in (${shape.turns})`)
     assert.equal(shape.rows, 16, `but the rail has one row per section (${shape.rows})`)
     /**
-     * A stale page is a failed comparison, not a mystery. The page states which rail build it carries, so the check
-     * (and a reader) can tell a current document from an older one served out of an out-of-date `dist`.
+     * The server marks the page with the hash of the built document's original bytes. The source has an
+     * `unbuilt` placeholder, not a rail-specific version label. Compare with the exact build this fixture
+     * starts; accepting any hash would not distinguish a current page from a stale one.
      */
-    assert.match(
+    const pageBuild = createHash('sha256')
+      .update(readFileSync(join(repoRoot, 'dist', 'server', 'page.html')))
+      .digest('hex')
+      .slice(0, 12)
+    assert.equal(
       await browser.evaluate('document.querySelector(\'meta[name="heddle-page"]\')?.content ?? ""'),
-      /^rail-sections\//,
-      'the page states the rail build it carries, so a stale page cannot pass silently',
+      pageBuild,
+      'the page states the exact build served by the fixture, so a stale page cannot pass silently',
     )
     assert.deepEqual(shape.roleCounts, { user: 8, assistant: 8 }, `and only the person's and the answer's roles (${JSON.stringify(shape.roleCounts)})`)
     /**

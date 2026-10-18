@@ -1,6 +1,6 @@
 ---
 title: Verifier 9 — Web UI
-version: 1.1.0
+version: 1.2.0
 description: a Web UI on localhost, on a documented default port, whose access-mode control is a session-scoped permission selector.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -20,16 +20,14 @@ doubles. Nothing here needs a display, so it runs unattended.
 
 ## What decides it
 
-`check.mjs` starts the server on an ephemeral port and fetches the root and the API.
-
-## What decides it
-
 - [`check.mjs`](check.mjs) — the port, the page, the API and the live stream.
 - [`check-team-view.mjs`](check-team-view.mjs) — a Lead's team as the Web UI shows it: the roster with live status,
   the shared board with its revisions and the mailbox ledger, read from the same `/api/team` projection the
   tools use; and no panel at all for a session with no team.
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
-  one turn, and one element drawn for it, with the person and the model keeping their own.
+  one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
+  freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
+  not a historical rail-specific label.
 - [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
@@ -71,3 +69,8 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
 
 [`../INDEX.md`](../INDEX.md) for the verifications, and
 [`../../ULTIMATE_GOAL.md`](../../ULTIMATE_GOAL.md) for the part this one decides.
+
+## Page marker regression evidence
+
+[`page-marker-evidence.md`](page-marker-evidence.md) records why the historical rail label was wrong
+and the browser check that retains exact built-page identity alongside the minimap behaviour.

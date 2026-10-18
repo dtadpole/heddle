@@ -1,6 +1,6 @@
 ---
 title: Verifier 3 — Context Management
-version: 1.1.0
+version: 1.2.0
 description: context is a surface over an append-only log, priced against the endpoint's window, and reduced cheaply before it is reduced expensively.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -14,12 +14,16 @@ append-only log, priced by a meter against the routed endpoint's own window, and
 before it is reduced expensively.
 
 A harness that sends the whole transcript forever eventually cannot send anything. This part judges
-the seven things a person relying on it can feel: a rewrite shadows a conversation without erasing
+the behaviours a person relying on it can feel: a rewrite shadows a conversation without erasing
 it; the budget is the window the endpoint declares; trimming one oversized tool result can end the
 pressure before a summary is paid for; a cut never separates a tool call from its result and never
 shadows the system prompt; a summary that does not shrink is refused and the conversation is left
 alone; a provider that says the conversation did not fit gets one reduction and one retry; and the
 project's instruction files arrive as one durable baseline that follows an edit inside a byte budget.
+That baseline belongs to the session's own folder, not the server's sandbox root. The check opens a
+session in one folder and puts decoy rules in another, reads the turn's log before running the context
+inspector, and requires that the decoy rules were never sent. Repeated compaction and whole-file
+instruction budget selection are judged separately.
 
 ## Where it runs
 
@@ -50,13 +54,14 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
 
 - **How well a model reasons.** Nothing here scores an answer's quality; the checks
   ask whether the mechanism works.
-- **Image offload and the surface's interpreter channel.** DSH's surface has a third plan kind,
-  `project`, which lets a plugin substitute the message an event derives to — that is how an image
-  reference becomes a file id. heddle has no images, so the fold has no interpreter hook, and that is
-  a deliberate omission rather than an untested one.
-- **A runtime-context snapshot.** DSH inserts one sourced user message per step carrying the working
-  directory and policy. heddle's equivalent is the instruction baseline plus the tool descriptions,
-  so there is no separate snapshot to judge.
+- **Image handling and the surface's interpreter channel.** Attachments exist, but this verifier does
+  not judge image transport or DSH's `project` plan. Image handling has its own checks in
+  [`test/attachments.test.ts`](../../test/attachments.test.ts) and
+  [`test/server-attachments.test.ts`](../../test/server-attachments.test.ts).
+- **A runtime-context snapshot.** Heddle records sourced runtime-context snapshots before requests.
+  Their append, reuse and migration rules are pinned by
+  [`test/runtime-context.test.ts`](../../test/runtime-context.test.ts); this verifier judges instruction
+  baselines, not that separate mechanism.
 - **Anything it has to spend to see.** Except where a check is named for the real
   backend, every fixture is local and the run is free.
 
@@ -64,3 +69,8 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
 
 [`../INDEX.md`](../INDEX.md) for the verifications, and
 [`../../ULTIMATE_GOAL.md`](../../ULTIMATE_GOAL.md) for the part this one decides.
+
+## Regression evidence
+
+[`session-baseline-evidence.md`](session-baseline-evidence.md) records the two-folder fixture and the
+negative control showing that the old sandbox-root rule fails before context inspection can repair it.
