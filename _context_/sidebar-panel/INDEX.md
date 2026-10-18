@@ -51,6 +51,13 @@ empty), and there is no "ad hoc" group at the bottom.
 the other edge, with the 5-pixel scrollbar still at the panel's right and the row's content in the search field's text
 column. The scrollable pane keeps the panel's full width; only the items are narrower.
 
+## Search-mode rows
+
+`search-hit-inset.png` — a hovered search result at 1200×800: the hit's tint starts and ends where the tree rows' do
+(12→340), with the row's 12px rounding and inner padding, and no shift of the list's edges when the tree is replaced by
+results. The page also states its own build in `meta[name=heddle-page]` (the file's sha256), which is how a stale
+served build is told apart from a missing feature.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

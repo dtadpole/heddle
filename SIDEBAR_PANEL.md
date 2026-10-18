@@ -421,6 +421,68 @@ hover and selection still paint on the row itself.
 **lessons:** a "full width" requirement is about the **scrollable region**; the items inside it are objects with their own
 edge. The two are separate facts and the reference states both.
 
+## Cycle 2: the search list is the same rows, and a build marker
+
+**measured:** the reference at 1200×800, 2026-10-17. Typing in its search field replaces the tree with a flat result
+list; the filtered rows measure **12→268** — the same inset as the tree's own rows — at radius 16 (its result component
+is taller, `padding: 4px 8px`). The scroller stayed 8→278. In the reference a search does not move the list's edges.
+
+**measured, ours:** tree rows 12→340, but search hits **12→335** — five pixels short on the right (the `.hit` list was
+still padded `.75rem`, not the row inset) — with radius 4.8px and 6.4px inner padding against the row's 12px and 8px.
+
+**brainstorm:**
+
+1. **Give the search list the tree's inset and the hit the row's rounding/padding.** *Chosen:* the reference's own
+   arrangement — a search is the same list of rows, filtered.
+2. **Give hits their own inset.** *Discarded:* two lists under one scrollbar with two edges read as two panels.
+3. **Match the reference's 16px hit radius.** *Discarded:* its hit is a taller two-line result component; heddle's hit is
+   a one-line row, so the row's 12px is this component's shape. Recorded as a deliberate divergence.
+4. **Keep 10% hover on hits while rows use 8%.** *Discarded:* same surface, same state, same tint.
+
+**understand:** the two lists share the scrolling pane, so they must share its geometry; the row's shape belongs to the
+row, not to the list that holds it. The gap was not a design choice but a stale padding left on one list.
+
+**step back:** in scope, one value class, no new structure. The row content moves with the list's padding, so the hits'
+text lands on 20/332 like the tree's.
+
+**changed:** `src/server/page.html` — `#search-results` padding, `.hit` padding/radius/hover tint.
+
+**evidence:** the same probe against the same fixture, reverting only the rule:
+
+| Run | tree row | search hit |
+|---|---|---|
+| without the fix (`.75rem`) | 12→340 | **12→335** — the new claim fails |
+| with the fix | 12→340 | 12→340 |
+
+and the geometry is identical at 1000 and 1600 viewport widths (the sidebar is a fixed 352 either way):
+`{"viewport":1000,"row":[12,340]}` and `{"viewport":1600,"row":[12,340]}`.
+
+Screenshot: [`_context_/sidebar-panel/search-hit-inset.png`](_context_/sidebar-panel/search-hit-inset.png) — a hovered
+search hit whose tint starts and ends where the tree rows' do.
+
+### The stale-build lesson, made checkable
+
+This cycle began by reading the live page's rows as **0→347** — the inset "missing". The source had it. The daemon was
+serving `~/heddle-deploy`, a clean checkout that predated the commit (the deployment path the install script requires),
+so every live reading came from a stale page. Two changes from that:
+
+- the served page now carries **`meta[name=heddle-page]`**, the first 12 hex of its own file's sha256, filled in by the
+  server (`markedPage`, unit-tested); part 11 recomputes it from `dist/server/page.html` and asserts the served document
+  states it. A stale build now says which build it is instead of looking like a missing feature;
+- the **deployment checkout is updated to `origin/main` before every live reading** (fetch + reset + build + restart from
+  that checkout), and its `dompurify` dependency is installed — its build had been copying the page and then failing.
+
+**reds:** none in part 11. Part 80 is red on the concurrent session's image-provider work, unrelated to the sidebar.
+
+**coverage:** rest and search-mode lists, two viewport widths, and the served page's build marker were read. The
+selected state under search (a hit is a button, not a treeitem) was not measured this cycle.
+
+**invariants:** the pane still spans the panel with its 5px scrollbar at the edge; tree rows and search hits share one
+inset (asserted); their content column is the search field's text column; the 14px depth indent is unchanged.
+
+**lessons:** a second list inside one scroller is not a second design; it is the same row shape in another state. And a
+comparison that does not pin the served build can spend a cycle measuring a page nobody rebuilt.
+
 **lessons:** a scrollbar is geometry as well as paint. The measurable facts are `offsetWidth - clientWidth`,
 `scrollbar-gutter` and the end padding — and the first attempt failed on a property (`scrollbar-width: thin`) whose
 only effect was to switch the mechanism off, which is why the new contract asserts its **absence**.

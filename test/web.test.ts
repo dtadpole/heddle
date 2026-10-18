@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { createHash } from 'node:crypto'
+
+import { markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -326,4 +330,22 @@ test('a turn\'s usage adds up across rounds, and stays absent where no provider 
     { inputTokens: 10, outputTokens: 6 },
     'a field only one round reported is kept without inventing the other',
   )
+})
+
+test('the served page states which build it is, from its own bytes', () => {
+  /**
+   * **A stale build and a missing feature look the same on screen.** The live daemon once served a deployment checkout
+   * an hour behind the source, and a row's geometry read as "not implemented" while the source and the checks were
+   * correct. The marker is the page file's own hash, so a probe can compare the served document with the build it
+   * expects instead of guessing from pixels.
+   */
+  const html = '<head>\n<meta name="heddle-page" content="unbuilt" />\n</head>'
+  const expected = createHash('sha256').update(html).digest('hex').slice(0, 12)
+  assert.match(markedPage(html), new RegExp(`<meta name="heddle-page" content="${expected}">`))
+  /** A different document is a different build. */
+  assert.notEqual(markedPage(html), markedPage(html.replace('unbuilt', 'other')))
+  /** The page shipped here carries the placeholder the server replaces, not a stale hand-written name. */
+  const pageFile = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
+  assert.match(pageFile, /<meta name="heddle-page" content="unbuilt" \/>/)
+  assert.ok(markedPage(pageFile).includes(`content="${createHash('sha256').update(pageFile).digest('hex').slice(0, 12)}"`))
 })

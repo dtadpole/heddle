@@ -1,4 +1,5 @@
 import { contextWindowFromModelList } from '../llm/model-info.ts'
+import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
@@ -2538,8 +2539,29 @@ export function tokenFormPage(options: { readonly stale?: boolean } = {}): strin
  * `build` copies it beside the compiled module, because a file the server reads at runtime is not one
  * `tsc` emits.
  */
+/**
+ * The page with its build marker filled in.
+ *
+ * The served document carries `data-page`-adjacent `meta[name=heddle-page]` set to the first 12 hex of the file's
+ * sha256, computed rather than pasted: a served page that predates a rebuild can then be told apart from a page that
+ * lacks the feature, which on screen look identical. (It happened: the live daemon served a stale deployment checkout
+ * while the source and the checks were already correct, and a row's geometry read as "not implemented".)
+ */
+export function markedPage(html: string): string {
+  const marker = createHash('sha256').update(html).digest('hex').slice(0, 12)
+  return html.replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+}
+
+/**
+ * The page, read from the file beside this module.
+ *
+ * The served document carries `data-page="<first 12 hex of the file's sha256>"`, computed here rather than pasted
+ * into the file: a served page that predates a rebuild can then be told apart from a page that lacks the feature,
+ * which on screen look identical. (It happened: the live daemon served a stale deployment checkout while the source
+ * and the checks were already correct, and a row's geometry read as "not implemented".)
+ */
 function page(): string {
-  return readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')
+  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8'))
 }
 
 /** The addresses a person could reach this server on, for a LAN-aware message. */

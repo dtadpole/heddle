@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — the resizable panels.
@@ -95,6 +96,17 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
   try {
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.getElementById("gutter-left") !== null', 20_000), 'the divider is there')
+
+    /**
+     * **Which build is this?** The served page carries its own file's hash in `meta[name=heddle-page]`; the check
+     * recomputes it from `dist/server/page.html`, the file this server serves. Measured failure this prevents: the
+     * live daemon ran a deployment checkout an hour behind the source, and a row's geometry read as "not
+     * implemented" while the source and the claim were already correct. A page that predates a rebuild must say so
+     * rather than look like a missing feature.
+     */
+    const pageHash = createHash('sha256').update(readFileSync(join(repoRoot, 'dist', 'server', 'page.html'))).digest('hex').slice(0, 12)
+    const servedHash = await browser.evaluate(`document.querySelector('meta[name="heddle-page"]')?.getAttribute('content') ?? null`)
+    assert.equal(servedHash, pageHash, `the served page states the build it is (${pageHash})`)
 
     /**
      * The divider is a control, not a styled border: `role="separator"` with a tabindex is what makes it
@@ -208,6 +220,36 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
       await browser.waitFor(`document.querySelectorAll('#tree li[data-kind="session"]').length > ${sessionsBefore}`, 20_000),
       'the chord starts another one',
     )
+
+    /**
+     * **A search keeps the same rows.** DSH replaces its tree with a flat result list, and its filtered rows still sit
+     * at 12→268 — the same inset as the tree's own rows (measured 2026-10-17). Heddle's hits must land on the tree's
+     * row box, or switching to search visibly shifts the list's edges.
+     */
+    const searchRow = JSON.parse(await browser.evaluate(`(() => {
+      const treeRow = document.querySelector('#tree li[data-kind="session"] > .row')
+      if (treeRow === null) return JSON.stringify({ error: 'no session row' })
+      const treeBox = [Math.round(treeRow.getBoundingClientRect().left), Math.round(treeRow.getBoundingClientRect().right)]
+      const field = document.getElementById('session-search')
+      field.value = 'session'
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      return JSON.stringify({ treeBox, radius: getComputedStyle(treeRow).borderRadius })
+    })()`))
+    await new Promise((done) => setTimeout(done, 800))
+    const hitBox = JSON.parse(await browser.evaluate(`(() => {
+      const hit = document.querySelector('#search-results .hit')
+      if (hit === null) return JSON.stringify({ error: 'no hit' })
+      const box = hit.getBoundingClientRect()
+      return JSON.stringify({ box: [Math.round(box.left), Math.round(box.right)], radius: getComputedStyle(hit).borderRadius, padding: getComputedStyle(hit).padding, visible: !document.getElementById('search-results').hidden })
+    })()`))
+    assert.equal(hitBox.error, undefined, `the search draws a hit\nsaw: ${JSON.stringify(hitBox)}`)
+    assert.equal(searchRow.error, undefined, `a tree row exists to compare\nsaw: ${JSON.stringify(searchRow)}`)
+    assert.deepEqual(hitBox.box, searchRow.treeBox, `a hit shares the tree row's inset\nsaw: ${JSON.stringify({ tree: searchRow.treeBox, hit: hitBox.box })}`)
+    assert.equal(hitBox.radius, searchRow.radius, 'and its rounding, so search does not read as another surface')
+
+    /** Clear the search so the drag below measures the tree, not the results. */
+    await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ''; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await new Promise((done) => setTimeout(done, 600))
 
     /** Drag it wider, the way a person does, with a pointer that has coordinates. */
     const dragged = JSON.parse(
