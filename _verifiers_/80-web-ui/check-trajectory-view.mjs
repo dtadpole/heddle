@@ -309,6 +309,27 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(chrome.laneLabel.transform, 'none', 'not uppercased')
     assert.equal(chrome.laneLabel.spacing, 'normal', 'and not letter-spaced')
 
+    // Trusted hover, over CDP: DSH paints nothing on a trajectory row, and the check holds heddle to it.
+    const rowPoint = JSON.parse(
+      await browser.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('#tr-table tbody tr')]
+        const row = rows.find((entry) => entry.querySelectorAll('td').length >= 2) ?? rows[0]
+        const rect = row.querySelector('td').getBoundingClientRect()
+        return JSON.stringify({ x: rect.left + 60, y: rect.top + rect.height / 2 })
+      })()`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round(rowPoint.x), y: Math.round(rowPoint.y), button: 'none', buttons: 0, clickCount: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const hoverPaint = JSON.parse(
+      await browser.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('#tr-table tbody tr')]
+        const row = rows.find((entry) => entry.querySelectorAll('td').length >= 2) ?? rows[0]
+        return JSON.stringify({ background: getComputedStyle(row).backgroundColor })
+      })()`),
+    )
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none', buttons: 0, clickCount: 0 })
+    assert.equal(hoverPaint.background, 'rgba(0, 0, 0, 0)', 'a hovered row paints nothing, as DSH does')
+
     // Kind tags, per element: DSH's measured 4px radius and palette, not an approximation.
     const tags = JSON.parse(
       await browser.evaluate(`(() => {

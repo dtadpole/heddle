@@ -1,74 +1,85 @@
 {
   "dsh": {
     "label": "dsh",
-    "idle": {
-      "rows": 0,
-      "painted": 0,
-      "heights": [],
-      "hoverCandidates": []
+    "ready": true,
+    "rows": 31,
+    "heights": [
+      30,
+      630
+    ],
+    "hoverState": {
+      "background": "rgba(0, 0, 0, 0)",
+      "afterLeave": "rgba(0, 0, 0, 0)"
     },
-    "hoverState": null,
     "geometry": {
       "1000": {
-        "table": null,
-        "cells": [],
-        "rowHeight": null,
-        "panel": null,
-        "scroller": null
+        "table": 937,
+        "cells": [
+          122,
+          815
+        ],
+        "rowHeight": 30,
+        "panel": null
       },
       "1600": {
-        "table": null,
-        "cells": [],
-        "rowHeight": null,
-        "panel": null,
-        "scroller": null
+        "table": 1313,
+        "cells": [
+          122,
+          1191
+        ],
+        "rowHeight": 30,
+        "panel": null
       },
       "base": {
-        "table": null,
-        "cells": [],
-        "rowHeight": null,
-        "panel": null,
-        "scroller": null
+        "table": 1153,
+        "cells": [
+          122,
+          1031
+        ],
+        "rowHeight": 30,
+        "panel": null
       }
-    },
-    "scroll": {
-      "counts": []
     }
   },
   "heddle": {
     "label": "heddle",
-    "idle": {
-      "rows": 0,
-      "painted": 0,
-      "heights": [],
-      "hoverCandidates": []
+    "ready": true,
+    "rows": 11,
+    "heights": [
+      30
+    ],
+    "hoverState": {
+      "background": "rgb(44, 44, 44)",
+      "afterLeave": "rgba(0, 0, 0, 0)"
     },
-    "hoverState": null,
     "geometry": {
       "1000": {
-        "table": null,
-        "cells": [],
-        "rowHeight": null,
-        "panel": null,
-        "scroller": null
+        "table": 644,
+        "cells": [
+          122,
+          522
+        ],
+        "rowHeight": 30,
+        "panel": 352
       },
       "1600": {
-        "table": null,
-        "cells": [],
-        "rowHeight": null,
-        "panel": null,
-        "scroller": null
+        "table": 1244,
+        "cells": [
+          122,
+          1122
+        ],
+        "rowHeight": 30,
+        "panel": 352
       },
       "base": {
-        "table": null,
-        "cells": [],
-        "rowHeight": null,
-        "panel": null,
-        "scroller": null
+        "table": 1084,
+        "cells": [
+          122,
+          962
+        ],
+        "rowHeight": 30,
+        "panel": 352
       }
-    },
-    "scroll": {
-      "counts": []
     }
   }
 }

@@ -169,3 +169,28 @@ The honest state is: the instrument is in place and runs end to end, the numbers
 
 Next round: fix the predicate to test the cells' rects (or `display`/`offsetParent`) and select DSH's session
 through a selector verified in a snapshot, then run the matrix and record the numbers.
+
+## Batch B2 — trusted hover, and the viewport pair (probe, headless CDP)
+
+The probe drives `hover` through `_tools_/browser-use`, so the pointer is **trusted** (CDP
+`Input.dispatchMouseEvent`) and CSS `:hover` really applies. Rows are two-column trajectory rows on both sides.
+
+| Metric | DSH | heddle (before) | Verdict |
+|---|---|---|---|
+| idle row | transparent | transparent | agree |
+| **hovered row** | **rgba(0,0,0,0)** | rgb(44,44,44) | **fixed → no hover paint, as DSH** |
+| after pointer leaves | transparent | transparent | agree; the reset is proven, not assumed |
+| event column @1000 / @1600 | 122 / 122 | 122 / 122 | agree |
+| table width @1000 / @1600 | 937 / 1313 | 644 / 1244 | **driver: sidebar width**, not table layout |
+
+DSH paints **no** row hover: its affordance is the selected state (measured earlier at 14% white). Heddle had
+added a hover tint; it is removed so the states agree, and the part 9 check now moves a **real pointer** over a
+row over CDP and asserts the row stays transparent (`browser.send('Input.dispatchMouseEvent')`).
+
+The table-width pair exposes a second, larger difference whose driver is not the table: heddle keeps its
+416px sidebar at 1000px and squeezes the content column to 522px, while DSH's content is 815px wide there —
+consistent with DSH collapsing or narrowing its navigation pane at narrow widths. That is a responsive-state
+gap in the shell, not in the trajectory, and is recorded for a round that can measure the collapse breakpoint.
+
+Still not measured: scroll 0/25/50/75/100% row counts (the probe's scroll block was dropped when the row
+predicate was rewritten) and the collapsed turns/calls/search states.
