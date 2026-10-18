@@ -229,3 +229,21 @@ centred on the card (card centre 777, dock centre 776.5 at the measured window).
   auto` centres its text while stretching its own box, and only measuring the element's own width against its
   children catches it. Separator and ring sizes are properties like any other: measured at 1px, they are
   worth fixing rather than explaining.
+
+## Deployment (after the loop closed)
+
+The loop's cycles built `dist/` but did not deploy it, and the gap was real: the launchd service
+`com.dtadpole.heddle-web` was pointing at `/Users/zhenc/heddle-model-selector/dist/cli.js` — another session's
+worktree, repointed for its own UI work — so the owner's page at `127.0.0.1:8082` served that worktree's build
+and never showed the new dock.
+
+Fixed: the plist was backed up, its `ProgramArguments` and `WorkingDirectory` restored to
+`/Users/zhenc/heddle`, `npm run build` re-run in the main checkout (the page is read per request, so a rebuild
+alone updates the served page), the service booted out and bootstrapped again, and the served HTML checked:
+`data-stat-pill` markers present, the gate at 8082 answers 200. The live screenshot with the owner's real
+session — [heddle-stats-dock-live.png](_context_/dsh-mechanisms/heddle-stats-dock-live.png) — shows the dock
+reading `8 turns 17 steps`, `267K tok · Cache hit 63%`, `2%`.
+
+Lesson for the skill: a loop that ends at "the suites are green" can still leave the owner looking at a
+different build; **deployment is the last assertion**, and it is a question of *which checkout the service
+runs*, not only whether `dist/` is fresh.
