@@ -2216,7 +2216,7 @@ export function transcriptTurns(
         | undefined
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
-      if (message.role === 'user') turns.push({ kind: 'user', text })
+      if (message.role === 'user') turns.push({ kind: 'user', text, ...(typeof event.at === 'string' ? { time: event.at } : {}) })
       else if (message.role === 'assistant') turns.push({ kind: 'assistant', text })
       else if (message.role === 'tool') {
         /**
@@ -2282,6 +2282,12 @@ export function transcriptTurns(
 /** One thing the chat shows, after the fold. A tool turn carries both halves of one call. */
 export interface ChatTurn {
   readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool'
+  /**
+   * When the logged event happened, as its own `at` — the **user message's clock**, which the page shows beside
+   * the bubble and the copy button (DSH's `MessageIconActions` reads the same event time). It is the recorded
+   * instant, not the render clock: a reloaded session shows when each message was sent.
+   */
+  readonly time?: string
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */

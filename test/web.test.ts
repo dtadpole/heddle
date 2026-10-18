@@ -26,6 +26,20 @@ test('a tool call keeps its name as a label, apart from its arguments', () => {
   ])
 })
 
+test('a person\'s message carries the logged event time, which is the clock its bubble shows', () => {
+  /**
+   * The bubble's clock is the **recorded** instant, not the render clock: a reloaded session must show when each
+   * message was sent. The event's own `at` is what travels, because that is the stamp the log wrote.
+   */
+  const turns = transcriptTurns([
+    { type: 'message', at: '2026-10-17T22:03:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'what is in here' }] } },
+    { type: 'message', at: '2026-10-17T22:03:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'two files' }] } },
+  ])
+  assert.equal(turns[0].kind, 'user')
+  assert.equal(turns[0].time, '2026-10-17T22:03:00.000Z', 'the user turn carries the event time')
+  assert.equal(turns[1].kind, 'assistant')
+})
+
 test('reasoning keeps its own kind, because a reader wants it apart from the answer', () => {
   const turns = transcriptTurns([
     { type: 'assistant/chunk', chunk: { type: 'reasoning-delta', text: 'thinking' } },

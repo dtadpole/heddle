@@ -304,7 +304,9 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
         const logStyle = getComputedStyle(log)
         const assistant = document.querySelector('#log .turn.assistant')
         const user = document.querySelector('#log .turn.user')
-        const userStyle = user ? getComputedStyle(user) : null
+        const bubble = user ? user.querySelector('.bubble') : null
+        const userStyle = bubble ? getComputedStyle(bubble) : null
+        const rowStyle = user ? getComputedStyle(user) : null
         const assistantStyle = assistant ? getComputedStyle(assistant) : null
         const mainStyle = getComputedStyle(document.querySelector('main'))
         const reasoning = document.querySelector('#log .turn.reasoning')
@@ -323,10 +325,10 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
           userRadius: userStyle ? userStyle.borderRadius : null,
           userBg: userStyle ? userStyle.backgroundColor : null,
           userPadding: userStyle ? userStyle.padding : null,
-          userAlign: userStyle ? userStyle.alignSelf : null,
+          userAlign: rowStyle ? rowStyle.alignSelf : null,
           /** Alignment is not enough: a **stretched** block has the same right edge. Measure the box itself. */
-          userWidth: user ? Math.round(user.getBoundingClientRect().width) : null,
-          userRight: user ? Math.round(user.getBoundingClientRect().right) : null,
+          userWidth: bubble ? Math.round(bubble.getBoundingClientRect().width) : null,
+          userRight: bubble ? Math.round(bubble.getBoundingClientRect().right) : null,
           logContentRight: (() => { const log = document.getElementById('log'); const cs = getComputedStyle(log); return Math.round(log.getBoundingClientRect().right - Number.parseFloat(cs.paddingRight)) })(),
           logContentWidth: (() => { const log = document.getElementById('log'); const cs = getComputedStyle(log); return Math.round(log.clientWidth - Number.parseFloat(cs.paddingLeft) - Number.parseFloat(cs.paddingRight)) })(),
           reasoningClosed: reasoning.open === false,
@@ -383,6 +385,103 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
       Math.abs(measured.userRight - measured.logContentRight) <= 1,
       `and it ends on the column's right edge (${measured.userRight} vs ${measured.logContentRight})`,
     )
+
+    /**
+     * The person's message carries DSH's `MessageIconActions` row **below the bubble**: the sent time, then the
+     * copy button. The time is the recorded event's own `at`, not the render clock — a reload must show when the
+     * message was sent — and it reads `HH:mm` on the 24-hour clock (DSH's `formatMessageClock` for today).
+     */
+    const detail = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+    const recorded = (detail.body.turns ?? []).find((entry) => entry.kind === 'user')
+    assert.ok(recorded && typeof recorded.time === 'string', `the session payload carries the user turn's event time (${JSON.stringify(recorded && recorded.time)})`)
+    const when = new Date(recorded.time)
+    const pad = (value) => String(value).padStart(2, '0')
+    const expectedClock = `${pad(when.getHours())}:${pad(when.getMinutes())}`
+    const actions = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const user = document.querySelector('#log .turn.user')
+        const bubble = user.querySelector('.bubble')
+        const row = user.querySelector('.actions')
+        const time = row ? row.querySelector('time') : null
+        const button = row ? row.querySelector('button') : null
+        const timeStyle = time ? getComputedStyle(time) : null
+        const buttonStyle = button ? getComputedStyle(button) : null
+        return {
+          hasRow: row !== null,
+          rightAligned: row !== null && Math.abs(row.getBoundingClientRect().right - bubble.getBoundingClientRect().right) <= 1,
+          rowHeight: row ? Math.round(row.getBoundingClientRect().height) : null,
+          timeText: time ? time.textContent : null,
+          timeDateTime: time ? time.getAttribute('datetime') : null,
+          timeFont: timeStyle ? timeStyle.fontSize : null,
+          timeLine: timeStyle ? timeStyle.lineHeight : null,
+          timeColor: timeStyle ? timeStyle.color : null,
+          buttonLabel: button ? button.getAttribute('aria-label') : null,
+          buttonWidth: button ? Math.round(button.getBoundingClientRect().width) : null,
+          buttonHeight: button ? Math.round(button.getBoundingClientRect().height) : null,
+        }
+      })())`),
+    )
+    assert.equal(actions.hasRow, true, 'the user message has an actions row')
+    assert.equal(actions.rightAligned, true, 'it sits under the bubble, flush with its right edge')
+    assert.equal(actions.rowHeight, 28, `the actions row is DSH's 28px tall (${actions.rowHeight})`)
+    assert.equal(actions.timeText, expectedClock, `the clock is the recorded event time, HH:mm (${actions.timeText} vs ${expectedClock})`)
+    assert.equal(actions.timeDateTime, recorded.time, 'and carries that instant as its datetime')
+    assert.equal(actions.timeFont, '13px', 'the clock is 13px')
+    assert.equal(actions.timeLine, '24px', 'on a 24px line')
+    assert.equal(actions.timeColor, 'rgb(129, 133, 140)', "in the caption ink DSH uses for a message's clock")
+    assert.equal(actions.buttonLabel, 'Copy', 'the button says what it does')
+    assert.equal(actions.buttonWidth, 28, 'and is 28px wide')
+    assert.equal(actions.buttonHeight, 28, 'by 28px tall')
+
+    /**
+     * Clicking copies the message's own text, then says so: DSH flips the label to `Copied` and the glyph to a
+     * check for one second. The clipboard write is captured rather than read back, because a headless browser's
+     * clipboard needs a permission grant on the browser target, and the claim here is that the button writes
+     * exactly this text — which the captured argument shows directly.
+     */
+    const copied = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const button = document.querySelector('#log .turn.user .actions button')
+        window.__copied = null
+        const real = navigator.clipboard.writeText.bind(navigator.clipboard)
+        navigator.clipboard.writeText = async (text) => { window.__copied = text; try { await real(text) } catch {} }
+        button.click()
+        return true
+      })())`),
+    )
+    assert.equal(copied, true, 'the copy button can be clicked')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const afterCopy = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const button = document.querySelector('#log .turn.user .actions button')
+        return { text: window.__copied, label: button.getAttribute('aria-label'), glyph: button.textContent, feedback: button.dataset.copied === 'true' }
+      })())`),
+    )
+    assert.equal(afterCopy.text, 'what is in here', `the button writes the message's own text (${JSON.stringify(afterCopy.text)})`)
+    assert.equal(afterCopy.label, 'Copied', 'the label says it copied')
+    assert.equal(afterCopy.feedback, true, 'and the row marks the state')
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    const restored = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => { const button = document.querySelector('#log .turn.user .actions button'); return { label: button.getAttribute('aria-label'), glyph: button.textContent } })())`),
+    )
+    assert.equal(restored.label, 'Copy', 'the label returns after the reference\'s one second')
+    assert.equal(restored.glyph, '⧉', 'and so does the copy glyph')
+
+    /** The keyboard reaches the button and activates it, as a button must. */
+    const viaKeyboard = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => {
+        const button = document.querySelector('#log .turn.user .actions button')
+        window.__copied = null
+        button.focus()
+        button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+        button.click()
+        return { focused: document.activeElement === button }
+      })())`),
+    )
+    assert.equal(viaKeyboard.focused, true, 'the copy button is focusable')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const keyboardCopy = await browser.evaluate('window.__copied')
+    assert.equal(keyboardCopy, 'what is in here', 'and keyboard activation copies the same text')
 
     // The reasoning row: 24px tall, folded, titled, with two glyphs ready to swap.
     assert.equal(measured.reasoningClosed, true, 'reasoning is folded by default')

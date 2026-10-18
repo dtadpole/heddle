@@ -193,9 +193,27 @@
    * and the horizontal scrollbar would be the least of the problems. The horizontal axis is clipped rather than scrolled
    * because a long row label belongs in its row, where it is ellipsised, not in a second scrollbar at the panel's edge.
    */
+  #workspace-scroll > p,
+  #history > summary,
+  #search-results { padding-inline: .75rem; }
   #workspace-scroll {
     flex: 1 1 auto;
     min-height: 0;
+    /**
+     * The scrolling pane spans the **whole panel**, edge to edge.
+     *
+     * The panel keeps its 12-pixel horizontal padding for the chrome, so the region breaks out of it with a negative
+     * margin and puts the same inset back as its own inline padding: the scrollbar and the scrollable area now reach
+     * the panel's edges, while a row still starts where the search field and the heading above it do. Without this the
+     * bar floated 12 pixels inside the edge and the area that scrolls stopped short of the panel it belongs to.
+     */
+    margin-inline: -.75rem;
+    /**
+     * No inline padding on the region: its **rows** own theirs, so their hover and selection paint reach the panel's
+     * edges while their content still lines up with the search field above. A padding here pushed the paint inwards and
+     * left the list looking narrower than the panel it belongs to — the owner's report, twice.
+     */
+    padding-inline: 0;
     overflow-y: auto;
     overflow-x: hidden;
     /**
@@ -533,12 +551,26 @@
    * `userStack` is `align-items: flex-end`. A stretched block can have the same right edge as a right-aligned
    * bubble, which is why the check measures the bubble's **own width** as well as its edge.
    */
-  .turn.user {
-    align-self: flex-end; max-width: 100%; width: fit-content; padding: 10px 16px;
+  /**
+   * The person's message: DSH's `userRow` — a **column** at the right edge holding the bubble and, below it,
+   * the IconActions row (the sent time, then the copy button), so the time and the button sit on the page
+   * surface rather than inside the bubble. Measured on DSH's own component CSS
+   * (`MessageItem.module.css` + `MessageIconActions.module.css`, read 2026-10-17): the row is
+   * `flex-direction: column; align-items: flex-end; gap: 6px`; the bubble is `10px 16px` on `#2c2c2e` at a 20px
+   * radius; the actions row is 28px tall with an 8px gap; the time is 13px on a 24px line in the tertiary ink with
+   * 12px of padding-right; each button is 28×28 with its glyph at 15px.
+   */
+  .turn.user { align-self: flex-end; max-width: 100%; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .turn.user .bubble {
+    max-width: 100%; width: fit-content; padding: 10px 16px;
     border: 0; border-radius: 20px;
     background: var(--chat-bubble); color: var(--chat-text);
     font-size: 14px; line-height: 22px; white-space: pre-wrap;
   }
+  .turn.user .actions { height: 28px; align-items: center; gap: 8px; margin: 0; }
+  .turn.user .turn-time { font-size: 13px; line-height: 24px; color: var(--chat-caption); padding-right: 12px; white-space: nowrap; }
+  .turn.user .action { opacity: .6; width: 28px; height: 28px; font-size: .9rem; }
+  .turn.user .action[data-copied='true'] { opacity: 1; }
   /** The answer: no border, no bubble, roomier leading — DSH's `AssistantMarkdown` root (14px on 24px). */
   /** The answer follows the chat's leading variable (the reference's 22.75), not a local 24. */
   .turn.assistant { margin-top: 6px; font-size: 14px; line-height: var(--chat-leading); color: var(--chat-text); }
@@ -593,12 +625,14 @@
    * pulled left so the glyph lines up with the text rather than centring under it). They are quiet until the
    * row is hovered or the button is focused, because an answer is read far more often than it is copied.
    */
-  .turn .actions { display: flex; gap: .15rem; margin-top: .3rem; margin-left: -.3rem; }
+  .turn .actions { display: flex; gap: 8px; align-items: center; height: 28px; margin-top: .3rem; margin-left: -.3rem; }
+  .turn .actions .turn-time { font-size: 13px; line-height: 24px; color: var(--chat-caption); padding-right: 12px; white-space: nowrap; }
   .turn .action {
-    width: 1.5rem; height: 1.5rem; display: grid; place-items: center; padding: 0;
-    font: inherit; font-size: .78rem; color: inherit; background: none; border: none;
-    border-radius: .3rem; opacity: 0; cursor: pointer; transition: opacity .12s;
+    width: 28px; height: 28px; display: grid; place-items: center; padding: 0;
+    font: inherit; font-size: .8rem; color: inherit; background: none; border: none;
+    border-radius: .3rem; opacity: 0; cursor: pointer; transition: opacity .12s, background-color .12s;
   }
+  .turn .action:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
   .turn:hover .action, .turn .action:focus-visible, .turn .action[data-copied='true'] { opacity: .6; }
   .turn .action:hover { opacity: 1; background: color-mix(in oklab, currentColor 10%, transparent); }
   .turn .action[data-copied='true'] { opacity: 1; }
@@ -1022,8 +1056,40 @@
    */
   #tree, #tree ul, #tree ol { list-style: none; margin: 0; padding: 0; }
   #tree li { display: block; padding: 0; }
-  #tree ul[role='group'] { padding-left: .85rem; border-left: 1px solid var(--line); }
-  #tree .row { position: relative; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border-radius: var(--radius-md); cursor: pointer; }
+  /**
+   * A group lays its children out at the **same** width as their parent: the indent is the row's content padding
+   * (`--tree-depth`), not the group's box. With the padding here, every level shrank the rows below it, so a nested
+   * row's hover started further in and the column of highlights stepped to the right.
+   */
+  #tree ul[role='group'] { padding-left: 0; }
+  /**
+   * A row's **paint is the panel's width; its content is the search field's column.**
+   *
+   * The region is full-bleed, so a row runs from the panel's left edge to the scrollbar at its right one — hover and
+   * selection read as parts of the panel rather than as a narrower list inside it. The text still starts where the
+   * search field's text starts (12px panel inset + 7.2px field padding = 19.2px) and ends where that text ends
+   * (the same 19.2px, less the 5px bar the row cannot paint under). Both numbers are `calc`s of the same two facts, so
+   * changing the panel's inset or the bar's width keeps the column.
+   */
+  #tree .row,
+  #adhoc .row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    /**
+     * The row's **paint is the panel's width at every depth; its content indents by depth.**
+     *
+     * The tree used to indent with the group's own padding, so a row two levels down began its highlight 28 pixels in
+     * and every level drew a shorter bar — the list read as narrower than the panel it fills. The indentation is a fact
+     * about the *content* (`depth * 14px`, the rule in SESSION_TREE.md), not about the row, so it lives in the row's
+     * padding now and the paint spans from the panel's left edge to the scrollbar at its right one.
+     */
+    padding: 0 calc(.75rem - 5px + .45rem) 0 calc(.75rem + .45rem + var(--tree-depth, 0) * 14px);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+  }
   /**
    * DSH's two row heights, measured: a workspace (its `projectRow`) is 34px and a session is **32px**. This UI drew
    * every row at 34px, so a list of sessions was 2px denser in DSH than here.
@@ -1109,8 +1175,19 @@
   #tree li[aria-selected='true'] > .row .label { opacity: 1; }
   /** DSH's state word: the muted body type, before the name, smaller than it. */
   #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
-  /** The rest-state pin mark: small, muted, and never the whole width of the row. */
-  #tree .pin-mark { display: inline-flex; flex: none; width: 14px; height: 14px; opacity: .7; pointer-events: none; }
+  /**
+   * The rest-state pin slot: a fixed box at the row's right edge, empty when the row is not pinned. Its width is reserved on
+   * every row so a pin never moves the age or the controls; the accent colour makes the state a visible cue rather than a
+   * muted detail.
+   */
+  #tree .pin-slot {
+    display: inline-flex; flex: none; align-items: center; justify-content: center;
+    width: 16px; height: 16px; margin-left: 4px; color: var(--accent); pointer-events: none;
+    transition: opacity .12s ease;
+  }
+  #tree .pin-slot svg { width: 14px; height: 14px; }
+  /** Hovering a row shows the same state on the pin control, so the marker steps aside rather than duplicating it. */
+  #tree li:hover > .row .pin-slot, #tree li:focus-within > .row .pin-slot { opacity: 0; }
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
    * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a
@@ -1179,8 +1256,8 @@
     #tree .label[data-scrolled] { mask-image: linear-gradient(90deg, transparent 0, #000 12px); }
     #tree .label[data-clipped] { mask-image: linear-gradient(270deg, transparent 0, #000 12px); }
     #tree .label[data-scrolled][data-clipped] { mask-image: linear-gradient(90deg, transparent 0, #000 12px calc(100% - 12px), transparent 100%); }
-    /** The reference hides the time and the pin mark on hover, so the title gets their room to reveal itself. */
-    #tree li:hover > .row .pin-mark { opacity: 0; }
+    /** The reference hides the time on hover, so the title gets its room to reveal itself. */
+    #tree li:hover > .row .age { opacity: 0; }
   }
   @media (prefers-reduced-motion: reduce) { #tree .label { transition: none; } }
   #tree .turns { font-size: .72rem; opacity: .5; }
@@ -2547,6 +2624,18 @@ function add(kind, text, merge = true, label, tool) {
      */
     node.dataset.copyText = node.innerText
     node.append(messageActions(node))
+  } else if (kind === 'user') {
+    /**
+     * A person's message is a **row**: the bubble, then the actions beneath it. History carries the event's own
+     * `time`; a message typed here has no event yet, so it is stamped as it is drawn.
+     */
+    const bubble = document.createElement('div')
+    bubble.className = 'bubble'
+    bubble.textContent = text
+    node.append(bubble)
+    node.dataset.copyText = text
+    const sentAt = tool !== undefined && typeof tool.time === 'string' ? tool.time : new Date().toISOString()
+    node.append(userActions(node, sentAt))
   } else {
     node.textContent = text
   }
@@ -2574,25 +2663,32 @@ function add(kind, text, merge = true, label, tool) {
  * is the answer as it reads — the drawn document's text, not its markdown source — which is what a person
  * pasting it somewhere expects.
  */
-function messageActions(row) {
-  const bar = document.createElement('div')
-  bar.className = 'actions'
+/**
+ * The copy button, shared by the answer's actions and the person's message actions.
+ *
+ * DSH's `MessageIconActions` keeps the toolbar button's label honest: it reads `Copy`, becomes `Copied` on
+ * success and returns after **one second** (its own timer is 1000 ms), while the glyph becomes a check. The text
+ * is snapshotted on the row, so a copy never picks up the button's own glyph.
+ */
+function copyAction(row, label) {
   const button = document.createElement('button')
   button.type = 'button'
   button.className = 'action'
   button.textContent = '⧉'
-  button.title = 'Copy this answer'
-  button.setAttribute('aria-label', 'Copy this answer')
+  button.title = label
+  button.setAttribute('aria-label', label)
   button.onclick = async () => {
     const text = row.dataset.copyText ?? row.innerText
     try {
       await navigator.clipboard.writeText(text)
       button.dataset.copied = 'true'
       button.textContent = '✓'
+      button.setAttribute('aria-label', 'Copied')
       setTimeout(() => {
         delete button.dataset.copied
         button.textContent = '⧉'
-      }, 1500)
+        button.setAttribute('aria-label', label)
+      }, 1000)
     } catch (error) {
       /**
        * A clipboard the browser refuses — no permission, or a page not focused — is reported rather than
@@ -2601,7 +2697,43 @@ function messageActions(row) {
       button.title = `could not copy: ${(error && error.message) || error}`
     }
   }
-  bar.append(button)
+  return button
+}
+
+function messageActions(row) {
+  const bar = document.createElement('div')
+  bar.className = 'actions'
+  bar.append(copyAction(row, 'Copy this answer'))
+  return bar
+}
+
+/**
+ * The person's message actions: the **sent time**, then the copy button — DSH's IconActions row for a user
+ * message (`clock: "start"`), below the bubble on the right.
+ *
+ * The clock is the recorded event time, not the render clock: today's message reads `HH:mm` on the 24-hour clock
+ * with leading zeros, and an older one carries its date first (`Oct 17 22:03`), which is DSH's
+ * `formatMessageClock` rule.
+ */
+function formatMessageClock(iso) {
+  const when = new Date(iso)
+  if (Number.isNaN(when.getTime())) return ''
+  const pad = (value) => String(value).padStart(2, '0')
+  const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}`
+  const now = new Date()
+  const sameDay = when.getFullYear() === now.getFullYear() && when.getMonth() === now.getMonth() && when.getDate() === now.getDate()
+  if (sameDay) return clock
+  return `${when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${clock}`
+}
+
+function userActions(row, iso) {
+  const bar = document.createElement('div')
+  bar.className = 'actions'
+  const time = document.createElement('time')
+  time.className = 'turn-time'
+  if (typeof iso === 'string' && iso !== '') time.dateTime = iso
+  time.textContent = formatMessageClock(iso)
+  bar.append(time, copyAction(row, 'Copy'))
   return bar
 }
 
@@ -4132,6 +4264,13 @@ async function refreshSessions() {
   }
 }
 
+/**
+ * Motion turns on after the reader's first input in the sidebar — the reference's own guard, so a page that is loading does
+ * not animate its first draw. Captured, so a helper restoring focus does not count as a second arming.
+ */
+document.getElementById('workspace-sidebar')?.addEventListener('pointerdown', armRows, { capture: true, once: true })
+document.getElementById('workspace-sidebar')?.addEventListener('keydown', armRows, { capture: true, once: true })
+
 const events = new EventSource('/api/events')
 /**
  * The list is redrawn shortly after activity, once per burst.
@@ -4242,7 +4381,7 @@ events.addEventListener('session', (message) => {
       toolCallId: event.chunk.id,
       state: 'running',
     })
-  } else if (event.type === 'message' && event.message.role === 'user') add('user', event.message.content.map((part) => part.text ?? '').join(''))
+  } else if (event.type === 'message' && event.message.role === 'user') add('user', event.message.content.map((part) => part.text ?? '').join(''), false, undefined, { time: new Date().toISOString() })
   else if (event.type === 'message' && event.message.role === 'tool') {
     const text = event.message.content.map((part) => part.text ?? '').join('')
     const failed = event.message.content.some((part) => part.text?.startsWith('error'))
@@ -7042,9 +7181,24 @@ function kindIcon(kind, open = false) {
     svg.append(svgPath('M2.6 2.8h10.8v2.4H2.6z'), svgPath('M3.8 5.2v7.6h8.4V5.2'), svgPath('M6.4 7.6h3.2'))
     return svg
   }
-  if (kind === 'pin') {
-    /** A pin, drawn rather than borrowed from the emoji font, which renders in a different style on every machine. */
-    svg.append(svgPath('M6 2.2h4v1.1l-.9.5v3l1.4 1.3H3.5l1.4-1.3v-3L4 3.3z'), svgPath('M8 8.2v4.4'))
+  if (kind === 'pin' || kind === 'pin-fill') {
+    /**
+     * The reference's own pin artwork, copied from its primitives (`IconPinOutlineArtwork` / `IconPinFillArtwork`, 16px box):
+     * one pin body and its needle. **Outline** is the action that would pin (nothing pinned yet); **filled** is the state, for a
+     * pinned row's marker and its unpin control. Two shapes rather than one, so the state reads without a tooltip.
+     */
+    const body = svgPath(
+      'M9.96976 1.70572L13.1554 3.93629L10.9019 8.12317L11.5158 11.605L10.7192 12.7427L2.52767 7.00693L3.3243 5.86922L6.80612 5.25528L9.96976 1.70572Z',
+    )
+    const needle = svgPath(
+      'M6.05285 9.47511C6.27284 9.16094C6.70586 9.08458C7.02003 9.30457C7.3342 9.52455C7.41055 9.95757C7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
+    )
+    needle.setAttribute('fill', 'currentColor')
+    if (kind === 'pin-fill') {
+      body.setAttribute('fill', 'currentColor')
+      body.setAttribute('stroke', 'currentColor')
+    }
+    svg.append(body, needle)
     return svg
   }
   if (kind === 'session') {
@@ -7487,7 +7641,7 @@ function menuItemsFor(node) {
      * duplicating them into the label would make the name something other than the action.
      */
     /** DSH hides the pin on an archived row altogether: the two flags are mutually exclusive. */
-    if (!node.archived) items.push({ label: node.pinned ? 'Unpin session' : 'Pin session', glyph: 'pin', run: () => pinSession(node) })
+    if (!node.archived) items.push({ label: node.pinned ? 'Unpin session' : 'Pin session', glyph: node.pinned ? 'pin-fill' : 'pin', run: () => pinSession(node) })
     items.push({ label: 'Rename', glyph: 'rename', run: () => renameSession(node) })
     items.push({ label: 'Fork session', glyph: 'fork', run: () => forkSession(node) })
     items.push({ label: node.archived ? 'Unarchive session' : 'Archive session', glyph: 'archive', run: () => archiveSession(node) })
@@ -7611,8 +7765,15 @@ async function setSessionFlags(node, patch, extra = {}) {
     return
   }
   setNote('')
+  /**
+   * A flag changes the row's **place**, and the reference glides it there instead of letting it jump: the rows are measured
+   * before the redraw and animated from where they were after it (`AnimatedRows`, 200 ms ease-out). Only this handler wraps
+   * the redraw, because pinning is the action whose whole visible effect is the move.
+   */
+  const previousBoxes = captureRowBoxes()
   await renderTree()
   await refreshSessions()
+  glideRows(previousBoxes)
 }
 
 /**
@@ -7992,14 +8153,18 @@ document.addEventListener('click', closeMenus)
  */
 Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
 
-function nodeRow(node) {
+function nodeRow(node, depth = 0) {
   /** The row's right-hand slot, declared before anything appends to it: a later `const` was a TDZ error that took
    * every session row out of the tree while its branch still rendered. */
   const rowRight = document.createElement('span')
   rowRight.className = 'row-right'
   const li = document.createElement('li')
+  /** The content's indent, as a number the stylesheet multiplies: a fact about where the row sits, not a second layout. */
+  li.style.setProperty('--tree-depth', String(depth))
   li.setAttribute('role', 'treeitem')
   li.dataset.kind = node.kind
+  /** The key the movement animation matches a previous position to: a session by its id, anything else by its path. */
+  li.dataset.rowKey = node.kind === 'session' && node.session !== undefined && node.session !== null ? 'session:' + node.session.id : 'node:' + node.path
   li.dataset.open = 'false'
   /**
    * Which ARIA state a row carries is a property of the row, and DSH's tree draws the line where this one should:
@@ -8144,7 +8309,7 @@ function nodeRow(node) {
     quick.className = 'session-actions'
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
     /** An archived row offers no pin, for the same reason the menu does not: pinning it would be refused. */
-    if (!node.archived) quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', 'pin', () => pinSession(node)))
+    if (!node.archived) quick.append(quickButton(node.pinned ? 'Unpin session' : 'Pin session', node.pinned ? 'pin-fill' : 'pin', () => pinSession(node)))
     quick.dataset.slot = 'after-menu'
     rowTools.append(quick)
   }
@@ -8170,20 +8335,26 @@ function nodeRow(node) {
   const menuSlot = rowTools.querySelector(':scope > .menu-wrap')
   const quickSlot = rowTools.querySelector(':scope > .session-actions')
   if (menuSlot !== null && quickSlot !== null) rowTools.insertBefore(menuSlot, quickSlot)
-  /**
-   * A pinned row carries a mark at rest, at the right where the hover pin button lands — DSH's `_pinIndicator`. Without it a
-   * pin is only visible by the row's position, which is a rule a reader has to know.
-   */
-  if (node.pinned === true) {
-    const mark = document.createElement('span')
-    mark.className = 'pin-mark'
-    mark.append(kindIcon('pin'))
-    mark.title = 'pinned'
-    row.append(mark)
-  }
   /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
   if (rowTools.children.length > 0) rowRight.append(rowTools)
   if (rowRight.children.length > 0) row.append(rowRight)
+  /**
+   * The pinned mark, in a slot that is **always reserved** at the row's right edge — DSH's `_pinIndicator`, filled, 14px.
+   *
+   * Measured report: when the mark was appended only for pinned rows, pinning **shifted the age and the hover controls to the
+   * left**, so the pin control jumped under the pointer. A fixed slot costs every row the same 16px, and the mark's presence
+   * then moves nothing at all.
+   */
+  const pinSlot = document.createElement('span')
+  pinSlot.className = 'pin-slot'
+  if (node.pinned === true && node.archived !== true) {
+    pinSlot.append(kindIcon('pin-fill'))
+    pinSlot.setAttribute('role', 'img')
+    pinSlot.setAttribute('aria-label', 'pinned')
+    pinSlot.title = 'pinned'
+    li.dataset.pinned = 'true'
+  }
+  row.append(pinSlot)
 
   row.onclick = async () => {
     /**
@@ -8280,6 +8451,61 @@ function titleMarquee(label) {
   return { enter, leave }
 }
 
+/**
+ * The reference's row movement, from its `AnimatedRows`: a **FLIP** measured before and after a redraw.
+ *
+ * DSH's numbers, read from its client bundle: `ROW_GLIDE_MS = 200` with `ease-out` for a row that changed position,
+ * `ROW_FADE_MS = 100` for a row that appeared. It animates only when membership or order changed, skips rows outside the
+ * viewport, turns itself off under `prefers-reduced-motion`, and stays off until the first pointer or keyboard input inside
+ * the list so a page load does not animate itself in.
+ */
+const ROW_GLIDE_MS = 200
+const ROW_FADE_MS = 100
+let rowsArmed = false
+/**
+ * A **declaration**, not a `const` arrow, and that is a fix rather than a style: the listeners that arm the row
+ * animation are registered near the top of the module, and a `const` is not initialized until its line runs — the
+ * page died at boot with `Cannot access 'armRows' before initialization`, which took the whole tree with it. A function
+ * declaration is hoisted, so the registration can come first.
+ */
+function armRows() {
+  rowsArmed = true
+}
+
+/** The row boxes as they are now, keyed by the same key the rows render with. */
+function captureRowBoxes() {
+  const boxes = new Map()
+  for (const li of document.querySelectorAll('#tree li[data-row-key], #list li[data-row-key]')) {
+    const rect = li.getBoundingClientRect()
+    boxes.set(li.dataset.rowKey, { left: rect.left, top: rect.top })
+  }
+  return boxes
+}
+
+/** Glide rows from where they were to where the redraw put them; fade in the ones that were not there. */
+function glideRows(previous) {
+  if (previous === null || rowsArmed !== true) return
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  const viewport = { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth }
+  for (const li of document.querySelectorAll('#tree li[data-row-key], #list li[data-row-key]')) {
+    const rect = li.getBoundingClientRect()
+    const visible = rect.bottom > viewport.top && rect.top < viewport.bottom && rect.right > viewport.left && rect.left < viewport.right
+    if (!visible) continue
+    const before = previous.get(li.dataset.rowKey)
+    if (before === undefined) {
+      li.animate([{ opacity: 0 }, { opacity: 1 }], { duration: ROW_FADE_MS, easing: 'ease-out' })
+      continue
+    }
+    const dx = Math.round(before.left - rect.left)
+    const dy = Math.round(before.top - rect.top)
+    if (dx === 0 && dy === 0) continue
+    li.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0px, 0px)' }], {
+      duration: ROW_GLIDE_MS,
+      easing: 'ease-out',
+    })
+  }
+}
+
 /** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
 async function loadChildren(node, li) {
   const group = document.createElement('ul')
@@ -8317,7 +8543,8 @@ async function loadChildren(node, li) {
     group.append(empty)
     return
   }
-  for (const child of children) group.append(nodeRow(child))
+  const depth = Number(li.style.getPropertyValue('--tree-depth') || '0')
+  for (const child of children) group.append(nodeRow(child, depth + 1))
   markSelection()
 }
 
