@@ -32,7 +32,7 @@ async function startServer(label, options = {}) {
   const home = isolatedHome(`model-switcher-${label}`)
   const work = fixtureDir(`model-switcher-${label}-work`)
   const one = options.toolFirst === true
-    ? await toolThenPlainDouble('answer from one', options.holdOpenMs ?? 3200)
+    ? await toolThenPlainDouble('answer from one')
     : await plainDouble('answer from one')
   const two = await plainDouble('answer from two')
   const config = writeJson(join(home, 'heddle.json'), {
@@ -135,17 +135,24 @@ async function plainDouble(content) {
 }
 
 /**
- * A double whose **first** answer is a tool call, held open for `holdOpenMs`, and whose later answers are text.
+ * A double whose **first** answer is a tool call, held until `releaseFirst()`, and whose later answers are text.
  *
  * The hold is what makes a turn observably running while a person switches the model: a tool round gives the
  * loop a second model call, and that second call is where "the switch landed on the turn's next step" is measured
  * rather than assumed.
  */
-async function toolThenPlainDouble(content, holdOpenMs) {
+async function toolThenPlainDouble(content) {
   const { createServer } = await import('node:http')
   const requests = []
   const turns = []
   let count = 0
+  let finishFirst
+  let firstReleased = false
+  const releaseFirst = () => {
+    firstReleased = true
+    finishFirst?.()
+    finishFirst = undefined
+  }
   const server = createServer((request, response) => {
     let body = ''
     request.on('data', (chunk) => {
@@ -184,8 +191,11 @@ async function toolThenPlainDouble(content, holdOpenMs) {
         response.write('data: [DONE]\n\n')
         response.end()
       }
-      if (first) setTimeout(finish, holdOpenMs)
-      else finish()
+      if (first && !firstReleased) {
+        // Keep this step pending until the browser has recorded its model switch. No timing race.
+        response.flushHeaders()
+        finishFirst = finish
+      } else finish()
     })
   })
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
@@ -195,7 +205,11 @@ async function toolThenPlainDouble(content, holdOpenMs) {
     baseUrl: `http://127.0.0.1:${port}/d`,
     requests,
     turns,
-    close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
+    releaseFirst,
+    close: () => {
+      releaseFirst()
+      return new Promise((resolvePromise) => server.close(() => resolvePromise()))
+    },
   }
 }
 
@@ -445,7 +459,11 @@ async function trustedClick(browser, expression, label) {
  */
 async function openMenu(browser) {
   await trustedClick(browser, SEAT, 'seat')
-  if (!(await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 1200))) {
+  try {
+    await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 1200)
+  } catch (error) {
+    // waitFor throws on timeout; the historical false-return branch was unreachable.
+    if (!(error instanceof Error) || !error.message.startsWith('timed out after 1200ms waiting for:')) throw error
     await trustedClick(browser, SEAT, 'seat (retry after layout shift)')
   }
   await browser.waitFor(`document.getElementById('model-menu').hidden === false`, 5000)
@@ -772,14 +790,14 @@ test('the menu is keyboard-operable and a selection restores focus without a rin
 test('a switch made while a turn runs lands on that turn’s next step', async (context) => {
   /**
    * DSH's running-turn rule, measured on 2026-10-17: the seat stays enabled while a turn streams, and the switch
-   * takes effect on a later step of the same turn (not merely on the next turn). The first double answers with a
-   * tool call held open long enough to switch; the loop's second model call must then reach the second endpoint.
+   * takes effect on a later step of the same turn (not merely on the next turn). The first double holds its
+   * tool call until the browser confirms the switch; releasing it must route the next call to the second
+   * endpoint. A fixed 3.2-second delay raced against layout changes and browser instrumentation.
    */
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
-  const server = await startServer('running', { toolFirst: true, holdOpenMs: 3200 })
+  const server = await startServer('running', { toolFirst: true })
   const browser = await openBrowser({ width: 1280, height: 1000 })
   try {
-    await watchErrors(browser)
     await watchErrors(browser)
     await browser.goto(server.url)
     assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
@@ -801,6 +819,9 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
       'Select model, current Model Two, reasoning effort High',
       'the seat answers the switch at once',
     )
+    assert.equal(server.one.turns.length, 1, 'the first request stays pending until the switch is made')
+    assert.equal(server.two.turns.length, 0, 'no next-step request has escaped before release')
+    server.one.releaseFirst()
     assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the same turn ends with the new endpoint’s answer')
     assert.ok(await until(() => server.one.turns.length === 1), 'the first step asked the first endpoint')
     assert.ok(await until(() => server.two.turns.length === 1), 'the next step asked the second')
