@@ -17,7 +17,7 @@ been paid for.
 
 | Skill | For |
 |---|---|
-| [`ui-parity-audit`](ui-parity-audit/INDEX.md) | matching this UI against a reference implementation (the running DSH at `127.0.0.1:8080`) and finding every difference a person can feel |
+| [`ui-parity-audit`](ui-parity-audit/INDEX.md) | matching this UI against a reference implementation (the running DSH at `127.0.0.1:8080`) without missing the same thing twice: a coverage matrix, a DOM-derived inventory, content stress, occlusion checks and the ledger of every miss |
 | [`full-loop-goal`](full-loop-goal/INDEX.md) | turning a large job into a goal that runs research (measure, then brainstorm) → understand (then step back) → plan → implement → verify → fix for a stated number of cycles |
 
 ## What belongs here
