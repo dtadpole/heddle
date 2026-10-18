@@ -88,6 +88,22 @@ already matched, while heddle's heading was 1px short at weight 600 and the payl
 mono face (its markup is a `code` element, and the rule named `pre`). The fix names the code element, puts
 the measured "SF Mono" first in the mono stack, and gives the headings DSH's 24px/500/20px.
 
+## Batch D — toolbar and lane strip (measured once each side)
+
+| Metric | DSH | heddle | Verdict |
+|---|---|---|---|
+| toolbar height | 28px | 34px | **fixed → 28px** |
+| toolbar button | 20px tall, 8px radius, rgb(173,178,184) | 20px, 4px radius, text-3 | **fixed → 8px and the measured colour** |
+| search input | 149×18px | 140×16px | **fixed → 149×18 (the box widened for the icon)** |
+| lane strip | Input/Model/Tools, 51px | input/model/tools, 72px | **fixed → 51px, capitalised-in-css-free labels** |
+| lane label | 10px/400, rgb(129,133,140), no transform, no tracking | 8px/10px mono, uppercase, .04em | **fixed → measured typography** |
+
+Driver of the chrome disagreements was **the control scale**, not structure: both sides have the same three
+toggle buttons, one search field and three lanes, but heddle had been built on an 8px-mono lane label and a
+34px bar while DSH uses a 10px sentence-case label inside a 28px bar. The strip is content-driven, so the
+tolerance is stated: 51px ±5px; the measurement lands at 51 after dropping the separate legend (DSH has no
+legend row) and giving each of the three lanes 15px.
+
 ## Unknowns (not measured, never filled in from plausibility)
 
 - DSH's SYSTEM and COMPACTED tag colours: those rows were not in the rendered window (virtualised table).
