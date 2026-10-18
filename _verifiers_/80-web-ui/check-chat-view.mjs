@@ -785,6 +785,36 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     )
     assert.deepEqual(shape.roleCounts, { user: 8, assistant: 8 }, `and only the person's and the answer's roles (${JSON.stringify(shape.roleCounts)})`)
     /**
+     * **No chat scrollbar.** the reference's transcript paints its scrollbar transparent (6px in the box model, stable
+     * gutter) so nothing slides over the text; heddle was on the platform overlay bar, which appeared on every
+     * scroll — the owner's distraction. The rail scrubs, so the bar is redundant: measure that the scroller reports
+     * no scrollbar at rest, and the same after a scroll.
+     */
+    const scrollbar = async () =>
+      JSON.parse(
+        await browser.evaluate(`JSON.stringify((() => {
+          const log = document.getElementById('log')
+          const pseudo = getComputedStyle(log, '::-webkit-scrollbar')
+          return {
+            scrollbarWidth: getComputedStyle(log).scrollbarWidth,
+            gutter: log.offsetWidth - log.clientWidth,
+            display: pseudo.display,
+            scrollTop: Math.round(log.scrollTop),
+          }
+        })())`),
+      )
+    const scrollbarAtRest = await scrollbar()
+    assert.equal(scrollbarAtRest.scrollbarWidth, 'none', 'the chat scroller declares no scrollbar')
+    assert.equal(scrollbarAtRest.gutter, 0, `and reserves no scrollbar gutter (${scrollbarAtRest.gutter}px)`)
+    assert.equal(scrollbarAtRest.display, 'none', 'its webkit scrollbar is not displayed')
+    await browser.evaluate('document.getElementById("log").scrollTop = 400')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const scrollbarScrolled = await scrollbar()
+    assert.ok(scrollbarScrolled.scrollTop > 0, `the transcript still scrolls without a visible bar (${scrollbarScrolled.scrollTop})`)
+    assert.equal(scrollbarScrolled.gutter, 0, 'and the gutter stays at zero while scrolled')
+    await browser.evaluate('document.getElementById("log").scrollTop = 0')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    /**
      * The unit is the **section**, not the turn: the old assertion pinned "one row per displayed turn", which is
      * exactly the tool-grained structure the owner reported. The reference's unit is the user message and the
      * answer (measured 5 user + 5 assistant rows over a 27-row conversation with no tool or reasoning rows).
