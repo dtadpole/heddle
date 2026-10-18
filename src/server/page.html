@@ -162,7 +162,45 @@
    * trajectory details included. A rounded surface is declared on the element that *is* rounded — see
    * `#composer-card`, which owns its 28px — so adding one later cannot leak into the layout.
    */
-  aside { width: var(--sidebar-width); flex: none; overflow-y: auto; padding: .75rem; color: var(--text-2); background: var(--sidebar); }
+  /**
+   * The panel is a **fixed column**: it never scrolls, and its one variable-length region does.
+   *
+   * Measured from DSH on 2026-10-17: its sidebar column is `overflow: hidden` (813/813), its workspace list is the only
+   * `overflow-y: auto` element, and the bottom rows are anchored below it. The owner's report was the opposite here —
+   * the whole pane scrolled (1233/813), taking the search and the controls with it.
+   */
+  aside {
+    width: var(--sidebar-width);
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding: .75rem;
+    color: var(--text-2);
+    background: var(--sidebar);
+  }
+  /** The rows above the list are the panel's chrome: they keep their height and cannot be squeezed by the list. */
+  aside > header,
+  aside > button,
+  aside > h1,
+  aside > input,
+  aside > p { flex: none; }
+  /**
+   * The workspaces region: the only thing in the panel that scrolls.
+   *
+   * `min-height: 0` is what lets a flex child shrink below its content — without it the region would grow past the pane
+   * and the horizontal scrollbar would be the least of the problems. The horizontal axis is clipped rather than scrolled
+   * because a long row label belongs in its row, where it is ellipsised, not in a second scrollbar at the panel's edge.
+   */
+  #workspace-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /** Room for the scrollbar, so a row's age does not sit under it when the list is long. */
+    padding-right: .15rem;
+  }
   /**
    * The conversation column, shared by the transcript and the composer.
    *
@@ -1412,6 +1450,8 @@
   body[data-sidebar='collapsed'] #search-results,
   body[data-sidebar='collapsed'] #tree-note,
   body[data-sidebar='collapsed'] #history { display: none; }
+  /** A rail has no list to scroll: the region goes with the words. */
+  body[data-sidebar='collapsed'] #workspace-scroll { display: none; }
   body[data-sidebar='collapsed'] #sidebar-search { display: inline-flex; }
   /**
    * In the rail the primary action is DSH's **second icon**, immediately after the control that opens the panel: its
@@ -1789,15 +1829,26 @@
   -->
   <input id="session-search" type="search" placeholder="Search sessions" aria-label="search session names" autocomplete="off">
   <p class="meta" id="search-note" hidden></p>
-  <ul id="tree" role="tree" aria-label="workspace folders"></ul>
-  <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
-  <div id="search-results" role="tree" aria-label="search results" hidden></div>
-  <p id="tree-note" class="meta" hidden></p>
-  <details id="history">
-    <summary>ad hoc</summary>
-    <p class="meta" id="adhoc-note" hidden></p>
-    <ul id="adhoc" role="tree" aria-label="folders adopted because a session ran in them"></ul>
-  </details>
+  <!--
+    The **one scrollable region** of the panel, which is what the reference does and what this panel did not.
+    Measured from DSH on 2026-10-17 at 1400x900: its sidebar column is `overflow: hidden` and does not scroll, while the
+    workspace list alone is `overflow-y: auto` (270x461, scrollHeight 756) — the brand, the primary action, the global
+    rows, the workspaces header and the search are above it and do not move, and the bottom rows are anchored below it.
+    Heddle scrolled the whole pane instead: its aside measured `overflow-y: auto` with scrollHeight 1233 against a
+    813-pixel client, so every control scrolled away with the list. The chrome above and below this wrapper is
+    `flex: none`, so only this region can ever be compressed.
+  -->
+  <div id="workspace-scroll">
+    <ul id="tree" role="tree" aria-label="workspace folders"></ul>
+    <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
+    <div id="search-results" role="tree" aria-label="search results" hidden></div>
+    <p id="tree-note" class="meta" hidden></p>
+    <details id="history">
+      <summary>ad hoc</summary>
+      <p class="meta" id="adhoc-note" hidden></p>
+      <ul id="adhoc" role="tree" aria-label="folders adopted because a session ran in them"></ul>
+    </details>
+  </div>
 </aside>
 <!--
   The divider between the sidebar and the content.

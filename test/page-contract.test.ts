@@ -164,6 +164,21 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
   assert.ok(page.includes('current = null\n      const title'), 'a vanished session releases the pointer')
 })
 
+test('the navigation panel is a fixed column, and only its workspaces region scrolls', () => {
+  /**
+   * Measured from DSH on 2026-10-17: its sidebar column is `overflow: hidden` (813/813) with exactly one inner
+   * scroller — the workspace list — while the brand, the primary action, the workspaces header and the search stay
+   * above it. Heddle scrolled the whole pane (1233/813), which is the owner's report. The browser check in part 11
+   * judges the behaviour; these contracts catch a rewrite that drops the structure the behaviour needs.
+   */
+  assert.match(page, /<div id="workspace-scroll">/, 'the variable-length region has its own wrapper')
+  assert.match(page, /<div id="workspace-scroll">\s*<ul id="tree"/, 'the tree lives inside it')
+  assert.match(page, /aside \{[\s\S]*?display: flex;[\s\S]*?flex-direction: column;[\s\S]*?min-height: 0;[\s\S]*?overflow: hidden;/, 'the panel is a fixed column that cannot scroll')
+  assert.match(page, /#workspace-scroll \{[\s\S]*?flex: 1 1 auto;[\s\S]*?min-height: 0;[\s\S]*?overflow-y: auto;/, 'the region carries the scroll')
+  assert.match(page, /aside > header,\s*aside > button,\s*aside > h1,\s*aside > input,\s*aside > p \{ flex: none; \}/, 'and the chrome above it keeps its height')
+  assert.match(page, /body\[data-sidebar='collapsed'\] #workspace-scroll \{ display: none; \}/, 'a rail has no region to scroll')
+})
+
 test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
   /**
    * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as

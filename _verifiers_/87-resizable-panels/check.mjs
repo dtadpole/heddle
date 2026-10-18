@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -71,6 +71,13 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
    * part is about the panel, not about the registration route.
    */
   mkdirSync(join(work, 'notes'), { recursive: true })
+  /**
+   * Enough rows that the workspaces region overflows a short window. A scroll claim on a list that fits is a claim that
+   * cannot fail, so the fixture has to be long: the tree draws one row per file, and the region is the thing under test.
+   */
+  for (let index = 0; index < 40; index += 1) {
+    writeFileSync(join(work, `file-${String(index).padStart(2, '0')}.md`), `# ${index}\n`)
+  }
   const seededAt = new Date().toISOString()
   writeJson(join(home, 'workspaces.json'), {
     version: 3,
@@ -407,6 +414,75 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * HOME registers no workspace and a browser assertion here would only be able to pass vacuously. The live
      * measurement is in `SESSION_UI.md`: a fresh profile draws 8 rows with the first root `aria-expanded="true"`.
      */
+
+    /**
+     * The panel **does not scroll as a whole**; its workspaces region does. Measured from DSH on 2026-10-17: its
+     * sidebar column is `overflow: hidden` (813/813) with exactly one inner scroller — the workspace list — and the
+     * brand, the primary action and the search above it never move. The owner's report was the opposite here, and this
+     * is the assertion that keeps the fix: the aside cannot scroll, the region can, and scrolling it leaves the chrome
+     * exactly where it was.
+     */
+    /**
+     * The panel is wide here: the reload above restored it, and the chord has not been pressed yet. The tree is a fetch
+     * of its own, so the region has nothing to measure until it has drawn — and the branch has to be **open** for the
+     * 40 seeded files to be rows, which the remembered expansion from the primary action guarantees.
+     */
+    assert.ok(
+      await browser.waitFor('document.querySelectorAll("#tree .row").length > 40', 20_000),
+      'the seeded workspace is drawn open, so the region has more rows than fit',
+    )
+    const panel = JSON.parse(
+      await browser.evaluate(`(() => {
+        const aside = document.querySelector('aside')
+        const region = document.getElementById('workspace-scroll')
+        const read = (el) => {
+          const s = getComputedStyle(el)
+          const r = el.getBoundingClientRect()
+          return { y: Math.round(r.y), overflowY: s.overflowY, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
+        }
+        const scrollers = [...aside.querySelectorAll('*')].filter((el) => {
+          const s = getComputedStyle(el)
+          return /auto|scroll/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 1
+        })
+        return JSON.stringify({
+          aside: read(aside),
+          asideScrolls: aside.scrollHeight > aside.clientHeight + 1,
+          region: read(region),
+          regionScrolls: region.scrollHeight > region.clientHeight + 1,
+          scrollers: scrollers.map((el) => el.id || el.tagName.toLowerCase()),
+          chrome: {
+            brand: read(document.getElementById('brand')).y,
+            newSession: read(document.getElementById('new-session')).y,
+            search: read(document.getElementById('session-search')).y
+          }
+        })
+      })()`),
+    )
+    assert.equal(panel.aside.overflowY, 'hidden', 'the panel is a fixed column')
+    assert.equal(panel.asideScrolls, false, `and does not scroll as a whole (${panel.aside.scrollHeight}/${panel.aside.clientHeight})`)
+    assert.deepEqual(panel.scrollers, ['workspace-scroll'], 'the workspaces region is the only thing that scrolls')
+    assert.equal(panel.regionScrolls, true, `and it does scroll, because the fixture overflows (${panel.region.scrollHeight}/${panel.region.clientHeight})`)
+
+    const scrolled = JSON.parse(
+      await browser.evaluate(`(() => {
+        const region = document.getElementById('workspace-scroll')
+        region.scrollTop = region.scrollHeight
+        region.dispatchEvent(new Event('scroll'))
+        const read = (el) => Math.round(el.getBoundingClientRect().y)
+        return JSON.stringify({
+          scrollTop: Math.round(region.scrollTop),
+          brand: read(document.getElementById('brand')),
+          newSession: read(document.getElementById('new-session')),
+          search: read(document.getElementById('session-search')),
+          asideScrollTop: Math.round(document.querySelector('aside').scrollTop)
+        })
+      })()`),
+    )
+    assert.ok(scrolled.scrollTop > 0, 'the region scrolled to its end')
+    assert.equal(scrolled.brand, panel.chrome.brand, 'and the brand row did not move')
+    assert.equal(scrolled.newSession, panel.chrome.newSession, 'nor the primary action')
+    assert.equal(scrolled.search, panel.chrome.search, 'nor the search field')
+    assert.equal(scrolled.asideScrollTop, 0, 'while the panel itself stayed at zero')
 
     /**
      * The chord, which is DSH's own: `Alt+Meta+B`. It **toggles** — pressed while wide it collapses, pressed again it
