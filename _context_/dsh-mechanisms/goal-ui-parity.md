@@ -84,3 +84,21 @@ its edges. It now takes the composer card's own width formula (`min(calc(100% - 
 pill** still hugs its content inside that composer-width dock (its measured pill was 680px inside a 929px
 dock); the owner asked for the visible bar itself to follow the input area, so Heddle fills the composer width
 and aligns to it.
+
+## The rest of the traits, from DSH's own GoalBar module
+
+Extracted live from DSH's stylesheet (14 `.nLMEza_` rules — the GoalBar module's own CSS):
+
+| Trait | DSH | Heddle | Verdict |
+|---|---|---|---|
+| surface | the row itself is transparent; a `::before` pseudo-element paints `var(--dsw-specific-menu)` with `backdrop-filter: var(--dsw-menu-backdrop-filter)`, under `box-shadow: var(--dsw-elevation-panel)` | transparent row + elevation shadow only | **fixed** — a `::before` now paints a 92% menu colour (`var(--composer)`) with `blur(20px) saturate(1.2)` behind the row |
+| placement | `margin: 0 auto calc(0px - stack-gap - 3px)` — the dock **tucks into the composer card** by 9px (measured live: dock bottom is 9px past the card's top edge) | a 5.6px gap above the card | **fixed** — `margin: 0 auto -9px`; measured tuck 9px |
+| height | 36px fixed, padding `4px 5px 4px 12px` | 37px content-sized | **fixed** — `box-sizing: border-box; height: 36px`; measured 36 |
+| colour: glyph | `label-tertiary` | opacity .85 of the inherited colour | **fixed** — 70% of the current colour |
+| colour: phrase | `label-primary`, 13px/500/24px | matches | match |
+| colour: objective | `label-primary-dimmed`, 13px/20px, ellipsis | 78% of the current colour | **fixed** — 78% (dimmed) |
+| colour: verbs | `label-tertiary`, hover `label-secondary` on `interactive-bg-hover` | tertiary colour, hover brighter with a 10% fill | **fixed** — hover colour 82% + white 18%, 10% fill |
+| disabled verb | `opacity: .4; cursor: default` | none | **added** (`.4` + default cursor) |
+| error | a 12/20 red line replaces the objective inside the row | shown as a note under the composer | **kept with a reason**: the refusal note is shared by other actions (the check already judges it at `#tree-note`), and moving it into the dock is a behaviour change with its own claim |
+| inline editor | `objectiveInput`: 26px, 0.5px border, radius-sm, focus border business colour | an `edit` icon that opens a browser prompt | **kept with a reason**: recorded in the earlier round; the dock's anatomy matches, the editing interaction is a separate change |
+| hidden states | home: no dock; session with a goal: dock; **complete**: gone (measured) | hidden with no session, hidden when complete, shown for active/paused/blocked | **fixed** (complete was this round's other change) |

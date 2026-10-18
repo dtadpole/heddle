@@ -554,11 +554,19 @@
    * input area, so it is given the composer card's own width formula and centring rather than a hug — the left
    * and right edges are the input's edges, judged by a width-equality assertion.
    */
-  #goal-bar { display: flex; align-items: center; gap: 10px; width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto .35rem; padding: 4px 5px 4px 12px; border: 0; border-radius: 12px; background: transparent; box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; font-size: 13px; line-height: 24px; }
+  /**
+   * DSH's GoalBar module, measured live: the visible surface is a `::before` menu surface (translucent menu
+   * colour plus a backdrop blur) behind an elevation-panel shadow — not a transparent row with a ring; the row is
+   * a fixed 36px with 4/5/4/12 padding; the dock tucks into the composer with a negative bottom margin (stack gap
+   * + 3px); the glyph and the verbs are tertiary-label coloured, the phrase is the primary label, and the
+   * objective is the dimmed label.
+   */
+  #goal-bar { position: relative; isolation: isolate; display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); height: 36px; margin: 0 auto -9px; padding: 4px 5px 4px 12px; border: 0; border-radius: 12px; background: transparent; box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; font-size: 13px; line-height: 24px; }
+  #goal-bar::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: color-mix(in oklab, var(--composer) 92%, transparent); backdrop-filter: blur(20px) saturate(1.2); pointer-events: none; }
   #goal-bar[hidden] { display: none; }
-  #goal-glyph { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: none; opacity: .85; }
-  #goal-phase { font-size: 13px; font-weight: 500; white-space: nowrap; flex: none; }
-  #goal-objective { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 20px; color: color-mix(in oklab, currentColor 92%, transparent); }
+  #goal-glyph { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: none; color: color-mix(in oklab, currentColor 70%, transparent); }
+  #goal-phase { font-size: 13px; font-weight: 500; white-space: nowrap; flex: none; color: var(--text); }
+  #goal-objective { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 20px; color: color-mix(in oklab, currentColor 78%, transparent); }
   #goal-rounds { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   #goal-running { display: inline-flex; align-items: center; gap: .3rem; font-size: 11px; opacity: .75; flex: none; }
   #goal-running[hidden] { display: none; }
@@ -566,7 +574,8 @@
   @keyframes goal-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   #goal-actions { display: flex; align-items: center; gap: 10px; flex: none; }
   #goal-actions button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: rgb(173, 178, 184); cursor: pointer; }
-  #goal-actions button:hover { background: color-mix(in oklab, currentColor 12%, transparent); color: currentColor; }
+  #goal-actions button:hover { background: color-mix(in oklab, currentColor 10%, transparent); color: color-mix(in oklab, currentColor 82%, white 18%); }
+  #goal-actions button:disabled { opacity: .4; cursor: default; }
   #goal-actions button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
   #goal-actions svg { width: 14px; height: 14px; }
   /**

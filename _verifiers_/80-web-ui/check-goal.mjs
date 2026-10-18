@@ -445,7 +445,9 @@ test('an active goal is visible in the chat window, live, without a reload', asy
         rounds: document.getElementById('goal-rounds').textContent,
         hasGlyph: document.getElementById('goal-glyph') !== null,
         hasRunning: document.getElementById('goal-running') !== null,
-        abovePrompt: document.getElementById('goal-bar').getBoundingClientRect().bottom <= document.getElementById('prompt').getBoundingClientRect().top + 1,
+        /** DSH's dock tucks 9px into the composer, so "above" is its top edge, not its bottom. */
+        abovePrompt: document.getElementById('goal-bar').getBoundingClientRect().top < document.getElementById('prompt').getBoundingClientRect().top,
+        tuck: Math.round(document.getElementById('goal-bar').getBoundingClientRect().bottom - document.getElementById('prompt').getBoundingClientRect().top),
         belowLogTop: document.getElementById('goal-bar').getBoundingClientRect().top > document.getElementById('log').getBoundingClientRect().top,
       })`))
       assert.equal(shown.text, 'be visible while pushing', 'the objective is read from the durable goal')
@@ -453,6 +455,7 @@ test('an active goal is visible in the chat window, live, without a reload', asy
       assert.equal(shown.hasGlyph, true, 'DSH parity: the dock carries a goal glyph')
       assert.equal(shown.hasRunning, true, 'and a running state, from the live stream')
       assert.equal(shown.abovePrompt, true, 'the indicator sits above the composer, where DSH docks it')
+      assert.ok(shown.tuck >= 0 && shown.tuck <= 12, `and tucks into it by DSH's 9px (measured ${shown.tuck})`)
       assert.equal(shown.belowLogTop, true, 'and inside the chat column rather than over it')
       /** DSH names the dock's objective and verbs; a person reading with a screen reader gets the same facts. */
       assert.equal(
@@ -492,6 +495,30 @@ test('an active goal is visible in the chat window, live, without a reload', asy
       })()`))
       assert.ok(Math.abs(align.barW - align.cardW) <= 1, `the dock follows the input area's width (bar ${align.barW} vs card ${align.cardW})`)
       assert.ok(Math.abs(align.barX - align.cardX) <= 1, `and is aligned to it (bar ${align.barX} vs card ${align.cardX})`)
+      /** The rest of the trait ledger: surface, tuck, height, radius, icon colour — DSH's measured values. */
+      const traits = JSON.parse(await browser.evaluate(`(() => {
+        const bar = document.getElementById('goal-bar')
+        const card = document.getElementById('composer-card')
+        const b = bar.getBoundingClientRect()
+        const c = card.getBoundingClientRect()
+        const strip = (el) => { const t = document.createElement('div'); t.style.color = el; document.body.append(t); const v = getComputedStyle(t).color; t.remove(); return v }
+        void strip
+        return JSON.stringify({
+          tuck: Math.round(b.bottom - c.y),
+          height: Math.round(b.height),
+          radius: getComputedStyle(bar).borderRadius,
+          beforeBg: getComputedStyle(bar, '::before').backgroundColor,
+          beforeFilter: getComputedStyle(bar, '::before').backdropFilter,
+          iconColor: getComputedStyle(bar.querySelector('[data-goal-action="pause"]')).color,
+        })
+      })()`))
+      assert.ok(traits.tuck >= 5 && traits.tuck <= 12, `the dock tucks into the composer like DSH's negative stack-gap margin (measured ${traits.tuck}px)`)
+      assert.equal(traits.height, 36, 'the row is DSH\'s fixed 36px')
+      assert.equal(traits.radius, '12px', 'with its measured radius')
+      assert.notEqual(traits.beforeBg, 'rgba(0, 0, 0, 0)', 'the visible surface is a menu fill on a pseudo-element, not a transparent row')
+      assert.match(traits.beforeFilter, /blur/, 'with DSH\'s backdrop blur')
+      assert.equal(traits.iconColor, 'rgb(173, 178, 184)', 'the verbs are tertiary-label coloured, as DSH\'s are')
+
       assert.equal(dockStyle.radius, '12px', 'and DSH\'s 12px radius')
       assert.equal(dockStyle.gap, '10px', 'and its 10px gap')
       assert.ok(dockStyle.h <= 40, 'the row stays a single composer-height row')
