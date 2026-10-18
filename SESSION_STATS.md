@@ -265,3 +265,45 @@ directly: [heddle-stats-dock-8082.png](_context_/dsh-mechanisms/heddle-stats-doc
 percent is honestly blank there because that session's endpoint declares no window; the claude-opus session at
 `3082` showed `2%`). The model-selector session was steered to run its own server on another port and to leave
 `3082`/`8082` alone.
+
+## Completeness loop — cycle 1: the context gauge was hidden, not missing
+
+**The report.** The owner saw the dock's first two items but no context-used part. Measured on the live page:
+the dock's third item was absent while `13 turns 31 steps` and `692K tok · Cache hit 80%` rendered.
+
+**Measured (both sides).** The element exists in the page and is hidden by design when no context window is
+declared; the session's own stats do carry the numerator — `GET /api/sessions/<id>` returned
+`stats.lastPromptTokens: 37796` for the live `plugboard-d` session. `/api/endpoints` showed both
+`plugboard-d` (`deepseek-flash`) and `plugboard-x` (`gpt-6.1-sol`) **without** `contextWindow`, while
+`claude-opus` declares 1,000,000 — which is why only some sessions had the gauge. So the missing thing was a
+**value**, not a mechanism.
+
+**Where an honest value comes from (measured, not guessed).** Both providers' model lists report it, reached
+through the signing helper: `GET /d/models` → `data[].context_window` = **1,048,576** for `deepseek-flash`;
+`GET /x/models` → `models[].context_window` = **500,000** for `gpt-6.1-sol` (plus `max_context_window`
+872,000). No local catalogue in DSH held these numbers, so a hardcoded table would have been a guess with a
+helpful shape.
+
+**Brainstorm:** (a) leave the gauge blank — rejected: the fact is available; (b) hardcode a model→window table
+in the repo — rejected: guessed numbers for private models and stale the day a route changes; (c) declare the
+windows in the machine-local config, values taken from the providers' own metadata — **done now** as the
+immediate fix; (d) teach the harness to discover the window from the endpoint's model list (kind-aware:
+`data[].context_window` for openai-chat, `models[].context_window` for openai-responses), config declaration
+winning, unknown staying blank — **chosen as the cycle-2 mechanism**, because it keeps future models honest
+without editing config by hand.
+
+**Step back.** The objective widens slightly and correctly: the dock's UI was complete, but the harness lacked
+a way to learn a real window for a provider that reports one. The audit is therefore *every figure's data
+path*, not only the gauge.
+
+**Changed now (immediate fix, machine-local only).** `~/.heddle/heddle.json` declares
+`contextWindow: 1048576` for `plugboard-d` and `500000` for `plugboard-x`, each with a
+`$contextWindowSource` naming the provider field and date; backup kept beside the file. The main daemon was
+restarted and the live page checked at `http://localhost:8082/`:
+[heddle-stats-dock-context.png](_context_/dsh-mechanisms/heddle-stats-dock-context.png) shows
+`13 turns 31 steps · 692K tok · Cache hit 80% · 4%` — the gauge with its ring at 4% (37,796 / 1,048,576).
+
+**Next cycle (planned):** a kind-aware window resolver in the harness (config wins; provider model list
+second; cache; failure leaves it absent), failing-first unit tests for each wire shape, a browser contract
+where an endpoint declares no window but its model list reports one and the gauge appears, then the live
+8082 check and the suites.
