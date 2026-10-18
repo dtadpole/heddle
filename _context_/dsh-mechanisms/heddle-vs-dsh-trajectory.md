@@ -194,3 +194,23 @@ gap in the shell, not in the trajectory, and is recorded for a round that can me
 
 Still not measured: scroll 0/25/50/75/100% row counts (the probe's scroll block was dropped when the row
 predicate was rewritten) and the collapsed turns/calls/search states.
+
+## Batch D2 — scroll, collapse and search (probe, headless CDP)
+
+| State | DSH | heddle | Verdict |
+|---|---|---|---|
+| DOM rows at 0/25/50/75/100% | **34 at every position** (scroller `Y0dWHa_tablePane`) | no scrollable pane on the measured session (no overflow), full render | **structural difference**: DSH virtualises, heddle renders every row |
+| collapse turns | control found ("Collapse turns"), row count unchanged in the same task | 15 → **6** → restored 15 | heddle works; DSH unmeasured (its render is async) |
+| collapse calls | control found, count unchanged in the same task | 15 → 15 (no subcall rows to fold) | heddle's data has no subcalls; DSH unmeasured |
+| search "not-a-real-term-xyz" | 28 → 28 → 28 in the same task | 15 → **4** → cleared 15 | heddle filters and clears; DSH unmeasured (debounced) |
+
+Attribution: the scroll difference is **virtualisation, not a paint detail** — DSH keeps a ~34-row window in
+the DOM whatever the scroll position, while heddle renders the whole ledger. Adopting virtualisation is a
+structural feature (windowed rendering, scroll anchoring, a page of history), not a comparison-round fix, and
+is recorded as a decision for the owner rather than quietly copied.
+
+The DSH collapse and search numbers are **not trustworthy yet**: both are rendered asynchronously/debounced,
+and the probe clicks and reads in the same task, so the unchanged counts prove nothing. The probe needs a
+settle wait after each toggle and after typing (plus the async render), the same class of bug the split-bar
+check hit earlier. Until then those two states are unknown on the DSH side; heddle's side is measured and
+works.
