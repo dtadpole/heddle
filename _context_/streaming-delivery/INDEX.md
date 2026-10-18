@@ -22,6 +22,8 @@ One file per measurement a cycle of [`SESSION_STREAMING.md`](../../SESSION_STREA
   Flash answer streamed into it, from a browser profile created after the daemon restart.
 - `cycle-2-tool-turn-8082.png` — the same address after a two-round tool turn (`bash`, then a streamed
   answer about its output), taken from a fresh profile; the baseline of cycle 2, before the live tool card.
+- `cycle-2-live-tool-card-8082.png` — the same address mid-stream after cycle 2 landed: a `write_file` card live
+  at 1615 characters of arguments, still growing, from a profile created after the daemon restart.
 
 ## Where it runs
 

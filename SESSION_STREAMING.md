@@ -3,7 +3,7 @@ title: Streaming, from the plugboard route to the page a person opens
 version: 1.0.0
 description: The full-loop goal that makes a DeepSeek answer arrive at the owner's Web UI incrementally instead of in one burst, with three cycles and the deployment at 8082 as the last measurement.
 level: L2
-status: cycle-1-verified
+status: cycle-2-verified
 grounded_in:
   - owner statement 2026-10-17 asking whether heddle can run with the DeepSeek models behind the plugboard interface and receive streaming
   - owner statement 2026-10-17 that the message must be seen arriving in the Web UI in a streaming manner, not only in the log
@@ -190,4 +190,63 @@ Cycle 2 — the page goes silent while the model writes a tool call's arguments
               cycle: the Responses and Anthropic adapters' equivalents (their routes are outside this objective;
               recorded as siblings), and persisting deltas in the log — the durable record keeps one complete
               call, as DSH's does.
+  changed:    src/llm/types.ts — a `tool-call-delta` chunk (index, id?, name?, argumentsDelta), live only.
+              src/llm/adapters.ts — the Chat adapter yields one per provider fragment, and still the one complete
+              `tool-call` at the finish.
+              src/session/store.ts — a delta is published with `transient: true` and the next seq, never appended,
+              so the transcript, the trajectory and the surface never see a fragment and the seq has no hole.
+              src/llm/service.ts — `generate()` named `done` instead of taking every unnamed chunk as the finish.
+              src/server/page.html — the card grows in place and the complete call settles it (ad7aff6), and the
+              card is drawn with `addBlock` at the first fragment (3bb7dc2).
+  verify (1): ad7aff6 alone was delivered and measured, and it was **not** enough. The SSE instrument at 8082 saw
+              825 (flash) and 953 (pro) transient fragments arriving before the call — the server half worked. The
+              page instrument saw no live card at all: an EventSource tap on the page's own `/api/events` counted
+              1092 `tool-call-delta` events arriving, while the page drew nothing until the finished call. Cause:
+              the live card was drawn through `add()`, which returns early on empty text, and a call's first
+              fragment usually carries only the tool's name — so there was never a card for later fragments to
+              grow. The two instruments disagreed, which is exactly the case the objective names.
+  fix:        3bb7dc2 draws the card with `addBlock`, which has no empty-text guard.
+  delivered:  http://127.0.0.1:8082/ -> 127.0.0.1:3082, launchd com.dtadpole.heddle-web restarted with
+              `launchctl kickstart -k`: PID 4973 -> 63375, started 02:55:54, running
+              /Users/zhenc/heddle-deploy/dist/cli.js with --config /Users/zhenc/heddle-deploy/cordis.yml. dist was
+              built from the clean committed tree at 3bb7dc2 (no uncommitted file in the checkout). Build marker
+              served at 8082 and read by the fresh browser: `heddle-page=dd6d45d28567`, equal to
+              sha12(dist/server/page.html). Revert: `git revert 3bb7dc2 ad7aff6 && npm run build && launchctl
+              kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`.
+  evidence:   Instrument 1, the delivered SSE (8082/api/turn, a write_file call with a ~4000-character argument):
+                deepseek-flash   951 transient tool-call-delta events, 16.164s..19.207s, tool-call at 19.327s;
+                                 longest silence anywhere in the turn 1.414s (model/request -> first text)
+                deepseek-v4-pro  981 transient fragments, 26.982s..33.056s, tool-call at 33.223s; longest
+                                 silence 1.587s
+              Before: 3.683s (flash) and 14.112s (pro) of silence from the last reasoning delta to the tool-call.
+              Instrument 2, the page (fresh Chrome profile `goalc2v` created after the restart, New session, the
+              composer, a MutationObserver on #log): the card appeared at 24272ms **live** and titled
+              `write_file`, its arguments took 806 distinct lengths over 2385ms (0 -> 1 -> 2 -> 6 -> 7 -> 9 ...
+              -> 4024 -> 4025), and the complete call settled that same card at 26675ms with 4025 characters, state
+              ok, one card total. Before: no live card; one finished card in one step.
+              Screenshot from 8082 mid-stream, the card live at 1615 characters:
+              _context_/streaming-delivery/cycle-2-live-tool-card-8082.png.
+              Assertions shown to bite: test/tool-call-delta.test.ts — adapter half reverted fails "each fragment
+              reaches the caller as it lands"; store half reverted fails "the store publishes a fragment and never
+              writes it to the log". _verifiers_/80-web-ui/check-chat-view.mjs "a tool call being written is drawn
+              at its first fragment" — with 3bb7dc2 reverted in dist it fails "a card was on screen while the call
+              was still being written (41 samples)"; restored it passes.
+  reds:       none. npm run check 0 errors; npm test 478/478; check-chat-view.mjs 18/18. (The four sandbox EPERM
+              tests seen early in this session do not occur under danger-full-access; they were the outer sandbox
+              refusing a nested fence.)
+  coverage:   both models, a long tool argument, at the wire, the delivered SSE, the page's event stream, the
+              page's DOM and the log. Not visited: the Responses and Anthropic adapters' fragments (siblings, their
+              routes are outside this objective); two calls in one round (the slot key handles it; no live
+              measurement); a reload mid-call (the live card is not in the log, so a reload draws nothing until the
+              call lands — by design, recorded rather than built).
+  invariants: the log holds one complete tool-call and no fragment (the store check, and the SSE count of
+              transient events vs. the log's single tool-call); every other consumer — loop, ledger, printer,
+              transcript — still reads one complete call (the second adapter check); the 17 neighbouring chat-view
+              checks still pass.
+  landed:     ad7aff6 and 3bb7dc2 on main, fast-forwarded and pushed; 8082 serves 3bb7dc2's build, measured above.
+  lessons:    Two instruments that disagree are the finding, not noise: the SSE probe said "streams", the page
+              said "nothing". The second fix was found only because the page was sampled at the address the person
+              opens. And a guard written for one caller (`add` skipping an empty answer) is wrong for a caller with
+              a different meaning of empty — the page check now pins that path. A double that counts every request
+              miscounts: the page's `/models` discovery spent the first version's tool call.
 ```
