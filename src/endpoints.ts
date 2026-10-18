@@ -24,10 +24,14 @@ import type { EndpointConfig } from './llm/types.ts'
 /**
  * The repository's own defaults.
  *
- * Every one of them is **offline**: a `scripted` endpoint reads a local JSON file
- * and a loopback base URL reaches a signer on this machine. Nothing here points
- * at a paid service or carries a credential, which is what makes the file safe to
- * commit and what lets a fresh clone run its checks with no setup.
+ * The one endpoint here is **offline**: `scripted` reads a local JSON file. Nothing here points at a paid service or
+ * carries a credential, which is what makes the file safe to commit and what lets a fresh clone run its checks with no
+ * setup.
+ *
+ * **`localhost` was removed on 2026-10-17** at the owner's instruction. It was a loopback endpoint pointing at port
+ * 8790 — the plugboard signing helper, which exists only on a machine that runs one — so it was a default with a
+ * machine's assumption inside it, and on a provider list it read as a real destination when it was a duplicate of the
+ * `plugboard-d` endpoint beside it. The local file names every endpoint this machine actually has.
  */
 export function defaultEndpoints(): readonly EndpointConfig[] {
   return [
@@ -37,13 +41,6 @@ export function defaultEndpoints(): readonly EndpointConfig[] {
       baseUrl: 'scripted.json',
       model: 'scripted',
       capabilities: ['offline', 'tools'],
-    },
-    {
-      name: 'localhost',
-      kind: 'openai-chat',
-      baseUrl: 'http://127.0.0.1:8790/ds',
-      model: 'deepseek-flash',
-      capabilities: ['chat', 'stream', 'tools', 'reasoning'],
     },
   ]
 }

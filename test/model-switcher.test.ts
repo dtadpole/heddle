@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { describeEndpoints } from '../src/endpoints.ts'
+import { defaultEndpoints, describeEndpoints } from '../src/endpoints.ts'
 import { SessionStore } from '../src/session/store.ts'
 import { resolveTurnEndpoint } from '../src/server/web.ts'
 
@@ -150,4 +150,25 @@ test('an endpoint summary carries the context window when it declares one', () =
   assert.equal(described.endpoints[0]?.contextWindow, 128000)
   const quiet = describeEndpoints([{ name: 'unstated', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:1' }])
   assert.equal('contextWindow' in (quiet.endpoints[0] ?? {}), false, 'and says nothing when the endpoint does not')
+})
+
+test('the repository ships no machine-specific endpoint default', () => {
+  /**
+   * The defaults are what a fresh clone runs against, so every one of them must be offline and true on any
+   * machine. `localhost` was a loopback endpoint pointing at port 8790 — the plugboard signing helper, which only
+   * exists where one is running — and it was removed on 2026-10-17 at the owner's instruction. It also read as a
+   * real destination in a provider list while duplicating the `plugboard-d` endpoint beside it.
+   *
+   * This is asserted rather than recorded, because the failure it prevents is somebody adding a convenient loopback
+   * default back: a fresh clone would then advertise an endpoint that cannot answer.
+   */
+  assert.deepEqual(
+    defaultEndpoints().map((endpoint) => endpoint.name),
+    ['scripted'],
+    'the only default is the offline fixture',
+  )
+  assert.ok(
+    defaultEndpoints().every((endpoint) => endpoint.kind === 'scripted'),
+    'and it points at no network address at all',
+  )
 })

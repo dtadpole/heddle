@@ -83,8 +83,9 @@ that made it necessary and the test that judges it. The first is
 - **Endpoint configuration is never committed.** A URL, a model name or a credential
   belongs to the machine, and it is read from `$HEDDLE_CONFIG`,
   `$HEDDLE_HOME/heddle.json` or `~/.heddle/heddle.json`, with `HEDDLE_<ENDPOINT>_*`
-  environment overrides. The defaults committed here point at a scripted fixture and at
-  loopback, so a fresh clone runs its checks with no setup and no key.
+  environment overrides. The one default committed here is the **scripted fixture** — offline, no
+  network address — so a fresh clone runs its checks with no setup and no key. A machine-specific
+  endpoint (a loopback signer, a gateway, a provider) belongs in the local file and nowhere else.
 - **A verifier is the contract.** When a check fails, the first question is whether the
   code is wrong or the claim is. Fix whichever it is in the same pass; a check bent to
   pass is worse than no check.
