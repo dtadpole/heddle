@@ -187,7 +187,7 @@ export function openAiChatAdapter(
     ...(effort !== undefined && effort.value !== null ? { reasoning_effort: effort.value } : {}),
   }
 
-  const streaming = endpoint.stream ?? request.stream ?? false
+  const streaming = endpoint.stream ?? request.stream ?? true
 
   return (async function* chat() {
     const result = await post({
