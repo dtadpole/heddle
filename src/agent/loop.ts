@@ -93,6 +93,11 @@ export interface TurnResult {
   /** What the last context preparation was, so a caller can report the budget. */
   readonly context?: { readonly estimatedTokens: number; readonly thresholdTokens: number; readonly pruned: number; readonly compacted: boolean }
   /**
+   * Why the turn stopped early, in the loop's own words — the round limit is the usual one. Kept on the result
+   * **and** in the completed event so a page can say it instead of looking like it did nothing.
+   */
+  readonly ended?: readonly string[]
+  /**
    * Tokens the provider said this turn used, when it said.
    *
    * Providers report usage per round, and a turn has several rounds when tools are involved, so this is the
@@ -169,9 +174,11 @@ function specsOf(tools: Context['tools']): readonly ToolSpec[] {
 /**
  * Run one turn.
  *
- * `maxRounds` defaults to eight: enough for a task that reads, writes and checks,
- * and small enough that a model which keeps asking for tools is stopped with a
- * readable transcript rather than an open-ended bill. `maxOverflowRetries` defaults
+ * `maxRounds` defaults to eight for a one-shot turn: enough for a task that reads, writes and checks, and small
+ * enough that an unattended model which keeps asking for tools is stopped with a readable transcript rather than an
+ * open-ended bill. The Web UI passes `Infinity`, which is the reference's own rule — DSH's agent loop has no step
+ * cap (measured: its logs hold turns of 436 steps, and its contexts are bounded by compaction, not by cutting the
+ * turn) — and an operator can still name a cap with `heddle web --max-rounds`. `maxOverflowRetries` defaults
  * to one, which is DSH's default and enough for the one thing a retry can fix.
  */
 export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<TurnResult> {
@@ -343,7 +350,15 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
           else if (chunk.type === 'done') {
             finishReason = chunk.finishReason
             usage = mergeUsage(usage, chunk.usage)
-            ended.push(`round ${round + 1}: ${chunk.finishReason}`)
+            /**
+             * Only an **abnormal** finish is a stop reason worth a notice: `stop` ends the answer normally and
+             * `tool_calls` asks for the next round by design. Recording those too made every healthy multi-round
+             * turn read as "stopped" — measured while checking a ten-round fixture, whose answer carried a notice
+             * about its own `tool_calls` finish.
+             */
+            if (chunk.finishReason !== 'stop' && chunk.finishReason !== 'tool_calls') {
+              ended.push(`round ${round + 1}: ${chunk.finishReason}`)
+            }
           }
         }
         break
@@ -458,6 +473,11 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     finishReason,
     rounds,
     denials: denials.length,
+    /**
+     * A stopped turn says so in the record. Measured before this: the reason lived only in the local `ended`
+     * list, so a turn cut by the round limit reached the page as an empty answer with no trace anywhere.
+     */
+    ...(ended.length > 0 ? { ended } : {}),
   })
   ctx.session.store.append(options.session, { type: 'turn/completed', rounds })
 
@@ -472,6 +492,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     context: lastContext,
     ...(ended.length > 0 ? { ended } : {}),
     ...(usage !== undefined ? { usage } : {}),
+    ...(ended.length > 0 ? { ended } : {}),
   }
 }
 

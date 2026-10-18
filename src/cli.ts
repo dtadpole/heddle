@@ -76,7 +76,7 @@ options:
       --endpoint <name>      which configured endpoint answers (default: the first)
       --model <id>           override the endpoint's model for this turn
       --system <text>        system prompt, recorded when the session is new
-      --max-rounds <n>       stop after n model-plus-tools rounds (default 8)
+      --max-rounds <n>       stop after n model-plus-tools rounds (one-shot default 8; web: uncapped)
       --max-output-tokens <n>  cap the tokens one model call may generate
       --stream               print reasoning and content deltas to stderr as they arrive
       --list                 list what is registered, then stop
@@ -494,6 +494,7 @@ async function runWeb(args: Args): Promise<void> {
     const server = await startWebServer(app.ctx, {
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
+      ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
       // The endpoint the flag named becomes the server's default, so a turn posted without one
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),

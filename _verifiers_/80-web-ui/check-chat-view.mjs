@@ -20,7 +20,7 @@ import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, 
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label, steps) {
+async function startServer(label, steps, options = {}) {
   const home = isolatedHome(`chat-${label}`)
   const work = fixtureDir(`chat-${label}-work`)
   const { config } = scriptedConfig({
@@ -34,7 +34,7 @@ async function startServer(label, steps) {
      * check that fails because the tree is mid-write says nothing about the page. Unset, the project's own patch is
      * used, which is what a normal run wants.
      */
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), ...(process.env.HEDDLE_CHECK_PATCH ? ['--patch', process.env.HEDDLE_CHECK_PATCH] : []), '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), ...(options.maxRounds !== undefined ? ['--max-rounds', String(options.maxRounds)] : [])],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config }, cwd: work },
   )
   return {
@@ -1386,5 +1386,68 @@ test('a finished turn shows the edited files as one summary: single name, or a f
     await multi.close()
     await single.close()
     await plain.close()
+  }
+})
+
+test('a long turn is not cut at eight rounds, and a turn the loop does stop says why', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The owner's report: a complex prompt (more than twenty steps) made the server stop responding. The Web UI was
+   * calling `runTurn` without a round budget, so it inherited the loop's **one-shot default of eight**, and the
+   * reason ("stopped after the round limit of 8") lived only in a local list — no answer, no notice.
+   *
+   * The reference's rule is measured, not chosen: DSH's agent loop has no step cap, and its own session logs across
+   * 266 sessions and 1,617 turns hold a largest turn of **436 steps**, with 283 turns over 32 and 59 over 100 — the
+   * bound is context compaction (333 `compaction/prune` events), not a cut. Interactive turns are therefore uncapped
+   * by default, a **40-round** fixture must reach its answer, and only an explicit `--max-rounds 3` may stop a turn
+   * (with the reason carried into the transcript and the page).
+   */
+  const fortySteps = (work) => [
+    ...Array.from({ length: 40 }, (_, index) => ({ toolCall: { name: 'list_dir', arguments: { path: work } }, reasoning: `step ${index + 1}` })),
+    { text: 'the long task finished' },
+  ]
+  const long = await startServer('rounds-long', fortySteps)
+  const short = await startServer('rounds-short', fortySteps, { maxRounds: 3 })
+  const browser = await openBrowser()
+  const runTurn = async (server) => {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'run the long task', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the long turn was accepted (${turn.status})`)
+    const stream = await turn.text()
+    const detail = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+    return { stream, session, turns: detail.body.turns ?? [] }
+  }
+  try {
+    /** Ten rounds finish, because the interactive budget is 32 rather than the one-shot eight. */
+    const done = await runTurn(long)
+    assert.match(done.stream, /the long task finished/, 'a forty-round turn reaches its answer, because interactive turns are uncapped')
+    await browser.goto(long.url)
+    await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
+    await browser.waitFor('document.getElementById("log").innerText.includes("the long task finished")', 10_000)
+    const noticeOnLong = await browser.evaluate('document.querySelectorAll("#log .turn-notice").length')
+    assert.equal(noticeOnLong, 0, 'and carries no stop notice')
+
+    /** Three rounds under an explicit budget stop, and the reason travels: API, transcript, page. */
+    const stopped = await runTurn(short)
+    const answer = stopped.turns.find((entry) => entry.kind === 'assistant')
+    assert.ok(answer !== undefined, 'a row exists for the stopped turn')
+    assert.ok(Array.isArray(answer.ended) && answer.ended.some((entry) => /round limit of 3/.test(entry)), `the transcript carries the reason (${JSON.stringify(answer && answer.ended)})`)
+    await browser.goto(short.url)
+    await browser.waitFor('document.querySelectorAll("#log .turn-notice").length >= 1', 25_000)
+    const noticeText = await browser.evaluate('document.getElementById("log").innerText')
+    assert.match(noticeText, /Stopped after the round limit of 3/, `the page says why (${noticeText.slice(-120)})`)
+  } finally {
+    browser.close()
+    await long.close()
+    await short.close()
   }
 })

@@ -76,19 +76,25 @@ export const DEFAULT_PORT = 3082
 export const DEFAULT_HOST = '127.0.0.1'
 
 /**
- * Rounds an interactive turn gets before the loop stops it.
+ * **No round cap for an interactive turn** — DSH's own rule, measured rather than chosen.
  *
- * The loop's own default of eight is for a one-shot turn, where a model that keeps asking for tools should be cut
- * off before the bill grows. A person watching the Web UI is doing the opposite: the owner's complex prompts
- * measured more than twenty model-plus-tools rounds, and at eight the server stopped mid-task with no answer and
- * no reason. Interactive turns get 32 unless the operator says otherwise (`heddle web --max-rounds`).
+ * The reference's agent loop has no step limit at all: a step runs the model, and the loop continues while the
+ * answer keeps asking for tools, ending on a normal finish, `max-tokens`, or the person's stop; long contexts are
+ * handled by compaction, not by cutting the turn. Its own session logs show how far that goes — across 266 sessions
+ * and 1,617 turns, the largest turn took **436 steps**, 283 turns exceeded 32 and 59 exceeded 100, with 333
+ * `compaction/prune` events doing the bounding. The owner's "backend stopped to respond" was this server applying
+ * the loop's one-shot default of eight to an interactive turn.
+ *
+ * A cap is therefore **operator-only**: `heddle web --max-rounds N` slows the loop down on purpose, and the loop
+ * reports it as a stop. The one-shot CLI default of eight stays, because cutting an unattended turn is a different
+ * decision from cutting one a person is watching.
  */
-export const DEFAULT_WEB_MAX_ROUNDS = 32
+export const DEFAULT_WEB_MAX_ROUNDS = Number.POSITIVE_INFINITY
 
 export interface WebServerOptions {
   readonly host?: string
   readonly port?: number
-  /** Rounds one interactive turn may take; {@link DEFAULT_WEB_MAX_ROUNDS} when absent. */
+  /** Rounds one interactive turn may take; unbounded when absent, which is the reference's rule. */
   readonly maxRounds?: number
   /** Where the cookie-signing secret lives. */
   readonly secretPath?: string
@@ -317,7 +323,10 @@ interface RequestState {
    * the composer grew a Stop.
    */
   readonly controllers: Map<string, Set<AbortController>>
-  /** Rounds an interactive turn may take before the loop stops it; {@link DEFAULT_WEB_MAX_ROUNDS} by default. */
+  /**
+   * Rounds an interactive turn may take before the loop stops it — `Infinity` by default, so the loop ends the way
+   * DSH's does (the model stops calling tools), and only an explicit `--max-rounds` turns this into a limit.
+   */
   readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string

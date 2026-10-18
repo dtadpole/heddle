@@ -75,6 +75,31 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   assert.equal(answers[1].files, undefined, 'the next exchange does not inherit the previous one\'s files')
 })
 
+test('a turn stopped by the round limit keeps its reason on the answer', () => {
+  /**
+   * The reason used to live only in the loop's local list, so a stopped turn reached the page as an empty answer
+   * with no trace. The completed event carries it now, and the fold attaches it to the answer it stopped.
+   */
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'do a big thing' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'partial answer' } },
+    { type: 'assistant/completed', text: 'partial answer', rounds: 32, ended: ['stopped after the round limit of 32'] },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answer.ended, ['stopped after the round limit of 32'])
+})
+
+test('a stopped turn with no text still produces a row carrying the reason', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'nothing printed' }] } },
+    { type: 'assistant/completed', text: '', rounds: 32, ended: ['stopped after the round limit of 32'] },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.ok(answer !== undefined, 'a settled row exists for the notice')
+  assert.deepEqual(answer.ended, ['stopped after the round limit of 32'])
+  assert.equal(answer.text, '')
+})
+
 test('reasoning keeps its own kind, because a reader wants it apart from the answer', () => {
   const turns = transcriptTurns([
     { type: 'assistant/chunk', chunk: { type: 'reasoning-delta', text: 'thinking' } },

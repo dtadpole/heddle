@@ -2710,7 +2710,13 @@ let current = null
 let goalView = null
 
 function add(kind, text, merge = true, label, tool) {
-  if (text === '' || text === undefined) return
+  /**
+   * An empty answer is normally nothing to draw — except when it carries something a reader must see: the stop
+   * reason that explains why it is empty, or the files it wrote before stopping. Measured: a turn cut by the round
+   * limit has no text, and dropping it took the notice with it, so the page showed a silent stop.
+   */
+  const hasMeta = tool !== undefined && ((Array.isArray(tool.ended) && tool.ended.length > 0) || (Array.isArray(tool.files) && tool.files.length > 0))
+  if ((text === '' || text === undefined) && !hasMeta) return
   const last = log.lastElementChild
   // The merge flag is what the live stream wants: deltas of one answer belong in one block. Passing
   // false is what history wants, where two consecutive entries of the same kind are two turns.
@@ -2963,7 +2969,9 @@ function turnNotice(ended) {
   const notice = document.createElement('div')
   notice.className = 'turn-notice'
   notice.setAttribute('role', 'status')
-  notice.textContent = `Turn stopped: ${ended.join('; ')}`
+  /** The loop's sentence, capitalised — not framed with another "stopped", which read twice. */
+  const reason = ended.join('; ')
+  notice.textContent = reason.charAt(0).toUpperCase() + reason.slice(1)
   return notice
 }
 
