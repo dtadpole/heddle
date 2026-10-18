@@ -3548,7 +3548,7 @@ function refreshRunningStatus() {
   const label = runRow.querySelector('.label')
   if (label !== null) {
     /** The reference clamps the first reading to a second: its `Math.max(1e3, now - startTime)`. */
-    label.textContent = `Weaving for ${formatRunDuration(runStartedAt === null ? 1000 : Math.max(1000, Date.now() - runStartedAt))} ···`
+    label.textContent = `Weaving for ${formatRunDuration(Math.max(1000, Date.now() - startedAt))} ···`
   }
   if (runRow !== log.lastElementChild) log.append(runRow)
   followChatTail()
@@ -5328,6 +5328,10 @@ events.addEventListener('session', (message) => {
   if (event.type === 'todo/write' && payload.session === (current ?? composerKey)) scheduleTodoRefresh()
   if (event.type === 'model/request') {
     runningSessions.add(payload.session)
+    if (!runningSince.has(payload.session)) {
+      const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
+      runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
+    }
     paintRunningMarks()
     /**
      * A turn this page did **not** start — a goal round continuing itself, the CLI, or another window — is a
@@ -5344,6 +5348,7 @@ events.addEventListener('session', (message) => {
   }
   else if (event.type === 'turn/completed') {
     runningSessions.delete(payload.session)
+    runningSince.delete(payload.session)
     paintRunningMarks()
     if (payload.session === (current ?? composerKey)) {
       liveRounds = 0
@@ -5978,6 +5983,7 @@ function submitDraft(gesture) {
  * queued row; the message was never recorded, so restoring it cannot duplicate anything.
  */
 async function sendNow(text, attachments = []) {
+  if (directTurnPending === 0) directPendingSince = Date.now()
   directTurnPending += 1
   renderComposerState()
   try {
@@ -5988,6 +5994,7 @@ async function sendNow(text, attachments = []) {
     add('denied', `the message could not be sent: ${(error && error.message) || error}`)
   } finally {
     directTurnPending -= 1
+    if (directTurnPending === 0) directPendingSince = null
     renderComposerState()
     /** The turn this page started just ended: now a message that was waiting behind it can go. */
     void pumpQueue()
@@ -6492,6 +6499,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         void renderSettledAnswers()
         if (typeof payload.session === 'string') {
           runningSessions.delete(payload.session)
+          runningSince.delete(payload.session)
           paintRunningMarks()
         }
         renderComposerState()
@@ -6502,6 +6510,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
         if (typeof payload.session === 'string') {
           runningSessions.delete(payload.session)
+          runningSince.delete(payload.session)
           paintRunningMarks()
         }
         renderComposerState()
