@@ -493,8 +493,12 @@ test('an active goal is visible in the chat window, live, without a reload', asy
         const c = document.getElementById('composer-card').getBoundingClientRect()
         return JSON.stringify({ barX: Math.round(b.x), barW: Math.round(b.width), cardX: Math.round(c.x), cardW: Math.round(c.width) })
       })()`))
-      assert.ok(Math.abs(align.barW - align.cardW) <= 1, `the dock follows the input area's width (bar ${align.barW} vs card ${align.cardW})`)
-      assert.ok(Math.abs(align.barX - align.cardX) <= 1, `and is aligned to it (bar ${align.barX} vs card ${align.cardX})`)
+      /**
+       * DSH's own relationship: bar = min(100%, text column), card = text column + 32, so the bar is 32px narrower
+       * than the input card and inset 16px on each side (measured on DSH: bar 680 inside a 712 card).
+       */
+      assert.ok(Math.abs(align.cardW - align.barW - 32) <= 1, `the bar is DSH's 32px narrower than the input card (bar ${align.barW} vs card ${align.cardW})`)
+      assert.ok(Math.abs(align.barX - align.cardX - 16) <= 1, `and inset 16px like DSH's dock inset (bar ${align.barX} vs card ${align.cardX})`)
       /** The rest of the trait ledger: surface, tuck, height, radius, icon colour — DSH's measured values. */
       const traits = JSON.parse(await browser.evaluate(`(() => {
         const bar = document.getElementById('goal-bar')

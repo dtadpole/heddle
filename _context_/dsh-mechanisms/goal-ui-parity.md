@@ -123,3 +123,14 @@ between 4 and 8px.
 The same measurement corrected the surface: DSH's `::before` is `rgba(67, 69, 74, 0.45)` with
 `backdrop-filter: blur(40px) saturate(1.5)`; Heddle had used a 92% composer fill at blur 20, which read as
 opaque. Heddle now uses DSH's measured values.
+
+## Width, corrected: the bar is 32px narrower than the input card
+
+The first width pass read the owner's "follow the input area" literally and made the bar equal to the composer
+card, which measured too wide next to DSH. DSH's own relation is narrower: `.nLMEza_bar` is
+`width: 100%; max-width: calc(var(--dsh-composer-card-max-width) - 4 * var(--dsh-composer-dock-inset))`; with
+`card-max = chat-content + 32` and `dock-inset = 8`, the bar's max width is **the text column**, i.e. the
+**input card minus 32px**, centred inside a dock that is the card minus 2×clearance. Measured on DSH: bar 680,
+composer card 712, dock 929. Heddle's bar now uses `max-width: var(--chat-column)` (its card is the column +
+32), so it is 32px narrower than the input and inset 16px on each side, and the part 9 test asserts exactly
+that relation (card width − bar width = 32, left inset = 16).

@@ -561,7 +561,13 @@
    * + 3px); the glyph and the verbs are tertiary-label coloured, the phrase is the primary label, and the
    * objective is the dimmed label.
    */
-  #goal-bar { position: relative; isolation: isolate; display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); height: 36px; margin: 0 auto 6px; padding: 4px 5px 4px 12px; border: 0; border-radius: 12px; background: transparent; box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; font-size: 13px; line-height: 24px; }
+  /**
+   * DSH's bar is `width:100%; max-width: calc(card-max − 4×dock-inset)`: with card-max = chat-content + 32 that is
+   * exactly the text column, so the bar is 32px narrower than the input card and centred inside it (measured: bar
+   * 680 inside a 712 card, dock 929). The owner saw the full-card-width version as too wide; this is the
+   * reference's own relationship, not a hug.
+   */
+  #goal-bar { position: relative; isolation: isolate; display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), var(--chat-column)); height: 36px; margin: 0 auto 6px; padding: 4px 5px 4px 12px; border: 0; border-radius: 12px; background: transparent; box-shadow: rgba(255, 255, 255, 0.06) 0 0 0 0.5px, rgba(0, 0, 0, 0.03) 0 3px 8px, rgba(0, 0, 0, 0.02) 0 0 16px; font-size: 13px; line-height: 24px; }
   #goal-bar::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: rgba(67, 69, 74, 0.45); backdrop-filter: blur(40px) saturate(1.5); pointer-events: none; }
   #goal-bar[hidden] { display: none; }
   #goal-glyph { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: none; color: color-mix(in oklab, currentColor 70%, transparent); }
