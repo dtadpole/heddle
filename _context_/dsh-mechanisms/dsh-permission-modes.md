@@ -1,6 +1,6 @@
 ---
 title: DSH permission modes and heddle's session-scoped access mode
-version: 1.0.0
+version: 1.1.0
 description: What DSH's access-mode control renders and does, measured in a browser in every state, and the session-scoped access mode heddle now implements beside it, with the designs discarded and why.
 grounded_in:
   - source: browser
@@ -187,16 +187,186 @@ override and a per-call policy argument; the sandbox's `mode` field is process-w
 
 ### evidence
 
-Filled in by cycles 1-3 below.
+**Before.** The chip was a `data-inert` read-out: `#access::before` drew an 11px circle, its cursor
+was `default`, there was no menu, and the only source was `GET /api/status`; the mode was fixed when
+the sandbox service was constructed. The reference has none of that — it is a control.
+
+**Failing first.** Every claim was written and seen red before the implementation:
+
+- `test/permission-mode.test.ts` failed on a missing `src/session/mode.ts` (`ERR_MODULE_NOT_FOUND`),
+  so none of the fold, gate or persistence assertions could pass;
+- `_verifiers_/75-permission-sandbox/check-session-mode.mjs` reported `verdict 1 — 2 check(s) failed`:
+  the HTTP change route did not exist (404) and the session record carried no permission;
+- `_verifiers_/80-web-ui/check-access.mjs` reported `verdict 1 — 3 check(s) failed`: the chip had no
+  label element, no menu and no dialog.
+
+**After** (measured on this branch):
+
+| Instrument | Before | After |
+|---|---|---|
+| `npm run check` | green at the base commit | green |
+| `npm test` | 315 pass | **323 pass**, 0 fail (6 new permission tests, 2 updated context contracts) |
+| `npm run build` | green | green |
+| `_verifiers_/75-permission-sandbox/` | 5 checks | **7 checks, all pass** (5 three-mode + 2 session-mode) |
+| `_verifiers_/80-web-ui/` | 11 check files, 2 failing pre-existing reds | **11 check files, all pass** (access contract grown from 1 to 4 tests) |
+
+**Heddle beside the reference**, measured the same way (`getComputedStyle` / `getBoundingClientRect`
+in a browser):
+
+| Property | DSH | Heddle |
+|---|---|---|
+| chip box | 153.25 x 28 (Workspace Write) | 28 high; width follows the label, as the reference's does |
+| label | `Read Only` / `Workspace Write` / `Full access`, 13px weight 500 line-height 20 | the same three words, 13px weight 500 line-height 20 |
+| colour / radius / padding / gap | `#cfd3d6`, 8px, `0 4px 0 8px`, 4px | the same |
+| anatomy | 14px glyph + label + 14px chevron | the same |
+| accessible name | `Access mode, current: <name>` | the same, **with** `aria-haspopup="menu"` and `aria-expanded` (DSH has neither) |
+| menu | `fixed`, 167 x 144, radius 16, padding 4, opens above the chip | `fixed`, 171 x 112 (three entries), radius 16, padding 4, opens above |
+| item | 34px, radius 12, 14px glyph, check after the label on the current one | the same, plus `role="menuitemradio"` with `aria-checked` (DSH has neither) |
+| risk gate | 440 x 292 dialog, `aria-modal`, labelled `Enable Full access?`, checkbox arms the primary button | 440 x 250, same semantics, plus a **server-side** refusal without the confirmation token |
+| refusal | red `Write · Error: [sandbox: file access denied under read-only mode]` on the closed row, then a Reject / Allow once approval card for a one-call escalation | the same red sentence on the closed row; a one-call model-requested escalation is **not** offered (deferred below) |
+
+The screenshots are beside this file: [`dsh-permission-menu.png`](dsh-permission-menu.png),
+[`dsh-permission-full-access-dialog.png`](dsh-permission-full-access-dialog.png),
+[`dsh-permission-refusal.png`](dsh-permission-refusal.png), and heddle's
+[`heddle-permission-menu.png`](heddle-permission-menu.png),
+[`heddle-permission-full-access-dialog.png`](heddle-permission-full-access-dialog.png),
+[`heddle-permission-refusal.png`](heddle-permission-refusal.png).
 
 ### coverage
 
-Visited cells: chip anatomy, idle/hover/focus, menu inventory and selected state, keyboard
+Visited cells: chip anatomy and idle/hover/focus, menu inventory and selected state, keyboard
 (Escape), downgrade, escalation and its risk gate, reload persistence, running-turn availability,
-per-session independence, refusal rendering and escalation rejection. Not visited: a real
-provider turn under every mode (the scripted endpoint is used instead), mobile viewports, and the
-reference's `Auto review EXP` behaviour (no substrate here).
+per-session independence, refusal rendering (closed row), unconfirmed-escalation refusal, and the
+no-session state. Not visited: a real provider turn under every mode (the scripted endpoint is used
+instead), mobile viewports, and the reference's `Auto review EXP` behaviour (no substrate here).
 
-## Cycle 2 — pending
+### invariants
 
-## Cycle 3 — pending
+The structural change moved a composer control and added a session event, so the assertions that the
+old shape guaranteed were re-run: the composer's 12 checks (queueing, steering, one card, growing
+editor, Stop, column width, status line, `+` menu, control states) all pass; the chat view's closed
+and opened tool rows still render (the failure sentence is added to the hint, not to the body); the
+workspace/session tree checks pass; and the unit suite pins that a tool call's resolved mode never
+comes from its arguments, so an added tool cannot quietly widen itself.
+
+## Cycle 2 — re-measure the reference, and fix what the comparison found
+
+### measured
+
+Re-measured DSH in a fresh tab: chip 153.25 x 28, 13px/500/20, `#cfd3d6`, radius 8, `0 4px 0 8px`,
+gap 4, 14px glyph + 14px chevron, pointer, two svgs, **no** `aria-haspopup`/`aria-expanded`; menu
+167 x 144, radius 16, padding 4, `fixed`, opens above, four items 34px/radius 12 with the current one
+carrying a check and **no** `aria-checked`. Nothing had drifted from cycle 1, so the comparison table
+above is a re-measurement, not a memory.
+
+### step back
+
+Two differences survived the first implementation and are not cosmetic:
+
+1. **Names.** Heddle said `Read only` / `Workspace write`; the reference says `Read Only` /
+   `Workspace Write` / `Full access`. A control a person chooses from is compared by its words, so
+   they are now the reference's, verbatim.
+2. **Refusal visibility.** Heddle kept `error (SANDBOX): …` inside the opened tool row; the
+   reference puts the sentence on the closed row. A mode whose refusals only appear after a click
+   reads as a mode that worked. The failure sentence now rides the summary line, and a browser
+   assertion requires the closed row to name the refusing mode.
+
+The step back also widened the meaning of "green": the 80 verifier had two reds that were **not**
+mine. One was a stale team-view fixture (crafted ids that the session route refuses — reproduced on a
+pristine checkout of the base commit, so owned by the agent-teams workstream); it was repaired as a
+fixture bug without touching team code. The other, the model switcher, only needed the worktree to be
+a registered workspace, which is machine state the check assumes rather than a code defect.
+
+### changed
+
+- `src/server/page.html`: the reference's names; the closed tool row carries its failure sentence.
+- `_verifiers_/80-web-ui/check-composer.mjs`, `check-access.mjs`: the label element and the names.
+- `_verifiers_/80-web-ui/check-team-view.mjs`: the fixture's session ids are `session-<uuid>`.
+
+### evidence
+
+The access contract grew to four tests (anatomy, risk gate, visible refusal + no widening, running
+turn) and all pass; `check-composer.mjs` is 12/12; the full 80 verifier is green. Cycle 2's failures
+were found by re-measuring, not by reading, which is the point of keeping the instrument.
+
+### reds
+
+None open. Named for the record: the team-view fixture red belonged to the agent-teams workstream and
+was repaired as a stale fixture; the model-switcher red was machine state, not code.
+
+### coverage
+
+Cycle 2 visited the cells cycle 1 had left implicit: the names, the closed-row refusal, and the
+combination "a mode changed through the UI, then a turn refused under it". Not visited: DSH's
+one-call escalation approval (heddle has no approval-prompt channel to a person in a CLI run, so it
+cannot be honest about offering one).
+
+### invariants
+
+The label change touched text only; the browser contracts that read accessible names failed first and
+were updated together with the page, so no check was left judging the old words. The refusal-line
+change adds a span to an existing hint; the chat view's closed-row and opened-row contracts both still
+pass.
+
+## Cycle 3 — final verification, and what is kept
+
+### measured
+
+Every instrument, from a clean build of this branch:
+
+- `npm run check` — green.
+- `npm test` — 323 pass, 0 fail.
+- `npm run build` — green.
+- `node --test _tools_/*/_tests_/*/unit.test.mjs` — the tool component suites, green.
+- `_verifiers_/75-permission-sandbox/verify.sh` — 7 checks (5 three-mode + 2 session-mode), verdict 0.
+- `_verifiers_/80-web-ui/verify.sh` — 11 check files / 39 checks, exit 0, including the four-test
+  access contract.
+- Every other verifier under `_verifiers_/`, because the access mode is a framework change: **12
+  verdict 0, 1 verdict 3, 1 verdict 1**. The `3` is `10-llm-backends`, the real-endpoint probe whose
+  unjudged answer is the documented exception when no backend is configured. The `1` is
+  `88-file-preview`'s "an html document is previewed as a page" — reproduced on a pristine checkout
+  of the base commit, so it is another workstream's pre-existing red (file preview), named here and
+  not edited under. `_tools_/*/_tests_/*/unit.test.mjs` — 35 pass. The convention linter over the
+  worktree — 68 folders, 0 errors, 0 warnings.
+
+### step back
+
+The difference is gone as a **class**, not as one control: the mode is recorded per session, resolved
+at the one gate every tool call crosses, changeable only through one owner route, visible in the chip
+and in the closed tool row, and gated on the server as well as in the dialog. Three differences are
+**kept** with their reasons:
+
+- `Auto review EXP` is not offered — heddle has no auto-review integration, and an option that cannot
+  do what it says is worse than a missing option.
+- A model-requested one-call escalation (`sandbox_permissions` + a Reject/Allow once approval) is not
+  offered — heddle has no approval prompt a headless run could answer, and the task's rule is that an
+  escalation is an owner action. It stays deferred beside the approval service.
+- The chip's width follows its label rather than being a fixed 153px — the reference's width is also
+  a function of its label (`117–153` in the input-area reading), so this is the same rule, not a
+  difference.
+
+### coverage
+
+The coverage matrix is complete for this mechanism: every interactive element of the control was
+inventoried from the DOM (trigger, three menu items, risk checkbox, two dialog buttons, close), each
+state (idle, hover, focus, open, selected, pending, disabled, running-turn) was measured or asserted,
+content stress was tried in the only dimension this control has (a third entry and the longest mode
+name), occlusion was checked by asserting the menu is `fixed` and opens inside the viewport above the
+chip, and the reload/another-window cases are covered by the session event and the browser reload.
+Not visited, and named: mobile viewports, a real provider turn under every mode, and DSH's Auto
+review.
+
+### lessons (the mechanisms that now prevent a repeat)
+
+- **A permission control is a three-part mechanism** — a recorded fact, one gate every effect crosses,
+  and an owner-only writer — and a UI shipped without the third is a control that lies. The check for
+  it is a refusal that leaves the record untouched.
+- **"Green" means the verifier's own fixtures are current.** A stale fixture (ids the API refuses) can
+  report a red that has nothing to do with the change; reproduce a suspect red on a pristine checkout
+  before editing under it.
+- **Names are part of a control's contract.** The reference's words, cased the way the reference cases
+  them, are what the parity audit compares, and the browser contract reads the label element rather
+  than the control's raw text.
+- **A refusal has to be visible where the action is.** The closed row carries the sentence; a
+  transcript that only reveals a refusal after a click is the same failure as a silent widening, one
+  step later.
