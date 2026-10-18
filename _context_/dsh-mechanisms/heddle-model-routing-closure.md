@@ -108,6 +108,61 @@ Cycle 1 — one vocabulary for three wire shapes
               and the check that keeps it is per-adapter rather than per-table.
 ```
 
+```
+Cycle 2 — where a model lives, not where its endpoint does
+  measured:   siblings of cycle 1's class, found by asking "which reader still takes a per-model fact from the
+              endpoint?". Three, all silent. The model-list read asked the endpoint's address about the
+              endpoint's DEFAULT model, so any other model's answer was undefined — and undefined is what a
+              caller reads as "text only". Measured with a two-host double: inputModalitiesFromModelList for a
+              model living on the second host returned undefined, where the host that serves it declares
+              ['text','image']. The same read used fetch, which cannot take a forwarding hop, so on a gateway
+              that requires one it could only ever fail. And the catalogue the page reads dropped each model's
+              own contextWindow: meta-codex showed (none) for all five while the configuration declares 272000
+              and 1000000.
+  brainstorm: (a) pass a model argument to the readers — smallest, but leaves the address wrong because the
+              reader still builds the URL from the endpoint. (b) resolve the model's own baseUrl inside
+              model-info and take the model to ask about as an option — chosen. (c) have the caller pass a
+              fully-resolved {url, model} pair — correct but makes every caller repeat the resolution.
+              (d) drop discovery and require contextWindow/inputModalities in configuration — removes a
+              convenience that exists because providers publish the facts, and makes every machine restate
+              them. (e) keep fetch and configure a global proxy env — a process-wide setting for a per-endpoint
+              fact. chosen: (b)  discarded: (a) address stays wrong, (c) duplication at every call site,
+              (d) loses published facts, (e) wrong scope
+  step back:  widen once more, and the widening paid: the cache was keyed by endpoint alone, so a second model's
+              question would have been answered by the first model's capabilities. A per-request fact needs a
+              per-request key. Also the endpoint's window was still the only one the catalogue exposed, so a 1M
+              deployment was measured against 272k — the same class, one layer up.
+  changed:    src/llm/model-info.ts — askAbout, addressOf (a model's own baseUrl), a per-endpoint-and-model
+              cache key, and the read now goes through wire() so the hop works; src/llm/service.ts — the
+              modality lookup is cached and invalidated per endpoint AND model, and the request's own model is
+              passed; src/endpoints.ts — describeModel carries the model's window, inheriting the endpoint's
+              when it declares none; test/model-info-per-model.test.ts — a two-host double where model b exists
+              only on the second host.
+  delivered:  not restarted; the owner gated it. The build is in ~/heddle-deploy/dist.
+  evidence:   before → after: the two-host probe returned undefined for model b and returns ['text','image'];
+              describeEndpoint for meta-codex shows (none) for every model and now shows 272000, 272000,
+              1000000, 272000, 272000. Assertions shown to fail without the fix: three of the five new checks
+              (own-address, cache-separation, catalogue window) went red against the reverted sources; the
+              other two are regression guards on behaviour that was already correct (default address, refusal
+              becomes undefined).
+  reds:       one, and not mine: test/page-contract.test.ts caught a duplicate top-level `const FOLLOW_SLACK_PX`
+              in src/server/page.html — a SyntaxError that leaves the WHOLE page module without behaviour. Found
+              by the suite while cycle 2 ran; fixed in the working tree and fixed independently by the concurrent
+              session as CHAT_FOLLOW_SLACK_PX (commit abe7ced), which is what main carries. Verified after: no
+              duplicate among 356 top-level declarations, page-contract 16/16.
+  coverage:   the per-model address, the per-model cache key, the refusal path, and the catalogue window. Not
+              covered: a real provider that publishes per-model windows differently per host (the double speaks
+              one listing shape), and an image turn end to end against meta-codex, because no model there is
+              known to accept images and a false claim would be worse than an untested one.
+  invariants: 455 unit checks green; one real turn on meta-codex with a non-default model (gpt-5.6-sol-ptu)
+              answers, so routing a model to its own host did not break the ordinary path.
+  landed:    pushed as 0aaff60 (the concurrent session committed this cycle's working tree as found, with the
+              loop credited). Provenance is recorded rather than claimed: the code is on main and the evidence
+              above was taken from it.
+  lessons:    a fact that varies per model must be keyed per model everywhere it is cached, resolved and
+              displayed; three readers had taken it from the endpoint and none of them failed loudly.
+```
+
 ## Read next
 
 [`../../_skills_/full-loop-goal/INDEX.md`](../../_skills_/full-loop-goal/INDEX.md) for the procedure this follows,
