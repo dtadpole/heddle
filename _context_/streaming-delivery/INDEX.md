@@ -1,5 +1,5 @@
 ---
-title: Streaming
+title: Streaming Delivery
 version: 1.0.0
 description: Screenshots and measurements taken at the owner's address while judging whether a DeepSeek answer reaches the Web UI as it is written.
 grounded_in:
@@ -7,7 +7,7 @@ grounded_in:
   - source: SESSION_STREAMING.md, the full-loop document these files are the evidence for
 ---
 
-# `streaming`
+# `streaming-delivery`
 
 Instance of [`_context_`](../INDEX.md). Holds the evidence the streaming loop cites: what the page a
 person opens looked like while an answer was arriving, taken from the delivered address rather than

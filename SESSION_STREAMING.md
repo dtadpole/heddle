@@ -101,7 +101,7 @@ Cycle 1 — a Chat Completions call asks the route not to stream, so the page ca
                 row; the assistant row climbed 1 -> 2 -> 6 -> 13 -> 17 -> 20 -> 24 -> 33 -> 42 -> 48 -> 55
                 characters across 29.88s..29.95s and kept climbing to 1926 at 32.32s. A burst would be one
                 jump from 0 to the final length.
-              Screenshot from 8082: _context_/streaming/cycle-1-streamed-answer-8082.png.
+              Screenshot from 8082: _context_/streaming-delivery/cycle-1-streamed-answer-8082.png.
               Assertion shown to bite: test/stream-arrival.test.ts with the default reverted to `false`
               fails 3 of 4 (asks-to-stream, deltas-while-writing, unlabelled-stream-not-buffered) and the
               fourth, the JSON-body invariant, passes either way by design; restored, 4 of 4 pass.
