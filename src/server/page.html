@@ -5192,9 +5192,10 @@ document.addEventListener('keydown', (keyEvent) => {
  *   the control cannot report access it did not get.
  */
 function accessTitle(mode) {
-  if (mode === 'read-only') return 'Read only'
+  /** DSH's own names, verbatim from its menu: title case for the two confined modes, lower-case `access`. */
+  if (mode === 'read-only') return 'Read Only'
   if (mode === 'danger-full-access') return 'Full access'
-  return 'Workspace write'
+  return 'Workspace Write'
 }
 
 /** The closed vocabulary, narrowest first. */

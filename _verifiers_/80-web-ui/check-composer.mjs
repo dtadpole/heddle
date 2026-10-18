@@ -486,7 +486,7 @@ test('the access chip reports the server\u2019s sandbox mode', async (context) =
     const chip = JSON.parse(
       await browser.evaluate('JSON.stringify({ text: document.getElementById("access-label")?.textContent ?? "", title: document.getElementById("access").title })'),
     )
-    assert.match(chip.text, /^(Read only|Workspace write|Full access)$/, `the chip names the mode (${chip.text})`)
+    assert.match(chip.text, /^(Read Only|Workspace Write|Full access)$/, `the chip names the mode (${chip.text})`)
     assert.match(chip.title, /sandbox mode/, 'and says where the name comes from')
   } finally {
     browser.close()

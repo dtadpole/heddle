@@ -203,7 +203,7 @@ test('the chip is a menu control with the reference’s anatomy and a selected s
     assert.ok(await browser.waitFor('document.getElementById("access").disabled === false', 10_000), 'and is enabled once a session is open')
 
     const chip = JSON.parse(await readChip(browser))
-    assert.match(chip.label, /^(Read only|Workspace write|Full access)$/, `the chip names the mode (${chip.label})`)
+    assert.match(chip.label, /^(Read Only|Workspace Write|Full access)$/, `the chip names the mode (${chip.label})`)
     assert.match(chip.ariaLabel, /^Access mode, current: /, 'and its accessible name says kind and value')
     assert.equal(chip.hasPopup, 'menu', 'the chip says it opens a menu')
     assert.equal(chip.expanded, 'false', 'and is closed to begin with')
@@ -232,7 +232,7 @@ test('the chip is a menu control with the reference’s anatomy and a selected s
       })()`),
     )
     assert.equal(menu.role, 'menu', 'the popup is a menu')
-    assert.deepEqual(menu.items.map((item) => item.label), ['Read only', 'Workspace write', 'Full access'], 'the three modes, narrowest first')
+    assert.deepEqual(menu.items.map((item) => item.label), ['Read Only', 'Workspace Write', 'Full access'], 'the three modes, narrowest first, in the reference’s own names')
     assert.equal(menu.items.filter((item) => item.checked === 'true').length, 1, 'exactly one entry is the current mode')
     assert.equal(menu.items.find((item) => item.checked === 'true').label, chip.label, 'and the current entry is the one the chip names')
     assert.equal(menu.items.find((item) => item.checked === 'true').check, true, 'the current entry carries a check, as the reference draws it')
@@ -274,7 +274,7 @@ test('the chip is a menu control with the reference’s anatomy and a selected s
     )
     assert.equal(pending.busy, 'true', 'the chip is busy while the change is in flight')
     assert.equal(pending.disabled, true, 'and cannot be clicked into a second change')
-    assert.ok(await browser.waitFor('document.getElementById("access-label")?.textContent === "Read only"', 10_000), 'the server’s answer lands as Read only')
+    assert.ok(await browser.waitFor('document.getElementById("access-label")?.textContent === "Read Only"', 10_000), 'the server’s answer lands as Read Only')
     assert.equal(await sessionMode(server, session), 'read-only', 'and the session itself records read-only')
 
     const after = JSON.parse(await readChip(browser))
@@ -284,7 +284,7 @@ test('the chip is a menu control with the reference’s anatomy and a selected s
 
     /** A reload comes back to the session's own mode, not to a page-local memory. */
     await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.getElementById("access-label")?.textContent === "Read only"', 20_000), 'a reload comes back to the session’s mode')
+    assert.ok(await browser.waitFor('document.getElementById("access-label")?.textContent === "Read Only"', 20_000), 'a reload comes back to the session’s mode')
     assert.equal(await sessionMode(server, session), 'read-only', 'and that mode is still the session record’s')
   } finally {
     browser.close()
@@ -299,7 +299,7 @@ test('full access needs the risk gate, and the server refuses an unconfirmed esc
   try {
     const session = await startSession(server)
     await browser.goto(server.url)
-    await browser.waitFor('document.getElementById("access-label")?.textContent === "Workspace write"', 20_000)
+    await browser.waitFor('document.getElementById("access-label")?.textContent === "Workspace Write"', 20_000)
 
     const openDialog = async () => {
       await clickAt(browser, '#access')
@@ -334,12 +334,12 @@ test('full access needs the risk gate, and the server refuses an unconfirmed esc
     assert.equal(gate.riskChecked, false, 'the risk is not pre-acknowledged')
     assert.equal(gate.enableDisabled, true, 'and the primary action is disabled until it is acknowledged')
     assert.equal(gate.cancel, true, 'there is a way out')
-    assert.equal(gate.chip, 'Workspace write', 'nothing widened while the gate is open')
+    assert.equal(gate.chip, 'Workspace Write', 'nothing widened while the gate is open')
 
     /** Cancel leaves the session exactly where it was. */
     await clickAt(browser, '#access-cancel')
     assert.ok(await browser.waitFor('document.getElementById("access-dialog").hidden === true', 5_000), 'Cancel closes the gate')
-    assert.equal(await browser.evaluate('document.getElementById("access-label").textContent'), 'Workspace write', 'and the chip did not move')
+    assert.equal(await browser.evaluate('document.getElementById("access-label").textContent'), 'Workspace Write', 'and the chip did not move')
     assert.equal(await sessionMode(server, session), 'workspace-write', 'nor did the session')
 
     /** Acknowledged and enabled, the escalation lands — and only then. */
@@ -418,7 +418,7 @@ test('a refused write is visible on the closed row, and no UI action widens the 
     assert.match(row.summary, /read-only/, 'and names the mode that refused it')
     assert.equal(row.closed, true, 'without needing the row opened')
     assert.match(row.result, /error \(SANDBOX\)/, 'the full result is still inside the row')
-    assert.equal(row.chip, 'Read only', 'the chip reports the session it is actually running under')
+    assert.equal(row.chip, 'Read Only', 'the chip reports the session it is actually running under')
     assert.equal(await sessionMode(server, session), 'read-only', 'and no turn or tool call widened it')
   } finally {
     browser.close()
