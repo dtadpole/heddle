@@ -313,13 +313,69 @@ Cycle 2 — a vision route is found by what it publishes, and a request's images
               tsc, not only the branch.
 ```
 
+## Cycle 3 — the transcript and queue carry the file, not a marker
+
+```
+Cycle 3 — an attached file is visible where a person reads it, and several files survive the queue
+  measured:   DSH's historical message images (dsh-client-ui-attachment/lib/client.js:691-897): a wrapping
+              gallery (gap 10px, flex-start/end alignment), a lone image at a 240px long edge with its aspect
+              clamped to [0.25,4] and never upscaled, several images as 64px tiles, a 48px thumbnail variant, a
+              zoom-in frame that opens a lightbox, a loading state and a retryable load failure, and labels
+              ("Image", "View original"). DSH's queue dock rows carry the queued message's own attachments: 24px
+              image thumbnails and 180×24 file chips with a 16px icon, a 13px name and a 10px size, in a strip
+              capped at 55% of the row (dsh-client-ui-conversation/lib/client.js:15215).
+              heddle today: the transcript shows `[image name]` / `[file name]` text — cycle 1's honest minimum —
+              and there is no route that serves an upload's bytes, so a thumbnail is impossible; the queue row
+              shows only `· N files`; several images already reach the provider (projection and budget carry
+              them) but no check proves it; the queue editor preserves an item's attachments because they live
+              on the item, but nothing shows that, so an edit looks like it might drop the image.
+  brainstorm: (a) a dedicated read-only `GET /api/uploads/<leaf>` (contained to the upload root, inline only for
+                  embeddable bytes, token-gated like every route), structured attachment metadata on the
+                  transcript turn, and a gallery on the user row plus a small queue strip — chosen;
+              (b) embed data URLs into the transcript JSON — discarded: one reloaded conversation would carry
+                  megabytes per image, and the page already has a URL to fetch;
+              (c) serve uploads through the existing `/api/raw` workspace route — discarded: an upload may live
+                  outside any registered workspace, and the route's containment rule is the wrong one; the upload
+                  root is the directory that owns these bytes;
+              (d) keep the cycle-1 name markers — discarded: DSH shows the image and opens the original, and the
+                  owner's reference is the contract;
+              (e) render the queue's thumbnails by parsing the stored path in the page — discarded: the page would
+                  re-derive name and size the server already measured; the queued item carries them.
+  step back:  still a mechanism, not a value: a serving route, a structured fact on the turn, and the presentation.
+              The objective is unchanged; cycle 3 also closes the checks the earlier cycles left open — several
+              images in one message, the queue's attachment survival across an edit, and the full matrix at the
+              owner's address.
+  plan:       src/server/web.ts — `GET /api/uploads/<leaf>` (upload-root containment, inline types only, no
+              directory listing), and user transcript turns carry `attachments` (name, kind, media type, bytes,
+              url) instead of only text markers;
+              src/server/page.html — the DSH gallery on a user row (lone 240px / several 64px tiles, dialog
+              lightbox, alt text), a queue strip with 24px image thumbs and file chips, and the composer's queue
+              items carry the measured file facts so editing cannot lose them;
+              tests written first: the transcript fold's attachment metadata, the serving route's containment,
+              the browser matrix (sent image card, two images as two tiles and two wire parts, queued image
+              survives an edit and still reaches the provider), and the deployed address with two images.
+  changed:    pending — the cycle is at its plan.
+  delivered:  pending.
+  evidence:   pending.
+  reds:       none yet.
+  coverage:   to visit: the uploads route (a real file, a traversal attempt, an unknown leaf), lone vs several
+              images, the lightbox, a file chip, the queue strip, an edited queued message, and the owner's
+              address with two images.
+  invariants: a served upload is contained to the upload root; a non-embeddable type is served as a download;
+              the transcript remains usable when an upload was deleted (the card shows a failed state, the turn
+              still reads); the queue carries the same measured facts as the composer; sending an image never
+              changes its stored bytes.
+  landed:     pending.
+  lessons:    pending.
+```
+
 ## Cycle status
 
 | Cycle | Aim | Phase | Evidence committed | Landed |
 |---|---|---|---|---|
 | 1 | delivery mechanism: typed user content + DSH projection + provider mapping + pending cards | completed | test/attachments.test.ts, test/server-attachments.test.ts, check-composer (5 attachment checks) | e50b257, deployed at 9eef059 |
 | 2 | capability discovery so a vision route receives image content; DSH's image budgets/offload | completed | test/model-info.test.ts, test/model-discovery.test.ts, check-composer (2 published-modality checks) | 56e9b69, deployed and observed |
-| 3 | transcript cards, several images, queue-edit attachments; full matrix re-measure at the owner's address | pending | — | — |
+| 3 | transcript and queue carry the file; several images; queue-edit survival; full matrix at the owner's address | implement in progress | — | — |
 
 ## Read next
 
