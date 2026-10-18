@@ -420,7 +420,18 @@
   h1 { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); margin: .25rem 0 .5rem; }
   ol { list-style: none; margin: 0; padding: 0; }
   li { padding: .4rem .5rem; border-radius: var(--radius); cursor: pointer; }
-  li:hover { background: var(--surface); }
+  /**
+   * A small clickable list row's hover surface — **scoped to the lists that have such rows**: the changed files of a
+   * turn and the settings dialog's lists.
+   *
+   * Unscoped it also matched the tree's items, and a tree `li` contains its **whole subtree**: hovering any row set the
+   * ancestor `li`s to `--surface`, so an opaque tint painted behind the entire tree section instead of only the row
+   * (the owner's report: "do NOT change the entire workspace tree background"). The tree's own row is the only thing in
+   * the tree that carries a hover tint.
+   */
+  .changed-list > li:hover,
+  .settings-endpoint:hover,
+  .settings-workspace:hover { background: var(--surface); }
   li[aria-current] { background: var(--surface); color: var(--text); }
   .meta { opacity: .6; font-size: .78rem; }
   /**
@@ -8162,26 +8173,26 @@ function kindIcon(kind, open = false) {
       'M9.96976 1.70572L13.1554 3.93629L10.9019 8.12317L11.5158 11.605L10.7192 12.7427L2.52767 7.00693L3.3243 5.86922L6.80612 5.25528L9.96976 1.70572Z',
     )
     /**
-     * The needle's `d` is copied **verbatim**, spaces included. A hand-compacted version that broke each cubic into its own `C`
-     * (one coordinate pair per command) is an invalid path: the browser painted nothing, so the pin's head showed and its tail
-     * did not — the owner's report that the thin tail was missing. Verified by rendering the two paths in separate colours: the
-     * body painted, the malformed needle was blank.
+     * The tail is a **thin shaft on the head's own centre line**, not the reference's asymmetric fill shape.
+     *
+     * The owner's two reports: the tail was too thick, and it did not sit in the **middle** of the head. Measured on the reference
+     * artwork: its needle leaves the head off its centreline by about 1.8 units of the 16-unit box, and its filled taper is about
+     * 0.95 units thick. The head below is still the reference's path exactly; the shaft is drawn from the head's geometric centre
+     * (the bounding box centre of that path, 7.85, 7.22) outward along the same down-left direction, as a **0.9-unit round-capped
+     * stroke**, which is thinner than the fill it replaces and is centred by construction. The head covers the shaft's start, so
+     * the joint needs no seam.
      */
-    const needle = svgPath(
-      'M6.05285 9.47511C6.27284 9.16094 6.70586 9.08458 7.02003 9.30457C7.3342 9.52455 7.41055 9.95757 7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
-    )
-    needle.setAttribute('fill', 'currentColor')
-    /**
-     * The needle is **fill only** — no stroke. The reference's artwork leaves the tail unstroked, while this SVG root carries
-     * `stroke: currentColor`, which the needle inherited: the tail was drawn at its own width **plus a 1-unit outline**, about
-     * twice as thick as the reference's. The owner asked for a thinner tail; this is the difference, not a new shape.
-     */
-    needle.setAttribute('stroke', 'none')
+    const shaft = svgPath('M6.87 8.97L3.95 14.2')
+    shaft.setAttribute('fill', 'none')
+    shaft.setAttribute('stroke', 'currentColor')
+    shaft.setAttribute('stroke-width', '0.9')
+    shaft.setAttribute('stroke-linecap', 'round')
     if (kind === 'pin-fill') {
       body.setAttribute('fill', 'currentColor')
       body.setAttribute('stroke', 'currentColor')
     }
-    svg.append(body, needle)
+    /** Shaft first, head last: the head paints over the shaft's first units and hides the join. */
+    svg.append(shaft, body)
     return svg
   }
   if (kind === 'session') {

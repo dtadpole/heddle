@@ -615,6 +615,67 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     )
 
     /**
+     * **Hovering a row changes the row only.** The owner's report: "when mouse over, do NOT change the entire workspace
+     * tree background, only the tree item". The cause was a global `li:hover { background: var(--surface) }`: a tree
+     * `li` contains its whole subtree, so hovering a child row also matched the ancestor `li`s and painted an opaque
+     * surface behind the entire section (measured: row → 8% tint *and* `li` → rgb(35,35,36)). The rule now names the
+     * lists that have small clickable rows; the tree's item carries its own tint and nothing behind it changes.
+     */
+    const hoverOfChild = JSON.parse(
+      await browser.evaluate(`(() => {
+        const row = [...document.querySelectorAll('#tree li:not([data-kind="workspace"]) > .row')][0]
+        if (row === undefined) return JSON.stringify({ error: 'no child row' })
+        const rect = row.getBoundingClientRect()
+        const li = row.closest('li')
+        const ancestor = li.parentElement.closest('li')
+        const bg = (element) => element === null ? null : getComputedStyle(element).backgroundColor
+        /** The rest reading comes from the resolved row: at rest there is no hovered element to find. */
+        return JSON.stringify({
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+          rest: {
+            row: bg(row),
+            li: bg(li),
+            ancestor: bg(ancestor),
+            tree: bg(document.getElementById('tree')),
+            pane: bg(document.getElementById('workspace-scroll')),
+            aside: bg(document.querySelector('aside'))
+          }
+        })
+      })()`),
+    )
+    assert.equal(hoverOfChild.error, undefined, `a child row exists to hover\nsaw: ${JSON.stringify(hoverOfChild)}`)
+    const surfaceReader = `(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find((candidate) => candidate.matches(':hover'))
+      if (row === undefined) return JSON.stringify({ error: 'nothing hovered' })
+      const li = row.closest('li')
+      const ancestor = li.parentElement.closest('li')
+      const bg = (element) => element === null ? null : getComputedStyle(element).backgroundColor
+      return JSON.stringify({
+        row: bg(row),
+        li: bg(li),
+        ancestor: bg(ancestor),
+        tree: bg(document.getElementById('tree')),
+        pane: bg(document.getElementById('workspace-scroll')),
+        aside: bg(document.querySelector('aside'))
+      })
+    })()`
+    const restSurface = hoverOfChild.rest
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hoverOfChild.x, y: hoverOfChild.y })
+    await new Promise((done) => setTimeout(done, 350))
+    const hoveredSurface = JSON.parse(await browser.evaluate(surfaceReader))
+    assert.notEqual(hoveredSurface.error, 'nothing hovered', 'the pointer landed on a row')
+    assert.notEqual(hoveredSurface.row, 'rgba(0, 0, 0, 0)', `the hovered row carries the tint\nsaw: ${JSON.stringify(hoveredSurface)}`)
+    assert.equal(hoveredSurface.li, 'rgba(0, 0, 0, 0)', 'its own list item stays clear, so the tint is the row\'s alone')
+    assert.equal(hoveredSurface.ancestor, restSurface.ancestor, 'and the folder above it is unchanged, though its subtree contains the row')
+    assert.equal(hoveredSurface.tree, restSurface.tree, 'the tree behind the rows does not change')
+    assert.equal(hoveredSurface.pane, restSurface.pane, 'nor the scrolling pane')
+    assert.equal(hoveredSurface.aside, restSurface.aside, 'nor the panel')
+    /** Put the pointer away so the readings below start from rest. */
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1000, y: 600 })
+    await new Promise((done) => setTimeout(done, 250))
+
+    /**
      * The chord, which is DSH's own: `Alt+Meta+B`. It **toggles** — pressed while wide it collapses, pressed again it
      * opens — so both directions are read, because a chord bound to only one of them is a control that can put the
      * panel away and not bring it back.

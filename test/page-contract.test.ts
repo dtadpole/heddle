@@ -215,6 +215,14 @@ test('the workspaces region spans the panel and carries the reference\'s scrollb
   assert.match(page, /#search-results \{ padding-inline: 12px calc\(12px - 5px\); \}/, 'and the search results take the same inset, so a search does not shift the list edges')
   assert.match(page, /#search-results \.hit \{[^}]*padding: \.3rem \.5rem;[^}]*border-radius: 12px;/s, 'with each hit using the row padding and rounding')
   assert.match(page, /#tree \.row:focus-visible \{[^}]*outline: 2px solid color-mix\(in oklab, var\(--text\) 45%, transparent\);[^}]*outline-offset: -2px;/s, 'and a focused row draws its ring inside its own box, in the panel ink')
+
+  /**
+   * **The hover surface names its lists.** `li:hover` unscoped also matched tree items, and a tree `li` holds its whole
+   * subtree — hovering a child row painted an opaque surface behind the entire section. The rule names the changed-files
+   * list and the settings lists; the tree's row carries its own tint.
+   */
+  assert.doesNotMatch(page, /^\s*li:hover \{ background: var\(--surface\); \}/m, 'no unscoped list-item hover surface')
+  assert.match(page, /\.changed-list > li:hover,\s*\n\s*\.settings-endpoint:hover,\s*\n\s*\.settings-workspace:hover \{ background: var\(--surface\); \}/, 'the surface is scoped to the lists that want it')
   assert.match(page, /#tree ul\[role='group'\] \{ padding-left: 0; \}/, 'while a group no longer narrows the rows below it')
   assert.match(page, /function nodeRow\(node, depth = 0\)/, 'nodeRow carries the depth')
   assert.match(page, /group.append\(nodeRow\(child, depth \+ 1\)\)/, 'and passes one more to each child')

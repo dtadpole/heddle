@@ -351,6 +351,31 @@ reachable from the panel — recorded here as the consequence of the removal.
 
 Screenshot: [`_context_/sidebar-panel/parallel-roots.png`](_context_/sidebar-panel/parallel-roots.png).
 
+## After the loop — the hover surface that leaked
+
+**the report:** the owner hovered a row and the **whole workspace tree** changed shade, not just the item.
+
+**measured,** live at 1200×800: hovering a child row changed the row (`oklab(… / 0.08)`, the row's own tint) **and its
+parent `li` to an opaque `rgb(35,35,36)`**. The cause was a global stylesheet rule, `li:hover { background:
+var(--surface) }`, intended for the small clickable lists (a turn's changed files, the settings dialog's lists). A tree
+`li` **contains its entire subtree**, and `:hover` matches ancestors, so hovering any row set the ancestor `li`s to an
+opaque surface — it painted behind the whole section.
+
+**the fix,** one rule scoped to what it is for:
+
+```css
+.changed-list > li:hover,
+.settings-endpoint:hover,
+.settings-workspace:hover { background: var(--surface); }
+```
+
+Measured after: the hovered row carries its 8% tint while its `li`, the ancestor folder `li`, `#tree`,
+`#workspace-scroll` and the panel keep their rest backgrounds (all transparent or unchanged); part 11 asserts exactly
+that, including the ancestor case, and the unit contract rejects a bare `li:hover` surface.
+
+**lesson:** a global element-selector rule is a **subtree** rule in disguise — an element's box contains its descendants,
+so styling `li:hover` styles every ancestor row's whole body. Scope by the component that wants the state.
+
 ## Cycle: the row inset — the tint stops inside the panel
 
 **measured:** the reference at 1200×800, 2026-10-17. Panel 0→280; its workspace list 8→278 with
