@@ -27,6 +27,12 @@ working directory), four Models with `credential set` rather than a credential, 
 says credentials are never shown. The panel's foot with its `Settings` entry is visible at the bottom edge, below the
 scrolling workspaces region.
 
+## Cycle 3
+
+`cycle-3-region.png` — the workspaces region scrolled to its middle at 1100×700: the reserved 5-pixel bar on the right
+edge and the 16 pixels of padding under the last row, the two facts cycle 1 had left to the platform. The panel's foot
+and the conversation beside it are unchanged.
+
 ## Read next
 
 [`SIDEBAR_PANEL.md`](../../SIDEBAR_PANEL.md) for the measured structure, the approaches that were discarded, and each

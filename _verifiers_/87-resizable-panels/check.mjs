@@ -598,6 +598,58 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     )
     assert.ok(chordTwice.width > 100, `and opens it again (${chordTwice.width})`)
     assert.equal(chordTwice.label, 'Collapse sidebar', 'naming the action back')
+
+    /**
+     * Cycle 3: the region's **own geometry**, which cycle 1 left to the platform. Measured from the reference on
+     * 2026-10-17: its list reports a 5-pixel scrollbar (`offsetWidth - clientWidth`), `scrollbar-gutter: stable` and a
+     * 16-pixel `padding-bottom`, so its last row ends 16 pixels above the list's bottom edge. Heddle measured 0 and 0,
+     * and its first attempt at a styled bar reserved nothing: `::-webkit-scrollbar` does not apply while
+     * `scrollbar-width: thin` is set, and without a stable gutter the platform draws an overlay bar of width 0.
+     */
+    const bar = JSON.parse(
+      await browser.evaluate(`(() => {
+        const region = document.getElementById('workspace-scroll')
+        const style = getComputedStyle(region)
+        region.scrollTop = region.scrollHeight
+        const children = [...region.children].filter((child) => child.getBoundingClientRect().height > 0)
+        const last = children[children.length - 1]
+        return JSON.stringify({
+          gutter: region.offsetWidth - region.clientWidth,
+          scrollbarGutter: style.scrollbarGutter,
+          paddingBottom: style.paddingBottom,
+          lastChildGap: Math.round(region.getBoundingClientRect().bottom - last.getBoundingClientRect().bottom)
+        })
+      })()`),
+    )
+    assert.equal(bar.gutter, 5, 'the region reserves the reference\'s 5-pixel scrollbar')
+    assert.equal(bar.scrollbarGutter, 'stable', 'with a stable gutter, so the list does not shift when it grows')
+    assert.equal(bar.paddingBottom, '16px', 'and ends with the reference\'s 16 pixels of breathing room')
+    assert.ok(bar.lastChildGap >= 12, `so the last row does not touch the foot (${bar.lastChildGap}px)`)
+    assert.ok(bar.lastChildGap <= 20, `and no more than the padding plus a border (${bar.lastChildGap}px)`)
+
+    /**
+     * And a **short** list: closing the workspace leaves five rows, so the region stops scrolling — the panel must keep
+     * its shape, with the foot still at the bottom edge rather than rising to meet the list.
+     */
+    await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find((r) => r.querySelector('.label')?.textContent === 'resize')
+      if (row !== undefined && row.closest('li').dataset.open === 'true') row.click()
+      return true
+    })()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tree .row").length < 10', 10_000), 'the workspace is closed, so the list is short')
+    const short = JSON.parse(
+      await browser.evaluate(`(() => {
+        const region = document.getElementById('workspace-scroll')
+        const foot = document.getElementById('panel-foot').getBoundingClientRect()
+        const aside = document.querySelector('aside').getBoundingClientRect()
+        return JSON.stringify({
+          scrollable: region.scrollHeight > region.clientHeight + 1,
+          gapToBottom: Math.round(aside.bottom - foot.bottom)
+        })
+      })()`),
+    )
+    assert.equal(short.scrollable, false, 'a list that fits does not scroll')
+    assert.ok(short.gapToBottom >= 0 && short.gapToBottom <= 24, `and the foot stays at the bottom edge (${short.gapToBottom}px above it)`)
   } finally {
     browser.close()
     server.kill()

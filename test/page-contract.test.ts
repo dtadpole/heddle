@@ -200,6 +200,19 @@ test('the panel ends with a Settings entry, and the Settings surface never rende
   assert.match(page, /endpoint\.credential === 'set' \? 'credential set' : 'no credential'/, 'the credential is reported as set or not, never printed')
 })
 
+test('the workspaces region carries the reference\'s scrollbar and its end padding', () => {
+  /**
+   * Measured from DSH on 2026-10-17: its list reports a 5-pixel scrollbar (`offsetWidth - clientWidth`),
+   * `scrollbar-gutter: stable` and `padding-bottom: 16px`. Heddle measured 0 and 0, and its first attempt reserved
+   * nothing because `scrollbar-width: thin` stops `::-webkit-scrollbar` from applying at all. Part 11 measures the
+   * result; these contracts catch the CSS being dropped.
+   */
+  assert.match(page, /#workspace-scroll \{[\s\S]*?padding-bottom: 1rem;/, 'the region ends with the reference\'s 16 pixels')
+  assert.match(page, /#workspace-scroll \{[\s\S]*?scrollbar-gutter: stable;/, 'and reserves its scrollbar gutter')
+  assert.match(page, /#workspace-scroll::-webkit-scrollbar \{ width: 5px; \}/, 'with the reference\'s 5-pixel bar')
+  assert.doesNotMatch(page, /#workspace-scroll \{[\s\S]*?scrollbar-width: thin;/, 'and not the property that would disable it')
+})
+
 test("the page's module parses, because one syntax error leaves the whole UI without behaviour", () => {
   /**
    * Measured on 2026-10-17: a concurrent edit split a function signature from its body, and the page then loaded as

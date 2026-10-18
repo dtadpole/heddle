@@ -198,8 +198,31 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    /** Room for the scrollbar, so a row's age does not sit under it when the list is long. */
-    padding-right: .15rem;
+    /**
+     * The reference's own scroll and end-of-list geometry, measured 2026-10-17: its list reports a **5-pixel
+     * scrollbar** (`offsetWidth - clientWidth`), and its last row ends **16 pixels above the list's bottom edge**.
+     * Heddle measured 0 and 0 — a platform overlay bar and content ending flush against the panel's foot. The bar is
+     * styled rather than left to the platform so the gutter is reserved (a row's age does not sit under a floating bar)
+     * and the list ends with the same breathing room, which is what keeps the last row off the separator below it.
+     */
+    padding-bottom: 1rem;
+    /**
+     * `stable` is the reference's own choice, read from its list: `scrollbar-gutter: stable` **plus** a 5-pixel
+     * `::-webkit-scrollbar` gives it an `offsetWidth - clientWidth` of 5. Two corrections to this page's first attempt,
+     * both measured: without the gutter the platform drew an overlay bar (width 0) even with the webkit width set, and
+     * `scrollbar-width: thin` is the property that stops `::-webkit-scrollbar` from applying at all — the reference
+     * leaves it at `auto`.
+     */
+    scrollbar-gutter: stable;
+  }
+  #workspace-scroll::-webkit-scrollbar { width: 5px; }
+  #workspace-scroll::-webkit-scrollbar-track { background: transparent; }
+  #workspace-scroll::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: color-mix(in oklab, var(--text) 22%, transparent);
+  }
+  #workspace-scroll::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--text) 34%, transparent);
   }
   /**
    * The bottom area: anchored, and it never scrolls with the list.
@@ -1017,7 +1040,14 @@
    *   DSH's selected row is `rgba(255,255,255,0.08)`, weight 400, no left bar. Selection is the tint that stays
    *   after the pointer leaves, which is the whole difference between the two states.
    */
-  #tree .age { font-size: 11px; color: var(--text-3); transition: opacity .12s ease; }
+  /**
+   * The age is **decoration**: it must never intercept a pointer meant for the controls that fade in over it.
+   *
+   * Measured: hovering a row's archive or pin icon made the icon blink, and a trusted click dispatched at the icon's centre
+   * was delivered to this span instead of the button — because the age shares the `.row-right` grid slot with the tools and sat
+   * above them. It keeps its own slot and paints behind the controls now.
+   */
+  #tree .age { font-size: 11px; color: var(--text-3); transition: opacity .12s ease; pointer-events: none; }
   #tree li:hover > .row .age, #tree li:focus-within > .row .age { opacity: 0; }
   /**
    * The row's right-hand slot holds two things in **one grid cell**: the age when the row is quiet, the controls when
@@ -1030,6 +1060,11 @@
   #tree .row-right > .age, #tree .row-right > .row-tools { grid-area: slot; }
   #tree .row-tools {
     display: inline-flex; align-items: center; gap: 6px;
+    /**
+     * Above the age that shares this slot: without a stacking context here the two boxes paint in DOM order and a hover can
+     * land on the transparent age while the icon is what the eye sees.
+     */
+    position: relative; z-index: 1;
     opacity: 0; pointer-events: none; transition: opacity .12s ease;
     /**
      * **No surface of its own.** Measured from DSH: its row actions sit directly on the row — transparent buttons over the
@@ -1075,7 +1110,7 @@
   /** DSH's state word: the muted body type, before the name, smaller than it. */
   #tree .status { font-size: 12px; color: var(--text-3); flex: none; }
   /** The rest-state pin mark: small, muted, and never the whole width of the row. */
-  #tree .pin-mark { display: inline-flex; flex: none; width: 14px; height: 14px; opacity: .7; }
+  #tree .pin-mark { display: inline-flex; flex: none; width: 14px; height: 14px; opacity: .7; pointer-events: none; }
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
    * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a
