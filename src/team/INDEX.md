@@ -1,6 +1,6 @@
 ---
 title: Team
-version: 0.1.0
+version: 1.0.0
 description: The Agent Teams layer — durable teammates, a journal in the Lead's session, a target-confirmed mailbox and a shared task board.
 grounded_in:
   - source: human-authored
@@ -60,13 +60,21 @@ tools never appear in the model's list. Planned next: the Web UI view.
    `reopen`, `reassign` (Lead-only), `delete`; readiness never starts an owner; `blockedBy` is a DAG (cycles
    refused); `writeScopes` are **advisory** warnings, not a lock.
 
-## Acceptance (what the goal must prove)
+## Acceptance (met, with the evidence)
 
 - unit tests for the fold, member lifecycle, task CAS, readiness/cycles, delivery ledger and limits —
-  [`../../test/team-state.test.ts`](../../test/team-state.test.ts) now covers this file;
-- a scripted end-to-end check driving Lead → spawn → message → task → wait → result across sessions;
-- restart recovery of a live team;
-- clean-checkout verification (build, unit suite, the new verifier, goal checks as regression).
+  [`../../test/team-state.test.ts`](../../test/team-state.test.ts) (12), plus the service
+  ([`../../test/team-service.test.ts`](../../test/team-service.test.ts), 14), the live-turn registry
+  ([`../../test/turns.test.ts`](../../test/turns.test.ts), 4) and the tools
+  ([`../../test/team-tools.test.ts`](../../test/team-tools.test.ts), 10);
+- a scripted end-to-end check driving Lead → spawn → message → task → wait → result across sessions —
+  [`../../_verifiers_/50-agentic-loop/check-teams.mjs`](../../_verifiers_/50-agentic-loop/check-teams.mjs);
+- restart recovery of a live team, and boot recovery of a previous process's provisioning members and queued
+  mail — the same check's two tests;
+- the view — [`../../_verifiers_/80-web-ui/check-team-view.mjs`](../../_verifiers_/80-web-ui/check-team-view.mjs);
+- clean-checkout verification (build, 306 unit tests, part 5's four check files, the team view and the goal
+  checks as regression) at commit `73a7ecf`. The post-implementation DSH comparison, including every deliberate
+  divergence, is the last section of the reading.
 
 ## Read next
 

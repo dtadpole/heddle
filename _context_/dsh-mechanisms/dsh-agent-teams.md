@@ -220,7 +220,63 @@ The mapping questions the implementation goal has to answer:
 6. **UI and policy**: a member roster and task board view, plus the collaboration guidance somewhere heddle can
    inject into the system prompt (the context service's notes are the nearest slot).
 
-## 6. Read next
+## 6. After implementation: the comparison
+
+Heddle's team layer was built against this reading and is judged at the commit `73a7ecf` on a clean checkout.
+The mapping, mechanism by mechanism:
+
+| DSH | Heddle | Verdict |
+|---|---|---|
+| TeamId is the Lead's session; team state is `team/*` events folded into projection | the same: `team/member`, `team/task`, `team/message/queued`, `team/message/delivered` in the Lead's log, folded strictly, version 2 | matched |
+| teammates are sessions of their own (`childSessionMeta`: parentSession, origin, delegationDepth) plus `teamId` | the same four fields in the session metadata; a teammate resolves its Lead through `teamId` | matched |
+| roster: Lead-only spawn, `fresh`/`fork` providers, provisioning → active/failed, recovery from the durable child | the same phases; `fork` copies the Lead's derived messages, `fresh` starts empty; recovery settles provisioning from whether the child log accepted a prompt, otherwise fails with the reason | matched in shape |
+| mailbox: durable queue, target-local delivery, acceptance proven by the target's own log, per-target serialization, pending/byte caps, `accepted`/`queued` | the same: delivery writes into the target log (steered message mid-turn, a new turn when idle), `delivered` journaled only after the target log shows the id; per-target tail; the same caps; provisioning targets queue | matched |
+| task board: revisions, CAS, readiness, blockedBy DAG, advisory write scopes | the same eight actions; cycles/missing blockers refused; readiness never starts an owner; warnings only | matched |
+| wait: journal commit or member-status change, timeout, `noProgress` | journal writes wake it, timeout ends it, `noProgress` when no other member is running or provisioning | matched; **narrower** — heddle's wake signal is a journal write, so a pure status change (a turn starting/ending) is seen by the next poll, not by the wait |
+| interrupt: Lead-only, pending inbox preserved | Lead-only, aborts the session's live turns through the live-turn registry, queue untouched | matched |
+| nine tools `spawn_teammate`, `send_message`, `list_agents`, `wait_agent`, `interrupt_agent`, `team_task_*` | the same nine, same names and parameters; refusals are stable codes (`TEAM_LEAD_REQUIRED`, `TEAM_STALE_REVISION`, ...) | matched |
+| policy shared by every member's prompt | written once per session as a durable `context/note` with `origin: 'team-policy'` | matched in content, different in delivery |
+| profile bundle disables direct subagent tools, inserts service, tools, UI, with measured limits | an opt-in `team` row with the same limits (8 members, 256 tasks, 64 pending, 64 KiB), the nine tools on the allow list, and the panel in the page | matched |
+| client UI for roster and board | a read-only panel on `/api/team`: roster with live status, task cards with readiness and warnings, mailbox ledger | **narrower** — no member conversation links, no task editing from the view |
+
+### Deliberate divergences, and why
+
+1. **No persistent agent object.** DSH keeps a live agent per member and can steer it at a step boundary and
+   `interrupt` it by authority. Heddle has no agent registry: a teammate is a session, a delivery is a turn (or
+   a steered message into a running one), and "running" is the process-local live-turn registry. This is what
+   made `ctx.get('turns')` necessary — the registry must be readable from a plugin's own fiber without an
+   injected service — and it is also why a status change does not itself wake a wait.
+2. **Spawn returns once the first turn is durable, not once it finishes.** The Lead keeps working; the first
+   turn runs in the background. A provisioning failure is a child-creation failure; a failed first turn is a
+   fact in the child's log, not a `failed` member, exactly as DSH separates provisioning from a run.
+3. **Delivery is a turn, not a continuable run.** Heddle's `runTurn` is one-shot; a mailbox message to an idle
+   member starts a turn, a message to a running member is appended for the loop's between-round input. The
+   durable properties are the same; arbitrary step-boundary steering is not.
+4. **No per-member tool filter, persona, model override, or out-of-process teammate.** DSH's subagent
+   capabilities; heddle gives a teammate the profile's tools and the Lead's endpoint/model from session
+   metadata. `delegate` (the earlier subagent slice) and a team are different tools with different scopes.
+5. **No descriptor versioning beyond the event version.** The journal events carry version 2 and the fold
+   refuses an unknown version; DSH's versioned subagent descriptors describe a live run, which heddle does not
+   have.
+6. **No disposal drain of continuable children.** Heddle's turns end through abort; DSH's runtime drains
+   continuable children with `disposalTimeoutMs` before disposing. Heddle has nothing to drain.
+7. **Same-session teammates are not implemented.** DSH can seed a child with a prefix of the parent's history;
+   heddle's teammates are always separate sessions, so attribution is the session metadata rather than an
+   event-level agent id. A same-session child would need that event-level identity first.
+
+### What judges this
+
+| Claim | Judge |
+|---|---|
+| fold, phase lifecycle, task CAS, readiness, caps | [`test/team-state.test.ts`](../../test/team-state.test.ts) — 12 |
+| spawn, delivery proven at the target, queuing, recovery, wait, interrupt | [`test/team-service.test.ts`](../../test/team-service.test.ts) — 14 |
+| live-turn registry semantics | [`test/turns.test.ts`](../../test/turns.test.ts) — 4 |
+| the nine tools and their refusals | [`test/team-tools.test.ts`](../../test/team-tools.test.ts) — 10 |
+| Lead → spawn → task → message → answer across sessions; restart survival; boot recovery from leftovers | [`_verifiers_/50-agentic-loop/check-teams.mjs`](../../_verifiers_/50-agentic-loop/check-teams.mjs) |
+| the view: roster, board, mail — and no panel without a team | [`_verifiers_/80-web-ui/check-team-view.mjs`](../../_verifiers_/80-web-ui/check-team-view.mjs) |
+| build, 306 unit tests, part 5 and the goal checks as regression | clean checkout at `73a7ecf` |
+
+## 7. Read next
 
 [`dsh-context.md`](dsh-context.md) for how a request is composed from a session, and
 [`dsh-goal.md`](dsh-goal.md) for the round driver whose event-sourced shape the team journal should copy.
