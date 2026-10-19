@@ -474,6 +474,7 @@ named in place rather than smoothed over.
 
 ## Read next
 
-[`dsh-agent-teams.md`](dsh-agent-teams.md) for the subagent and team layers this lane sits under,
-[`dsh-context.md`](dsh-context.md) for how the notice becomes part of the next request, and
-[`../INDEX.md`](../INDEX.md) for the `_context_` type.
+[`dsh-work-selection.md`](dsh-work-selection.md) for when the model chooses a job instead of a
+foreground call or a delegation, [`dsh-agent-teams.md`](dsh-agent-teams.md) for the subagent and team
+layers this lane sits under, [`dsh-context.md`](dsh-context.md) for how the notice becomes part of the
+next request, and [`../INDEX.md`](../INDEX.md) for the `_context_` type.

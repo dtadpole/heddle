@@ -1,11 +1,12 @@
 ---
 title: DSH Mechanisms
-version: 1.5.0
-description: How DeepSeek Harness implements each mechanism heddle mirrors, read from the installed packages and measured in its browser, with the context and background-job readings corrected and guarded by a check beside them.
+version: 1.6.0
+description: How DeepSeek Harness implements each mechanism heddle mirrors, read from the installed packages and measured in its browser, with the context, background-job and work-selection readings corrected and guarded by a check beside them.
 grounded_in:
   - source: the installed DSH packages under ~/.volta, read on 2026-10-11, 2026-10-17 and 2026-10-18
   - source: DSH's Web UI on its local port 8080, measured in a browser on 2026-10-17
   - source: DSH's Web UI on its local port 3080 and the live session log under ~/.dsh, observed on 2026-10-18
+  - source: the composed Web profile at ~/.dsh/profiles/web/cordis.yml, read on 2026-10-18
   - source: the live store at ~/.dsh for the workspace and session shapes
 ---
 
@@ -72,6 +73,12 @@ the frontmatter every authored artifact carries.
   controls and the completion notice that wakes an idle owner, the four producer kinds, and the two background
   subagent lanes — one-shot is a job, continuable is a durable child — with the composition that chooses between
   them, observed live in the Web GUI.
+- [`dsh-work-selection.md`](dsh-work-selection.md) — the decision layer over that mechanism: how a tool call
+  runs through one scheduler and its gates, the three ways a background job actually begins (explicit flag,
+  automatic timeout promotion, mode default), the exact model-facing sentences that say when (the jobs policy,
+  the subagent "set false only when…" rule, the explicit-ask gates on workflow, ralph and teams, and the one
+  prescription to use a managed job), the five shapes a model chooses between, and how Agent Teams sit on the
+  continuable-subagent lane with no jobs of their own, observed in the running GUI.
 - [`dsh-conversation-views.md`](dsh-conversation-views.md) — the view ring over one session, and the
   Trajectory ledger as a pure projection of the session window.
 - [`dsh-trajectory-ui.md`](dsh-trajectory-ui.md) — the Trajectory tab measured in a browser: the dense

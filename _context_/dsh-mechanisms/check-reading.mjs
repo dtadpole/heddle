@@ -372,3 +372,86 @@ test('dsh-jobs.md states the facts this check guards', async (context) => {
     )
   }
 })
+
+/**
+ * The facts [`dsh-work-selection.md`](dsh-work-selection.md) leans on: the call path, the trigger
+ * surface, the sentences that state when, and the team layer's position on the continuable lane.
+ */
+test('the selection reading: the tool-call path is one scheduler', async (context) => {
+  const loop = needs(context, 'dsh-agent-loop')
+  const prompt = needs(context, 'dsh-system-prompt')
+  if (loop === undefined || prompt === undefined) return
+
+  states(loop, 'async function executeToolCalls(ctx, turn, step, toolCalls, signal, acceptContext)', 'dsh-agent-loop')
+  states(loop, 'maxParallelToolCalls', 'dsh-agent-loop')
+  states(loop, '"tool/call"', 'dsh-agent-loop')
+  states(loop, '"tool/result"', 'dsh-agent-loop')
+  states(prompt, 'PLAN_POLICY: 500', 'dsh-system-prompt')
+  states(prompt, 'TEAM_POLICY: 600', 'dsh-system-prompt')
+  states(prompt, 'TOOL_JOBS: 1600', 'dsh-system-prompt')
+  states(prompt, 'TOOL_SUBAGENT: 2800', 'dsh-system-prompt')
+})
+
+test('the selection reading: the three ways a background job begins', async (context) => {
+  const bash = needs(context, 'dsh-tool-bash')
+  const workflow = needs(context, 'dsh-tool-workflow')
+  const subagentTool = needs(context, 'dsh-tool-subagent')
+  if (bash === undefined || workflow === undefined || subagentTool === undefined) return
+
+  states(bash, 'promoteOnTimeout: z.boolean().default(true)', 'dsh-tool-bash')
+  states(bash, 'No timeout applies.', 'dsh-tool-bash')
+  states(bash, 'kind: "bash",', 'dsh-tool-bash')
+  states(workflow, 'kind: "workflow",', 'dsh-tool-workflow')
+  states(subagentTool, 'Set false only when your next action depends on the result.', 'dsh-tool-subagent')
+  states(subagentTool, 'request.run_in_background ?? options.continuable', 'dsh-tool-subagent')
+})
+
+test('the selection reading: the explicit-ask gates and the one prescription', async (context) => {
+  const workflow = needs(context, 'dsh-tool-workflow')
+  const ralph = needs(context, 'dsh-tool-ralph')
+  const team = needs(context, 'dsh-experimental-tool-agent-team')
+  const web = needs(context, 'dsh-web-app')
+  if (workflow === undefined || ralph === undefined || team === undefined || web === undefined) return
+
+  states(workflow, 'ONLY when the user explicitly asks', 'dsh-tool-workflow')
+  states(ralph, 'ONLY when the direct human explicitly asks', 'dsh-tool-ralph')
+  states(team, 'create teammates only when the user explicitly asks', 'the team tool plugin')
+  states(web, 'use a managed background job', 'dsh-web-app')
+})
+
+test('the selection reading: teammates are continuable children, never jobs', async (context) => {
+  const team = needs(context, 'dsh-experimental-tool-agent-team')
+  const subagent = needs(context, 'dsh-subagent')
+  if (team === undefined || subagent === undefined) return
+
+  const settlement = source('dsh-subagent', 'lib/types/run-settlement.js')
+  if (!skipUnless(context, settlement !== undefined, 'dsh-subagent/lib/types/run-settlement.js')) return
+
+  states(team, 'wait_agent', 'the team tool plugin')
+  states(team, 'ACTIVE_WAIT_STATUSES', 'the team tool plugin')
+  states(settlement, 'the one-shot background path uses Jobs; continuable children have no Task,', 'dsh-subagent/run-settlement')
+  assert.ok(
+    !team.includes('ctx.jobs') && !team.includes('jobs.start('),
+    'the team plugin now touches ctx.jobs — dsh-work-selection.md says a teammate never owns a job',
+  )
+})
+
+test('dsh-work-selection.md states the facts this check guards', async (context) => {
+  if (!skipUnless(context, packageRoot !== undefined, CAPABILITY)) return
+  const reading = readFileSync(new URL('./dsh-work-selection.md', import.meta.url), 'utf8')
+
+  for (const fact of [
+    'executeToolCalls',
+    'maxParallelToolCalls',
+    'promoteOnTimeout',
+    'Set false only when your next action depends on the result',
+    'create teammates only when the user explicitly asks',
+    'use a managed background job',
+    'ctx.jobs',
+  ]) {
+    assert.ok(
+      reading.includes(fact),
+      `dsh-work-selection.md does not state ${JSON.stringify(fact)} — every correction must be written into the reading, not only into this check`,
+    )
+  }
+})
