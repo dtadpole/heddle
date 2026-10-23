@@ -24,7 +24,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`compose.rs`](compose.rs) | rows, composition with the last write winning, provenance |
 | [`profile.rs`](profile.rs) | profiles, and the layers a run or a configuration command uses |
 | [`schema.rs`](schema.rs) | the JSON Schema subset a component's configuration is checked against |
-| [`validate.rs`](validate.rs) | the component catalog seam and the validation pass |
+| [`validate.rs`](validate.rs) | the component catalog seam, the validation pass, and the outside-component manifest catalog (`ManifestCatalog`, `read_component_manifest`) |
 | [`local.rs`](local.rs) | the machine's `heddle.json` |
 | [`endpoints.rs`](endpoints.rs) | endpoint configuration, its model catalogue and the resolution ladder |
 | [`command.rs`](command.rs) | `heddle profiles` and `heddle config`, output and exit codes |
