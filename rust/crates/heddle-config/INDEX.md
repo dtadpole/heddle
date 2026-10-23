@@ -210,6 +210,7 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | main `cc09a59`, lane `a819f5f` (a context-verifier fix and status docs; no Rust source, 05 verifier or runner changed since `480d9b8`) | the same command, with the `480d9b8` builds, source-identical | 10/10 passed, verdict 0, both binaries |
 | 2026-10-22 | lane `a66e662` (eleven merges: the binary's `boot.rs`, `float_roundtrip` workspace-wide, and this crate's null-config tests) | `HEDDLE_BIN=<debug build of exactly a66e662> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; this crate's 118 unit tests passed on the same tree under `float_roundtrip` |
 | 2026-10-22 | main `d28625d` (UI-verifier fixes only; no Rust source, 05 verifier or runner changed since `a819f5f`) | `HEDDLE_BIN=<lane release build of the 480d9b8 sources, identical here> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0 |
+| 2026-10-22 | main `b0ef8ab` (the lane's merges re-made on main: the binary's `boot.rs`, `float_roundtrip`, a `heddle-tools` that differs from `a66e662`) | `HEDDLE_BIN=<debug build of exactly b0ef8ab> sh _verifiers_/05-config-system/verify.sh --json`; this crate's code and the workspace manifest are identical to `a66e662`, where its 118 unit tests passed | 10/10 passed, verdict 0 |
 
 ## Decisions the contract makes
 
