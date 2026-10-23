@@ -31,6 +31,10 @@
 //! [`HookErrorKind::Failed`](crate::HookErrorKind::Failed); the child's stderr goes to the log. `shutdown`
 //! and `exit` end the connection ([`StdioListener::shutdown`]).
 //!
+//! The child may also speak first: a message carrying a `method` is its own request (a `log` line is
+//! forwarded to the log and answered `null`; any other method is answered `-32601`), so its id space never
+//! collides with a pending hook call.
+//!
 //! # Configuration row (for the boot and the `60-hooks` branch)
 //!
 //! ```yaml
@@ -303,15 +307,37 @@ struct RpcRequest<'a> {
     params: Value,
 }
 
-/// One line the child writes.
+/// One line the child writes: a reply to a host request, or a request of its own (`method` present).
 #[derive(Deserialize)]
-struct RpcReply {
+struct Incoming {
     #[serde(default)]
     id: Option<u64>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    params: Option<Value>,
     #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
     error: Option<RpcError>,
+}
+
+/// The host's answer to one of the child's own requests.
+#[derive(Serialize)]
+struct RpcAnswer {
+    jsonrpc: &'static str,
+    id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<RpcAnswerError>,
+}
+
+/// The error arm of [`RpcAnswer`].
+#[derive(Serialize)]
+struct RpcAnswerError {
+    code: i64,
+    message: String,
 }
 
 /// The JSON-RPC error arm of a reply.
@@ -458,6 +484,7 @@ impl StdioListener {
             .expect("a piped child stderr is always present");
         let pending: Arc<Mutex<PendingCalls>> = Arc::default();
         let (outbox, outbox_rx) = mpsc::unbounded_channel::<String>();
+        let outbox_for_reader = outbox.clone();
         let listener = Arc::new(StdioListener {
             child: Mutex::new(child),
             outbox,
@@ -489,22 +516,66 @@ impl StdioListener {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let reply: RpcReply = match serde_json::from_str(trimmed) {
-                            Ok(reply) => reply,
+                        let incoming: Incoming = match serde_json::from_str(trimmed) {
+                            Ok(incoming) => incoming,
                             Err(error) => {
                                 tracing::error!(
                                     %error,
                                     line = trimmed,
-                                    "an outside listener wrote a line that is not a JSON-RPC reply"
+                                    "an outside listener wrote a line that is not a JSON-RPC message"
                                 );
                                 fail_pending(
                                     &pending_for_reader,
-                                    "the outside listener wrote a line that is not a JSON-RPC reply",
+                                    "the outside listener wrote a line that is not a JSON-RPC message",
                                 );
                                 break;
                             }
                         };
-                        let RpcReply { id, result, error } = reply;
+                        // A message carrying a method is the child's own request, not a reply: its id
+                        // space is independent, so answering it here is what keeps correlation sound.
+                        if let Some(method) = incoming.method {
+                            let message = incoming
+                                .params
+                                .as_ref()
+                                .and_then(|params| params.get("message"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if method == "log" {
+                                tracing::info!(target: "heddle_events::outside", "{message}");
+                            } else {
+                                tracing::warn!(
+                                    method = %method,
+                                    "an outside listener asked for a host method that is not supported"
+                                );
+                            }
+                            if let Some(id) = incoming.id {
+                                let answer = if method == "log" {
+                                    RpcAnswer {
+                                        jsonrpc: "2.0",
+                                        id,
+                                        result: Some(Value::Null),
+                                        error: None,
+                                    }
+                                } else {
+                                    RpcAnswer {
+                                        jsonrpc: "2.0",
+                                        id,
+                                        result: None,
+                                        error: Some(RpcAnswerError {
+                                            code: -32601,
+                                            message: format!("method not found: {method}"),
+                                        }),
+                                    }
+                                };
+                                if let Ok(line) = serde_json::to_string(&answer) {
+                                    let _ = outbox_for_reader.send(line);
+                                }
+                            }
+                            continue;
+                        }
+                        let Incoming {
+                            id, result, error, ..
+                        } = incoming;
                         let Some(id) = id else {
                             tracing::warn!(
                                 line = trimmed,
@@ -1270,5 +1341,24 @@ printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"next"}}\n'
             .await
             .unwrap();
         assert_eq!(value, "default:base", "next runs the default");
+    }
+
+    #[tokio::test]
+    async fn a_child_request_whose_id_collides_does_not_corrupt_the_pending_call() {
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"method":"log","params":{"message":"hello from the child"}}\n'
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"replace","value":"still correlated"}}\n'
+"#;
+        let config = script_config(script, &[Echoed::NAME]);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        let reply = listener.call(waterfall_call("base")).await.unwrap();
+        assert_eq!(
+            reply,
+            HookReply::Replace {
+                value: serde_json::json!("still correlated")
+            }
+        );
     }
 }
