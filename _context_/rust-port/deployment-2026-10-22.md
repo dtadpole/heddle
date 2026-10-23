@@ -90,6 +90,21 @@ URL is this build's page byte for byte, and the checkout is a clean deployment c
 The one open question — whether the committed wording should say `main` or `origin/main` for a worktree
 deployment — is D-015's, and the branch takes the wording that matches the machine.
 
+## A turn does not answer, and the page is not why
+
+Reproduced 2026-10-22 20:27 PDT against `3082` with a session cookie: the stream opens, records the user message
+and the context notes, sends `model/request endpoint=scripted`, then `compaction/recovery code=SCRIPT` and
+`event: error — the script for 'scripted' could not be read at scripted.json`.
+
+That is the repository's offline default endpoint (`src/endpoints.ts`: `kind: 'scripted'`,
+`baseUrl: 'scripted.json'`), and a relative `baseUrl` is resolved against the server's working directory, which is
+this checkout. The repository carries no such file and does not ignore one, because every check suite writes its
+own and removes it; a file dropped here would also make the checkout dirty and fail `96-deployment`'s third check.
+So the deployment serves the UI and the API, and **a turn cannot answer until an endpoint is configured on this
+machine** — in `~/.heddle/heddle.json`, either pointing the scripted endpoint at an absolute script path (canned
+answers, which is a choice about the owner's page and not this seat's to make) or naming a real endpoint with a
+key. Nothing in the checkout changes either way.
+
 ## What stopped it, and what brings it back
 
 Two stops were measured after the first proof, and both are recorded because a 502 on the owner's page looks the
