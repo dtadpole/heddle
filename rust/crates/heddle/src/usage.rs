@@ -80,6 +80,8 @@ pub const SERVED: &[Capability] = &[
     Capability::Context,
     Capability::Tools,
     Capability::Hooks,
+    Capability::Models,
+    Capability::Streaming,
 ];
 
 /// The words the verifiers gate on, and the capability that must be served before one may appear.

@@ -29,6 +29,7 @@ pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> E
         return match command {
             CommandWord::Web => web(args, invocation, out),
             CommandWord::Profiles | CommandWord::Config => config_command(args, invocation, out),
+            CommandWord::AdapterCall => adapter_call(out),
             _ => boot_then(args, invocation, out),
         };
     }
@@ -47,6 +48,7 @@ pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> E
 pub fn capability_of(command: CommandWord) -> Capability {
     match command {
         CommandWord::Profiles | CommandWord::Config => Capability::Config,
+        CommandWord::AdapterCall => Capability::Always,
         CommandWord::Models => Capability::Models,
         CommandWord::Tools | CommandWord::Commands => Capability::Tools,
         CommandWord::Sessions | CommandWord::Transcript | CommandWord::Session => {
@@ -439,6 +441,22 @@ impl heddle_agent::command::GoalAdvance for GoalJoin {
             }
         })
     }
+}
+
+/// `adapter-call`: standard input whole as the `{endpoint, request}` value, answered by heddle-llm's entry
+/// point on the process runtime. It needs no boot and no service: the endpoint arrives in the input.
+fn adapter_call(out: &mut Output<'_>) -> Exit {
+    use std::io::Read;
+    let mut input = String::new();
+    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+        return out.fail(&format!(
+            "adapter-call could not read standard input: {error}"
+        ));
+    }
+    let (stdout, stderr) = out.writers();
+    exit_code(
+        crate::runtime::tokio().block_on(heddle_llm::command::adapter_call(&input, stdout, stderr)),
+    )
 }
 
 /// `models`: `heddle-llm`'s entry point over the model row's service.
