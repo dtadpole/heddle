@@ -17,8 +17,8 @@
 //!
 //! # Seams
 //!
-//! - [`SessionLog`] is the port this crate needs from `heddle-session`'s store; an implementation for the store
-//!   lands here once its API does.
+//! - [`SessionLog`] is the port this crate needs from `heddle-session`'s store; it is implemented for
+//!   `heddle_session::SessionStore`, so the boot passes the store itself.
 //! - [`RoundRunner`] is how a round is run — append the attributed user message and answer it with one turn;
 //!   the boot implements it over `heddle-agent`'s turn.
 //! - [`DriverTrigger`] turns the session's own events (`session/event` on the bus) into driver requests; the
@@ -29,10 +29,12 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod command;
 mod driver;
 pub mod http;
 mod log;
 mod service;
+mod store;
 #[cfg(test)]
 mod test_support;
 pub mod tool;

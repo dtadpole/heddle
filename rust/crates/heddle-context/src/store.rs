@@ -52,6 +52,61 @@ impl LogEvent {
     }
 }
 
+impl LogEvent {
+    /// This event, borrowed, as a scan reads it.
+    pub fn as_ref(&self) -> EventRef<'_> {
+        EventRef {
+            seq: self.seq,
+            kind: &self.kind,
+            fields: &self.fields,
+        }
+    }
+}
+
+/// One event of the log, borrowed: what a scan reads without copying the log.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EventRef<'a> {
+    /// The event's position in the log.
+    pub seq: u64,
+    /// The event's `type`.
+    pub kind: &'a str,
+    /// Every other field as written.
+    pub fields: &'a Map<String, Value>,
+}
+
+impl<'a> EventRef<'a> {
+    /// One field, when present.
+    pub fn field(&self, key: &str) -> Option<&'a Value> {
+        self.fields.get(key)
+    }
+
+    /// The `origin` of a `context/note`.
+    pub fn origin(&self) -> Option<&'a str> {
+        self.field("origin").and_then(Value::as_str)
+    }
+
+    /// The `identity` a note was rendered from, when it is a string.
+    pub fn identity(&self) -> Option<&'a str> {
+        self.field("identity").and_then(Value::as_str)
+    }
+
+    /// Whether this node derives to a system message: a `message` or `context/note` whose message
+    /// has the `system` role and at least one part (an empty message derives to none).
+    pub fn is_system_message(&self) -> bool {
+        if self.kind != "message" && self.kind != "context/note" {
+            return false;
+        }
+        let Some(message) = self.field("message") else {
+            return false;
+        };
+        message.get("role").and_then(Value::as_str) == Some("system")
+            && message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|content| !content.is_empty())
+    }
+}
+
 /// A range of surface positions named by the seqs at its two ends.
 ///
 /// The range is **positional**: after one replacement the seqs inside it need not be ordered, and
@@ -186,6 +241,24 @@ pub trait ContextStore: Send + Sync {
         options: AppendOptions,
     ) -> Result<u64, StoreError>;
 
+    /// Visit the log newest first, each event borrowed, until `visit` answers `false`.
+    ///
+    /// The scans this crate makes — the last call's usage, the retained runtime snapshot, the head
+    /// and the baseline — read a few fields of a few events; a store that can lend its events
+    /// overrides this so a round never copies the whole log. `visit` must not call the store.
+    fn visit_newest_first(
+        &self,
+        session: &Self::Handle,
+        visit: &mut dyn FnMut(EventRef<'_>) -> bool,
+    ) -> Result<(), StoreError> {
+        for event in self.read(session)?.iter().rev() {
+            if !visit(event.as_ref()) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// The event at `seq`, when there is one.
     fn event(&self, session: &Self::Handle, seq: u64) -> Result<Option<LogEvent>, StoreError> {
         Ok(self
@@ -215,5 +288,78 @@ pub trait ContextStore: Send + Sync {
             .into_iter()
             .filter_map(|node| node.message)
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Map, Value, json};
+
+    use super::{LogEvent, SeqRange, SurfaceOp};
+
+    fn event(kind: &str, fields: Value) -> LogEvent {
+        let Value::Object(fields) = fields else {
+            panic!("fields are an object");
+        };
+        LogEvent {
+            seq: 7,
+            kind: kind.to_string(),
+            fields,
+        }
+    }
+
+    #[test]
+    fn a_system_message_is_one_with_the_system_role_and_some_content() {
+        let system = event(
+            "context/note",
+            json!({"message": {"role": "system", "content": [{"type": "text", "text": "be brief"}]}, "origin": "system-prompt"}),
+        );
+        assert!(system.as_ref().is_system_message());
+        assert_eq!(system.as_ref().origin(), Some("system-prompt"));
+
+        let empty = event(
+            "message",
+            json!({"message": {"role": "system", "content": []}}),
+        );
+        assert!(
+            !empty.as_ref().is_system_message(),
+            "an empty message derives to none"
+        );
+
+        let user = event(
+            "message",
+            json!({"message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}),
+        );
+        assert!(!user.as_ref().is_system_message());
+
+        let chunk = event(
+            "assistant/chunk",
+            json!({"chunk": {"type": "text-delta", "text": "hi"}}),
+        );
+        assert!(!chunk.as_ref().is_system_message());
+
+        let log_only = event("compaction/start", Value::Object(Map::new()));
+        assert!(!log_only.as_ref().is_system_message());
+        assert_eq!(log_only.as_ref().seq, 7);
+    }
+
+    #[test]
+    fn a_surface_operation_round_trips_the_log_spelling() {
+        assert_eq!(SurfaceOp::Append.to_json(), json!("append"));
+        let replace = SurfaceOp::Replace(SeqRange {
+            start_seq: 6,
+            end_seq: 3,
+        });
+        assert_eq!(
+            replace.to_json(),
+            json!({"op": "replace", "startSeq": 6, "endSeq": 3})
+        );
+        assert_eq!(SurfaceOp::from_json(&replace.to_json()), Some(replace));
+        assert_eq!(
+            SurfaceOp::from_json(&json!("append")),
+            Some(SurfaceOp::Append)
+        );
+        assert_eq!(SurfaceOp::from_json(&json!({"op": "insert"})), None);
+        assert_eq!(SurfaceOp::from_json(&json!(42)), None);
     }
 }

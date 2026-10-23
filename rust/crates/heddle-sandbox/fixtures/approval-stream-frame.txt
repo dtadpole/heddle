@@ -1,0 +1,3 @@
+event: approval
+data: {"id":"approval-00000000-0000-4000-8000-000000000002","tool":"bash","reason":"escalate sandbox to danger-full-access: the write target is outside the workspace and the task requires it","displayReason":"Allow this command with danger-full-access permissions: the write target is outside the workspace and the task requires it","session":"session-00000000-0000-4000-8000-000000000001","at":"2026-10-22T20:31:07.412Z"}
+

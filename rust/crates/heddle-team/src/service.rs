@@ -222,9 +222,10 @@ pub struct RecoverAllReport {
 }
 
 impl RecoverAllReport {
-    /// The line the `web` command prints at boot, before its URL line, or `None` when there was nothing to
-    /// recover: `heddle web: recovered N team(s) (S settled, D delivered[, F failed])`. The verifiers match it.
-    pub fn boot_line(&self) -> Option<String> {
+    /// What the `web` command reports at boot, without its `heddle web: ` prefix, or `None` when there was
+    /// nothing to recover: `recovered N team(s) (S settled, D delivered[, F failed])`. This is the shape of a
+    /// boot note the server's `web` entry point prints before its URL line.
+    pub fn boot_note(&self) -> Option<String> {
         if self.recovered == 0 && self.failed == 0 {
             return None;
         }
@@ -234,9 +235,15 @@ impl RecoverAllReport {
             String::new()
         };
         Some(format!(
-            "heddle web: recovered {} team(s) ({} settled, {} delivered{failed})",
+            "recovered {} team(s) ({} settled, {} delivered{failed})",
             self.recovered, self.settled, self.delivered
         ))
+    }
+
+    /// The whole line the `web` command prints at boot, before its URL line:
+    /// `heddle web: recovered N team(s) (S settled, D delivered[, F failed])`. The verifiers match it.
+    pub fn boot_line(&self) -> Option<String> {
+        self.boot_note().map(|note| format!("heddle web: {note}"))
     }
 }
 
@@ -649,6 +656,14 @@ impl TeamService {
         Ok(report)
     }
 
+    /// Recover every team in the store this service was built over: [`Self::recover_all`] over the store's
+    /// whole session listing, which is what the TypeScript `web` command passes (`ctx.session.list()`,
+    /// unfiltered). The startup edge of the `web` command, and nothing else, calls this.
+    pub async fn recover_store(&self) -> RecoverAllReport {
+        let sessions = self.deps.store.list();
+        self.recover_all(&sessions).await
+    }
+
     /// Recover every given session that carries team events. A team whose log the fold refuses is reported
     /// through `warn`, counted as failed, and skipped; the others are still recovered.
     pub async fn recover_all(&self, leads: &[SessionId]) -> RecoverAllReport {
@@ -954,6 +969,16 @@ mod tests {
         assert_eq!(
             failed_only.boot_line().as_deref(),
             Some("heddle web: recovered 0 team(s) (0 settled, 0 delivered, 1 failed)")
+        );
+        // The note is the line without its prefix, for a server that prints its boot notes itself.
+        assert_eq!(RecoverAllReport::default().boot_note(), None);
+        assert_eq!(
+            recovered.boot_note().as_deref(),
+            Some("recovered 1 team(s) (2 settled, 1 delivered)")
+        );
+        assert_eq!(
+            failed_only.boot_note().as_deref(),
+            Some("recovered 0 team(s) (0 settled, 0 delivered, 1 failed)")
         );
     }
 

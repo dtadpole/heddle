@@ -2,12 +2,10 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 
 import {
   fixtureDir,
-  inProcessOnly,
   parseJson,
   readTranscript,
   removeDir,
@@ -33,16 +31,17 @@ import {
  * 3. **Cheap before expensive** — trimming one oversized tool result can end the pressure, and then
  *    no summary is paid for.
  * 4. **A cut cannot corrupt a turn** — no span separates a tool call from its result, and the
- *    system prompt is never shadowed.
+ *    model is never left without its system prompt.
  * 5. **A summary that does not shrink is refused**, and the conversation is left exactly as it was.
  * 6. **A provider that says the conversation did not fit gets one reduction and one retry**, and
  *    only one.
  *
- * Two of these are judged **in-process against `dist/`** rather than through the CLI. That is
- * deliberate and it is not a shortcut: a refusal and a cut boundary are properties of the engine
- * that a scripted provider cannot produce on demand — a scripted summariser always returns *some*
- * text, and a cut either falls inside a pair or it does not. Judging them through the built module
- * is still judging what a user installs, and `dist/` is rebuilt before the suite runs.
+ * Every one is judged **through the command line**, so the same check judges the TypeScript build and
+ * a `HEDDLE_BIN` binary. Four and five used to call `dist/` modules in process, on the reasoning that
+ * a scripted provider cannot aim a cut or refuse a summary. It can: a scripted compaction step returns
+ * a summary larger than its span, and a cut is aimed through sizes — a tool result priced over the
+ * retained budget on its own, read last — so the tail must stop between a call and its answer. The
+ * engine's aimed unit cases stay where they belong, in each build's unit suite.
  */
 
 const CAPABILITY = 'context management as a surface with a budget'
@@ -125,7 +124,10 @@ function harness(label, options = {}) {
 
 async function supportsContext() {
   const help = await runCli(['--help'])
-  return /context/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /^\s{2}context\b/m.test(help.stdout) && /--turn/.test(help.stdout)
 }
 
 /** The one session a fixture recorded. */
@@ -154,26 +156,22 @@ async function derived(h, session) {
 }
 
 /**
- * The page's display fold, which is what a reader is shown.
+ * What a reader is shown, judged on the log rather than through a build's own fold.
  *
- * Imported from the build rather than re-implemented here: the claim is about *the panel*, and a
- * check that folded the log itself would only be judging its own idea of the panel.
+ * The panel draws a `message` event as a turn — a user message as a user turn, an assistant message as
+ * an assistant turn — and skips every `context/note`, which is how a checkpoint and an instruction
+ * baseline stay out of the conversation. So the claim "a note is never shown as something a person said"
+ * is a claim about which events are `message`s, and the log answers it for either build. Importing the
+ * TypeScript build's fold from `dist/` instead made the check fail under `HEDDLE_BIN` in a lane with no
+ * TypeScript build (D-023).
  */
-let panelFold
-async function transcriptTurns(events) {
-  panelFold ??= (await import(pathToFileURL(join(repoRoot, 'dist', 'server', 'web.js')).href)).transcriptTurns
-  return panelFold(events)
-}
-
-/** The built module a check reads, and an unjudged verdict when there is no build. */
-async function built(context, relativePath) {
-  const url = pathToFileURL(join(repoRoot, 'dist', relativePath)).href
-  try {
-    return await import(url)
-  } catch {
-    context.skip(`a built dist/${relativePath} to judge`)
-    return undefined
-  }
+function readerTurns(events) {
+  return events
+    .filter((event) => event.type === 'message' && (event.message?.role === 'user' || event.message?.role === 'assistant'))
+    .map((event) => ({
+      kind: event.message.role,
+      text: (event.message.content ?? []).map((part) => part.text ?? '').join(''),
+    }))
 }
 
 test('a compaction shadows a span, the log keeps it, and the model reads the summary once', async (context) => {
@@ -313,78 +311,126 @@ test('trimming one oversized result can clear the pressure, and then nothing is 
   }
 })
 
-test('a cut never splits a tool call from its result, and never shadows the prompt', async (context) => {
-  if (!inProcessOnly(context, 'a cut keeps a tool call with its result, and a summary that does not shrink is refused')) return
-  const storeModule = await built(context, 'session/store.js')
-  if (storeModule === undefined) return
-  const compactionModule = await built(context, 'context/compaction.js')
-  if (compactionModule === undefined) return
-  const meterModule = await built(context, 'context/meter.js')
-  if (meterModule === undefined) return
-  const budgetModule = await built(context, 'context/budget.js')
-  if (budgetModule === undefined) return
+/**
+ * The conversation both cut checks run on, aimed **through sizes** rather than through an injected
+ * `retainTokens` or a module call, so the binary is judged exactly as the TypeScript build is.
+ *
+ * One turn, because a scripted endpoint replays its steps from the first in every new process: it
+ * records a system prompt, writes a file, then reads it back. The read's result is 6000 characters —
+ * under the 8192 a result has to exceed before it is pruned, so it keeps its full price — and it is
+ * the **newest node** when the pressure check runs before the turn's third request. Priced alone at
+ * well over `retainTokens`, it is the node at which the retained tail reaches its budget, so the tail
+ * keeps the result and the cut lands between the call and its answer. That is the one position that
+ * exercises the rule: the cut must back off before the call. The threshold sits between the second
+ * request (after the write) and the third (after the read), so nothing compacts earlier.
+ */
+const PAIR = { threshold: 3200, retain: 600 }
+const PAIR_FILE = 'the quick brown fox jumps over the lazy dog, '.repeat(134).slice(0, 6000)
 
-  const root = tempDir('heddle-surface-')
+function pairSteps(compactionStep) {
+  return [
+    { toolCall: { name: 'write_file', arguments: { path: 'pair.txt', content: PAIR_FILE } } },
+    { toolCall: { name: 'read_file', arguments: { path: 'pair.txt' } } },
+    { text: 'read it' },
+    compactionStep,
+  ]
+}
+
+/** Run the turn and return the session, its log, and the call and result the cut must keep together. */
+async function pairConversation(h) {
+  const run = await runCli(
+    ['--profile', h.profileDir, '--endpoint', 'scripted', '--system', 'be brief', '--turn', `write then read ${'y'.repeat(2000)}`, '--json'],
+    { env: h.env },
+  )
+  assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
+  const session = sessionOf(h.home)
+  const events = eventsOf(h.home, session)
+  const system = events.find((event) => event.type === 'context/note' && event.origin === 'system-prompt')
+  assert.ok(system, 'the system prompt was recorded')
+  const call = events.find(
+    (event) => event.type === 'assistant/chunk' && event.chunk?.type === 'tool-call' && event.chunk?.name === 'read_file',
+  )
+  const shape = events.map((event) => event.type + (event.chunk?.name ? `:${event.chunk.name}` : '') + (event.message?.role ? `:${event.message.role}` : '')).join(' ')
+  assert.ok(call, `the read call was recorded\n${shape}`)
+  const result = events.find(
+    (event) => event.type === 'message' && event.message?.role === 'tool' && event.message?.toolCallId === call.chunk.id,
+  )
+  assert.ok(result, 'and its result')
+  assert.ok(
+    JSON.stringify(result.message).length > PAIR_FILE.length,
+    'the result carries the whole file, so it is priced over the retained budget on its own',
+  )
+  return { session, events, system, call, result, summary: parseJson(run.stdout) }
+}
+
+test('a cut never splits a tool call from its result, and the model keeps its system prompt', async (context) => {
+  if (!skipUnless(context, await supportsContext(), CAPABILITY)) return
+  const h = harness('cut-pair', {
+    contextWindow: 100_000,
+    thresholdTokens: PAIR.threshold,
+    retainTokens: PAIR.retain,
+    instructions: false,
+    steps: pairSteps({ purpose: 'compaction', text: 'the briefing' }),
+  })
   try {
-    const store = new storeModule.SessionStore(join(root, 'sessions'))
-    const handle = store.create({ cwd: root })
-    const system = store.message(handle, { role: 'system', content: [{ type: 'text', text: 'be brief' }] })
-    const user = store.message(handle, { role: 'user', content: [{ type: 'text', text: 'do the thing' }] })
-    store.assistantChunk(handle, { type: 'tool-call', id: 'call-1', name: 'read_file', arguments: '{"path":"a"}' })
-    const assistantSeq = store.surface(handle).nodes[store.surface(handle).nodes.length - 1]
-    store.assistantChunk(handle, { type: 'done', finishReason: 'tool_calls' })
-    const tool = store.message(handle, { role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'the result' }] })
-    const user2 = store.message(handle, { role: 'user', content: [{ type: 'text', text: 'and again' }] })
-    const assistant2 = store.message(handle, { role: 'assistant', content: [{ type: 'text', text: 'done' }] })
-
-    const meter = new meterModule.TokenMeter()
-    const nodes = store.surface(handle).nodes
-    const measurement = meter.measure({
-      nodes: nodes.map((seq) => ({ seq, message: store.deriveNode(handle, seq) })).filter((node) => node.message !== null),
-      generation: store.surface(handle).contentGeneration,
-    })
-    const budget = budgetModule.resolveBudget({ configWindow: 10_000 })
-
-    /**
-     * A retained tail priced to land the cut **between** the assistant's call and its result.
-     *
-     * That is the only way to exercise the rule: a cut that is already balanced proves nothing, so
-     * the three newest nodes are priced exactly and the cut is aimed at index 3 — the tool result's
-     * position — where the surface would be left holding a call with no answer.
-     */
-    const priced = new Map(measurement.nodes.map((node) => [node.seq, node.tokens]))
-    const priceOf = (seq) => priced.get(seq) ?? 0
-    const aimed = priceOf(assistantSeq) + priceOf(tool.seq) + priceOf(user2.seq) + priceOf(assistant2.seq)
-    const plan = new compactionModule.CompactionEngine(store).plan(handle, budget, measurement, { retainTokens: aimed })
-    assert.ok(plan !== null, 'a plan was chosen')
-    assert.ok(!plan.shadowedSeqs.includes(system.seq), 'the system prompt is never inside a shadowed span')
+    const { session, events, system, call, result } = await pairConversation(h)
+    const start = events.find((event) => event.type === 'compaction/start')
+    assert.ok(start, `a compaction was planned\n${events.map((event) => event.type).join(' ')}`)
+    const shadowed = start.shadowedSeqs ?? []
+    assert.ok(shadowed.length > 0, 'the plan shadowed something')
     assert.equal(
-      plan.shadowedSeqs.includes(assistantSeq),
-      plan.shadowedSeqs.includes(tool.seq),
-      `the call and its result were taken together\nshadowed: ${JSON.stringify(plan.shadowedSeqs)}`,
+      shadowed.includes(call.seq),
+      shadowed.includes(result.seq),
+      `the call and its result were taken together\nshadowed: ${JSON.stringify(shadowed)} call ${call.seq} result ${result.seq}`,
     )
-    assert.ok(!plan.shadowedSeqs.includes(tool.seq), 'and the cut backed off before the pair rather than through it')
+    assert.ok(!shadowed.includes(result.seq), 'and the cut backed off before the pair rather than through it')
 
-    const surfaceBefore = [...store.surface(handle).nodes]
-    const refused = await new compactionModule.CompactionEngine(store).compact(handle, plan, {
-      budget,
-      measurement,
-      summarize: async () => 'z'.repeat(20_000),
-      measure: () => measurement,
+    // What the model reads after the rewrite. The system prompt is still read: through the command line it is a
+    // note appended when the round starts, after the first prompt, so the plan may shadow that note — the claim a
+    // consumer relies on is that the model is never left without it, and the next round restores it.
+    const view = await derived(h, session)
+    assert.ok(
+      view.messages.some((message) => message.role === 'system' && (message.text ?? '').includes('be brief')),
+      `the model still reads the system prompt after the rewrite (recorded at seq ${system.seq})`,
+    )
+    // And every tool message still follows the call that asked for it.
+    view.messages.forEach((message, index) => {
+      if (message.role !== 'tool') return
+      const previous = view.messages[index - 1]
+      assert.equal(previous?.role, 'assistant', `tool message ${index} follows an assistant message`)
+      assert.match(previous?.text ?? '', /^→ /, `tool message ${index} follows the call that asked for it`)
     })
-    assert.equal(refused.compacted, false, 'a summary larger than its span is refused')
-    const events = store.read(handle)
+  } finally {
+    removeDir(h.home)
+  }
+})
+
+test('a summary that does not shrink is refused, and the conversation is left as it was', async (context) => {
+  if (!skipUnless(context, await supportsContext(), CAPABILITY)) return
+  const h = harness('cut-refused', {
+    contextWindow: 100_000,
+    thresholdTokens: PAIR.threshold,
+    retainTokens: PAIR.retain,
+    instructions: false,
+    steps: pairSteps({ purpose: 'compaction', text: 'z'.repeat(20_000) }),
+  })
+  try {
+    const { session, events } = await pairConversation(h)
     assert.ok(
       events.some((event) => event.type === 'compaction/failed' && event.refused === true),
-      'and the refusal is recorded rather than swallowed',
+      `the refusal is recorded rather than swallowed\n${events.map((event) => event.type).join(' ')}`,
     )
-    assert.deepEqual([...store.surface(handle).nodes], surfaceBefore, 'the surface is exactly as it was')
+    assert.ok(!events.some((event) => event.type === 'compaction/summary'), 'no summary was accepted')
     assert.ok(
-      !store.deriveMessages(handle).some((message) => JSON.stringify(message).includes('zzzz')),
-      'no part of the refused summary reached the model',
+      !events.some((event) => event.type === 'context/note' && event.surfaceOp?.op === 'replace'),
+      'and no replacement landed, so the surface is exactly as it was',
     )
+    const view = await derived(h, session)
+    const texts = view.messages.map((message) => message.text ?? '')
+    assert.ok(!texts.some((text) => text.includes('zzzz')), 'no part of the refused summary reached the model')
+    assert.ok(texts.some((text) => text.includes('yyyy')), 'and the span it would have shadowed is still sent')
   } finally {
-    removeDir(root)
+    removeDir(h.home)
   }
 })
 
@@ -599,7 +645,7 @@ test('a long conversation can be compacted more than once, and the reader still 
     assert.equal(checkpoints.length, 1, 'the model reads the newest checkpoint, not a pile of them')
 
     // And the reader's view is the conversation: the harness's own notes are not turns.
-    const panel = await transcriptTurns(events)
+    const panel = readerTurns(events)
     assert.equal(panel.filter((turn) => turn.kind === 'user').length, 4, 'the four prompts are the four user turns')
     assert.ok(
       !panel.some((turn) => (turn.text ?? '').includes('<compacted-summary>') || (turn.text ?? '').includes('<system-reminder>')),

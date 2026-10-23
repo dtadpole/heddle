@@ -391,11 +391,53 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Approvals) => {
                 Some(Box::new(crate::adapters::ApprovalsComponent))
             }
-            // The rest land with their crate's API: a built-in with no adapter answers `None`, so its
-            // row fails naming itself rather than starting nothing.
-            ComponentRef::Builtin(_) | ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => {
-                None
+            ComponentRef::Builtin(Builtin::Session) => Some(Box::new(
+                crate::adapters::SessionComponent::new(self.env.clone()),
+            )),
+            ComponentRef::Builtin(Builtin::Workspace) => Some(Box::new(
+                crate::adapters::WorkspaceComponent::new(self.env.clone()),
+            )),
+            ComponentRef::Builtin(Builtin::Console) => {
+                Some(Box::new(crate::adapters::InCrateComponent::console()))
             }
+            ComponentRef::Builtin(Builtin::Greeting) => {
+                Some(Box::new(crate::adapters::InCrateComponent::greeting()))
+            }
+            ComponentRef::Builtin(Builtin::Announce) => {
+                Some(Box::new(crate::adapters::InCrateComponent::announce()))
+            }
+            ComponentRef::Builtin(Builtin::Tools) => {
+                Some(Box::new(crate::adapters::ToolsComponent))
+            }
+            ComponentRef::Builtin(Builtin::Todo) => Some(Box::new(crate::adapters::TodoComponent)),
+            ComponentRef::Builtin(Builtin::TodoTool) => {
+                Some(Box::new(crate::adapters::TodoToolComponent))
+            }
+            ComponentRef::Builtin(Builtin::Goal) => Some(Box::new(crate::adapters::GoalComponent)),
+            ComponentRef::Builtin(Builtin::GoalTool) => {
+                Some(Box::new(crate::adapters::GoalToolComponent))
+            }
+            ComponentRef::Builtin(Builtin::Turns) => {
+                Some(Box::new(crate::adapters::TurnsComponent))
+            }
+            ComponentRef::Builtin(Builtin::SubagentTool) => {
+                Some(Box::new(crate::adapters::SubagentToolComponent))
+            }
+            ComponentRef::Builtin(Builtin::GoalDriver) => {
+                Some(Box::new(crate::adapters::GoalDriverComponent))
+            }
+            ComponentRef::Builtin(Builtin::Team) => Some(Box::new(crate::adapters::TeamComponent)),
+            ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
+                crate::adapters::ContextComponent::new(self.env.clone()),
+            )),
+            // An outside component is declared by a manifest; any other outside path names nothing
+            // this binary can start, and its row fails naming itself.
+            ComponentRef::Outside(path) if path.to_string_lossy().ends_with(".component.yml") => {
+                Some(Box::new(crate::adapters::OutsideRow::new(path.clone())))
+            }
+            // Every built-in has its adapter; an outside path without a manifest, or a bare name that
+            // is neither, names nothing this binary can start, and its row fails naming itself.
+            ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => None,
         }
     }
 }
@@ -679,14 +721,21 @@ mod tests {
     }
 
     #[test]
-    fn a_built_in_takes_no_declared_schema_until_its_adapter_lands() {
+    fn a_built_in_declares_the_schema_its_adapter_carries() {
         let row = EntryRow {
             name: "./src/plugins/session.ts".to_owned(),
             ..EntryRow::default()
         };
-        assert_eq!(
-            BuiltinCatalog::default().lookup(&row, Some(Path::new("/repo"))),
-            SchemaLookup::NoSchema
+        let SchemaLookup::Schema(schema) =
+            BuiltinCatalog::default().lookup(&row, Some(Path::new("/repo")))
+        else {
+            panic!("the session adapter declares its row schema");
+        };
+        assert!(
+            schema
+                .check(&serde_json::json!({ "root": "/tmp/s" }))
+                .is_empty()
         );
+        assert_eq!(schema.check(&serde_json::json!({ "root": 7 })).len(), 1);
     }
 }

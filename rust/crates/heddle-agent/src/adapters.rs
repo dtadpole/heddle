@@ -1,0 +1,885 @@
+//! The turn's ports over the real crates, where they have landed.
+//!
+//! [`LlmModel`] is the [`ModelPort`] over `heddle-llm`'s [`ModelService`]. It converts nothing but the error:
+//! the request, the chunks and the usage are the model service's own types (see [`crate::upstream`]). The
+//! service already runs the `model/request` and `model/stream` hooks, drops reasoning-only assistant turns at
+//! the provider boundary and projects attachments, so the loop hands it the recorded messages as they are.
+//!
+//! [`Sessions`] is the [`SessionPort`] and [`SessionSubagents`] the [`SubagentStore`] over `heddle-session`'s
+//! [`SessionService`]; [`Context`] is the [`ContextPort`] over `heddle-context`'s [`ContextService`], generic
+//! over its store as that crate is. The hook adapter lands when the binary attaches the event bus; until then
+//! [`NoTurnHooks`](crate::NoTurnHooks) is the composition without listeners.
+//!
+//! The session and context crates keep their own record types; each adapter converts only at the seam, and
+//! the records it writes keep the TypeScript field order (the session crate's `ModelRequestRecord` is built in
+//! the loop's order, so `model/request` reads the same from either binary).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use tokio_util::sync::CancellationToken;
+
+use heddle_context::{ContextService, ContextStore};
+use heddle_llm::ModelService;
+use heddle_session::{
+    AppendOptions, CreateOptions, ModelRequestBreakdown, NewEvent, SessionOrigin, SessionService,
+};
+
+use crate::ports::{
+    ContextPort, ModelError, ModelPort, ModelRequestRecord, PortError, SessionPort,
+};
+use crate::subagent::SubagentStore;
+use crate::upstream::{
+    Chunk, ContentPart, ContextBreakdown, ContextReport, CreateSession, GenerateRequest, Message,
+    PrepareOptions, Role, RuntimeContextSection, SandboxMode, SessionEvent, SessionHandle,
+    SessionMeta, SurfaceView,
+};
+
+/// The [`ModelPort`] over a [`ModelService`].
+///
+/// A Stop drops the provider stream (`take_until` on the call's token), which drops the request with it — the
+/// Rust form of the TypeScript `AbortSignal` passed to `fetch`. A request to an endpoint the service does not
+/// know fails as one error item (`NO_ENDPOINT`) before any connection is made.
+pub struct LlmModel {
+    service: Arc<ModelService>,
+}
+
+impl LlmModel {
+    /// Wrap the deployment's model service.
+    pub fn new(service: Arc<ModelService>) -> Self {
+        Self { service }
+    }
+
+    /// The service this port asks.
+    pub fn service(&self) -> &Arc<ModelService> {
+        &self.service
+    }
+}
+
+impl ModelPort for LlmModel {
+    fn stream(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        match self.service.stream(request) {
+            Err(error) => Box::pin(futures::stream::once(async move {
+                Err(ModelError::from(error))
+            })),
+            Ok(stream) => {
+                let stream = stream.map(|item| item.map_err(ModelError::from));
+                match cancel {
+                    Some(cancel) => Box::pin(stream.take_until(cancel.cancelled_owned())),
+                    None => Box::pin(stream),
+                }
+            }
+        }
+    }
+
+    fn default_endpoint(&self) -> Option<String> {
+        self.service.default_endpoint(None)
+    }
+}
+
+fn port_error(error: impl std::fmt::Display) -> PortError {
+    PortError(error.to_string())
+}
+
+/// The [`SessionPort`] over a [`SessionService`]: the turn's reads and writes, each on disk before the next
+/// step starts.
+///
+/// The three reads the port declares infallible (`count`, `surface`, `node_role`) log a store failure and
+/// answer empty, so a broken read cannot invent input; every write fails the turn as [`PortError`].
+pub struct Sessions {
+    service: Arc<SessionService>,
+}
+
+impl Sessions {
+    /// Wrap the deployment's session service.
+    pub fn new(service: Arc<SessionService>) -> Self {
+        Self { service }
+    }
+
+    /// The service this port asks.
+    pub fn service(&self) -> &Arc<SessionService> {
+        &self.service
+    }
+}
+
+fn read_failed(session: &SessionHandle, what: &str, error: impl std::fmt::Display) {
+    tracing::warn!(target: "heddle_agent", session = session.id.as_str(), "{what} failed: {error}");
+}
+
+impl SessionPort for Sessions {
+    fn count(&self, session: &SessionHandle) -> usize {
+        match self.service.store().count(session) {
+            Ok(count) => usize::try_from(count).unwrap_or(usize::MAX),
+            Err(error) => {
+                read_failed(session, "counting the log", error);
+                0
+            }
+        }
+    }
+
+    fn user_content(
+        &self,
+        session: &SessionHandle,
+        content: Vec<ContentPart>,
+        source: Option<serde_json::Value>,
+    ) -> Result<(), PortError> {
+        self.service
+            .user_content(session, content, source)
+            .map_err(port_error)
+    }
+
+    fn surface(&self, session: &SessionHandle) -> SurfaceView {
+        match self.service.surface(session) {
+            Ok(surface) => SurfaceView {
+                nodes: surface.nodes.clone(),
+                content_generation: surface.content_generation,
+                replace_generation: surface.replace_generation,
+            },
+            Err(error) => {
+                read_failed(session, "reading the surface", error);
+                SurfaceView::default()
+            }
+        }
+    }
+
+    fn node_role(&self, session: &SessionHandle, seq: u64) -> Option<Role> {
+        match self.service.node(session, seq) {
+            Ok(message) => message.map(|message| message.role),
+            Err(error) => {
+                read_failed(session, "reading a surface node", error);
+                None
+            }
+        }
+    }
+
+    fn folder(&self, session: &SessionHandle) -> Option<PathBuf> {
+        self.service.folder(session).map(PathBuf::from)
+    }
+
+    fn model_request(
+        &self,
+        session: &SessionHandle,
+        record: &ModelRequestRecord,
+    ) -> Result<(), PortError> {
+        let record = heddle_session::ModelRequestRecord {
+            endpoint: record.endpoint.clone(),
+            model: record.model.clone(),
+            reasoning_effort: record.reasoning_effort.clone(),
+            messages: record.messages as u64,
+            tools: record.tools.clone(),
+            estimated_tokens: Some(record.estimated_tokens),
+            threshold_tokens: Some(record.threshold_tokens),
+            pruned: Some(record.pruned),
+            compacted: Some(record.compacted),
+            breakdown: Some(ModelRequestBreakdown {
+                system: Some(record.breakdown.system),
+                tools: Some(record.breakdown.tools),
+                messages: Some(record.breakdown.messages),
+            }),
+            generation: Some(record.generation),
+        };
+        self.service
+            .store()
+            .model_request(session, &record)
+            .map(drop)
+            .map_err(port_error)
+    }
+
+    fn assistant_chunk(&self, session: &SessionHandle, chunk: &Chunk) -> Result<(), PortError> {
+        self.service
+            .store()
+            .assistant_chunk(session, chunk)
+            .map(drop)
+            .map_err(port_error)
+    }
+
+    fn message(&self, session: &SessionHandle, message: Message) -> Result<(), PortError> {
+        self.service
+            .store()
+            .message(session, message)
+            .map(drop)
+            .map_err(port_error)
+    }
+
+    fn append(
+        &self,
+        session: &SessionHandle,
+        kind: &str,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), PortError> {
+        self.service
+            .store()
+            .append(
+                session,
+                NewEvent {
+                    kind: kind.to_owned(),
+                    fields,
+                },
+                AppendOptions::default(),
+            )
+            .map(drop)
+            .map_err(port_error)
+    }
+}
+
+/// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,
+/// origin and depth in its record, and given the parent's recorded mode.
+pub struct SessionSubagents {
+    service: Arc<SessionService>,
+}
+
+impl SessionSubagents {
+    /// Wrap the deployment's session service.
+    pub fn new(service: Arc<SessionService>) -> Self {
+        Self { service }
+    }
+}
+
+impl SubagentStore for SessionSubagents {
+    fn meta(&self, id: &str) -> Option<SessionMeta> {
+        // The record is read as the TypeScript fields; anything this crate does not read stays in `rest`.
+        let meta = self.service.meta(id)?;
+        serde_json::from_value(meta.to_value()).ok()
+    }
+
+    fn create(&self, options: CreateSession) -> Result<SessionHandle, PortError> {
+        let origin = match options.origin.as_deref() {
+            None => None,
+            Some("subagent") => Some(SessionOrigin::Subagent),
+            Some(other) => {
+                return Err(PortError(format!(
+                    "a session cannot be created with origin '{other}'"
+                )));
+            }
+        };
+        let options = CreateOptions {
+            cwd: options.cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+            endpoint: options.endpoint,
+            model: options.model,
+            reasoning_effort: options.reasoning_effort,
+            title: options.title,
+            parent_session: options.parent_session,
+            origin,
+            delegation_depth: options.delegation_depth.map(u64::from),
+            team_id: options.team_id,
+            id: options.id,
+        };
+        self.service.store().create(options).map_err(port_error)
+    }
+
+    fn read(&self, session: &SessionHandle) -> Vec<SessionEvent> {
+        match self.service.events(session) {
+            Ok(events) => events
+                .iter()
+                .map(|event| SessionEvent::clone(event))
+                .collect(),
+            Err(error) => {
+                read_failed(session, "reading the child's log", error);
+                Vec::new()
+            }
+        }
+    }
+
+    fn inherit_recorded_mode(
+        &self,
+        parent: &SessionHandle,
+        child: &SessionHandle,
+    ) -> Result<Option<SandboxMode>, PortError> {
+        heddle_session::inherit_recorded_mode::<SandboxMode>(self.service.store(), parent, child)
+            .map_err(port_error)
+    }
+}
+
+/// How the context service names a session, given the loop's handle.
+pub type HandleMap<H> = Arc<dyn Fn(&SessionHandle) -> H + Send + Sync>;
+
+/// The [`ContextPort`] over a [`ContextService`], generic over its store as that crate is.
+///
+/// The session store's binding names the same handle, so production passes [`Context::over_session_handles`];
+/// a test over the context crate's in-memory store maps the id. Every call the loop makes is a policy call of
+/// the service (`record_runtime_context`, `prepare`, `assemble`); the overflow recovery is not here — it is
+/// the `agent/request-error` listener's, as in the TypeScript build.
+pub struct Context<S: ContextStore> {
+    service: Arc<ContextService<S>>,
+    handle: HandleMap<S::Handle>,
+}
+
+impl<S: ContextStore> Context<S> {
+    /// A port over `service`, naming each session through `handle`.
+    pub fn new(service: Arc<ContextService<S>>, handle: HandleMap<S::Handle>) -> Self {
+        Self { service, handle }
+    }
+
+    /// The service this port asks.
+    pub fn service(&self) -> &Arc<ContextService<S>> {
+        &self.service
+    }
+}
+
+impl<S> Context<S>
+where
+    S: ContextStore<Handle = SessionHandle>,
+{
+    /// A port over a store whose handle is the session's own (the session store's binding).
+    pub fn over_session_handles(service: Arc<ContextService<S>>) -> Self {
+        Self::new(service, Arc::new(SessionHandle::clone))
+    }
+}
+
+/// The context service's report, as the loop's record reads it.
+fn report_of(report: heddle_context::ContextReport) -> ContextReport {
+    ContextReport {
+        messages: report.messages,
+        estimated_tokens: report.estimated_tokens,
+        context_window: report.context_window,
+        threshold_tokens: report.threshold_tokens,
+        pruned: report.pruned,
+        compacted: report.compacted,
+        instructions: report
+            .instructions
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        breakdown: ContextBreakdown {
+            system: report.breakdown.system,
+            tools: report.breakdown.tools,
+            messages: report.breakdown.messages,
+        },
+    }
+}
+
+impl<S: ContextStore + 'static> ContextPort for Context<S> {
+    fn record_runtime_context(
+        &self,
+        session: &SessionHandle,
+        sections: &[RuntimeContextSection],
+    ) -> Result<(), PortError> {
+        let sections: Vec<heddle_context::RuntimeContextSection> = sections
+            .iter()
+            .map(|section| heddle_context::RuntimeContextSection {
+                name: section.name.clone(),
+                text: section.text.clone(),
+            })
+            .collect();
+        self.service
+            .record_runtime_context(&(self.handle)(session), &sections)
+            .map_err(port_error)
+    }
+
+    fn prepare<'a>(
+        &'a self,
+        session: &'a SessionHandle,
+        options: PrepareOptions,
+    ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+        Box::pin(async move {
+            let handle = (self.handle)(session);
+            let prepared = heddle_context::PrepareOptions {
+                cwd: &options.cwd,
+                endpoint: &options.endpoint,
+                model: options.model.as_deref(),
+                tools: &options.tools,
+                system: options.system.as_deref(),
+                // One model call with purpose `compaction`, the service's default summariser.
+                summarizer: None,
+                // An ordinary round: the trigger and the retained tail apply.
+                force: false,
+            };
+            self.service
+                .prepare(&handle, &prepared)
+                .await
+                .map(report_of)
+                .map_err(port_error)
+        })
+    }
+
+    fn assemble(
+        &self,
+        session: &SessionHandle,
+        options: PrepareOptions,
+    ) -> Result<ContextReport, PortError> {
+        let assembled = heddle_context::AssembleOptions {
+            cwd: &options.cwd,
+            tools: &options.tools,
+            system: options.system.as_deref(),
+            endpoint: Some(&options.endpoint),
+            model: options.model.as_deref(),
+        };
+        self.service
+            .assemble(&(self.handle)(session), &assembled)
+            .map(report_of)
+            .map_err(port_error)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::path::PathBuf;
+
+    use heddle_llm::EndpointConfig;
+    use serde_json::json;
+
+    use super::*;
+    use crate::upstream::{ContentPart, Message, Role, ToolCall};
+
+    /// A scratch folder holding one scripted endpoint's step file.
+    pub(crate) fn scripted_service(label: &str, steps: serde_json::Value) -> Arc<ModelService> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let dir: PathBuf = std::env::temp_dir().join(format!(
+            "heddle-agent-scripted-{label}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("script.json");
+        std::fs::write(&script, json!({ "steps": steps }).to_string()).unwrap();
+        let endpoint: EndpointConfig = serde_json::from_value(json!({
+            "name": "scripted",
+            "kind": "scripted",
+            "baseUrl": script,
+            "model": "scripted",
+        }))
+        .unwrap();
+        Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap())
+    }
+
+    fn request(round: u32) -> GenerateRequest {
+        GenerateRequest {
+            endpoint: "scripted".into(),
+            messages: vec![Message::new(Role::User, vec![ContentPart::text("go")])],
+            round: Some(round),
+            ..GenerateRequest::default()
+        }
+    }
+
+    async fn collect(port: &LlmModel, request: GenerateRequest) -> Vec<Result<Chunk, ModelError>> {
+        port.stream(request, None).collect().await
+    }
+
+    #[tokio::test]
+    async fn a_scripted_round_streams_its_tool_call_and_finishes_for_tools() {
+        let port = LlmModel::new(scripted_service(
+            "call",
+            json!([
+                { "toolCall": { "name": "read_file", "arguments": { "path": "a.txt" } } },
+                { "text": "done" }
+            ]),
+        ));
+        let chunks: Vec<Chunk> = collect(&port, request(0))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            chunks.contains(&Chunk::ToolCall(ToolCall {
+                id: "call-read_file".into(),
+                name: "read_file".into(),
+                arguments: json!({ "path": "a.txt" }).to_string(),
+            })),
+            "{chunks:?}"
+        );
+        assert!(matches!(
+            chunks.last(),
+            Some(Chunk::Done { finish_reason, .. }) if finish_reason == "tool_calls"
+        ));
+
+        let second: Vec<Chunk> = collect(&port, request(1))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert!(second.contains(&Chunk::TextDelta {
+            text: "done".into()
+        }));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_endpoint_fails_as_one_coded_error_item() {
+        let port = LlmModel::new(scripted_service("unknown", json!([])));
+        let mut asked = request(0);
+        asked.endpoint = "nowhere".into();
+        let items = collect(&port, asked).await;
+        assert_eq!(items.len(), 1);
+        let error = items.into_iter().next().unwrap().unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("NO_ENDPOINT"));
+    }
+
+    #[tokio::test]
+    async fn a_scripted_failure_keeps_its_code_for_the_retry_rule() {
+        let port = LlmModel::new(scripted_service(
+            "overflow",
+            json!([{ "error": { "code": "CONTEXT_WINDOW_EXCEEDED", "message": "too long" } }]),
+        ));
+        let error = collect(&port, request(0))
+            .await
+            .into_iter()
+            .find_map(Result::err)
+            .expect("the step fails the call");
+        assert_eq!(error.code.as_deref(), Some("CONTEXT_WINDOW_EXCEEDED"));
+        assert!(error.message.contains("too long"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_call_yields_nothing() {
+        let port = LlmModel::new(scripted_service("stop", json!([{ "text": "never seen" }])));
+        let token = CancellationToken::new();
+        token.cancel();
+        let items: Vec<_> = port.stream(request(0), Some(token)).collect().await;
+        assert!(items.is_empty(), "{items:?}");
+    }
+
+    #[test]
+    fn the_default_endpoint_is_the_nominated_one() {
+        let port = LlmModel::new(scripted_service("default", json!([])));
+        assert_eq!(port.default_endpoint().as_deref(), Some("scripted"));
+    }
+
+    // ---- The session and context adapters, against the real services. ----
+
+    pub(crate) fn sessions_at(label: &str) -> Arc<SessionService> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "heddle-agent-sessions-{label}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let config = heddle_session::SessionConfig {
+            root: Some(root.to_str().unwrap().to_owned()),
+        };
+        Arc::new(SessionService::new(
+            &config,
+            &heddle_config::Env::default(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn the_session_port_records_the_prompt_and_reads_it_back_as_input() {
+        let sessions = sessions_at("port");
+        let handle = sessions.store().create(CreateOptions::default()).unwrap();
+        let port = Sessions::new(Arc::clone(&sessions));
+        assert_eq!(port.count(&handle), 1, "session/created is seq 0");
+        port.user_content(
+            &handle,
+            vec![ContentPart::text("first question")],
+            Some(json!({ "kind": "goal" })),
+        )
+        .unwrap();
+        assert_eq!(port.count(&handle), 2);
+        let surface = port.surface(&handle);
+        let users: Vec<u64> = surface
+            .nodes
+            .iter()
+            .copied()
+            .filter(|seq| port.node_role(&handle, *seq) == Some(Role::User))
+            .collect();
+        assert_eq!(users.len(), 1, "{surface:?}");
+        let events = sessions.events(&handle).unwrap();
+        let message = events.last().unwrap();
+        assert_eq!(message.kind, "message");
+        assert_eq!(message.fields["message"]["role"], "user");
+        assert_eq!(
+            message.fields["message"]["source"],
+            json!({ "kind": "goal" })
+        );
+    }
+
+    #[test]
+    fn the_session_port_writes_model_request_in_the_typescript_field_order() {
+        let sessions = sessions_at("request");
+        let handle = sessions.store().create(CreateOptions::default()).unwrap();
+        let port = Sessions::new(Arc::clone(&sessions));
+        port.model_request(
+            &handle,
+            &ModelRequestRecord {
+                endpoint: "scripted".into(),
+                model: None,
+                reasoning_effort: None,
+                messages: 3,
+                tools: vec!["read_file".into()],
+                estimated_tokens: 42,
+                threshold_tokens: 800,
+                pruned: 0,
+                compacted: false,
+                breakdown: ContextBreakdown {
+                    system: 1,
+                    tools: 2,
+                    messages: 39,
+                },
+                generation: 5,
+            },
+        )
+        .unwrap();
+        let events = sessions.events(&handle).unwrap();
+        let request = events.last().unwrap();
+        assert_eq!(request.kind, "model/request");
+        let keys: Vec<&str> = request.fields.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "endpoint",
+                "messages",
+                "tools",
+                "estimatedTokens",
+                "thresholdTokens",
+                "pruned",
+                "compacted",
+                "breakdown",
+                "generation"
+            ]
+        );
+        assert_eq!(request.fields["estimatedTokens"], 42);
+    }
+
+    #[test]
+    fn a_child_session_carries_its_parent_origin_depth_and_the_parents_mode() {
+        let sessions = sessions_at("child");
+        let parent = sessions
+            .store()
+            .create(CreateOptions {
+                endpoint: Some("scripted".into()),
+                ..CreateOptions::default()
+            })
+            .unwrap();
+        sessions
+            .set_mode(&parent, SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite)
+            .unwrap();
+        let store = SessionSubagents::new(Arc::clone(&sessions));
+        let child = store
+            .create(CreateSession {
+                cwd: Some("/work".into()),
+                endpoint: Some("scripted".into()),
+                parent_session: Some(parent.id.clone()),
+                origin: Some("subagent".into()),
+                delegation_depth: Some(1),
+                ..CreateSession::default()
+            })
+            .unwrap();
+        let meta = store.meta(&child.id).expect("the child's record");
+        assert_eq!(meta.parent_session.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(meta.origin.as_deref(), Some("subagent"));
+        assert_eq!(meta.delegation_depth, Some(1));
+        assert_eq!(meta.endpoint.as_deref(), Some("scripted"));
+        assert_eq!(
+            store.inherit_recorded_mode(&parent, &child).unwrap(),
+            Some(SandboxMode::ReadOnly)
+        );
+        assert_eq!(
+            sessions
+                .effective_mode(&child, SandboxMode::WorkspaceWrite)
+                .unwrap(),
+            SandboxMode::ReadOnly,
+            "a narrowed session cannot widen itself by spawning a child"
+        );
+        assert!(
+            store
+                .read(&child)
+                .iter()
+                .any(|event| event.kind == "session/created")
+        );
+    }
+
+    #[test]
+    fn an_unknown_origin_is_refused_rather_than_written() {
+        let sessions = sessions_at("origin");
+        let store = SessionSubagents::new(sessions);
+        let error = store
+            .create(CreateSession {
+                origin: Some("team".into()),
+                ..CreateSession::default()
+            })
+            .unwrap_err();
+        assert!(error.0.contains("team"), "{error}");
+    }
+
+    fn memory_context() -> (
+        Arc<heddle_context::testing::MemoryStore>,
+        Context<heddle_context::testing::MemoryStore>,
+    ) {
+        let store = Arc::new(heddle_context::testing::MemoryStore::new());
+        let service = Arc::new(ContextService::new(
+            Arc::clone(&store),
+            heddle_context::ContextConfig::default(),
+            heddle_context::ContextDependencies {
+                model: None,
+                heddle_home: std::env::temp_dir().join("heddle-agent-no-home"),
+            },
+        ));
+        let opener = Arc::clone(&store);
+        let port = Context::new(service, Arc::new(move |handle| opener.open(&handle.id)));
+        (store, port)
+    }
+
+    fn context_handle() -> SessionHandle {
+        SessionHandle {
+            id: "ctx".into(),
+            dir: "/ctx".into(),
+            transcript: "/ctx/t".into(),
+            meta: "/ctx/m".into(),
+        }
+    }
+
+    fn options() -> PrepareOptions {
+        PrepareOptions {
+            cwd: std::env::temp_dir(),
+            endpoint: "scripted".into(),
+            model: None,
+            tools: Vec::new(),
+            system: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_context_port_prepares_the_request_from_the_recorded_surface() {
+        let (store, port) = memory_context();
+        let session = store.open("ctx");
+        store.message(
+            &session,
+            Message::new(Role::User, vec![ContentPart::text("remember a word")]),
+        );
+        port.record_runtime_context(
+            &context_handle(),
+            &[RuntimeContextSection {
+                name: "sandbox:policy".into(),
+                text: "sandbox: workspace-write".into(),
+            }],
+        )
+        .unwrap();
+        let report = port.prepare(&context_handle(), options()).await.unwrap();
+        assert!(
+            report.messages.iter().any(|message| {
+                message.role == Role::User
+                && message.content.iter().any(
+                    |part| matches!(part, ContentPart::Text { text } if text == "remember a word")
+                )
+            }),
+            "{:?}",
+            report.messages
+        );
+        assert!(report.estimated_tokens > 0);
+        assert!(report.threshold_tokens > 0);
+        assert!(!report.compacted);
+
+        let assembled = port.assemble(&context_handle(), options()).unwrap();
+        assert_eq!(
+            assembled.messages.len(),
+            report.messages.len(),
+            "assembling derives the same request without reducing it"
+        );
+    }
+
+    /// A context double over the real session service: the request is the session's own derived messages.
+    pub(crate) struct SessionMessages {
+        pub(crate) sessions: Arc<heddle_session::SessionService>,
+    }
+
+    impl SessionMessages {
+        fn report(&self, session: &SessionHandle) -> Result<ContextReport, PortError> {
+            let messages = self
+                .sessions
+                .messages(session)
+                .map_err(|error| PortError(error.to_string()))?;
+            Ok(ContextReport {
+                estimated_tokens: messages.len() as u64 * 10,
+                context_window: 200_000,
+                threshold_tokens: 160_000,
+                messages,
+                ..ContextReport::default()
+            })
+        }
+    }
+
+    impl crate::ports::ContextPort for SessionMessages {
+        fn record_runtime_context(
+            &self,
+            _: &SessionHandle,
+            _: &[RuntimeContextSection],
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        fn prepare<'a>(
+            &'a self,
+            session: &'a SessionHandle,
+            _: PrepareOptions,
+        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+            Box::pin(async move { self.report(session) })
+        }
+
+        fn assemble(
+            &self,
+            session: &SessionHandle,
+            _: PrepareOptions,
+        ) -> Result<ContextReport, PortError> {
+            self.report(session)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_context_port_over_the_real_session_store_prepares_what_the_session_recorded() {
+        // The production binding: heddle-context's `impl ContextStore for SessionStore`, whose handle is the
+        // session's own, so `over_session_handles` needs no map.
+        let sessions = sessions_at("context-real");
+        let handle = sessions.store().create(CreateOptions::default()).unwrap();
+        sessions
+            .user_content(&handle, vec![ContentPart::text("remember a word")], None)
+            .unwrap();
+        let service = Arc::new(ContextService::new(
+            Arc::clone(sessions.store()),
+            heddle_context::ContextConfig::default(),
+            heddle_context::ContextDependencies {
+                model: None,
+                heddle_home: std::env::temp_dir().join("heddle-agent-no-home"),
+            },
+        ));
+        let port = Context::over_session_handles(service);
+        port.record_runtime_context(
+            &handle,
+            &[RuntimeContextSection {
+                name: "sandbox:policy".into(),
+                text: "sandbox: workspace-write".into(),
+            }],
+        )
+        .unwrap();
+        let report = port.prepare(&handle, options()).await.unwrap();
+        assert!(
+            report.messages.iter().any(|message| {
+                message.role == Role::User
+                && message.content.iter().any(
+                    |part| matches!(part, ContentPart::Text { text } if text == "remember a word")
+                )
+            }),
+            "{:?}",
+            report.messages
+        );
+        assert!(report.estimated_tokens > 0);
+        // The runtime-context note is the context crate's own `context/note` in the same log the loop reads,
+        // written only when the snapshot changed: the loop records it every round, the log gains it once.
+        port.record_runtime_context(
+            &handle,
+            &[RuntimeContextSection {
+                name: "sandbox:policy".into(),
+                text: "sandbox: workspace-write".into(),
+            }],
+        )
+        .unwrap();
+        let notes = sessions
+            .events(&handle)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "context/note")
+            .count();
+        assert_eq!(notes, 1, "an unchanged snapshot appends nothing");
+    }
+}

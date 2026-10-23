@@ -31,7 +31,7 @@
 //      bad arguments
 //   2  the commit was pushed but origin/main does not carry it as expected
 //   3  committed and read back, but the live tree could not be synced
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -426,7 +426,19 @@ const USAGE = `usage: record-commit.mjs --message TEXT (--file PATH ... | --stag
   --no-validate / --no-sync / --dry-run / --verbose / --retries N
   exit 0 committed and read back, 1 refused, 2 read-back failed, 3 live tree not synced`
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Node runs the main module from its real path, so compare real paths: through a symlink
+// such as macOS /tmp the plain comparison was false and the command silently did nothing,
+// which for the hygiene gate meant exit 0 with no judgement at all.
+function invokedAsScript() {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsScript()) {
   try {
     const args = parseArgs(process.argv.slice(2))
     if (args.help) {

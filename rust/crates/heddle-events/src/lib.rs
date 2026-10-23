@@ -22,8 +22,11 @@
 //!   replaces the value for the rest of the chain (or refuses the step), running it and changing what it
 //!   returns rewrites the result. A listener fails with a [`HookError`], which is either a deliberate
 //!   refusal or a broken hook, and the bus names the point and the listener on it.
-//! - **An outside listener is a process** ([`outside`]): it attaches to a point by name, receives each
-//!   dispatch as JSON and answers `next`, `replace`, `refuse` or `fail` — the part-4 protocol applied to hooks.
+//! - **An outside listener is a process** ([`outside`]): it declares the points it listens on, receives each
+//!   dispatch as JSON and answers `next`, `replace`, `merge`, `refuse` or an error — the part-4 protocol
+//!   applied to hooks.
+//! - **The feature crates' hook ports reach the bus through [`bridge`]**: the catalog's points as JSON, a
+//!   blocking dispatch for a synchronous port, and one function per port method.
 //!
 //! # Example
 //!
@@ -70,12 +73,15 @@
 
 #![warn(missing_docs)]
 
+pub mod bridge;
 mod bus;
+pub mod command;
 mod error;
 mod event;
 mod mode;
 pub mod outside;
 pub mod points;
+pub mod ports;
 mod waterfall;
 
 pub use bus::{EventBus, HookFuture, ListenOptions, Listener, Scope};

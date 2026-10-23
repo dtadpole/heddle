@@ -84,8 +84,43 @@ pub fn reasoning_value(
     endpoint: &EndpointConfig,
     request: &GenerateRequest,
 ) -> Result<Option<ReasoningValue>, ModelError> {
-    let _ = (endpoint, request);
-    todo!("port reasoningValue")
+    let Some(id) = request
+        .reasoning_effort
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let model = request
+        .model
+        .as_deref()
+        .or(endpoint.model.as_deref())
+        .filter(|model| !model.is_empty());
+    match endpoint.reasoning_level_for(model, id) {
+        Some(level) => Ok(level.value),
+        None => {
+            let declared = endpoint
+                .reasoning_levels_for(model)
+                .map(|levels| {
+                    levels
+                        .levels
+                        .iter()
+                        .map(|level| level.id.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_else(|| "(none)".to_string());
+            Err(ModelError::new(
+                format!(
+                    "'{}' does not offer reasoning effort '{id}' for model '{}'; declared: {declared}",
+                    endpoint.name,
+                    model.unwrap_or("(none)")
+                ),
+                endpoint.name.clone(),
+                crate::error::code::UNSUPPORTED_REASONING_EFFORT,
+            ))
+        }
+    }
 }
 
 /// Whether an endpoint's models reason at all: the `reasoning` capability, an endpoint-level block, or any offered
@@ -101,6 +136,13 @@ pub fn reasoning_configured(endpoint: &EndpointConfig) -> bool {
                 matches!(entry, heddle_config::ModelEntry::Option(model) if model.reasoning.is_some())
             })
         })
+}
+
+/// A failure known before any body exists, as the stream's first and only item.
+pub(crate) fn error_stream(error: ModelError) -> ChunkStream {
+    Box::pin(futures::stream::once(async move {
+        Err::<Chunk, ModelError>(error)
+    }))
 }
 
 /// What one parsed event did to a fold.
@@ -325,5 +367,147 @@ mod tests {
         assert_eq!(error.code, crate::error::code::UNKNOWN_KIND);
         assert_eq!(error.endpoint, "responses");
         assert!(error.to_string().contains("mystery"), "{error}");
+    }
+
+    fn level_set(ids: &[(&str, Option<ReasoningValue>)]) -> ReasoningLevels {
+        ReasoningLevels {
+            default: None,
+            levels: ids
+                .iter()
+                .map(|(id, value)| ReasoningLevel {
+                    id: (*id).to_string(),
+                    name: (*id).to_string(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn with_levels(endpoint: EndpointConfig, levels: ReasoningLevels) -> EndpointConfig {
+        EndpointConfig {
+            reasoning: Some(levels),
+            ..endpoint
+        }
+    }
+
+    #[test]
+    fn the_wire_value_of_a_declared_level_is_returned_and_a_null_level_sends_nothing() {
+        let endpoint = with_levels(
+            endpoint(),
+            level_set(&[
+                ("default", None),
+                ("high", Some(ReasoningValue::Text("high".into()))),
+                (
+                    "budget",
+                    Some(ReasoningValue::Number(serde_json::Number::from(8192))),
+                ),
+            ]),
+        );
+        let ask = |effort: Option<&str>| GenerateRequest {
+            endpoint: "responses".into(),
+            reasoning_effort: effort.map(ToString::to_string),
+            ..GenerateRequest::default()
+        };
+        assert_eq!(
+            reasoning_value(&endpoint, &ask(Some("high"))).expect("declared"),
+            Some(ReasoningValue::Text("high".into()))
+        );
+        assert_eq!(
+            reasoning_value(&endpoint, &ask(Some("budget"))).expect("declared"),
+            Some(ReasoningValue::Number(serde_json::Number::from(8192)))
+        );
+        assert_eq!(
+            reasoning_value(&endpoint, &ask(Some("default"))).expect("declared"),
+            None,
+            "a level whose value is null is real but sends nothing"
+        );
+        assert_eq!(reasoning_value(&endpoint, &ask(None)).expect("none"), None);
+        assert_eq!(
+            reasoning_value(&endpoint, &ask(Some(""))).expect("none"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_undeclared_level_is_refused_loudly_naming_the_declared_ids() {
+        let mut endpoint = with_levels(
+            endpoint(),
+            level_set(&[
+                ("low", Some(ReasoningValue::Text("low".into()))),
+                ("high", Some(ReasoningValue::Text("high".into()))),
+            ]),
+        );
+        endpoint.model = Some("m".into());
+        let error = reasoning_value(
+            &endpoint,
+            &GenerateRequest {
+                endpoint: "responses".into(),
+                reasoning_effort: Some("extreme".into()),
+                ..GenerateRequest::default()
+            },
+        )
+        .expect_err("not declared");
+        assert_eq!(error.code, crate::error::code::UNSUPPORTED_REASONING_EFFORT);
+        assert!(error.to_string().contains("'extreme'"), "{error}");
+        assert!(error.to_string().contains("low, high"), "{error}");
+        assert!(
+            error.to_string().contains("'m'"),
+            "it names the model too: {error}"
+        );
+    }
+
+    #[test]
+    fn the_level_is_looked_up_on_the_model_that_will_answer() {
+        let mut endpoint = with_levels(
+            endpoint(),
+            level_set(&[("shared", Some(ReasoningValue::Text("endpoint".into())))]),
+        );
+        endpoint.models = Some(vec![ModelEntry::Option(ModelOption {
+            id: "thinking".into(),
+            reasoning: Some(level_set(&[(
+                "shared",
+                Some(ReasoningValue::Text("model".into())),
+            )])),
+            ..ModelOption::default()
+        })]);
+        // The model's own block replaces the endpoint's, so the wire value is the model's.
+        assert_eq!(
+            reasoning_value(
+                &endpoint,
+                &GenerateRequest {
+                    endpoint: "responses".into(),
+                    model: Some("thinking".into()),
+                    reasoning_effort: Some("shared".into()),
+                    ..GenerateRequest::default()
+                }
+            )
+            .expect("declared"),
+            Some(ReasoningValue::Text("model".into()))
+        );
+        // A level only the endpoint declares is not offered by a model that declares its own block.
+        let mut endpoint = with_levels(
+            endpoint,
+            level_set(&[("endpoint-only", Some(ReasoningValue::Text("x".into())))]),
+        );
+        endpoint.models = Some(vec![ModelEntry::Option(ModelOption {
+            id: "thinking".into(),
+            reasoning: Some(level_set(&[(
+                "low",
+                Some(ReasoningValue::Text("low".into())),
+            )])),
+            ..ModelOption::default()
+        })]);
+        assert!(
+            reasoning_value(
+                &endpoint,
+                &GenerateRequest {
+                    endpoint: "responses".into(),
+                    model: Some("thinking".into()),
+                    reasoning_effort: Some("endpoint-only".into()),
+                    ..GenerateRequest::default()
+                }
+            )
+            .is_err()
+        );
     }
 }

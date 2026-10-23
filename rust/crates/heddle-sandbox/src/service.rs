@@ -439,6 +439,7 @@ mod tests {
 
         assert_eq!(service.workspace_root(), canonical(&real));
         assert_eq!(service.extra_writable_roots(), &[canonical(&real)]);
+
         assert_eq!(service.mode(), SandboxMode::WorkspaceWrite);
     }
 
@@ -461,6 +462,57 @@ mod tests {
             service.resolve_path("/etc/../tmp"),
             canonical(Path::new("/tmp")),
             "an absolute path ignores the workspace and is canonicalised"
+        );
+    }
+
+    #[test]
+    fn an_empty_path_resolves_to_the_workspace() {
+        let dir = TempDir::new("svc-empty-path");
+        let workspace = dir.child("ws");
+        let service = SandboxService::with_backend(
+            &config(SandboxMode::WorkspaceWrite, &workspace),
+            &host(&dir, Platform::Other),
+            None,
+        );
+        assert_eq!(
+            service.resolve_path(""),
+            canonical(&workspace),
+            "Node's path.resolve(workspaceRoot, '') is the workspace root"
+        );
+    }
+
+    #[test]
+    fn a_config_without_a_workspace_root_uses_the_hosts_directory() {
+        let dir = TempDir::new("svc-default-root");
+        let mut cfg = config(SandboxMode::WorkspaceWrite, dir.path());
+        cfg.workspace_root = None;
+        let service = SandboxService::with_backend(&cfg, &host(&dir, Platform::Other), None);
+        assert_eq!(
+            service.workspace_root(),
+            canonical(dir.path()),
+            "the process's directory is the workspace when the profile names none"
+        );
+    }
+
+    #[test]
+    fn a_relative_write_is_resolved_against_the_workspace_before_the_fence() {
+        // Outside the host temp areas: `../escape.txt` must leave the workspace *and* land where the policy
+        // grants nothing, or the temp area's own writability would mask the climb.
+        let dir = TempDir::outside_host_temp("svc-relative-write");
+        let workspace = dir.child("ws");
+        let service = SandboxService::with_backend(
+            &config(SandboxMode::WorkspaceWrite, &workspace),
+            &host(&dir, Platform::Other),
+            None,
+        );
+        assert_eq!(
+            service.assert_writable("notes/a.txt", SandboxMode::WorkspaceWrite),
+            Ok(canonical(&workspace).join("notes/a.txt")),
+            "a tool's relative path is a path inside the workspace"
+        );
+        assert!(
+            !service.writable("../escape.txt", SandboxMode::WorkspaceWrite),
+            "and .. is resolved before the fence, so it cannot climb out"
         );
     }
 
@@ -827,6 +879,212 @@ mod tests {
         assert!(
             serde_json::from_value::<SandboxConfig>(json!({"mode": "read-write"})).is_err(),
             "a mode outside the vocabulary is refused at the boundary"
+        );
+    }
+}
+
+/// The shell seam end to end on the real macOS runner: what `_verifiers_/75-permission-sandbox`'s
+/// `check-shell-confinement.mjs` judges through the `bash` tool, judged here at this crate's own seam.
+///
+/// Each case spawns exactly what the `bash` tool spawns, `confine(["/bin/sh", "-c", cmd], mode)` in
+/// [`SandboxService::workspace_root`], and classifies the real exit code and stderr with
+/// [`crate::backend::classify_outcome`]. The unit tests above use doubles; these use the kernel, so a profile that
+/// looks right but governs the wrong set fails here rather than in the verifier. The workspace and the outside
+/// folder are both under `/var/tmp`, outside the host temp areas, so the temp grant cannot mask an escape.
+#[cfg(all(test, target_os = "macos"))]
+mod seatbelt_end_to_end {
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{BackendChoice, SandboxConfig, SandboxHost, SandboxService};
+    use crate::backend::{
+        BackendName, Platform, SandboxOutcome, SandboxUnavailableError, classify_outcome,
+        shell_denial_message,
+    };
+    use crate::mode::SandboxMode;
+    use crate::testfs::TempDir;
+
+    /// What one shell call did.
+    struct Ran {
+        exit: i32,
+        stdout: String,
+        outcome: SandboxOutcome,
+    }
+
+    fn service(workspace: &Path, mode: SandboxMode, backend: BackendChoice) -> SandboxService {
+        let config = SandboxConfig {
+            mode,
+            workspace_root: Some(workspace.to_path_buf()),
+            backend,
+            ..SandboxConfig::default()
+        };
+        let host = SandboxHost {
+            cwd: workspace.to_path_buf(),
+            harness_home: workspace.join(".harness-home"),
+            platform: Platform::MacOs,
+        };
+        SandboxService::new(&config, &host)
+    }
+
+    /// The real runner must be usable, or every case below would pass or fail for the wrong reason. A nested
+    /// Seatbelt sandbox cannot apply a second profile; say so instead of judging nothing.
+    fn seatbelt(workspace: &Path) -> SandboxService {
+        let service = service(workspace, SandboxMode::WorkspaceWrite, BackendChoice::Auto);
+        assert_eq!(service.backend_name(), Some(BackendName::Seatbelt));
+        assert!(
+            !service.escalation_targets().is_empty(),
+            "sandbox-exec cannot apply a profile on this host (is this process already sandboxed?)"
+        );
+        service
+    }
+
+    /// One `bash` call: confine, spawn in the workspace, classify. A signal is exit 1, as the TypeScript `code ?? 1`.
+    fn bash(service: &SandboxService, mode: SandboxMode, command: &str) -> Ran {
+        let argv: Vec<OsString> = ["/bin/sh", "-c", command].map(OsString::from).to_vec();
+        let confined = service
+            .confine(&argv, mode)
+            .expect("the runner confines the call");
+        let output = Command::new(&confined.argv[0])
+            .args(&confined.argv[1..])
+            .current_dir(service.workspace_root())
+            .output()
+            .expect("the confined shell spawns");
+        let exit = output.status.code().unwrap_or(1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ran {
+            exit,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            outcome: classify_outcome(exit, &stderr, Some(&confined)),
+        }
+    }
+
+    #[test]
+    fn workspace_write_confines_the_shell_and_its_descendants_to_the_workspace() {
+        let workspace = TempDir::outside_host_temp("seatbelt-ws");
+        let outside = TempDir::outside_host_temp("seatbelt-out");
+        let service = seatbelt(workspace.path());
+        let mode = SandboxMode::WorkspaceWrite;
+
+        let inside = bash(&service, mode, "echo inside > inside.txt");
+        assert_eq!((inside.exit, &inside.outcome), (0, &SandboxOutcome::Exited));
+        assert!(
+            workspace.join("inside.txt").exists(),
+            "the inside write landed"
+        );
+
+        let target = outside.join("outside.txt");
+        let escape = bash(
+            &service,
+            mode,
+            &format!("echo outside > '{}'", target.display()),
+        );
+        assert_eq!(
+            escape.outcome,
+            SandboxOutcome::Denied,
+            "the kernel refused it, and it reads as a denial"
+        );
+        assert!(!target.exists(), "the outside write left no file");
+        assert_eq!(
+            shell_denial_message(mode),
+            "[sandbox: file access denied under workspace-write mode]",
+            "the sentence the bash tool reports for it"
+        );
+
+        let child = outside.join("child.txt");
+        let descendant = bash(
+            &service,
+            mode,
+            &format!("sh -c 'echo child > \"{}\"'", child.display()),
+        );
+        assert_eq!(
+            descendant.outcome,
+            SandboxOutcome::Denied,
+            "a descendant shell is confined with its parent"
+        );
+        assert!(!child.exists());
+
+        let sink = bash(&service, mode, "echo ok > /dev/null && echo devnull-ok");
+        assert_eq!((sink.exit, &sink.outcome), (0, &SandboxOutcome::Exited));
+        assert!(
+            sink.stdout.contains("devnull-ok"),
+            "/dev/null stays writable, so a shell still works"
+        );
+
+        let printed = bash(&service, mode, "echo \"Operation not permitted\"");
+        assert_eq!(
+            (printed.exit, &printed.outcome),
+            (0, &SandboxOutcome::Exited),
+            "printing the denial sentence and succeeding is not a denial"
+        );
+    }
+
+    #[test]
+    fn read_only_keeps_a_shell_but_denies_every_write() {
+        let workspace = TempDir::outside_host_temp("seatbelt-ro");
+        let service = seatbelt(workspace.path());
+        let mode = SandboxMode::ReadOnly;
+
+        let ran = bash(&service, mode, "echo the-shell-ran");
+        assert_eq!((ran.exit, &ran.outcome), (0, &SandboxOutcome::Exited));
+        assert!(
+            ran.stdout.contains("the-shell-ran"),
+            "the shell runs under read-only"
+        );
+
+        let write = bash(&service, mode, "echo denied > inside.txt");
+        assert_eq!(
+            write.outcome,
+            SandboxOutcome::Denied,
+            "even the workspace is not writable"
+        );
+        assert!(!workspace.join("inside.txt").exists(), "and nothing landed");
+        assert_eq!(
+            shell_denial_message(mode),
+            "[sandbox: file access denied under read-only mode]"
+        );
+    }
+
+    #[test]
+    fn danger_full_access_is_the_only_bypass() {
+        let workspace = TempDir::outside_host_temp("seatbelt-full");
+        let outside = TempDir::outside_host_temp("seatbelt-full-out");
+        let service = seatbelt(workspace.path());
+
+        let target = outside.join("full.txt");
+        let ran = bash(
+            &service,
+            SandboxMode::DangerFullAccess,
+            &format!("echo outside > '{}'", target.display()),
+        );
+        assert_eq!(
+            (ran.exit, &ran.outcome),
+            (0, &SandboxOutcome::Exited),
+            "nothing reports a denial"
+        );
+        assert!(target.exists(), "full access lets the shell write outside");
+    }
+
+    #[test]
+    fn a_confined_call_fails_closed_when_no_backend_is_usable() {
+        let workspace = TempDir::outside_host_temp("seatbelt-none");
+        let service = service(
+            workspace.path(),
+            SandboxMode::WorkspaceWrite,
+            BackendChoice::Disabled,
+        );
+        let argv: Vec<OsString> = ["/bin/sh", "-c", "echo ran > inside.txt"]
+            .map(OsString::from)
+            .to_vec();
+
+        let refused = service
+            .confine(&argv, SandboxMode::WorkspaceWrite)
+            .expect_err("no backend: the call is refused, never run unconfined");
+        assert!(refused.to_string().contains("no sandbox backend"));
+        assert_eq!(SandboxUnavailableError::CODE, "SANDBOX_UNAVAILABLE");
+        assert!(
+            !workspace.join("inside.txt").exists(),
+            "the command never ran"
         );
     }
 }

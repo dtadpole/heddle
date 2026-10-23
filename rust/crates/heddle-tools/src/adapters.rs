@@ -1,4 +1,4 @@
-//! The gate ports over the real `heddle-sandbox` services.
+//! The gate ports over the real `heddle-sandbox` and `heddle-session` services.
 //!
 //! The binary builds one [`SandboxService`] and one [`ApprovalService`] from the profile rows — the sandbox
 //! crate owns both, and every sentence, mode and ladder rule — wraps them here, and hands the pair to
@@ -21,9 +21,15 @@ use heddle_sandbox::{
     validate_escalation_args,
 };
 
-use crate::gates::{ApprovalGate, EscalationError, EscalationRequest, SandboxGate};
+use heddle_session::SessionService;
+
+use crate::gates::{
+    ApprovalGate, EscalationError, EscalationRequest, ModeResolver, NoToolHooks, SandboxGate,
+    ToolGates,
+};
 use crate::upstream::{
     ApprovalDecision, ConfinedArgv, SandboxDenial, SandboxMode, SandboxOutcome, SandboxUnavailable,
+    SessionHandle,
 };
 
 /// The [`ApprovalGate`] over an [`ApprovalService`]: the standing policy and the escalation ladder.
@@ -167,6 +173,57 @@ impl SandboxGate for Sandbox {
     }
 }
 
+/// The [`ModeResolver`] over a [`SessionService`]: a session's own `permission/mode` record outranks the
+/// deployment default.
+///
+/// A log that cannot be read resolves to the **default**, never to a wider mode: the default is the deployment's
+/// own choice, and a broken record must not be a way past it. The failure is logged.
+pub struct SessionModes {
+    service: Arc<SessionService>,
+}
+
+impl SessionModes {
+    /// Wrap the deployment's session service.
+    pub fn new(service: Arc<SessionService>) -> Self {
+        Self { service }
+    }
+}
+
+impl ModeResolver for SessionModes {
+    fn effective_mode(&self, session: &SessionHandle, default: SandboxMode) -> SandboxMode {
+        match self.service.effective_mode(session, default) {
+            Ok(mode) => mode,
+            Err(error) => {
+                tracing::warn!(
+                    target: "heddle_tools",
+                    session = session.id.as_str(),
+                    "the session's mode record could not be read, so the deployment mode applies: {error}"
+                );
+                default
+            }
+        }
+    }
+}
+
+/// The registry's gates over the deployment's three services, with no hook listeners — what the `tools` row
+/// injects (`approvals`, `sandbox`, `session`). The binary's adapter for the row is then
+/// `ToolRegistry::from_config(gates_over(sandbox, approvals, sessions), &ToolsConfig::from_row(&config)?)`.
+///
+/// The hook port stays [`NoToolHooks`] until the event bus attaches its own [`ToolHooks`](crate::ToolHooks)
+/// through the returned [`ToolGates`]' `hooks` field.
+pub fn gates_over(
+    sandbox: Arc<SandboxService>,
+    approvals: Arc<ApprovalService>,
+    sessions: Arc<SessionService>,
+) -> ToolGates {
+    ToolGates {
+        approvals: Arc::new(SandboxApprovals::new(approvals)),
+        sandbox: Arc::new(Sandbox::new(sandbox)),
+        modes: Arc::new(SessionModes::new(sessions)),
+        hooks: Arc::new(NoToolHooks),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -279,6 +336,92 @@ mod tests {
         let decision = denied.check("bash");
         assert!(!decision.allowed);
         assert!(decision.reason.is_some());
+    }
+
+    fn sessions_at(root: &Path) -> Arc<SessionService> {
+        let config = heddle_session::SessionConfig {
+            root: Some(root.to_str().unwrap().to_owned()),
+        };
+        Arc::new(SessionService::new(
+            &config,
+            &heddle_config::Env::default(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn a_session_with_no_mode_record_runs_under_the_deployment_mode() {
+        let root = scratch("modes-none");
+        let sessions = sessions_at(&root);
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let modes = SessionModes::new(Arc::clone(&sessions));
+        assert_eq!(
+            modes.effective_mode(&handle, SandboxMode::WorkspaceWrite),
+            SandboxMode::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn a_sessions_own_record_outranks_the_deployment_mode() {
+        let root = scratch("modes-record");
+        let sessions = sessions_at(&root);
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let change = sessions
+            .set_mode(&handle, SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite)
+            .unwrap();
+        assert!(change.changed);
+        let modes = SessionModes::new(Arc::clone(&sessions));
+        assert_eq!(
+            modes.effective_mode(&handle, SandboxMode::WorkspaceWrite),
+            SandboxMode::ReadOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registry_over_the_three_real_services_writes_inside_and_refuses_outside() {
+        let root = scratch("composed");
+        let gates = gates_over(
+            sandbox_at(&root),
+            Arc::new(ApprovalService::new(ApprovalsConfig::default())),
+            sessions_at(&root.join("sessions")),
+        );
+        let registry =
+            crate::ToolRegistry::from_config(gates, &crate::config::ToolsConfig::default());
+        let args = |value: serde_json::Value| value.as_object().cloned().unwrap();
+        let wrote = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "one.txt", "content": "first" })),
+                crate::ToolContext::new(&root),
+            )
+            .await;
+        assert_eq!(wrote.error, None, "{wrote:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("one.txt")).unwrap(),
+            "first"
+        );
+        let read = registry
+            .call(
+                "read_file",
+                args(json!({ "path": "one.txt" })),
+                crate::ToolContext::new(&root),
+            )
+            .await;
+        assert_eq!(read.output, "first");
+        let outside = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "/etc/heddle-should-not-exist", "content": "no" })),
+                crate::ToolContext::new(&root),
+            )
+            .await;
+        assert_eq!(outside.error.unwrap().code, crate::codes::SANDBOX);
     }
 
     #[tokio::test]

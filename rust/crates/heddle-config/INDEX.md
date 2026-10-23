@@ -58,9 +58,11 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 ## The config-boot contract
 
 What a caller does to turn command-line flags into rows, and what it may rely on afterwards. The binary follows it
-today (`rust/crates/heddle/src/cli.rs` `layer_options` and `config_args`, `boot.rs` `boot`). **`web` boots exactly as
-a run does** — the TypeScript `runWeb` calls `bootFromArgs` — so wiring `web` needs nothing new from this crate:
-steps 1–5 below, then the server reads what step 7 lists.
+today: every command that boots goes through `rust/crates/heddle/src/commands.rs` `boot_then`, which builds
+`cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `profiles` and `config` pass
+`cli::config_args` to `command::run`. **`web` boots exactly as a run does** — the TypeScript `runWeb` calls
+`bootFromArgs` — so wiring it needs nothing new from this crate: boot through the same path as `boot_then` (steps 1–5
+below), then hand the server what step 7 lists. As of main `480d9b8`, the binary's `web` is still `todo!()`.
 
 ### 1. One environment, built once
 
@@ -121,6 +123,9 @@ as `runConfigCommand` did not.
 - **The last write wins per top-level field**, and a patch replaces that field whole: a restated `config` is the
   entire `config`.
 - **A removed row stays**, with `disabled: Some(true)`; the binary's loader gives it no entry.
+- **No config is `None`.** A row that writes no `config`, or writes `config: null`, composes to `config: None`, and
+  a patch writing `config: null` clears it. Validation checks `None` as `{}`; a caller starting a component hands it
+  `{}`, as a Cordis plugin received, so its schema's defaults apply — never `null`, which every typed config refuses.
 - **Provenance** is one entry per leaf field, naming only the layer that won; `origin_of` answers a parent field
   (`config`) with the first leaf beneath it.
 - **Every problem is collected** before it fails (a duplicate insert, a patch or remove naming a row no earlier layer
@@ -158,6 +163,12 @@ optional `args`, an inline `config` JSON Schema) without starting anything; and 
 `Unresolvable`. **Keep the path arm delegating to `ManifestCatalog`**: answering `Unresolvable` there makes check 7 of
 `05-config-system` fail, with the row named but not the field.
 
+To answer a built-in, the catalog constructs that built-in's component and asks `schema()`; it never calls `start`.
+`--validate` therefore starts nothing only while **a component's constructor merely stores its inputs and its
+`schema()` is a pure value** — no file, directory, process or network touched. A new adapter keeps both, or
+`config --validate` begins doing work on a tree it was only asked to describe. As of lane `1221b3e`, every built-in
+constructor stores `env` and `cwd` only, and none of the 13 `schema()` bodies does I/O.
+
 ### 7. What the server reads after boot
 
 | Call | What to know |
@@ -170,15 +181,17 @@ optional `args`, an inline `config` JSON Schema) without starting anything; and 
 
 ### Keeping `05-config-system` judged
 
-Re-run it against every lane candidate, with the lane's release binary:
+Re-run it against every lane candidate. The verifier's entry point runs the same runner, check for check, as
+`node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json`:
 
 ```bash
-HEDDLE_BIN=~/heddle--int-backend/rust/target/release/heddle \
-  node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json
+HEDDLE_BIN=~/heddle--int-backend/rust/target/release/heddle sh _verifiers_/05-config-system/verify.sh --json
 ```
 
-The result must be `"verdict":0` with 10 passing. A drop from 10 is a regression, reported to integrator-one and the
-coordinator before any other work. Each check leans on the steps above:
+The result must be `"verdict":0` with all ten passing. A binary built before the candidate commit does not judge the
+candidate: when the lane's release build predates it, build the candidate itself (a debug build in a throwaway
+worktree is enough) and judge that. A drop from ten is a regression, reported to integrator-one and the coordinator
+before any other work. Each check leans on the steps above:
 
 | Check | Contract step |
 |---|---|
@@ -193,10 +206,21 @@ coordinator before any other work. Each check leans on the steps above:
 | the composition can say which layer supplied a value | 4 (provenance), `config --origins --json` |
 | a profile that does not exist says which ones do | 3 |
 
-| Date | Candidate | Binary | Result |
+One line per run, oldest first: the candidate, the command as run (with the binary it judged), and the result.
+
+| Date | Candidate | Command, and the binary it judged | Result |
 |---|---|---|---|
-| 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | lane release build, and a debug build of exactly `abdf20c` | 10 pass, verdict 0, both |
-| 2026-10-22 | main `0a10ceb` (the binary on main) | a debug build of main, and the lane release build | 10 pass, verdict 0, both |
+| 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | `HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json`, with the lane release build and with a debug build of exactly `abdf20c` | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `0a10ceb` (the binary on main) | the same command, with a debug build of main and with the lane release build | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `480d9b8` (a served command routes through the boot) | the same command, with a debug build of main and with the lane release build of `480d9b8` | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `cc09a59`, lane `a819f5f` (a context-verifier fix and status docs; no Rust source, 05 verifier or runner changed since `480d9b8`) | the same command, with the `480d9b8` builds, source-identical | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | lane `a66e662` (eleven merges: the binary's `boot.rs`, `float_roundtrip` workspace-wide, and this crate's null-config tests) | `HEDDLE_BIN=<debug build of exactly a66e662> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; this crate's 118 unit tests passed on the same tree under `float_roundtrip` |
+| 2026-10-22 | main `d28625d` (UI-verifier fixes only; no Rust source, 05 verifier or runner changed since `a819f5f`) | `HEDDLE_BIN=<lane release build of the 480d9b8 sources, identical here> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0 |
+| 2026-10-22 | main `b0ef8ab` (the lane's merges re-made on main: the binary's `boot.rs`, `float_roundtrip`, a `heddle-tools` that differs from `a66e662`) | `HEDDLE_BIN=<debug build of exactly b0ef8ab> sh _verifiers_/05-config-system/verify.sh --json`; this crate's code and the workspace manifest are identical to `a66e662`, where its 118 unit tests passed | 10/10 passed, verdict 0 |
+| 2026-10-22 | lane `1221b3e` (the binary composes the session, workspace, tools, todo, goal and turn rows; built-in adapters now supply schemas) | `HEDDLE_BIN=<debug build of exactly 1221b3e> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; `heddle config --validate` on the repository's own profile: 16 rows checked, 0 problems |
+| 2026-10-22 | main `b89ad37` (`1221b3e` plus a regenerated `Cargo.lock` and status docs; sources, 05 verifier and runner identical) | the `1221b3e` run above stands: `HEDDLE_BIN=<debug build of exactly 1221b3e> sh _verifiers_/05-config-system/verify.sh --json`, whose regenerated lockfile is byte-identical to main's | 10/10 passed, verdict 0, same binary |
+| 2026-10-22 | main `c4c9292` (one UI-verifier fix, `80-web-ui/check-team-view.mjs`; no Rust source, lockfile, 05 verifier or runner changed since `b89ad37`) | the `1221b3e` run above stands: `HEDDLE_BIN=<debug build of exactly 1221b3e> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
+| 2026-10-22 | lane `b548426` (binary increment: a new `runtime.rs`) | not run: the candidate does not compile — a build of exactly `b548426` fails with 6 errors in `runtime.rs`, which builds `heddle_tools::SessionHandle` with `PathBuf` fields that are `String` on main (a stale-base conflict, not a config change) | not judged; reported to integrator-one, developer-two and the coordinator; main `c4c9292` unaffected |
 
 ## Decisions the contract makes
 
@@ -225,6 +249,7 @@ coordinator before any other work. Each check leans on the steps above:
 | `insert:` written as a mapping or string | a `TypeError`, or one problem per character | `{file}: layer {n}: insert must be a list` |
 | a row `id` that is not a string | accepted, never addressable | a problem naming the file and field |
 | `heddle.json` `endpoints` as a mapping | a `TypeError` in the model plugin | a sentence naming the file |
+| a row written with `config: null`, in `config --json` | prints `"config": null` | prints no `config` key, as for an absent config; no verifier reads the difference |
 
 Kept as the TypeScript build has it, though inconsistent: `heddle --config X config` does not apply the project
 patch beside `X`, while `heddle --config X --turn …` does (`LayerOptions::for_inspection` vs `for_run`).

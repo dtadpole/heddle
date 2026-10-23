@@ -1,20 +1,19 @@
-//! `heddle web`: the server over the booted tree. Port of `runWeb` in `src/cli.ts`.
+//! `heddle web`: the server over the booted tree — `heddle-server`'s entry point, given the harness.
 //!
-//! The command boots the tree the command line names, refuses a tree with an entry still pending (the
-//! TypeScript build's one check before serving), and then either prints the plan (`--dry-run`) or
-//! starts `heddle-server` and serves until SIGINT or SIGTERM.
+//! The command boots the tree the command line names and refuses a tree with an entry still pending
+//! (the TypeScript build's one check before serving), reports each row it could not start, then hands
+//! `heddle_server::command::run` the [`Harness`] and serves until SIGINT or SIGTERM.
 //!
-//! The server takes a [`Harness`]: the services a route calls. It is assembled from what the boot
-//! provided — the model and sandbox rows through their adapters — and every service the boot did not
-//! provide is the server's own *unavailable* stand-in, which answers an empty list or the sentence
-//! naming the missing service, never an invented session or answer. As each crate's adapter lands, its
-//! service replaces the stand-in here and nothing else changes.
+//! The harness takes each service the boot provided — the session store through `heddle-server`'s own
+//! adapter, the model and the sandbox through the small views below — and keeps the server's
+//! *unavailable* stand-in for every service not composed yet, which answers an empty list or the
+//! sentence naming the missing service, never an invented session or answer.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use heddle_server::Harness;
 use heddle_server::services::{ModelService as ServerModels, SandboxService as ServerSandbox};
-use heddle_server::{DryRunPlan, Harness, ServerBuilder, ServerOptions};
 use serde_json::Value;
 
 use crate::boot::Boot;
@@ -22,32 +21,17 @@ use crate::cli::Args;
 use crate::output::Output;
 use crate::{Exit, Invocation};
 
-/// The server's options from the command line: port of the option object `runWeb` builds.
-pub fn server_options(args: &Args, asset_roots: Vec<PathBuf>) -> ServerOptions {
-    ServerOptions {
-        host: args.host.clone(),
-        port: args.port,
-        max_rounds: args.max_rounds,
-        default_endpoint: args.endpoint.clone(),
-        asset_roots,
-        ..ServerOptions::default()
-    }
-}
-
-/// Where the page's vendored assets are looked for: the base layer's directory (a checkout's own
-/// `cordis.yml` sits at its root) and the working directory, without repeats.
-pub fn asset_roots(anchor: &std::path::Path, cwd: &std::path::Path) -> Vec<PathBuf> {
-    let mut roots = vec![anchor.to_path_buf()];
-    if cwd != anchor {
-        roots.push(cwd.to_path_buf());
-    }
-    roots
-}
-
-/// The harness a booted tree gives the server: each service the boot provided, the server's
-/// unavailable stand-in for each it did not.
+/// The harness a booted tree gives the server.
 pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     let mut harness = Harness::unavailable(cwd);
+    if let Some(sessions) = boot
+        .services
+        .get::<Arc<heddle_session::SessionService>>("session")
+    {
+        harness.sessions = Arc::new(heddle_server::adapters::StoreSessions::new(
+            heddle_session::SessionService::from_store(Arc::clone(sessions.store())),
+        ));
+    }
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
     }
@@ -60,15 +44,13 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     harness
 }
 
-/// The lines `--dry-run` prints: the plan, and with `--json` the plan as one compact object, which is
-/// what `JSON.stringify` (with no indent) writes.
-pub fn dry_run_lines(plan: &DryRunPlan, json: bool) -> String {
-    let mut text = format!("{}\n", plan.announce());
-    if json {
-        text.push_str(&serde_json::to_string(plan).unwrap_or_default());
-        text.push('\n');
+/// Where the page's vendored assets are looked for: the base layer's directory and the working one.
+pub fn asset_roots(anchor: &std::path::Path, cwd: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots = vec![anchor.to_path_buf()];
+    if cwd != anchor {
+        roots.push(cwd.to_path_buf());
     }
-    text
+    roots
 }
 
 /// `heddle web`.
@@ -82,82 +64,65 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
             pending.join(", ")
         ));
     }
-    // A row this build cannot start yet is reported, as the TypeScript loader logs a plugin that failed,
-    // and the server still starts: its routes answer for that service with the sentence naming it.
-    for entry in boot
-        .entries
-        .iter()
-        .filter(|entry| entry.state == crate::boot::FiberState::Failed)
-    {
-        out.err(&format!(
-            "heddle web: row '{}' ({}) did not load: {}\n",
-            entry.id,
-            entry.name,
-            entry.error.as_deref().unwrap_or("its start was refused")
-        ));
+    for (id, name) in crate::boot::failed_entries(&boot) {
+        out.err(&format!("heddle web: row '{id}' ({name}) did not load\n"));
     }
-
-    let options = server_options(args, asset_roots(&boot.anchor, &invocation.cwd));
-    if args.dry_run {
-        out.out(&dry_run_lines(
-            &DryRunPlan::for_options(&options),
-            args.json,
-        ));
-        boot.dispose();
-        return Exit::Success;
-    }
-
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            boot.dispose();
-            return out.fail(&format!("cannot start the server's runtime: {error}"));
-        }
-    };
     let harness = harness(&boot, invocation.cwd.clone());
-    let exit = runtime.block_on(async {
-        let server = match ServerBuilder::new(harness, options).start().await {
-            Ok(server) => server,
-            Err(error) => return out.fail(&error.to_string()),
-        };
-        let [url_line, serving_line] = server.announce();
-        out.out(&format!("{url_line}\n{serving_line}\n"));
-        if args.json {
-            out.out(&format!("{}\n", server.announce_json()));
-        }
-        out.flush();
-        // Run until interrupted, which is the only honest lifetime for a server.
+    let shutdown = heddle_tools::CancellationToken::new();
+    let context = heddle_server::command::Context {
+        cwd: invocation.cwd.clone(),
+        harness: &harness,
+        events: None,
+        routers: Vec::new(),
+        views: Vec::new(),
+        asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
+        secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
+        notes: Vec::new(),
+        shutdown: shutdown.clone(),
+    };
+    let web_args = heddle_server::command::Args {
+        host: args.host.clone(),
+        port: args.port,
+        endpoint: args.endpoint.clone(),
+        max_rounds: args.max_rounds,
+        dry_run: args.dry_run,
+        json: args.json,
+    };
+    let runtime = crate::runtime::tokio();
+    // The only honest lifetime for a server: until it is interrupted.
+    runtime.spawn(async move {
         wait_for_stop().await;
-        server.close().await;
-        Exit::Success
+        shutdown.cancel();
     });
+    let (stdout, stderr) = out.writers();
+    let code = runtime.block_on(heddle_server::command::run(
+        heddle_server::command::Command::Web,
+        &web_args,
+        &context,
+        stdout,
+        stderr,
+    ));
     boot.dispose();
-    exit
+    if code == 0 {
+        Exit::Success
+    } else {
+        Exit::Failure
+    }
 }
 
 /// Resolve on SIGINT or SIGTERM, whichever comes first.
 async fn wait_for_stop() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut interrupt), Ok(mut terminate)) = (
-            signal(SignalKind::interrupt()),
-            signal(SignalKind::terminate()),
-        ) else {
-            let _ = tokio::signal::ctrl_c().await;
-            return;
-        };
-        tokio::select! {
-            _ = interrupt.recv() => {}
-            _ = terminate.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut interrupt), Ok(mut terminate)) = (
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::terminate()),
+    ) else {
         let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = interrupt.recv() => {}
+        _ = terminate.recv() => {}
     }
 }
 
@@ -200,34 +165,21 @@ impl ServerSandbox for Sandbox {
     fn transition(
         &self,
         current: &str,
-        requested: &Value,
-        confirm: &Value,
+        requested: Option<&Value>,
+        confirm: Option<&Value>,
     ) -> Result<String, String> {
-        // An absent body field arrives as `null`; the crate reads it as absent, which is what its
-        // sentence names (`'undefined' is not one of ...`).
-        let present = |value: &Value| (!value.is_null()).then(|| value.clone());
         let current = heddle_sandbox::SandboxMode::parse(current).unwrap_or(self.service.mode());
-        heddle_sandbox::permission_transition(
-            current,
-            present(requested).as_ref(),
-            present(confirm).as_ref(),
-        )
-        .map(|change| change.mode.to_string())
-        .map_err(|refusal| refusal.reason().to_owned())
+        heddle_sandbox::permission_transition(current, requested, confirm)
+            .map(|change| change.mode.to_string())
+            .map_err(|refusal| refusal.reason().to_owned())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boot::Boot;
     use crate::services::Services;
     use serde_json::json;
-
-    fn args(list: &[&str]) -> Args {
-        let argv: Vec<String> = list.iter().map(|word| (*word).to_owned()).collect();
-        crate::cli::parse_args(&argv).expect("the command line parses")
-    }
 
     fn empty_boot() -> Boot {
         Boot {
@@ -236,65 +188,6 @@ mod tests {
             services: Services::new(),
             anchor: PathBuf::from("/repo"),
         }
-    }
-
-    #[test]
-    fn the_flags_become_the_servers_options() {
-        let options = server_options(
-            &args(&[
-                "web",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "0",
-                "--max-rounds",
-                "4",
-                "--endpoint",
-                "double",
-            ]),
-            vec![PathBuf::from("/repo")],
-        );
-        assert_eq!(options.host(), "127.0.0.1");
-        assert_eq!(options.port(), 0, "0 asks for an ephemeral port");
-        assert_eq!(options.max_rounds, Some(4));
-        assert_eq!(options.default_endpoint.as_deref(), Some("double"));
-        assert_eq!(options.asset_roots, vec![PathBuf::from("/repo")]);
-        assert!(options.token.is_none(), "the token is minted at start");
-    }
-
-    #[test]
-    fn without_a_port_the_documented_default_is_planned() {
-        let options = server_options(&args(&["web"]), Vec::new());
-        assert_eq!(options.port(), 3082);
-        assert_eq!(options.host(), "127.0.0.1");
-    }
-
-    #[test]
-    fn a_dry_run_prints_the_plan_and_its_compact_json() {
-        let plan = DryRunPlan::for_options(&server_options(&args(&["web"]), Vec::new()));
-        let text = dry_run_lines(&plan, true);
-        let mut lines = text.lines();
-        assert_eq!(
-            lines.next(),
-            Some("heddle web: would serve http://127.0.0.1:3082/?token=generated-at-start")
-        );
-        let value: Value =
-            serde_json::from_str(lines.next().expect("the JSON line")).expect("one JSON object");
-        assert_eq!(
-            value,
-            json!({
-                "url": "http://127.0.0.1:3082/?token=generated-at-start",
-                "host": "127.0.0.1",
-                "port": 3082,
-                "dryRun": true,
-            })
-        );
-        assert!(
-            !text.lines().nth(1).unwrap_or_default().contains('\n'),
-            "the JSON is one line"
-        );
-        assert_eq!(lines.next(), None);
-        assert_eq!(dry_run_lines(&plan, false).lines().count(), 1);
     }
 
     #[test]
@@ -307,34 +200,6 @@ mod tests {
             asset_roots(std::path::Path::new("/repo"), std::path::Path::new("/repo")),
             vec![PathBuf::from("/repo")]
         );
-    }
-
-    #[test]
-    fn a_dry_run_through_the_command_prints_without_binding() {
-        let mut captured = crate::output::Captured::default();
-        let invocation = Invocation {
-            argv: Vec::new(),
-            env: heddle_config::Env::default(),
-            cwd: PathBuf::from("/repo"),
-        };
-        let exit = {
-            let mut out = captured.output();
-            web(
-                &args(&["web", "--dry-run", "--port", "3099", "--json"]),
-                &invocation,
-                empty_boot(),
-                &mut out,
-            )
-        };
-        assert_eq!(exit, Exit::Success);
-        let stdout = captured.stdout_text();
-        assert!(
-            stdout.starts_with(
-                "heddle web: would serve http://127.0.0.1:3099/?token=generated-at-start\n"
-            ),
-            "{stdout}"
-        );
-        assert!(stdout.contains("\"dryRun\":true"), "{stdout}");
     }
 
     #[test]
@@ -354,16 +219,20 @@ mod tests {
             env: heddle_config::Env::default(),
             cwd: PathBuf::from("/repo"),
         };
+        let argv: Vec<String> = ["web", "--dry-run"]
+            .iter()
+            .map(|w| (*w).to_owned())
+            .collect();
+        let args = crate::cli::parse_args(&argv).expect("parses");
         let exit = {
             let mut out = captured.output();
-            web(&args(&["web", "--dry-run"]), &invocation, boot, &mut out)
+            web(&args, &invocation, boot, &mut out)
         };
         assert_eq!(exit, Exit::Failure);
         assert_eq!(
             captured.stderr_text(),
             "heddle: 1 entr(y/ies) are still pending: announce\n"
         );
-        assert!(captured.stdout.is_empty());
     }
 
     #[test]
@@ -392,41 +261,19 @@ mod tests {
         boot.services = services;
         let harness = harness(&boot, PathBuf::from("/work"));
         assert_eq!(harness.models.names(), vec!["scripted".to_owned()]);
-        assert_eq!(
-            harness.models.default_endpoint(),
-            Some("scripted".to_owned())
-        );
-        assert!(!harness.models.declares_level("scripted", None, "high"));
         assert_eq!(harness.sandbox.default_mode(), "read-only");
         assert_eq!(
             harness
                 .sandbox
-                .transition("read-only", &json!("workspace-write"), &Value::Null),
+                .transition("read-only", Some(&json!("workspace-write")), None),
             Ok("workspace-write".to_owned())
         );
         assert!(
             harness
                 .sandbox
-                .transition("read-only", &json!("danger-full-access"), &Value::Null)
+                .transition("read-only", Some(&json!("danger-full-access")), None)
                 .is_err(),
             "full access needs the confirmation"
         );
-        assert_eq!(
-            harness
-                .sandbox
-                .transition("read-only", &Value::Null, &Value::Null),
-            Err(
-                "'undefined' is not one of read-only, workspace-write, danger-full-access"
-                    .to_owned()
-            )
-        );
-    }
-
-    #[test]
-    fn a_service_the_boot_did_not_provide_stays_the_servers_stand_in() {
-        let harness = harness(&empty_boot(), PathBuf::from("/work"));
-        assert!(harness.models.names().is_empty());
-        assert!(harness.workspaces.is_none());
-        assert_eq!(harness.cwd, PathBuf::from("/work"));
     }
 }

@@ -19,6 +19,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`tree.rs`](tree.rs) | the classified tree, one level at a time | `src/session/tree.ts` |
 | [`file.rs`](file.rs) | the right panel's file reader | `readFileText` in `src/session/tree.ts` |
 | [`collate.rs`](collate.rs) | the tree's name order | `Intl.Collator` in `src/session/tree.ts` |
+| [`command.rs`](command.rs) | `heddle workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file` and `session new`, answered here (D-043), and `describe_tree`; `session new` lives here because it needs both services | `src/cli.ts`, those branches and `describeTree` |
 | [`error.rs`](error.rs) | `WorkspaceError` | the thrown messages |
 
 ## Read next

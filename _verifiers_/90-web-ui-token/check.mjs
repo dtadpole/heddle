@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
@@ -20,6 +20,28 @@ import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, remove
  * The cookie is handled by hand rather than by a cookie jar, because the point is what the
  * server sets: `HttpOnly` and `SameSite` are the assertions, and a jar would hide them.
  */
+
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
 
 const CAPABILITY = 'a token that protects the Web UI and its event stream'
 
@@ -63,7 +85,7 @@ async function handshakeCookie(url) {
 async function startServer(label) {
   const home = isolatedHome(`token-${label}`)
   const work = fixtureDir(`token-${label}`)
-  const double = await chatDouble({ content: 'live content', reasoning: 'live reasoning' })
+  const double = held(await chatDouble({ content: 'live content', reasoning: 'live reasoning' }))
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   return {
     home,

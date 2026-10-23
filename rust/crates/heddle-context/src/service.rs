@@ -9,6 +9,7 @@
 //! `agent/request-error`. Here the listener's logic is [`ContextService::recover_overflow`], a plain
 //! method; registering it on the event bus is the composer's job (the `heddle` crate's boot).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ use crate::instructions::{
 use crate::meter::{Measurement, MeterInput, MeteredMessage, TokenMeter, UsageAnchor};
 use crate::pairing::repair_tool_pairing;
 use crate::runtime::{RUNTIME_CONTEXT_ORIGIN, RuntimeContextSection, render_runtime_context};
-use crate::store::{AppendOptions, ContextStore, LogEvent, SeqRange, SurfaceState};
+use crate::store::{AppendOptions, ContextStore, SeqRange, SurfaceState};
 use crate::types::{ContentPart, Message, Role, ToolSpec, describe_content, text_message};
 
 /// The configured window when neither the endpoint nor the profile gives one.
@@ -208,6 +209,73 @@ pub struct ContextView {
     pub instructions: Vec<PathBuf>,
 }
 
+impl ContextView {
+    /// What `heddle context <session>` prints without `--json`, line for line as the TypeScript
+    /// command writes it to stdout:
+    ///
+    /// ```text
+    /// heddle: <n> message(s), about <tokens> token(s)
+    /// heddle: budget <threshold> of <window>; pruned <n>; compacted <true|false>
+    ///   instruction <path>            (one per instruction file)
+    ///   <role>: <text>                (one per message)
+    /// ```
+    ///
+    /// A message's text is cut the way `text.slice(0, 80)` cuts it — eighty UTF-16 units, so a
+    /// character outside the BMP counts twice, and one split at the boundary prints as U+FFFD, the
+    /// replacement Node writes for the lone surrogate the slice leaves — and every `\n` becomes a space.
+    pub fn render_text(&self) -> String {
+        let mut out = format!(
+            "heddle: {} message(s), about {} token(s)\nheddle: budget {} of {}; pruned {}; compacted {}\n",
+            self.message_count,
+            self.estimated_tokens,
+            self.threshold_tokens,
+            self.context_window,
+            self.pruned,
+            self.compacted
+        );
+        for path in &self.instructions {
+            out.push_str(&format!("  instruction {}\n", path.display()));
+        }
+        for message in &self.messages {
+            out.push_str(&format!(
+                "  {}: {}\n",
+                role_word(message.role),
+                js_slice_units(&message.text, 80).replace('\n', " ")
+            ));
+        }
+        out
+    }
+}
+
+/// A role as the log spells it.
+fn role_word(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// `text.slice(0, units)` as JavaScript computes it and Node then prints it: a character that does
+/// not fit whole leaves its high surrogate behind, which UTF-8 output turns into U+FFFD.
+fn js_slice_units(text: &str, units: usize) -> String {
+    let mut taken = 0;
+    let mut out = String::new();
+    for character in text.chars() {
+        let width = character.len_utf16();
+        if taken + width > units {
+            if taken < units {
+                out.push('\u{FFFD}');
+            }
+            break;
+        }
+        out.push(character);
+        taken += width;
+    }
+    out
+}
+
 /// What [`ContextService::ensure_context`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaselineOutcome {
@@ -243,6 +311,34 @@ pub trait ModelAccess: Send + Sync {
 
     /// One non-streaming completion, returning its text, for the summarising call.
     fn complete(&self, request: SummaryRequest) -> BoxFuture<'_, Result<String, SummarizeError>>;
+}
+
+/// The model layer itself is a [`ModelAccess`], so a composition hands the service its
+/// `heddle_llm::ModelService` and writes no adapter: the window is the endpoint's (or its model's)
+/// declared `contextWindow`, as `contextWindowFor` reads it, and the summary is one `generate` call
+/// whose text is the answer. A failed call is the model error's sentence, which the engine records as
+/// a refusal.
+impl ModelAccess for heddle_llm::ModelService {
+    fn endpoint_window(&self, endpoint: &str, model: Option<&str>) -> Option<u64> {
+        self.endpoint(endpoint)?.context_window_for(model)
+    }
+
+    fn complete(&self, request: SummaryRequest) -> BoxFuture<'_, Result<String, SummarizeError>> {
+        Box::pin(async move {
+            let generated = self
+                .generate(heddle_llm::GenerateRequest {
+                    endpoint: request.endpoint,
+                    model: request.model,
+                    messages: request.messages,
+                    max_output_tokens: request.max_output_tokens,
+                    purpose: request.purpose,
+                    ..heddle_llm::GenerateRequest::default()
+                })
+                .await
+                .map_err(|error| SummarizeError(error.to_string()))?;
+            Ok(generated.text)
+        })
+    }
 }
 
 /// What the service is given besides its store and configuration.
@@ -385,19 +481,20 @@ impl<S: ContextStore> ContextService<S> {
         session: &S::Handle,
         tools: &[ToolSpec],
     ) -> Result<Measurement, ContextError> {
-        let events = self.store.read(session)?;
         let state = self.store.surface(session)?;
-        let mut kept: Vec<(u64, Message)> = Vec::with_capacity(state.nodes.len());
-        for seq in &state.nodes {
-            if let Some(message) = self.store.derive_node(session, *seq)? {
-                kept.push((*seq, message));
-            }
-        }
-        let nodes: Vec<MeteredMessage<'_>> = kept
+        // The surface in one call, so a store can derive every node from one index rather than
+        // re-reading the log per node (which made a long session's measurement quadratic).
+        let surface = self.store.derive_surface(session)?;
+        let nodes: Vec<MeteredMessage<'_>> = surface
             .iter()
-            .map(|(seq, message)| MeteredMessage { seq: *seq, message })
+            .filter_map(|node| {
+                node.message.as_ref().map(|message| MeteredMessage {
+                    seq: node.seq,
+                    message,
+                })
+            })
             .collect();
-        let usage = self.last_usage(&events);
+        let usage = self.last_usage(session)?;
         Ok(self.meter.measure(&MeterInput {
             nodes: &nodes,
             tools,
@@ -408,37 +505,38 @@ impl<S: ContextStore> ContextService<S> {
 
     /// The provider usage of the last completed call, with the generation of the request that made
     /// it: the anchor is a fact about the log, while the meter only knows how to price.
-    fn last_usage(&self, events: &[LogEvent]) -> Option<UsageAnchor> {
-        let mut anchor: Option<u64> = None;
+    ///
+    /// Read newest first: the last `model/request` is the anchor (none when its `generation` is not
+    /// a number), and the newest `done` chunk with usage after it is the usage — the same pair the
+    /// TypeScript build finds reading forward and resetting at every request.
+    fn last_usage(&self, session: &S::Handle) -> Result<Option<UsageAnchor>, ContextError> {
         let mut usage: Option<(Option<u64>, Option<u64>)> = None;
-        for event in events {
+        let mut anchor: Option<u64> = None;
+        self.store.visit_newest_first(session, &mut |event| {
             if event.kind == "model/request" {
                 anchor = event.field("generation").and_then(Value::as_u64);
-                usage = None;
-                continue;
+                return false;
             }
-            if event.kind != "assistant/chunk" || anchor.is_none() {
-                continue;
+            if usage.is_none()
+                && event.kind == "assistant/chunk"
+                && let Some(chunk) = event.field("chunk")
+                && chunk.get("type").and_then(Value::as_str) == Some("done")
+                && let Some(reported) = chunk.get("usage").and_then(Value::as_object)
+            {
+                usage = Some((
+                    reported.get("inputTokens").and_then(Value::as_u64),
+                    reported.get("outputTokens").and_then(Value::as_u64),
+                ));
             }
-            let Some(chunk) = event.field("chunk") else {
-                continue;
-            };
-            if chunk.get("type").and_then(Value::as_str) != Some("done") {
-                continue;
-            }
-            let Some(reported) = chunk.get("usage").and_then(Value::as_object) else {
-                continue;
-            };
-            usage = Some((
-                reported.get("inputTokens").and_then(Value::as_u64),
-                reported.get("outputTokens").and_then(Value::as_u64),
-            ));
-        }
-        let (input_tokens, output_tokens) = usage?;
-        Some(UsageAnchor {
-            input_tokens,
-            output_tokens,
-            generation: anchor?,
+            true
+        })?;
+        Ok(match (usage, anchor) {
+            (Some((input_tokens, output_tokens)), Some(generation)) => Some(UsageAnchor {
+                input_tokens,
+                output_tokens,
+                generation,
+            }),
+            _ => None,
         })
     }
 
@@ -451,24 +549,24 @@ impl<S: ContextStore> ContextService<S> {
         sections: &[RuntimeContextSection],
     ) -> Result<(), ContextError> {
         let snapshot = render_runtime_context(sections);
-        let events = self.store.read(session)?;
         let mut retained: Option<(u64, Option<String>)> = None;
         let mut legacy: Option<u64> = None;
-        for event in events.iter().rev() {
+        self.store.visit_newest_first(session, &mut |event| {
             if event.kind != "context/note" {
-                continue;
+                return true;
             }
             match event.origin() {
                 Some(RUNTIME_CONTEXT_ORIGIN) => {
                     retained = Some((event.seq, event.identity().map(str::to_string)));
-                    break;
+                    return false;
                 }
                 Some(origin::LEGACY_SANDBOX_POLICY) if legacy.is_none() => {
                     legacy = Some(event.seq);
                 }
                 _ => {}
             }
-        }
+            true
+        })?;
         if retained
             .as_ref()
             .and_then(|(_, identity)| identity.as_deref())
@@ -546,19 +644,26 @@ impl<S: ContextStore> ContextService<S> {
     ) -> Result<BaselineOutcome, ContextError> {
         let before = self.store.count(session)?;
         let state = self.store.surface(session)?;
-        let events = self.store.read(session)?;
-        let head_role = state
-            .nodes
-            .first()
-            .and_then(|seq| events.iter().find(|event| event.seq == *seq))
-            .and_then(LogEvent::message)
-            .filter(|message| !message.content.is_empty())
-            .map(|message| message.role);
+        // One borrowed pass over the log answers both questions this needs: whether the surface's
+        // head is a system message, and which instruction notes are on the surface.
+        let head = state.nodes.first().copied();
+        let on_surface: HashSet<u64> = state.nodes.iter().copied().collect();
+        let mut head_is_system = false;
+        let mut baselines: HashMap<u64, String> = HashMap::new();
+        self.store.visit_newest_first(session, &mut |event| {
+            if Some(event.seq) == head {
+                head_is_system = event.is_system_message();
+            }
+            if on_surface.contains(&event.seq) && event.origin() == Some(origin::INSTRUCTIONS) {
+                baselines.insert(event.seq, event.identity().unwrap_or_default().to_string());
+            }
+            true
+        })?;
 
         let mut system_seq = None;
         if let Some(system) = system.or(self.config.system.as_deref())
             && !system.is_empty()
-            && head_role != Some(Role::System)
+            && !head_is_system
         {
             system_seq = Some(
                 self.store.append(
@@ -597,7 +702,7 @@ impl<S: ContextStore> ContextService<S> {
 
         let mut instructions_seq = None;
         if let Some(rendered) = &rendered {
-            match self.current_baseline(&state, &events) {
+            match current_baseline(&state, &baselines) {
                 None => {
                     instructions_seq = Some(self.store.append(
                         session,
@@ -632,20 +737,6 @@ impl<S: ContextStore> ContextService<S> {
                 .unwrap_or_default(),
             wrote,
         })
-    }
-
-    /// The instruction node currently on the surface, with the digest it was rendered from.
-    fn current_baseline(&self, state: &SurfaceState, events: &[LogEvent]) -> Option<(u64, String)> {
-        for seq in state.nodes.iter().rev() {
-            let Some(event) = events.iter().find(|event| event.seq == *seq) else {
-                continue;
-            };
-            if event.origin() != Some(origin::INSTRUCTIONS) {
-                continue;
-            }
-            return Some((*seq, event.identity().unwrap_or_default().to_string()));
-        }
-        None
     }
 
     /// What a caller would send right now. May write the system prompt or the baseline the first
@@ -812,6 +903,19 @@ impl<S: ContextStore> ContextService<S> {
             RecoveryDecision::PassOn
         })
     }
+}
+
+/// The instruction node currently on the surface, newest position first, with the digest it was
+/// rendered from: `baselines` holds every instruction note on the surface by seq.
+fn current_baseline(
+    state: &SurfaceState,
+    baselines: &HashMap<u64, String>,
+) -> Option<(u64, String)> {
+    state
+        .nodes
+        .iter()
+        .rev()
+        .find_map(|seq| baselines.get(seq).map(|identity| (*seq, identity.clone())))
 }
 
 /// The instruction baseline as the note this crate writes.
@@ -1748,6 +1852,377 @@ mod tests {
                 "pruned": 0,
                 "compacted": false,
             })
+        );
+    }
+
+    fn view_of(
+        messages: Vec<super::ViewMessage>,
+        instructions: Vec<PathBuf>,
+    ) -> super::ContextView {
+        super::ContextView {
+            session: "session-1".to_string(),
+            message_count: messages.len(),
+            messages,
+            estimated_tokens: 42,
+            threshold_tokens: 800,
+            context_window: 1000,
+            pruned: 1,
+            compacted: false,
+            instructions,
+        }
+    }
+
+    fn view_message(role: Role, text: &str) -> super::ViewMessage {
+        super::ViewMessage {
+            role,
+            tool_call_id: None,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_text_rendering_is_the_typescript_commands_lines() {
+        let view = view_of(
+            vec![
+                view_message(Role::System, "be brief"),
+                view_message(Role::User, "line one\nline two"),
+            ],
+            vec![PathBuf::from("/p/AGENTS.md")],
+        );
+        assert_eq!(
+            view.render_text(),
+            "heddle: 2 message(s), about 42 token(s)\n\
+             heddle: budget 800 of 1000; pruned 1; compacted false\n  \
+             instruction /p/AGENTS.md\n  \
+             system: be brief\n  \
+             user: line one line two\n"
+        );
+    }
+
+    #[test]
+    fn a_long_message_is_cut_at_eighty_utf16_units() {
+        let long = "x".repeat(100);
+        let view = view_of(vec![view_message(Role::Assistant, &long)], Vec::new());
+        assert!(
+            view.render_text()
+                .ends_with(&format!("  assistant: {}\n", "x".repeat(80)))
+        );
+
+        // 79 units of text then an emoji: the slice keeps its high surrogate, which prints as U+FFFD.
+        let split = format!("{}😀tail", "y".repeat(79));
+        let view = view_of(vec![view_message(Role::Tool, &split)], Vec::new());
+        assert!(
+            view.render_text()
+                .ends_with(&format!("  tool: {}\u{FFFD}\n", "y".repeat(79)))
+        );
+
+        // 40 emoji are exactly 80 units, so nothing is cut and nothing is replaced.
+        let emoji = "😀".repeat(41);
+        let view = view_of(vec![view_message(Role::User, &emoji)], Vec::new());
+        assert!(
+            view.render_text()
+                .ends_with(&format!("  user: {}\n", "😀".repeat(40)))
+        );
+    }
+
+    #[test]
+    fn an_empty_context_prints_only_the_two_summary_lines() {
+        let view = view_of(Vec::new(), Vec::new());
+        assert_eq!(
+            view.render_text(),
+            "heddle: 0 message(s), about 42 token(s)\nheddle: budget 800 of 1000; pruned 1; compacted false\n"
+        );
+    }
+
+    #[test]
+    fn the_model_service_is_the_model_access_with_its_window_and_its_compaction_step() {
+        let scratch = Scratch::new("model-service");
+        let script = scratch.path().join("script.json");
+        std::fs::write(
+            &script,
+            serde_json::to_string(&json!({"steps": [
+                { "text": "an ordinary turn" },
+                { "purpose": "compaction", "text": "the briefing" },
+            ]}))
+            .expect("the script serialises"),
+        )
+        .expect("the script is written");
+        let endpoint: heddle_llm::EndpointConfig = serde_json::from_value(json!({
+            "name": "scripted",
+            "kind": "scripted",
+            "baseUrl": script.to_string_lossy(),
+            "model": "scripted",
+            "contextWindow": 1000,
+        }))
+        .expect("the endpoint parses");
+        let models =
+            heddle_llm::ModelService::new(vec![endpoint]).expect("the model service builds");
+
+        assert_eq!(models.endpoint_window("scripted", None), Some(1000));
+        assert_eq!(models.endpoint_window("absent", None), None);
+        let summary = block_on(models.complete(SummaryRequest {
+            endpoint: "scripted".to_string(),
+            model: None,
+            messages: vec![text_message(Role::User, "summarise")],
+            max_output_tokens: Some(1024),
+            purpose: Some("compaction".to_string()),
+        }))
+        .expect("the compaction step answers");
+        assert_eq!(
+            summary, "the briefing",
+            "the step tagged compaction, not the turn's"
+        );
+
+        // Through the service: the budget is the endpoint's window, so the trigger is 800.
+        let (_, service) = build_service(
+            ContextConfig {
+                context_window: Some(5000),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(scratch.path(), Some(Arc::new(models))),
+        );
+        let budget = service
+            .budget(Some("scripted"), None)
+            .expect("the budget resolves");
+        assert_eq!(budget.threshold_tokens, 800);
+        assert_eq!(budget.source, BudgetSource::Endpoint);
+    }
+
+    #[test]
+    fn an_absent_config_row_takes_every_default() {
+        let parsed: ContextConfig = serde_json::from_value(json!({})).expect("an empty row parses");
+        assert_eq!(parsed, ContextConfig::default());
+    }
+
+    /// A store that counts how the service asks for the surface: node by node, or in one call.
+    struct CountingStore {
+        inner: MemoryStore,
+        per_node: std::sync::atomic::AtomicUsize,
+        whole: std::sync::atomic::AtomicUsize,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ContextStore for CountingStore {
+        type Handle = crate::testing::MemorySession;
+
+        fn count(&self, session: &Self::Handle) -> Result<u64, crate::store::StoreError> {
+            self.inner.count(session)
+        }
+
+        fn read(
+            &self,
+            session: &Self::Handle,
+        ) -> Result<Vec<crate::store::LogEvent>, crate::store::StoreError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.read(session)
+        }
+
+        fn visit_newest_first(
+            &self,
+            session: &Self::Handle,
+            visit: &mut dyn FnMut(crate::store::EventRef<'_>) -> bool,
+        ) -> Result<(), crate::store::StoreError> {
+            self.inner.visit_newest_first(session, visit)
+        }
+
+        fn surface(
+            &self,
+            session: &Self::Handle,
+        ) -> Result<crate::store::SurfaceState, crate::store::StoreError> {
+            self.inner.surface(session)
+        }
+
+        fn derive_node(
+            &self,
+            session: &Self::Handle,
+            seq: u64,
+        ) -> Result<Option<Message>, crate::store::StoreError> {
+            self.per_node.fetch_add(1, Ordering::Relaxed);
+            self.inner.derive_node(session, seq)
+        }
+
+        fn derive_surface(
+            &self,
+            session: &Self::Handle,
+        ) -> Result<Vec<crate::store::SurfaceNode>, crate::store::StoreError> {
+            self.whole.fetch_add(1, Ordering::Relaxed);
+            self.inner.derive_surface(session)
+        }
+
+        fn append(
+            &self,
+            session: &Self::Handle,
+            event: serde_json::Value,
+            options: crate::store::AppendOptions,
+        ) -> Result<u64, crate::store::StoreError> {
+            self.inner.append(session, event, options)
+        }
+    }
+
+    #[test]
+    fn a_round_derives_the_surface_in_whole_calls_never_node_by_node() {
+        let scratch = Scratch::new("counting");
+        let store = Arc::new(CountingStore {
+            inner: MemoryStore::new(),
+            per_node: std::sync::atomic::AtomicUsize::new(0),
+            whole: std::sync::atomic::AtomicUsize::new(0),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let session = store.inner.open("s");
+        store
+            .inner
+            .message(&session, text_message(Role::System, "be brief"));
+        for index in 0..40 {
+            store.inner.message(
+                &session,
+                text_message(Role::User, format!("turn {index} {}", "w".repeat(200))),
+            );
+        }
+        let mut tool = text_message(Role::Tool, "x".repeat(30_000));
+        tool.tool_call_id = Some("call-1".to_string());
+        store.inner.message(&session, tool);
+
+        let service = ContextService::new(
+            store.clone(),
+            ContextConfig {
+                context_window: Some(3000),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(
+                scratch.path(),
+                Some(Arc::new(ScriptedModel {
+                    summary: "brief".to_string(),
+                    ..ScriptedModel::default()
+                })),
+            ),
+        );
+        let report = block_on(service.prepare(
+            &session,
+            &PrepareOptions {
+                cwd: scratch.path(),
+                endpoint: "local",
+                model: None,
+                tools: &[],
+                system: None,
+                summarizer: None,
+                force: false,
+            },
+        ))
+        .expect("the round prepares");
+        assert_eq!(
+            report.pruned, 1,
+            "the round pruned, so the pruner's walk ran too"
+        );
+        assert_eq!(
+            store.per_node.load(Ordering::Relaxed),
+            0,
+            "no node was derived on its own: a store indexes the log once per surface"
+        );
+        assert!(store.whole.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            store.reads.load(Ordering::Relaxed),
+            0,
+            "no scan copied the whole log: the usage, the snapshot and the baseline are borrowed"
+        );
+
+        // With instructions on, the baseline scan borrows too.
+        store.reads.store(0, Ordering::Relaxed);
+        std::fs::write(scratch.path().join("AGENTS.md"), "rules\n").expect("the rules");
+        let with_instructions = ContextService::new(
+            store.clone(),
+            ContextConfig {
+                context_window: Some(100_000),
+                ..ContextConfig::default()
+            },
+            dependencies(scratch.path(), None),
+        );
+        with_instructions
+            .record_runtime_context(
+                &session,
+                &[RuntimeContextSection {
+                    name: "sandbox:policy".to_string(),
+                    text: "Current heddle file policy: read-only.".to_string(),
+                }],
+            )
+            .expect("the snapshot is recorded");
+        with_instructions
+            .assemble(
+                &session,
+                &AssembleOptions {
+                    cwd: scratch.path(),
+                    tools: &[],
+                    system: Some("be brief"),
+                    endpoint: None,
+                    model: None,
+                },
+            )
+            .expect("the assembly succeeds");
+        assert_eq!(store.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(store.per_node.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn the_usage_anchor_resets_at_every_request_as_the_typescript_build_reads_it() {
+        let scratch = Scratch::new("usage-reset");
+        let (store, service) =
+            build_service(ContextConfig::default(), dependencies(scratch.path(), None));
+        let session = store.open("s");
+        store.message(&session, text_message(Role::User, "hello"));
+        store.assistant_chunk(&session, json!({"type": "text-delta", "text": "hi"}));
+        let generation = store
+            .surface(&session)
+            .expect("the surface")
+            .content_generation;
+        let request = |generation: serde_json::Value| {
+            store
+                .append(
+                    &session,
+                    json!({"type": "model/request", "endpoint": "local", "generation": generation}),
+                    crate::store::AppendOptions::default(),
+                )
+                .expect("the request appends");
+        };
+        request(json!(generation));
+        store.assistant_chunk(
+            &session,
+            json!({"type": "done", "finishReason": "stop", "usage": {"inputTokens": 900, "outputTokens": 100}}),
+        );
+        assert_eq!(
+            service
+                .measure(&session, &[])
+                .expect("measures")
+                .baseline
+                .kind,
+            crate::meter::BaselineKind::Usage
+        );
+
+        // A newer request with no answer yet: its usage is unknown, so nothing anchors.
+        request(json!(generation));
+        assert_eq!(
+            service
+                .measure(&session, &[])
+                .expect("measures")
+                .baseline
+                .kind,
+            crate::meter::BaselineKind::Estimated,
+            "the older call's usage does not carry past a newer request"
+        );
+
+        // A request whose generation is not a number anchors nothing, even once it is answered.
+        request(json!("unknown"));
+        store.assistant_chunk(
+            &session,
+            json!({"type": "done", "finishReason": "stop", "usage": {"inputTokens": 900, "outputTokens": 100}}),
+        );
+        assert_eq!(
+            service
+                .measure(&session, &[])
+                .expect("measures")
+                .baseline
+                .kind,
+            crate::meter::BaselineKind::Estimated
         );
     }
 }

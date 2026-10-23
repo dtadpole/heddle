@@ -315,6 +315,16 @@ mod tests {
     }
 
     #[test]
+    fn a_float_the_typescript_build_wrote_prints_back_unchanged() {
+        // `JSON.parse` is correctly rounded, so the TypeScript build reads and rewrites these exactly.
+        // serde_json's default float parser lands one ulp off on both (…491 -> …492, …507 -> …508); with
+        // `float_roundtrip` it agrees, which is what keeps `heddle transcript` byte-identical.
+        let line = r#"{"seq":3,"at":"2026-10-22T18:17:41.123Z","type":"tool/result","score":0.9999551342447491,"ratio":0.9040877429444507}"#;
+        let event = SessionEvent::from_line(line).expect("a written line parses");
+        assert_eq!(event.to_line(), line);
+    }
+
+    #[test]
     fn a_line_that_is_not_an_event_is_an_error() {
         assert!(SessionEvent::from_line("not json").is_err());
         assert!(
