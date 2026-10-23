@@ -67,6 +67,24 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     ) {
         harness.workspaces = Some(Arc::new(Workspaces { service, sessions }));
     }
+    // The renderer a settled answer is drawn with (web.ts: `html: renderMarkdown(turn.text)`). The page
+    // draws a history row's document, its edited-files card and its stop notice only from that `html`.
+    harness.markdown = Some(heddle_server::services::markdown_renderer(|text: &str| {
+        heddle_web_files::markdown::render_markdown(
+            text,
+            heddle_web_files::markdown::MarkdownOptions::default(),
+        )
+    }));
+    // The composer's figures (tokens, context, cost) projected from the session's events, as the
+    // trajectory crate draws them for the dock.
+    harness.stats = Some(heddle_server::services::stats_projector(
+        |_session: &str, events: &[Value]| {
+            to_json(heddle_web_trajectory::stats::session_stats_view(
+                events,
+                || None,
+            ))
+        },
+    ));
     // The goal, todo and team rows: the page's goal, todo and team panels read them.
     if let Some(service) = boot.services.get::<Arc<heddle_goal::GoalService>>("goal") {
         harness.goals = Some(Arc::new(Goals { service }));
@@ -114,7 +132,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     for (id, name) in crate::boot::failed_entries(&boot) {
         out.err(&format!("heddle web: row '{id}' ({name}) did not load\n"));
     }
-    let harness = harness(&boot, invocation.cwd.clone());
+    let mut harness = harness(&boot, invocation.cwd.clone());
+    compose_uploads(&mut harness, &heddle_config::heddle_home(&invocation.env));
     let runtime = crate::runtime::tokio();
     // The goal driver follows the sessions' events for as long as the server runs, so a goal keeps
     // pushing after each turn; then the boot sweep resumes the goals a previous process left active.
@@ -656,6 +675,19 @@ impl heddle_server::services::WorkspaceService for Workspaces {
     }
 }
 
+/// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under
+/// `<heddle home>/uploads`) become the typed parts the model receives.
+pub fn compose_uploads(harness: &mut Harness, home: &std::path::Path) {
+    let uploads = home.join("uploads");
+    harness.attachments = Some(heddle_server::services::attachment_reader(
+        move |raw: Option<&Value>| {
+            heddle_web_files::attachments::read_attachments(&uploads, raw)
+                .map(|parts| parts.iter().map(to_json).collect())
+                .map_err(|error| error.to_string())
+        },
+    ));
+}
+
 /// What the boot reports before the URL, in the TypeScript order: the teams the team row recovered
 /// (`recovered N team(s) (S settled, D delivered[, F failed])`). Each is printed as `heddle web: <note>`.
 async fn boot_notes(boot: &Boot) -> Vec<String> {
@@ -1027,6 +1059,32 @@ mod tests {
             .unwrap();
         assert!(tree.to_string().contains("project"), "{tree}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_settled_answer_is_rendered_by_the_files_crate_markdown() {
+        let harness = harness(&empty_boot(), PathBuf::from("/work"));
+        let markdown = harness.markdown.expect("the renderer is always composed");
+        let html = markdown.render("# Title\n\nA *settled* answer.");
+        assert!(html.contains("<h1"), "{html}");
+        assert!(html.contains("<em>settled</em>"), "{html}");
+    }
+
+    #[test]
+    fn the_stats_and_the_uploads_are_composed() {
+        let mut harness = harness(&empty_boot(), PathBuf::from("/work"));
+        let stats = harness
+            .stats
+            .clone()
+            .expect("the stats projector is composed");
+        assert!(stats.stats("s", &[]).is_object());
+        let home = std::env::temp_dir().join(format!("heddle-web-uploads-{}", std::process::id()));
+        compose_uploads(&mut harness, &home);
+        let reader = harness
+            .attachments
+            .expect("the attachment reader is composed");
+        assert_eq!(reader.read(None), Ok(Vec::new()), "no attachments is none");
+        assert!(reader.read(Some(&serde_json::json!("not a list"))).is_err());
     }
 
     #[test]
