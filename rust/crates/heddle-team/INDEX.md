@@ -1,6 +1,6 @@
 ---
 title: The heddle-team crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for durable teams, their policy, state and tool — its public API, the seams it needs from other crates, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
