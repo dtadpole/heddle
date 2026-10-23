@@ -14,7 +14,8 @@
 //!
 //! The recorded `id`, `session` and `at` belong to one run; a check that compares a live frame replaces those
 //! three fields and nothing else. What is fixed is the event name, the two-line frame (with its blank line), the
-//! field names, and the display-reason wording the card shows.
+//! field names, and the display-reason wording the card shows. **Key order is not fixed:** the page parses the
+//! payload with `JSON.parse`, so a check compares the envelope as text and the payload as parsed JSON.
 
 use crate::approvals::{Answer, ApprovalRequest};
 
@@ -264,6 +265,43 @@ mod tests {
             worker.await.expect("the escalation task"),
             Ok(SandboxMode::DangerFullAccess),
             "and the recorded answer grants the one wider call"
+        );
+    }
+
+    /// The README's comparison rule, as code: the envelope is text, the payload is parsed JSON.
+    ///
+    /// A server that forwards the question through `serde_json::Value` without `preserve_order` writes the keys
+    /// sorted. That frame is the same question to the page (`JSON.parse`), so a check must accept it, and a text
+    /// comparison of the payload would wrongly refuse it.
+    #[test]
+    fn a_payload_with_reordered_keys_is_the_same_question_but_not_the_same_text() {
+        let recorded_payload = STREAM_FRAME
+            .strip_prefix("event: approval\ndata: ")
+            .and_then(|rest| rest.strip_suffix("\n\n"))
+            .expect("the recorded envelope");
+        let sorted: std::collections::BTreeMap<String, Value> =
+            serde_json::from_str(recorded_payload).expect("the recorded payload is an object");
+        let sorted_payload = serde_json::to_string(&sorted).expect("the sorted object serialises");
+        let sorted_frame = format!("event: approval\ndata: {sorted_payload}\n\n");
+
+        assert_ne!(
+            sorted_payload, recorded_payload,
+            "sorting changes the text: the recorded order is the insertion order, not the alphabet"
+        );
+        assert_ne!(
+            sorted_frame, STREAM_FRAME,
+            "so a whole-frame text comparison would refuse it"
+        );
+        assert!(
+            sorted_frame.starts_with("event: approval\ndata: ")
+                && sorted_frame.ends_with("\n\n")
+                && !sorted_payload.contains('\n'),
+            "while the envelope still matches: the event line, one data line, the blank line"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&sorted_payload).expect("the sorted payload parses"),
+            serde_json::from_str::<Value>(recorded_payload).expect("the recorded payload parses"),
+            "and the payload is the same question once parsed, which is all the page reads"
         );
     }
 }

@@ -42,9 +42,11 @@ heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 | `fixture::{QUESTION_JSON, STREAM_FRAME, ANSWER_ALLOWED_ONCE, ANSWER_REJECTED, question, question_json, stream_frame, recorded_answer}` | the Web UI checks read the data files under [`fixtures/`](fixtures/README.md); the crate's tests pin its serialiser to them | recorded from `ApprovalService::request` and the page's `showApproval`/`answerApproval` |
 
 The recorded approval fixture is a **sample, not a contract**: `fixtures/approval-stream-frame.txt` is the exact
-SSE frame (`event: approval`, one `data:` line, a blank line), and a check compares a live frame against it after
-replacing only the `id`, `session` and `at` of the run it came from. [`fixtures/README.md`](fixtures/README.md)
-states the four facts the page depends on and the two ways to consume the files.
+SSE frame (`event: approval`, one `data:` line, a blank line). A check compares a live frame's envelope byte for
+byte and its payload as parsed JSON, after replacing only the `id`, `session` and `at` of the run it came from.
+Key order is not compared: the page uses `JSON.parse`, and a server forwarding through `serde_json::Value` keeps
+insertion order only with `preserve_order`, which this workspace gets from `heddle-llm` by feature unification.
+[`fixtures/README.md`](fixtures/README.md) states the facts the page depends on and how to consume the files.
 
 **Three Rust shapes differ from the TypeScript on purpose.** Every check takes the call's mode explicitly (no
 "default to the deployment mode" parameter; pass `service.mode()`); an approval's cancellation is any
@@ -80,7 +82,7 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 | 6 | the ladder | `escalation.rs` (`approve_escalation`) | the same mode needs no ask; not-wider and malformed refusals; the ask's reason and display reason carry the justification verbatim; each outcome maps to its refusal sentence; it runs with `ApprovalService` as the channel |
 | 7 | judged through the binary | none here | once tools, server, session and boot compose it: `75-permission-sandbox` and `80-web-ui` check-approval through `HEDDLE_BIN`, recorded with the command and date |
 
-**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (115 tests at 2026-10-22, `cargo test -p
+**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (116 tests at 2026-10-22, `cargo test -p
 heddle-sandbox`), including the task 6 ladder through `ApprovalService` as its channel and the recorded approval
 fixture, which a live `approve_escalation` call is proven to reproduce byte for byte up to the run's `id` and `at`.
 Task 7 is the judged-through-the-binary row, which needs the tools, server, session and boot crates. The real

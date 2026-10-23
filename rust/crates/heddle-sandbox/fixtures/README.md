@@ -35,16 +35,23 @@ The page (`src/server/page.html`, `showApproval` and `answerApproval`) and the s
 From the repository root, the files are at
 `rust/crates/heddle-sandbox/fixtures/` (`approval-stream-frame.txt` and the rest). Two uses, both cheap:
 
-- **The frame is the oracle.** Read `approval-stream-frame.txt`, replace the recorded `id`, `session` and `at`
-  with the live question's values (from `GET /api/approvals`, or from the frame the server actually wrote),
-  then assert the server's frame equals the result byte for byte. A renamed field, a pretty-printed payload, a
-  missing blank line or a dropped `displayReason` shows up as a diff.
+- **The frame is the oracle, in two parts.** Split the live frame and `approval-stream-frame.txt` the same way:
+  the **envelope** (`event: approval\n`, then `data: `, then one line, then `\n\n`) must match byte for byte,
+  and the **payload** on the `data:` line must equal the recorded object as parsed JSON (deep equality) once the
+  recorded `id`, `session` and `at` are replaced with the live question's (from `GET /api/approvals`, or from
+  the frame itself). A renamed field, a pretty-printed payload (it spans more than one line), a missing blank
+  line, a wrong event name or a dropped `displayReason` all fail one part or the other.
 - **The answers are the requests.** Post `approval-answer-allowed-once.json` (or the rejected one, or a literal
   with the same bytes) to `/api/approvals/<live id>` and expect `200 {"answered":true}`; post the same body again
   and expect `409`, because a question settles once.
 
-A live question will carry its own `id`/`session`/`at`, so a check that compares whole frames must normalise
-those three fields first; everything else in the file is fixed text.
+**Key order is not part of the contract, so do not compare the payload as text.** The page reads the payload
+with `JSON.parse`, which ignores key order. The recorded file has the TypeScript build's insertion order (`id`,
+`tool`, `reason`, `displayReason`, `session`, `at`), and the Rust crate's own `ApprovalRequest` serialiser writes
+the same order. But a server that forwards the question through `serde_json::Value` keeps that order only when
+serde_json's `preserve_order` feature is on. In this workspace it is on only through feature unification:
+`heddle-llm` enables it. Without it the keys would come out sorted. That run would be correct, yet a text
+comparison would fail it.
 
 ## Provenance
 
