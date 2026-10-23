@@ -609,3 +609,85 @@ async fn a_member_turn_after_the_run_has_ended_is_refused_not_leaked() {
         "the refused first turn is recorded in the teammate's own log"
     );
 }
+
+/// Mail to a teammate whose turn has finished takes the idle path: the team begins a new turn, whose prompt *is*
+/// the message, and journals the delivery before `send` returns. (Mail to a teammate mid-turn takes the steer
+/// path instead, appended to its log for the loop to notice; check-teams can take either, depending on how fast the
+/// teammate's first turn ends, so each path needs its own proof.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mail_to_an_idle_teammate_is_delivered_by_a_new_turn_before_send_returns() {
+    let home = Scratch::new("idle-home");
+    let work = Scratch::new("idle-work");
+    // The scripted endpoint hands out a purpose's steps by round within a turn, so every member turn answers
+    // with the first `team` step.
+    let steps = json!([{ "purpose": "team", "text": "alpha is ready" }]);
+    let booted = boot(&home.0, &work.0, steps);
+    let plugin = start(&booted);
+    let lead = booted
+        .sessions
+        .store()
+        .create(CreateOptions {
+            cwd: Some(work.0.to_string_lossy().into_owned()),
+            endpoint: Some("scripted".to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the Lead session");
+    let spawned = plugin
+        .tools
+        .call(
+            "spawn_teammate",
+            &json!({ "name": "alpha", "description": "the teammate", "prompt": "get ready" }),
+            Some(&lead.id),
+        )
+        .await;
+    assert!(spawned.error.is_none(), "{:?}", spawned.error);
+    let child_id = spawned.data.as_ref().expect("the spawn reports its member")["id"]
+        .as_str()
+        .expect("the member's id")
+        .to_owned();
+    let turns = booted
+        .runtime
+        .turns
+        .clone()
+        .expect("the live-turn registry");
+    wait_for("alpha's first turn to finish", || {
+        !turns.is_running(&child_id)
+            && events(&booted, &child_id)
+                .iter()
+                .any(|event| event["type"] == "turn/completed")
+    })
+    .await;
+
+    let sent = plugin
+        .tools
+        .call(
+            "send_message",
+            &json!({ "target": "alpha", "message": "the board is clear" }),
+            Some(&lead.id),
+        )
+        .await;
+    assert_eq!(
+        sent.data.as_ref().map(|data| data["status"].clone()),
+        Some(json!("accepted")),
+        "{:?}",
+        sent
+    );
+    let delivered = events(&booted, &lead.id)
+        .iter()
+        .filter(|event| event["type"] == "team/message/delivered")
+        .count();
+    assert_eq!(delivered, 1, "journaled before send returned");
+    // The mail began alpha's second turn, which runs to completion on its own task.
+    wait_for("the turn the mail began to finish", || {
+        let events = events(&booted, &child_id);
+        events
+            .iter()
+            .any(|event| is_user(event, "the board is clear"))
+            && events
+                .iter()
+                .filter(|event| event["type"] == "turn/completed")
+                .count()
+                == 2
+    })
+    .await;
+}
