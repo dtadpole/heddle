@@ -94,8 +94,10 @@ pub fn read_layer(file: &Path, env: &Env) -> Result<Vec<Layer>, ConfigError> {
 /// read from a file. `boot` and `config --validate` both anchor here, so `./alpha` in a profile names
 /// a file beside the profile, not one beside the caller's working directory.
 pub fn anchor_dir(layers: &[NamedLayer]) -> Option<PathBuf> {
-    let _ = layers;
-    todo!("heddle-config: anchor_dir")
+    layers
+        .iter()
+        .find(|layer| layer.file != INLINE_FILE)
+        .and_then(|layer| Path::new(&layer.file).parent().map(Path::to_path_buf))
 }
 
 #[cfg(test)]
@@ -115,5 +117,21 @@ mod tests {
                 .and_then(LayerValue::as_str),
             Some("session")
         );
+    }
+
+    #[test]
+    fn the_anchor_is_the_first_files_directory() {
+        let inline = NamedLayer::inline(1, Layer::default());
+        let file = NamedLayer {
+            layer: "dev/heddle.patch.yml".into(),
+            file: "/p/dev/heddle.patch.yml".into(),
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            anchor_dir(&[inline.clone(), file]),
+            Some(PathBuf::from("/p/dev"))
+        );
+        assert_eq!(anchor_dir(&[inline]), None);
+        assert_eq!(anchor_dir(&[]), None);
     }
 }

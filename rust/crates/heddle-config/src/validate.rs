@@ -13,11 +13,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 use crate::compose::EntryRow;
 use crate::env::Env;
 use crate::error::ConfigError;
-use crate::layer::NamedLayer;
+use crate::layer::{NamedLayer, anchor_dir};
 use crate::schema::Schema;
 
 /// What a catalog knows about the component a row names.
@@ -93,8 +94,43 @@ pub fn validate_rows(
     env: &Env,
     catalog: &dyn ComponentCatalog,
 ) -> Result<ValidationResult, ConfigError> {
-    let _ = (layers, env, catalog);
-    todo!("heddle-config: validate_rows")
+    let rows = crate::compose::compose(layers, env)?;
+    let anchor = anchor_dir(layers);
+    let mut problems = Vec::new();
+    let mut checked = 0;
+
+    for composed in &rows {
+        let row = &composed.row;
+        if row.disabled == Some(true) {
+            continue;
+        }
+        match catalog.lookup(row, anchor.as_deref()) {
+            // A component that declares no configuration is not a problem, and is not "checked":
+            // counting it would claim a check that never happened.
+            SchemaLookup::NoSchema => {}
+            SchemaLookup::Unresolvable(why) => problems.push(format!(
+                "{}: cannot resolve the component '{}' — {why}",
+                row.label(),
+                row.name
+            )),
+            SchemaLookup::Schema(schema) => {
+                checked += 1;
+                let config = row
+                    .config
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Map::new()));
+                for problem in schema.check(&config) {
+                    problems.push(format!("{}: {problem}", row.label()));
+                }
+            }
+        }
+    }
+
+    Ok(ValidationResult {
+        rows: rows.len(),
+        checked,
+        problems,
+    })
 }
 
 #[cfg(test)]
@@ -119,5 +155,138 @@ mod tests {
             catalog.lookup(&row("nowhere"), None),
             SchemaLookup::Unresolvable(_)
         ));
+    }
+
+    use crate::layer::Layer;
+    use crate::value::LayerValue;
+    use serde_json::json;
+
+    fn layers(insert: Vec<Value>) -> Vec<NamedLayer> {
+        vec![NamedLayer {
+            layer: "dev/heddle.patch.yml".into(),
+            file: "/p/dev/heddle.patch.yml".into(),
+            entries: vec![Layer {
+                insert: insert.into_iter().map(LayerValue::from).collect(),
+                ..Layer::default()
+            }],
+        }]
+    }
+
+    fn alpha_schema() -> Schema {
+        Schema::from_json(json!({
+            "type": "object",
+            "properties": { "count": { "type": "number" } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_bad_value_names_the_row_and_the_field() {
+        let catalog = StaticCatalog::new().with("alpha", Some(alpha_schema()));
+        let result = validate_rows(
+            &layers(vec![json!({
+                "id": "alpha",
+                "name": "alpha",
+                "config": { "count": "not-a-number" }
+            })]),
+            &Env::default(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(result.rows, 1);
+        assert_eq!(result.checked, 1);
+        assert_eq!(
+            result.problems,
+            [
+                "alpha: count is not a number, which means the value in the layer could not be read as one"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_disabled_row_is_skipped_and_a_schema_less_component_is_not_counted() {
+        let catalog = StaticCatalog::new()
+            .with("alpha", Some(alpha_schema()))
+            .with("plain", None);
+        let result = validate_rows(
+            &layers(vec![
+                json!({
+                    "id": "alpha",
+                    "name": "alpha",
+                    "disabled": true,
+                    "config": { "count": "not-a-number" }
+                }),
+                json!({ "id": "plain", "name": "plain", "config": { "anything": true } }),
+            ]),
+            &Env::default(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!((result.rows, result.checked), (2, 0));
+        assert!(result.problems.is_empty());
+    }
+
+    #[test]
+    fn an_unresolvable_component_is_a_problem() {
+        let result = validate_rows(
+            &layers(vec![json!({ "id": "alpha", "name": "./alpha" })]),
+            &Env::default(),
+            &StaticCatalog::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.problems,
+            ["alpha: cannot resolve the component './alpha' — not a known component"]
+        );
+        assert_eq!(result.checked, 0);
+    }
+
+    #[test]
+    fn an_absent_config_is_checked_as_an_empty_mapping() {
+        let catalog = StaticCatalog::new().with(
+            "alpha",
+            Some(
+                Schema::from_json(json!({
+                    "type": "object",
+                    "required": ["label"],
+                    "properties": { "label": { "type": "string" } }
+                }))
+                .unwrap(),
+            ),
+        );
+        let result = validate_rows(
+            &layers(vec![json!({ "id": "alpha", "name": "alpha" })]),
+            &Env::default(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(result.problems, ["alpha: label is required"]);
+    }
+
+    #[test]
+    fn a_composition_failure_is_the_error_rather_than_a_problem() {
+        let mut fixture = layers(Vec::new());
+        fixture[0].entries[0]
+            .patch
+            .push(LayerValue::from(json!({ "id": "nowhere", "config": {} })));
+        let error = validate_rows(&fixture, &Env::default(), &StaticCatalog::new()).unwrap_err();
+        assert!(error.problems()[0].contains("nowhere"));
+    }
+
+    #[test]
+    fn the_catalog_is_handed_the_anchor_directory() {
+        struct Recording;
+        impl ComponentCatalog for Recording {
+            fn lookup(&self, _row: &EntryRow, anchor: Option<&Path>) -> SchemaLookup {
+                assert_eq!(anchor, Some(Path::new("/p/dev")));
+                SchemaLookup::NoSchema
+            }
+        }
+        validate_rows(
+            &layers(vec![json!({ "id": "alpha", "name": "./alpha" })]),
+            &Env::default(),
+            &Recording,
+        )
+        .unwrap();
     }
 }
