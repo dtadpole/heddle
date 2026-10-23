@@ -482,15 +482,17 @@ impl<S: ContextStore> ContextService<S> {
     ) -> Result<Measurement, ContextError> {
         let events = self.store.read(session)?;
         let state = self.store.surface(session)?;
-        let mut kept: Vec<(u64, Message)> = Vec::with_capacity(state.nodes.len());
-        for seq in &state.nodes {
-            if let Some(message) = self.store.derive_node(session, *seq)? {
-                kept.push((*seq, message));
-            }
-        }
-        let nodes: Vec<MeteredMessage<'_>> = kept
+        // The surface in one call, so a store can derive every node from one index rather than
+        // re-reading the log per node (which made a long session's measurement quadratic).
+        let surface = self.store.derive_surface(session)?;
+        let nodes: Vec<MeteredMessage<'_>> = surface
             .iter()
-            .map(|(seq, message)| MeteredMessage { seq: *seq, message })
+            .filter_map(|node| {
+                node.message.as_ref().map(|message| MeteredMessage {
+                    seq: node.seq,
+                    message,
+                })
+            })
             .collect();
         let usage = self.last_usage(&events);
         Ok(self.meter.measure(&MeterInput {
@@ -1984,5 +1986,122 @@ mod tests {
     fn an_absent_config_row_takes_every_default() {
         let parsed: ContextConfig = serde_json::from_value(json!({})).expect("an empty row parses");
         assert_eq!(parsed, ContextConfig::default());
+    }
+
+    /// A store that counts how the service asks for the surface: node by node, or in one call.
+    struct CountingStore {
+        inner: MemoryStore,
+        per_node: std::sync::atomic::AtomicUsize,
+        whole: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ContextStore for CountingStore {
+        type Handle = crate::testing::MemorySession;
+
+        fn count(&self, session: &Self::Handle) -> Result<u64, crate::store::StoreError> {
+            self.inner.count(session)
+        }
+
+        fn read(
+            &self,
+            session: &Self::Handle,
+        ) -> Result<Vec<crate::store::LogEvent>, crate::store::StoreError> {
+            self.inner.read(session)
+        }
+
+        fn surface(
+            &self,
+            session: &Self::Handle,
+        ) -> Result<crate::store::SurfaceState, crate::store::StoreError> {
+            self.inner.surface(session)
+        }
+
+        fn derive_node(
+            &self,
+            session: &Self::Handle,
+            seq: u64,
+        ) -> Result<Option<Message>, crate::store::StoreError> {
+            self.per_node.fetch_add(1, Ordering::Relaxed);
+            self.inner.derive_node(session, seq)
+        }
+
+        fn derive_surface(
+            &self,
+            session: &Self::Handle,
+        ) -> Result<Vec<crate::store::SurfaceNode>, crate::store::StoreError> {
+            self.whole.fetch_add(1, Ordering::Relaxed);
+            self.inner.derive_surface(session)
+        }
+
+        fn append(
+            &self,
+            session: &Self::Handle,
+            event: serde_json::Value,
+            options: crate::store::AppendOptions,
+        ) -> Result<u64, crate::store::StoreError> {
+            self.inner.append(session, event, options)
+        }
+    }
+
+    #[test]
+    fn a_round_derives_the_surface_in_whole_calls_never_node_by_node() {
+        let scratch = Scratch::new("counting");
+        let store = Arc::new(CountingStore {
+            inner: MemoryStore::new(),
+            per_node: std::sync::atomic::AtomicUsize::new(0),
+            whole: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let session = store.inner.open("s");
+        store
+            .inner
+            .message(&session, text_message(Role::System, "be brief"));
+        for index in 0..40 {
+            store.inner.message(
+                &session,
+                text_message(Role::User, format!("turn {index} {}", "w".repeat(200))),
+            );
+        }
+        let mut tool = text_message(Role::Tool, "x".repeat(30_000));
+        tool.tool_call_id = Some("call-1".to_string());
+        store.inner.message(&session, tool);
+
+        let service = ContextService::new(
+            store.clone(),
+            ContextConfig {
+                context_window: Some(3000),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(
+                scratch.path(),
+                Some(Arc::new(ScriptedModel {
+                    summary: "brief".to_string(),
+                    ..ScriptedModel::default()
+                })),
+            ),
+        );
+        let report = block_on(service.prepare(
+            &session,
+            &PrepareOptions {
+                cwd: scratch.path(),
+                endpoint: "local",
+                model: None,
+                tools: &[],
+                system: None,
+                summarizer: None,
+                force: false,
+            },
+        ))
+        .expect("the round prepares");
+        assert_eq!(
+            report.pruned, 1,
+            "the round pruned, so the pruner's walk ran too"
+        );
+        assert_eq!(
+            store.per_node.load(Ordering::Relaxed),
+            0,
+            "no node was derived on its own: a store indexes the log once per surface"
+        );
+        assert!(store.whole.load(Ordering::Relaxed) > 0);
     }
 }

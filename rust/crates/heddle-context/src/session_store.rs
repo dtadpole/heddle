@@ -10,7 +10,7 @@
 
 use heddle_session::{SessionHandle, SessionStore};
 
-use crate::store::{AppendOptions, ContextStore, LogEvent, StoreError, SurfaceState};
+use crate::store::{AppendOptions, ContextStore, LogEvent, StoreError, SurfaceNode, SurfaceState};
 use crate::types::Message;
 
 impl ContextStore for SessionStore {
@@ -47,6 +47,26 @@ impl ContextStore for SessionStore {
         seq: u64,
     ) -> Result<Option<Message>, StoreError> {
         SessionStore::derive_node(self, session, seq).map_err(to_store_error)
+    }
+
+    /// One read and one index for the whole surface: `SessionStore::derive_node` indexes the log on
+    /// every call, so deriving node by node would be quadratic in a long session.
+    fn derive_surface(&self, session: &SessionHandle) -> Result<Vec<SurfaceNode>, StoreError> {
+        let events = SessionStore::read(self, session).map_err(to_store_error)?;
+        let by_seq = heddle_session::index_by_seq(events.as_slice());
+        let state = SessionStore::surface(self, session).map_err(to_store_error)?;
+        Ok(state
+            .nodes
+            .iter()
+            .map(|seq| SurfaceNode {
+                seq: *seq,
+                message: heddle_session::derive_message(&by_seq, *seq),
+            })
+            .collect())
+    }
+
+    fn derive_messages(&self, session: &SessionHandle) -> Result<Vec<Message>, StoreError> {
+        SessionStore::derive_messages(self, session).map_err(to_store_error)
     }
 
     fn append(
