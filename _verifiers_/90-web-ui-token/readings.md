@@ -1,9 +1,9 @@
 ---
 title: 90-web-ui-token — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-23T05:06:41Z
+modified: 2026-10-23T05:36:13Z
 level: L3
-version: 1.0.0
+version: 1.1.0
 description: The measured verdicts of 90-web-ui-token against the TypeScript build and the Rust binary.
 status: unverified
 grounded_in:
@@ -18,6 +18,7 @@ grounded_in:
 | about 20:17 | a recording `HEDDLE_BIN` stand-in that runs the same build | 9 of 9; twelve server starts reached the stand-in |
 | about 20:25 | the Rust binary, whose `--help` names no `web` | 9 of 9 unjudged |
 | about 22:00 | main's binary at `a871aae`, by the lane gate | 9 of 9 unjudged, none failed |
+| about 22:10 | developer-two's `web` (22bd865) in the ui lane at `6910c6e`, release binary, by the lane gate — not on main | **9 of 9** — the first ui part met through the Rust binary |
 
 **Part 10 through `HEDDLE_BIN` is not met**: unjudged is not passing, and the part waits on the binary serving `web`.
 It is the first ui part to attempt when `web` starts, because its checks need only the door. The lane gate:
