@@ -405,7 +405,8 @@ impl ServerBuilder {
             // web.ts has no method table: a request whose path matches but whose method does not
             // falls through to the same `404 not found`, so a wrong method is not a 405 here either.
             .method_not_allowed_fallback(fallback_route)
-            .layer(middleware::from_fn_with_state(state.clone(), door));
+            .layer(middleware::from_fn_with_state(state.clone(), door))
+            .layer(middleware::from_fn(catch_panics));
         Ok((router, state))
     }
 
@@ -594,6 +595,33 @@ where
                 })
                 .unwrap_or_else(|| "two routers claim the same route".to_owned());
             Err(ServerError::Route(format!("{name}: {detail}")))
+        }
+    }
+}
+
+/// A handler that panics answers `500 internal error: <message>` instead of dropping the connection.
+///
+/// web.ts wraps every request in a catch for the same reason: a route that throws must not take the
+/// connection (or the next check, which then reports "fetch failed" about the wrong thing) with it.
+/// Outermost, so the door and every mounted feature are covered.
+async fn catch_panics(request: Request, next: Next) -> Response {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(next.run(request))
+        .catch_unwind()
+        .await
+    {
+        Ok(response) => response,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                })
+                .unwrap_or_else(|| "the route failed".to_owned());
+            respond::internal_error(message)
         }
     }
 }
@@ -1380,7 +1408,10 @@ async fn get_team(
     if !state.harness().sessions.exists(&session) {
         return respond::no_session(&session);
     }
-    let view = team.view(&session);
+    let view = match team.view(&session) {
+        Ok(view) => view,
+        Err(error) => return respond::internal_error(error.message),
+    };
     respond::json(
         StatusCode::OK,
         &json!({
@@ -2884,6 +2915,115 @@ mod tests {
                 "{method} {path} fell through to the fallback"
             );
         }
+    }
+
+    struct BrokenTeam;
+
+    impl crate::services::TeamService for BrokenTeam {
+        fn view(&self, _session: &str) -> Result<crate::services::TeamView, ServiceError> {
+            Err(ServiceError::with_code(
+                "member alpha is active without provisioning",
+                "TEAM_MEMBER_PHASE",
+            ))
+        }
+    }
+
+    struct WorkingTeam;
+
+    impl crate::services::TeamService for WorkingTeam {
+        fn view(&self, _session: &str) -> Result<crate::services::TeamView, ServiceError> {
+            Ok(crate::services::TeamView {
+                lead: serde_json::json!("lead"),
+                members: serde_json::json!([{"name": "lead", "role": "lead", "status": "inactive"}]),
+                tasks: serde_json::json!([]),
+                messages: serde_json::json!([]),
+                delivered: serde_json::json!([]),
+            })
+        }
+    }
+
+    async fn team_answer(
+        team: Arc<dyn crate::services::TeamService>,
+        label: &str,
+    ) -> (StatusCode, String) {
+        let mut harness = harness();
+        harness.team = Some(team);
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret(label)),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/team?session=session-00000000-0000-0000-0000-000000000001",
+            Some(&cookie),
+        )
+        .await;
+        (status, body_text(&bytes))
+    }
+
+    #[tokio::test]
+    async fn a_refused_team_fold_is_the_typescript_internal_error() {
+        let (status, body) = team_answer(Arc::new(BrokenTeam), "team-broken").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body,
+            "internal error: member alpha is active without provisioning\n"
+        );
+
+        let (status, body) = team_answer(Arc::new(WorkingTeam), "team-working").await;
+        assert_eq!(status, StatusCode::OK);
+        let view: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["lead"], "lead");
+        assert_eq!(view["members"][0]["role"], "lead");
+    }
+
+    struct PanickingFeature;
+
+    impl Feature for PanickingFeature {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        fn routes(&self) -> Router<AppState> {
+            Router::new().route(
+                "/api/boom",
+                get(|| async {
+                    panic!("the boom route failed");
+                    #[allow(unreachable_code)]
+                    ""
+                }),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_route_answers_500_instead_of_dropping_the_connection() {
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("panic")),
+                ..ServerOptions::default()
+            },
+        )
+        .mount(PanickingFeature);
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/boom", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body_text(&bytes), "internal error: the boom route failed\n");
+        // The router keeps answering after the panic.
+        let (status, _, _) = call(&router, Method::GET, "/healthz", None).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     struct DuplicateFeature;

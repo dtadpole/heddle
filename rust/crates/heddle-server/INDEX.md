@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (122 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (124 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -101,7 +101,7 @@ to confirm or move a row.
 | `GET /api/tree`, `POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}` | heddle-server | over `WorkspaceService` |
 | `POST /api/workspaces/pick` | heddle-web-files | the platform folder picker |
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |
-| `GET`, `POST /api/goal`, `GET /api/todo`, `GET /api/team` | heddle-server | over the goal, todo and team traits |
+| `GET`, `POST /api/goal`, `GET /api/todo`, `GET /api/team` | heddle-server | over the goal, todo and team traits; a team log that refuses to fold answers `500 internal error: <message>`, as web.ts's catch-all does |
 | `GET /api/endpoints`, `GET /api/context` | heddle-web-composer | |
 | `GET /api/html`, `GET /vendor/purify.js` | heddle-server | `html.ts` is this crate's; the sanitiser is served as `text/javascript` so the preview page can run it |
 | `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`, `GET /api/file`, `POST /api/markdown` | heddle-web-files | use `respond::file_bytes` and `inline_content_type` |

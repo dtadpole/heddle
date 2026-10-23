@@ -453,7 +453,11 @@ pub struct TeamView {
 }
 
 pub trait TeamService: Send + Sync {
-    fn view(&self, session: &str) -> TeamView;
+    /// The session's team as one fold. `Err` when the team log refuses to fold (a member active without
+    /// provisioning, a skipped task revision, a foreign team id, …); the route answers it as the
+    /// TypeScript server's catch-all does, `500 internal error: <message>`, rather than hiding a broken
+    /// team behind an empty panel.
+    fn view(&self, session: &str) -> Result<TeamView, ServiceError>;
 }
 
 // ---------------------------------------------------------------------------------------------------------
