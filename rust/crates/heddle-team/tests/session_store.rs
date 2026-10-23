@@ -731,3 +731,119 @@ fn the_team_view_fixture_renders_the_roster_board_and_mailbox_the_check_reads() 
         "a session with no team shows no panel"
     );
 }
+
+/// A `TeamAgent` that records a member turn's prompt the way `heddle-agent`'s `begin_turn` does, and runs no model.
+struct PromptOnlyAgent {
+    store: Arc<SessionTeamStore>,
+}
+
+impl heddle_team::plugin::TeamAgent for PromptOnlyAgent {
+    fn begin_turn(
+        &self,
+        request: heddle_team::plugin::TeamTurnRequest,
+    ) -> Result<TurnFuture, String> {
+        self.store
+            .user_message(
+                &request.session,
+                vec![json!({ "type": "text", "text": request.prompt })],
+                request.source,
+            )
+            .map_err(|error| error.0)?;
+        Ok(Box::pin(async { Ok(()) }))
+    }
+
+    fn default_endpoint(&self) -> Option<String> {
+        Some("scripted".to_owned())
+    }
+}
+
+/// **Kept on purpose, as the TypeScript build does it**: the collaboration policy is made durable on the Lead's
+/// first team journal write, which happens while the Lead's first team tool call runs. So the note lands between
+/// the assistant's tool call and that tool's result, and the next request reads `user, assistant, system, tool`.
+/// Strict chat APIs refuse a tool call not followed directly by its result; whether the harness should move the
+/// note is an open question about the TypeScript build, put to its owner (coordinator, 2026-10-22). The port
+/// stays byte-faithful until that changes, and this test fails the day the order moves in either direction.
+#[tokio::test]
+async fn the_policy_note_lands_between_the_leads_first_team_tool_call_and_its_result_as_in_the_typescript_build()
+ {
+    let home = Scratch::new("order-home");
+    let work = Scratch::new("order-work");
+    let store = open_store(&home.0.join("sessions"));
+    let lead = store
+        .store
+        .create(CreateOptions {
+            cwd: Some(work.text()),
+            endpoint: Some("scripted".to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the Lead session");
+    let store_dependency: Arc<dyn TeamStore> = store.clone();
+    let plugin = heddle_team::plugin::TeamPlugin::install(heddle_team::plugin::TeamPluginDeps {
+        store: store_dependency,
+        agent: Arc::new(PromptOnlyAgent {
+            store: Arc::clone(&store),
+        }),
+        live: None,
+        config: heddle_team::plugin::TeamConfig::default(),
+        emit_changed: None,
+        warn: None,
+    });
+    let message = |role: Role, content: Vec<ContentPart>, tool_call_id: Option<&str>| Message {
+        role,
+        tool_call_id: tool_call_id.map(str::to_owned),
+        content,
+        source: None,
+    };
+    let text = |text: &str| ContentPart::Text {
+        text: text.to_owned(),
+    };
+    // The agent's order: the prompt, the assistant's tool call, the tool's run, then the tool's result.
+    store
+        .store
+        .message(
+            &lead,
+            message(Role::User, vec![text("Lead: do the team work")], None),
+        )
+        .expect("the prompt");
+    let call: ContentPart = serde_json::from_value(
+        json!({ "type": "tool-call", "id": "call-1", "name": "spawn_teammate", "arguments": "{}" }),
+    )
+    .expect("a tool-call part");
+    store
+        .store
+        .message(&lead, message(Role::Assistant, vec![call], None))
+        .expect("the tool call");
+    let outcome = plugin
+        .tools
+        .call(
+            "spawn_teammate",
+            &json!({ "name": "alpha", "description": "the teammate", "prompt": "write the thing" }),
+            Some(&lead.id),
+        )
+        .await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    store
+        .store
+        .message(
+            &lead,
+            message(Role::Tool, vec![text(&outcome.output)], Some("call-1")),
+        )
+        .expect("the tool result");
+
+    let messages = store
+        .store
+        .derive_messages(&lead)
+        .expect("the Lead's surface derives");
+    let roles: Vec<Role> = messages.iter().map(|message| message.role).collect();
+    assert_eq!(
+        roles,
+        vec![Role::User, Role::Assistant, Role::System, Role::Tool],
+        "the policy note sits between the tool call and its result, as in the TypeScript build"
+    );
+    assert!(
+        serde_json::to_string(&messages[2].content)
+            .expect("the note's content serializes")
+            .contains("Agent Teams is available in this session"),
+        "the system message is the team policy"
+    );
+}
