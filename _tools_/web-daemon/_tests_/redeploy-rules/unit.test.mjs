@@ -73,6 +73,14 @@ function fixture({ change = 'tooling' } = {}) {
       mkdirSync(join(work, path, '..'), { recursive: true })
       writeFileSync(join(work, path), body)
     }
+  } else if (change === 'daemon-inert') {
+    // This tool's own files that the running service never loads.
+    for (const [path, body] of [['_tools_/web-daemon/preview.sh', '#!/bin/sh\n'], ['_tools_/web-daemon/rehearse.sh', '#!/bin/sh\n'], ['_tools_/web-daemon/_tests_/x/unit.test.mjs', '\n'], ['_tools_/web-daemon/INDEX.md', 'docs\n']]) {
+      mkdirSync(join(work, path, '..'), { recursive: true })
+      writeFileSync(join(work, path), body)
+    }
+  } else if (change === 'daemon-live') {
+    writeFileSync(join(tools, 'supervisor.mjs'), '// changed on main\n')
   } else if (change === 'src') {
     mkdirSync(join(work, 'src'), { recursive: true })
     writeFileSync(join(work, 'src', 'server.ts'), 'export {}\n')
@@ -235,4 +243,20 @@ test('a change under src/ always rebuilds and restarts, even with a build presen
   built(f)
   assert.equal(redeploy(f).status, 0)
   assert.deepEqual(calls(f), full)
+})
+
+test('within this tool only the supervisor, the installer and its templates restart the server; the rest of it does not', () => {
+  // Measured 2026-10-23: a merge that changed only preview.sh and its tests restarted the live server, which minted
+  // a new launch token and broke the owner's link for nothing.
+  const inert = fixture({ change: 'daemon-inert' })
+  built(inert)
+  const quiet = redeploy(inert)
+  assert.equal(quiet.status, 0, quiet.stderr)
+  assert.match(quiet.stdout, /nothing the server loads at start changed, so no rebuild or restart/)
+  assert.ok(calls(inert).every((line) => !line.startsWith('install')), 'no install, so no restart')
+  const live = fixture({ change: 'daemon-live' })
+  built(live)
+  const moved = redeploy(live)
+  assert.equal(moved.status, 0, moved.stderr)
+  assert.ok(calls(live).some((line) => line.startsWith('install') && line.includes('--restart')), 'a new supervisor is installed')
 })
