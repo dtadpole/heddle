@@ -1,8 +1,8 @@
 ---
 title: The heddle-events crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:06:23Z
-version: 0.3.0
+modified: 2026-10-23T05:20:46Z
+version: 0.4.0
 description: The Rust port crate for the event bus and the named hook points, with Cordis's emit, parallel, serial, bail and waterfall modes — its public API, who uses which part, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -76,7 +76,7 @@ feature crate adapts behind the seam). The binary is the only crate that builds 
 | 4b | The component shape (D-031): listeners declared in `initialize`, `merge` for a post-execute rewrite that keeps the tool's result, `RpcListener` so one process serves tools and listeners, and a child's own requests answered without id collisions | landed |
 | 4c | The port bridge: `llm`, `tools` and `agent` intercept through ports of their own, synchronous and without this crate; `bridge` makes an adapter over the bus a few lines in whichever crate holds it | landed |
 | 4d | The port adapters (`ports`): the boot passes one `BusHooks` where it passes the no-listener defaults today, for model requests, tool calls and rounds | landed |
-| 5 | `60-hooks` through `HEDDLE_BIN`: the verifier branch that writes each hook as a `.component.yml` and a process is on main; the boot's bus wiring (developer-two) is what remains. Rehearsal on developer-two's f45993a with only `SERVED` edited (2026-10-22): 1 of 6 checks passes, and the five failures are that one step | waiting on the boot |
+| 5 | `60-hooks` through `HEDDLE_BIN`: the verifier's process-hook branch and its `_tests_/process-hooks` are on main, and the boot wires the bus (`12b21d1`). Rehearsal on developer-two's `3df3cc6` with only `SERVED` edited (`Hooks` and `Turn`, which the probe requires together): **6 of 6 pass**, `verify.sh` verdict 0 (2026-10-23). The rehearsal on `f45993a`, before the wiring, had 1 of 6 | passes in rehearsal; judged in the lane once the binary serves `hooks` and `--turn` |
 
 ## Read next
 

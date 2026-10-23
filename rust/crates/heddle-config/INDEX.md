@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:19:17Z
+modified: 2026-10-23T05:21:28Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -207,7 +207,7 @@ that validates is one that starts.
 | the name in `initialize`, errors and logs | **the row's `id`**, the same name `config --validate` and the boot's `N row(s) failed to load: <id>` use, so one broken row has one name everywhere |
 
 The two last rows are agreed with developer-five, who owns the process protocol (2026-10-22). **Where the binary still
-differs:** as of main `8072846` it names the running component by the manifest's file name without `.component.yml`,
+differs:** as of main `43fd346` it names the running component by the manifest's file name without `.component.yml`,
 so `id: alpha` naming `./shout.component.yml` says `shout` once running. `Catalog::component(&ComponentRef)` does not
 carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change is developer-two's.
 
@@ -275,6 +275,7 @@ it judges.
 | 2026-10-22 | lane `cdea647` (`c94d6b1` plus hook and tool process tests in the 40 and 60 verifiers, and six lockfile lines with no version moved; 05 and the runner untouched) | `HEDDLE_BIN=<debug build of exactly cdea647> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | main `0e7ffea` (`12b21d1`, one event bus per run and the hook points over it, plus a status doc) | `HEDDLE_BIN=<debug build of exactly 12b21d1> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | lane `95708c4` (the turn's hooks chain the overflow recovery after the bus; the binary changed) | `HEDDLE_BIN=<debug build of exactly 95708c4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | main `43fd346` (`3f8f744`: agent, team and events increments, a real outside component driven through the listeners, and the lockfile; `43fd346` adds a status doc) | `HEDDLE_BIN=<debug build of exactly 3f8f744> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated `3f8f744` and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
 
 ## Decisions the contract makes
 
