@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.7.6
+version: 0.8.0
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `5d1cec1`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `e69f552`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -49,26 +49,28 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
     40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**18 check files, 117 checks: 112 passed, 1 failed, 4 unjudged. Parts 0, 2, 3, 4, 5, 6 and 8 pass.** Since `b72cc1a` the
+**18 check files, 117 checks: 113 passed, 0 failed, 4 unjudged. Parts 0 and 2 to 8 pass; part 1 passes its six local checks.** Since `b72cc1a` the
 binary advertises `web`, `--turn`, `--stream`, `context`, `tools`, `hooks` and `models` beside configuration, sessions,
 workspaces and goal, so the checks that skipped at their capability probe are judged now: 91 checks turned from unjudged
 to passing, and none of the 21 that passed before stopped passing (compared check by check against a run on the previous
 `main`). Under D-048 a merge may open failing checks when it turns at least one into a pass and breaks none, provided
-this table names each failing check and the code that owns it — below, for both lanes.
+this table names each failing check and the code that owns it.
 
-**Failing, with owners:**
+**Failing, with owners:** none in the backend lane since `e69f552`. Part 7's last failure — the follow-up
+`POST /api/turn` on an existing session answering `400` — was the server's model adapter in `web.rs` answering the
+service default with the nominated endpoint only; it now falls back to the first endpoint, as `src/llm/service.ts`
+does, and `70-workspaces-sessions` passes 45 of 45.
 
-- `70-workspaces-sessions` — *a written session moves to the top of its folder, its age follows, and a real pin click
-  holds it there*: the follow-up `POST /api/turn` on an existing session answers `400`, not `200` (owned by the served turn route:
-  `rust/crates/heddle/src/web.rs` and `heddle-server`). Cause found: the server's model adapter in `web.rs` answers the
-  service default with the nominated endpoint only, where TypeScript falls back to the first endpoint
-  (`src/llm/service.ts`, as the binary's own CLI adapter already does), so a session with no recorded endpoint gets none.
-- In the ui lane's parts, measured by its baseline gate on `main` `4fc75f1` (release build): 85, 87, 88 and 90 pass in
-  full, and `80-web-ui` passes 73 of 75. Failing: `check-chat-view` #15, the weaving clock — `[data-chat-running]` is
-  still present after 30 s (owned by `heddle-server`); `check-goal` #1, intermittent (about 1 in 12) — after a restart,
-  `POST /api/goal` "complete" answers 404 "no session" for a session `GET /api/goal` still finds (owned by `web.rs`'s goal
-  route). Fixed since `9319116`: `check-context-view` #1 and `check-file-view` #1 (`heddle-web-composer` and
-  `heddle-web-files`, at `77fb012`); `check-goal` #4 and `check-trajectory-view` were the checks' own waits.
+**The ui lane's parts:** part 9 is met on `main` `33407a4` by the ui lane's gate — `80-web-ui` passes all 75 checks in
+two runs, and 85, 87 and 88 pass in full; part 10 passes 9 of 9. Three checks are intermittent through the binary:
+`check-chat-view` #11 and #16 (owned by the served web: `web.rs` and `heddle-server`; #16 failed 1 in 26 alone under
+load, the page settling on a prefix of the answer) and `check-goal` #1 (owned by `web.rs`'s goal route: after a
+restart, `POST /api/goal` "complete" can answer 404 for a session `GET /api/goal` still finds). Measured again in the
+backend lane on `e69f552`'s binary, which gates no ui merge: 88 of 90, 0 regressed against `main`'s binary. Its two
+failures fail on `main`'s binary as well: `80-web-ui/check.mjs`'s default-port check, because this Mac's live
+deployment already listens on the documented default port, and `88-file-preview`'s html preview, which timed out
+waiting for the preview to show — the ui lane read 88 in full on `33407a4`, so it is to be confirmed there (owned by
+`heddle-web-files`).
 
 **Fixed in the check:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in some full lane runs and never alone.
 Its poll for the teammate parsed each session's metadata while the binary could be writing it — both builds write that
@@ -101,10 +103,10 @@ check's capability probe asks for every command it runs, matched as a command li
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | **passes** — 6 of 6; outside tools are processes under `HEDDLE_BIN` |
 | 5 agentic loop | `_verifiers_/50-agentic-loop` | **passes** — 9 of 9 |
 | 6 hooks | `_verifiers_/60-hooks` | **passes** — 6 of 6; hooks are processes under `HEDDLE_BIN` |
-| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 44 pass, **1 fail** (above, with its owner) |
+| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | **passes** — 45 of 45 |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | **passes** — 17 of 17 (two consecutive runs) |
-| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | judged in the ui lane on `4fc75f1`: 79 pass, **2 fail** (listed above with owners); 85, 87 and 88 pass in full |
-| 10 token | `_verifiers_/90-web-ui-token` | **passes** — 9 of 9 (ui lane, on `4fc75f1`) |
+| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | **met** in the ui lane on `33407a4` — 80 passes 75 of 75 in two runs, 85, 87 and 88 in full; three checks intermittent (above) |
+| 10 token | `_verifiers_/90-web-ui-token` | **passes** — 9 of 9 (ui lane, on `33407a4`) |
 | 11 Web UI daemon | `_verifiers_/95-web-daemon` | not run in a lane gate: its stays-up check restarts the live server (D-045); the ui lane reads it |
 | model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged on this machine, on either build: both need a machine-local endpoint configuration |
 

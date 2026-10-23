@@ -673,8 +673,12 @@ impl ServerModels for Models {
         self.service.names()
     }
 
+    /// The endpoint a turn uses when neither the request nor the session names one (`defaultEndpoint`):
+    /// the configuration's nominated default when it exists, else the first endpoint, as
+    /// `src/llm/service.ts` answers. Only the nominated one left a session with no recorded endpoint
+    /// with none at all, and its follow-up turn was refused.
     fn default_endpoint(&self) -> Option<String> {
-        self.service.nominated()
+        self.service.default_endpoint(None)
     }
 
     fn declares_level(&self, endpoint: &str, model: Option<&str>, effort: &str) -> bool {
@@ -1359,6 +1363,23 @@ mod tests {
         assert!(harness.todos.is_none());
         assert!(harness.team.is_none());
         assert!(boot_notes(&boot).await.is_empty());
+    }
+
+    #[test]
+    fn the_server_default_endpoint_falls_back_to_the_first() {
+        let mut endpoints = heddle_config::default_endpoints();
+        let mut second = endpoints[0].clone();
+        second.name = "second".into();
+        endpoints.push(second);
+        let service = Arc::new(heddle_llm::ModelService::new(endpoints).unwrap());
+        let models = Models {
+            service: Arc::clone(&service),
+        };
+        // Nothing nominated: the first endpoint, not none.
+        assert_eq!(models.default_endpoint().as_deref(), Some("scripted"));
+        // A nominated default that exists wins.
+        service.nominate_default("second");
+        assert_eq!(models.default_endpoint().as_deref(), Some("second"));
     }
 
     fn empty_boot() -> Boot {
