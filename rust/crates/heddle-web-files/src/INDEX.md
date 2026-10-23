@@ -20,7 +20,6 @@ source; the order below is the crate's layering, each module depending only on t
 | [`highlight.rs`](highlight.rs) | the one highlighter, in `highlight.js`'s class vocabulary (`highlight.ts`) |
 | [`markdown.rs`](markdown.rs) | GFM markdown, link and image rules, frontmatter (`markdown.ts`) |
 | [`code.rs`](code.rs) | the renderer decision and the gutter code renderer (`code.ts`) |
-| [`html_preview.rs`](html_preview.rs) | an HTML document as a page: resource rewriting and its policy (`html.ts`, proposed) |
 | [`uploads.rs`](uploads.rs) | the upload store under `$HEDDLE_HOME/uploads` (`uploads.ts`) |
 | [`attachments.rs`](attachments.rs) | attachment references into content parts, and transcript cards (`attachments.ts`) |
 | [`picker.rs`](picker.rs) | the platform folder dialog behind an injectable runner (`picker.ts`) |

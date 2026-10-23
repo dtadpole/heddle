@@ -9,10 +9,23 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# The contract needs only these. The renderer libraries (a GFM markdown parser and a grammar-based highlighter),
-# the process runner and the clock arrive with the bodies that use them; see INDEX.md, "Port plan".
+# The contract needed the first four. The renderer libraries arrived with the bodies that use them; see INDEX.md,
+# "Port plan". Their versions live here rather than in the workspace table because only this crate renders.
 [dependencies]
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# The folder picker spawns the platform's dialog and bounds it in time.
+tokio.workspace = true
+# Markdown: a port of cmark-gfm, so tables, task lists, strikethrough and autolinks render as GitHub does.
+comrak = { version = "0.29", default-features = false }
+# Highlighting: Sublime's grammar engine with bat's syntax set, mapped onto highlight.js's class names.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+# The sha256 an attachment records is the digest of the bytes as they were attached.
+sha2 = "0.10"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1" 
