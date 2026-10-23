@@ -26,6 +26,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`store.rs`](store.rs) | the `ContextStore` port this crate needs from the session store |
 | [`types.rs`](types.rs) | `heddle-llm`'s message types, re-exported, and `text_message` |
 | [`testing.rs`](testing.rs) | `MemoryStore`, an in-memory `ContextStore`, behind the `testing` feature |
+| [`session_store.rs`](session_store.rs) | `impl ContextStore for heddle-session::SessionStore`, the real store bound to this crate's trait |
 | [`error.rs`](error.rs) | `ContextError` |
 | [`text.rs`](text.rs) | the JavaScript string rules the numbers rest on: UTF-16 length and `trim()` |
 

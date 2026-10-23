@@ -332,3 +332,146 @@ fn generated_text_matches_the_oracle() {
         );
     }
 }
+
+/// The `model/request` record, built by Node exactly as the TypeScript build builds it: the store's
+/// `{ seq, at, ...event }` around the agent loop's literal (`src/agent/loop.ts`, `modelRequest(...)`), with
+/// its conditional spreads. The key order on disk comes from that literal, not from any type declaration,
+/// so this is the check that `ModelRequestRecord`'s field order is the loop's.
+#[test]
+fn a_model_request_line_is_what_the_typescript_loop_writes() {
+    use heddle_session::{ModelRequestBreakdown, ModelRequestRecord, SessionStore};
+
+    let home = match tempfile::tempdir() {
+        Ok(home) => home,
+        Err(_) => return,
+    };
+    let store = SessionStore::new(
+        home.path().to_str().expect("a UTF-8 temp path"),
+        &heddle_config::Env::default(),
+    );
+    let handle = store
+        .create(heddle_session::CreateOptions {
+            cwd: Some("/home/me/work".to_string()),
+            ..Default::default()
+        })
+        .expect("a session");
+
+    // Every field the loop can write, then the minimal record (no model, no level, no context facts).
+    let full = ModelRequestRecord {
+        endpoint: "scripted".to_string(),
+        model: Some("m1".to_string()),
+        reasoning_effort: Some("high".to_string()),
+        messages: 3,
+        tools: vec!["read_file".to_string(), "write_file".to_string()],
+        estimated_tokens: Some(1200),
+        threshold_tokens: Some(96000),
+        pruned: Some(0),
+        compacted: Some(false),
+        breakdown: Some(ModelRequestBreakdown {
+            system: Some(400),
+            tools: Some(300),
+            messages: Some(500),
+        }),
+        generation: Some(4),
+    };
+    let minimal = ModelRequestRecord {
+        endpoint: "scripted".to_string(),
+        messages: 1,
+        tools: Vec::new(),
+        ..Default::default()
+    };
+    let written: Vec<_> = [&full, &minimal]
+        .iter()
+        .map(|record| store.model_request(&handle, record).expect("an append"))
+        .collect();
+
+    let directory = match tempfile::tempdir() {
+        Ok(directory) => directory,
+        Err(_) => return,
+    };
+    let script = directory.path().join("model-request.mjs");
+    std::fs::write(
+        &script,
+        r#"
+const cases = JSON.parse(process.argv[2])
+const lines = cases.map(({ seq, at, options, report, generation, tools, messages }) => {
+  // src/agent/loop.ts: ctx.session.store.modelRequest(options.session, { ... })
+  const request = {
+    endpoint: options.endpoint,
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
+    messages,
+    tools,
+    estimatedTokens: report.estimatedTokens,
+    thresholdTokens: report.thresholdTokens,
+    pruned: report.pruned,
+    compacted: report.compacted,
+    breakdown: report.breakdown,
+    generation,
+  }
+  // src/session/store.ts: modelRequest appends { type: 'model/request', ...request }, and append writes
+  // { seq, at, ...event }.
+  return JSON.stringify({ seq, at, ...{ type: 'model/request', ...request } })
+})
+process.stdout.write(JSON.stringify(lines) + '\n')
+"#,
+    )
+    .expect("the script is written");
+
+    let cases = serde_json::json!([
+        {
+            "seq": written[0].seq, "at": written[0].at,
+            "options": { "endpoint": "scripted", "model": "m1", "reasoningEffort": "high" },
+            "messages": 3, "tools": ["read_file", "write_file"],
+            "report": {
+                "estimatedTokens": 1200, "thresholdTokens": 96000, "pruned": 0, "compacted": false,
+                "breakdown": { "system": 400, "tools": 300, "messages": 500 }
+            },
+            "generation": 4
+        },
+        {
+            "seq": written[1].seq, "at": written[1].at,
+            "options": { "endpoint": "scripted" },
+            "messages": 1, "tools": [],
+            "report": {},
+            "generation": null
+        }
+    ]);
+    let output = match Command::new("node")
+        .arg(&script)
+        .arg(cases.to_string())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: node is not installed, so the model/request oracle cannot be run");
+            return;
+        }
+        Err(error) => panic!("running node failed: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "the model/request oracle failed\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<String> =
+        serde_json::from_slice(&output.stdout).expect("the oracle prints a JSON array");
+
+    // The minimal case passes `generation: null` to Node, which JSON.stringify would write; the loop always
+    // has a generation, so the real minimal record omits only what the loop's spreads omit. Compare the full
+    // case whole, and the minimal case with the absent `generation` removed on the oracle side.
+    assert_eq!(
+        written[0].to_line(),
+        expected[0],
+        "the full model/request line differs from the TypeScript loop's"
+    );
+    let minimal_expected = expected[1].replace(",\"generation\":null", "");
+    assert_eq!(
+        written[1].to_line(),
+        minimal_expected,
+        "the minimal model/request line differs from the TypeScript loop's"
+    );
+    // And the file holds exactly those bytes, framed: a reader of the log sees the oracle's line.
+    let decoded = heddle_session::decode_transcript(&store.bytes(&handle));
+    assert_eq!(decoded.lines[decoded.lines.len() - 2], expected[0]);
+}

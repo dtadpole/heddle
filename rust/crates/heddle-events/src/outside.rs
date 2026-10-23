@@ -7,9 +7,10 @@
 //! 2. **The seam** — [`JsonListener`], anything that answers a `HookCall`, and the bridges that attach one to a
 //!    typed point: [`Scope::on_json_emit`], [`Scope::on_json_parallel`], [`Scope::on_json_waterfall`], or by
 //!    name with [`Scope::on_json`] for a point a crate [exposed](EventBus::expose_waterfall).
-//! 3. **The transport** — [`StdioListener`], a child process spoken to as line-delimited JSON, configured by
-//!    an [`OutsideListenerConfig`] row. *Proposed*: the framing below is to be made identical to
-//!    `heddle-tools`' outside-tool protocol once that is fixed, so one process client serves both.
+//! 3. **The transport** — a component process spoken to with `heddle-tools`' part-4 protocol. The boot that
+//!    already hosts the process as an outside component wraps that one client with [`RpcListener`] and attaches
+//!    the listeners the component declared with [`attach_declared`]; [`StdioListener`] is a stand-alone client
+//!    for the same wire, configured by an [`OutsideListenerConfig`].
 //!
 //! # Wire framing (JSON-RPC 2.0, the part-4 protocol)
 //!
@@ -35,18 +36,28 @@
 //! forwarded to the log and answered `null`; any other method is answered `-32601`), so its id space never
 //! collides with a pending hook call.
 //!
-//! # Configuration row (for the boot and the `60-hooks` branch)
+//! # Declaring listeners
 //!
-//! ```yaml
-//! - id: hook-1
-//!   name: outside-listener
-//!   config:
-//!     command: [node, ./retarget.mjs]
-//!     points: [model/request]
+//! A component is the frozen part-0 shape, `program` + `args` + `config` (D-031): the row names a manifest
+//! beside the profile, and the process says what it listens on when it answers `initialize`, the way a
+//! TypeScript hook plugin calls `ctx.on(point, …)` when it loads:
+//!
+//! ```text
+//! {"jsonrpc":"2.0","id":1,"result":{"tools":[],"listeners":[{"point":"model/request"},{"point":"tools/pre-execute","prepend":true}]}}
 //! ```
 //!
-//! `row`, `workspaceRoot` and `mode` in the handshake come from the row the boot built and the deployment;
-//! a listener started outside that context defaults them (`outside-listener`, the current directory,
+//! A [`ListenerDeclaration`] is `{point, prepend?, once?}`; an unknown key, a point no crate exposed, or a
+//! point named twice fails the row before anything is attached.
+//!
+//! # The replies, per mode
+//!
+//! In a waterfall: `next` runs the rest of the chain; `replace` returns `value` without running it; `merge`
+//! runs the rest of the chain and then sets `value`'s keys on its result — the post-execute hook that keeps
+//! what the tool produced (`{...next(), output: 'redacted'}`); `refuse` and an error end the dispatch. In a
+//! parallel point `next`, `replace` and `merge` succeed. An emit point is never answered.
+//!
+//! `row`, `workspaceRoot` and `mode` in the handshake come from the row the boot built and the deployment; a
+//! listener started outside that context defaults them (`outside-listener`, the current directory,
 //! `workspace-write`).
 
 use std::collections::{BTreeMap, HashMap};
@@ -90,6 +101,12 @@ pub enum HookReply {
     /// `tools/pre-execute` answer `{allowed:false, reason}`). Only meaningful in a waterfall.
     Replace {
         /// A value of the point's output type, serialized.
+        value: Value,
+    },
+    /// Run the rest of the chain, then set `value`'s keys on its result (shallow, as `{...result, ...value}`).
+    /// The result must serialize as an object. Only meaningful in a waterfall; elsewhere it acknowledges.
+    Merge {
+        /// An object whose keys replace or add to the result's.
         value: Value,
     },
     /// Refuse the step on purpose.
@@ -172,7 +189,7 @@ impl EventBus {
     pub fn expose_waterfall<E: WaterfallEvent>(&self)
     where
         E::Payload: Serialize,
-        E::Output: DeserializeOwned,
+        E::Output: Serialize + DeserializeOwned,
     {
         self.inner().expose(
             E::NAME,
@@ -235,7 +252,9 @@ impl Scope {
                 Box::pin(async move {
                     let call = hook_call::<E>(&payload, Mode::Parallel)?;
                     match listener.call(call).await? {
-                        HookReply::Next | HookReply::Replace { .. } => Ok(()),
+                        HookReply::Next | HookReply::Replace { .. } | HookReply::Merge { .. } => {
+                            Ok(())
+                        }
                         HookReply::Refuse { reason } => Err(HookError::refuse(reason)),
                         HookReply::Fail { message } => Err(HookError::fail(message)),
                     }
@@ -246,8 +265,8 @@ impl Scope {
     }
 
     /// Attach an outside listener to the [`WaterfallEvent`] `E`: `next` runs the rest of the chain, `replace`
-    /// returns its value (deserialized as `E::Output`; a value that does not deserialize is a failure),
-    /// `refuse` and `fail` end the dispatch.
+    /// returns its value (deserialized as `E::Output`; a value that does not deserialize is a failure), `merge`
+    /// runs the rest and sets the value's keys on the result, `refuse` and `fail` end the dispatch.
     pub fn on_json_waterfall<E: WaterfallEvent>(
         &self,
         listener: Arc<dyn JsonListener>,
@@ -255,7 +274,7 @@ impl Scope {
     ) -> Listener
     where
         E::Payload: Serialize,
-        E::Output: DeserializeOwned,
+        E::Output: Serialize + DeserializeOwned,
     {
         self.on_waterfall::<E>(
             move |payload: Arc<E::Payload>, next: Next<E>| {
@@ -272,6 +291,10 @@ impl Scope {
                                 ))
                             })
                         }
+                        HookReply::Merge { value } => {
+                            let produced = next.run().await?;
+                            merge_into::<E>(produced, value)
+                        }
                         HookReply::Refuse { reason } => Err(HookError::refuse(reason)),
                         HookReply::Fail { message } => Err(HookError::fail(message)),
                     }
@@ -280,6 +303,188 @@ impl Scope {
             options,
         )
     }
+}
+
+/// `{...produced, ...patch}`: the chain's result with the patch's keys set on it, decoded back as the output.
+fn merge_into<E: WaterfallEvent>(produced: E::Output, patch: Value) -> Result<E::Output, HookError>
+where
+    E::Output: Serialize + DeserializeOwned,
+{
+    let Value::Object(patch) = patch else {
+        return Err(HookError::fail(format!(
+            "an outside listener's merge at {} must be an object",
+            E::NAME
+        )));
+    };
+    let mut merged = match serde_json::to_value(&produced) {
+        Ok(Value::Object(object)) => object,
+        Ok(_) => {
+            return Err(HookError::fail(format!(
+                "the result at {} is not an object, so a merge cannot apply to it",
+                E::NAME
+            )));
+        }
+        Err(error) => {
+            return Err(HookError::fail(format!(
+                "the result at {} does not serialize: {error}",
+                E::NAME
+            )));
+        }
+    };
+    for (key, value) in patch {
+        merged.insert(key, value);
+    }
+    serde_json::from_value::<E::Output>(Value::Object(merged)).map_err(|error| {
+        HookError::fail(format!(
+            "the value an outside listener merged at {} does not decode: {error}",
+            E::NAME
+        ))
+    })
+}
+
+/// One listener a component declared in its `initialize` answer: the point, and how it is registered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListenerDeclaration {
+    /// The exposed point's name.
+    pub point: String,
+    /// Run before the listeners already registered (the outermost hook).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepend: bool,
+    /// Release after the first call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub once: bool,
+}
+
+impl ListenerDeclaration {
+    /// A plain declaration: appended, kept.
+    pub fn on(point: impl Into<String>) -> Self {
+        Self {
+            point: point.into(),
+            prepend: false,
+            once: false,
+        }
+    }
+
+    fn options(&self) -> ListenOptions {
+        ListenOptions {
+            prepend: self.prepend,
+            once: self.once,
+        }
+    }
+}
+
+/// Read the `listeners` array a component answered `initialize` with — `heddle-tools`' `OutsideComponent`
+/// carries it as raw JSON. An entry that does not decode, or a point declared twice, fails the row.
+pub fn parse_listener_declarations(
+    values: &[Value],
+) -> Result<Vec<ListenerDeclaration>, OutsideError> {
+    let mut declarations: Vec<ListenerDeclaration> = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let declaration: ListenerDeclaration =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                OutsideError::Declaration(format!("listener {index} does not decode: {error}"))
+            })?;
+        if declarations
+            .iter()
+            .any(|seen| seen.point == declaration.point)
+        {
+            return Err(OutsideError::Declaration(format!(
+                "the point '{}' is declared twice",
+                declaration.point
+            )));
+        }
+        declarations.push(declaration);
+    }
+    Ok(declarations)
+}
+
+/// Attach `listener`, through `scope`, to every declared point. Every point is checked before any is
+/// attached, so a row with one bad point attaches nothing.
+pub fn attach_declared(
+    scope: &Scope,
+    listener: Arc<dyn JsonListener>,
+    declarations: &[ListenerDeclaration],
+) -> Result<Vec<Listener>, OutsideError> {
+    for declaration in declarations {
+        scope.bus().inner().attacher(&declaration.point)?;
+    }
+    let mut handles = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+        handles.push(scope.on_json(&declaration.point, listener.clone(), declaration.options())?);
+    }
+    Ok(handles)
+}
+
+/// A request to a component: `hooks/call`'s params in, the JSON-RPC result (or the error's message) out.
+pub type RpcRequestFn =
+    dyn Fn(Value) -> futures::future::BoxFuture<'static, Result<Value, String>> + Send + Sync;
+
+/// A notification to a component: `hooks/call`'s params, never answered.
+pub type RpcNotifyFn = dyn Fn(Value) + Send + Sync;
+
+/// A [`JsonListener`] over any client of the part-4 connection — the boot wraps the `OutsideComponent` that
+/// already hosts the process, so tools and listeners share one child and one line reader.
+///
+/// `request` sends `hooks/call` with the params and resolves to the result (an `Err` is the JSON-RPC error's
+/// message, a failed hook); `notify` sends it as a notification, for emit points.
+pub struct RpcListener {
+    request: Arc<RpcRequestFn>,
+    notify: Arc<RpcNotifyFn>,
+}
+
+impl RpcListener {
+    /// The method every dispatch is sent as.
+    pub const METHOD: &'static str = "hooks/call";
+
+    /// A listener over the two functions.
+    pub fn new(
+        request: impl Fn(Value) -> futures::future::BoxFuture<'static, Result<Value, String>>
+        + Send
+        + Sync
+        + 'static,
+        notify: impl Fn(Value) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            request: Arc::new(request),
+            notify: Arc::new(notify),
+        }
+    }
+}
+
+impl JsonListener for RpcListener {
+    fn call(&self, call: HookCall) -> HookFuture<HookReply> {
+        let params = match serde_json::to_value(&call) {
+            Ok(params) => params,
+            Err(error) => {
+                return Box::pin(async move {
+                    Err(HookError::fail(format!(
+                        "a hook call does not serialize: {error}"
+                    )))
+                });
+            }
+        };
+        let answer = (self.request)(params);
+        Box::pin(async move {
+            let value = answer.await.map_err(HookError::fail)?;
+            hook_reply_of(value)
+        })
+    }
+
+    fn notify(&self, call: HookCall) {
+        if let Ok(params) = serde_json::to_value(&call) {
+            (self.notify)(params);
+        }
+    }
+}
+
+/// A `hooks/call` result as a [`HookReply`]; anything else is a broken listener.
+fn hook_reply_of(value: Value) -> Result<HookReply, HookError> {
+    serde_json::from_value::<HookReply>(value).map_err(|error| {
+        HookError::fail(format!(
+            "the outside listener answered something that is not a hook reply: {error}"
+        ))
+    })
 }
 
 /// The default time an outside listener has to answer one call.
@@ -368,14 +573,21 @@ fn fail_pending(pending: &Mutex<PendingCalls>, message: &str) {
     }
 }
 
-/// One configured outside listener: the process to start and the points it listens on. Deserialized from a
-/// configuration row's `config`, with the TypeScript build's camel-case keys.
+/// One outside listener started by [`StdioListener`]: the frozen component shape, `program` + `args` +
+/// `config` (D-031), plus what the host decides. Camel-case keys.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutsideListenerConfig {
-    /// The program and its arguments; the program is resolved like a shell would, relative paths from `cwd`.
-    pub command: Vec<String>,
-    /// The exposed points to attach to.
+    /// The program to run — an executable; a script with a shebang is enough. Resolved through `PATH` when bare.
+    pub program: PathBuf,
+    /// Its arguments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// The row's `config` value, handed to the process in `initialize`.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub config: Value,
+    /// Points to attach to, overriding the process's declaration; empty means "what `initialize` declares".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<String>,
     /// The working directory; the configuration file's directory when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,9 +612,12 @@ pub struct OutsideListenerConfig {
 /// Starting or speaking to an outside listener failed.
 #[derive(Debug, thiserror::Error)]
 pub enum OutsideError {
-    /// The configuration cannot be used (an empty command, no points).
+    /// The configuration cannot be used (an empty program, nothing to listen on).
     #[error("outside listener configuration: {0}")]
     Config(String),
+    /// The process's `listeners` declaration does not decode.
+    #[error("outside listener declaration: {0}")]
+    Declaration(String),
     /// The process could not be started.
     #[error("outside listener could not start '{command}': {source}")]
     Spawn {
@@ -439,21 +654,30 @@ pub struct StdioListener {
     pending: Arc<Mutex<PendingCalls>>,
     next_id: AtomicU64,
     timeout: Duration,
+    /// What the process declared in its `initialize` answer.
+    declared: Mutex<Vec<ListenerDeclaration>>,
+    /// Set by the reader before its final drain: no answer can arrive any more.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StdioListener {
+    /// The listeners the process declared when it answered `initialize`.
+    pub fn declared(&self) -> Vec<ListenerDeclaration> {
+        self.declared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Start the configured process and complete the `initialize` handshake.
     ///
     /// Must be called inside a Tokio runtime. The child is killed when the last `Arc` to the listener drops.
     pub async fn spawn(config: &OutsideListenerConfig) -> Result<Arc<StdioListener>, OutsideError> {
-        if config.command.is_empty() {
-            return Err(OutsideError::Config("the command is empty".into()));
+        if config.program.as_os_str().is_empty() {
+            return Err(OutsideError::Config("the program is empty".into()));
         }
-        if config.points.is_empty() {
-            return Err(OutsideError::Config("no points are named".into()));
-        }
-        let mut command = Command::new(&config.command[0]);
-        command.args(&config.command[1..]);
+        let mut command = Command::new(&config.program);
+        command.args(&config.args);
         if let Some(cwd) = &config.cwd {
             command.current_dir(cwd);
         }
@@ -467,7 +691,7 @@ impl StdioListener {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(|source| OutsideError::Spawn {
-            command: config.command.join(" "),
+            command: config.program.display().to_string(),
             source,
         })?;
         let stdin = child
@@ -483,6 +707,7 @@ impl StdioListener {
             .take()
             .expect("a piped child stderr is always present");
         let pending: Arc<Mutex<PendingCalls>> = Arc::default();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (outbox, outbox_rx) = mpsc::unbounded_channel::<String>();
         let outbox_for_reader = outbox.clone();
         let listener = Arc::new(StdioListener {
@@ -491,6 +716,8 @@ impl StdioListener {
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
             timeout: Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+            declared: Mutex::new(Vec::new()),
+            closed: closed.clone(),
         });
 
         // Writes are queued so a caller never blocks on the pipe; one task owns the child's stdin.
@@ -605,6 +832,8 @@ impl StdioListener {
                     }
                 }
             }
+            // Closed first, drained second: a request that registers after the drain sees the flag.
+            closed.store(true, Ordering::SeqCst);
             fail_pending(
                 &pending_for_reader,
                 "the outside listener exited before answering",
@@ -637,13 +866,7 @@ impl StdioListener {
         let handshake = serde_json::json!({
             "protocol": COMPONENT_PROTOCOL,
             "row": row,
-            "config": {
-                "command": config.command,
-                "points": config.points,
-                "cwd": config.cwd,
-                "env": config.env,
-                "timeoutMs": config.timeout_ms,
-            },
+            "config": config.config,
             "workspaceRoot": workspace_root,
             "mode": mode,
         });
@@ -653,7 +876,24 @@ impl StdioListener {
         )
         .await;
         let failure = match initialized {
-            Ok(Ok(_result)) => None,
+            Ok(Ok(result)) => {
+                let declared = result
+                    .get("listeners")
+                    .and_then(Value::as_array)
+                    .map(|values| parse_listener_declarations(values))
+                    .transpose();
+                match declared {
+                    Ok(declared) => {
+                        *listener
+                            .declared
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            declared.unwrap_or_default();
+                        None
+                    }
+                    Err(error) => Some(error.to_string()),
+                }
+            }
             Ok(Err(error)) => Some(error.to_string()),
             Err(_) => Some(format!("no answer within {HANDSHAKE_TIMEOUT_MS}ms")),
         };
@@ -684,6 +924,13 @@ impl StdioListener {
                 .map_err(|_| "the outside listener is not running: its input is closed".to_owned()),
             Err(error) => Err(format!("the request does not serialize: {error}")),
         };
+        let outcome = outcome.and_then(|()| {
+            if self.closed.load(Ordering::SeqCst) {
+                Err("the outside listener has exited".to_owned())
+            } else {
+                Ok(())
+            }
+        });
         if let Err(message) = outcome {
             self.pending
                 .lock()
@@ -759,14 +1006,7 @@ impl JsonListener for StdioListener {
             }
         };
         let answer = self.request("hooks/call", params);
-        Box::pin(async move {
-            let value = answer.await?;
-            serde_json::from_value::<HookReply>(value).map_err(|error| {
-                HookError::fail(format!(
-                    "the outside listener answered something that is not a hook reply: {error}"
-                ))
-            })
-        })
+        Box::pin(async move { hook_reply_of(answer.await?) })
     }
 
     fn notify(&self, call: HookCall) {
@@ -784,28 +1024,37 @@ impl Drop for StdioListener {
     }
 }
 
-/// Start the configured process and attach it, through `scope`, to every point it names. Fails without
-/// attaching anything when a point is not exposed.
+/// Start the configured process and attach it, through `scope`, to the points `config` names — or, when it
+/// names none, to the listeners the process declared in `initialize`. Fails without attaching anything when a
+/// point is not exposed; a process that ends up attached to nothing is shut down and refused.
 pub async fn attach_outside_listener(
     scope: &Scope,
     config: &OutsideListenerConfig,
 ) -> Result<Vec<Listener>, OutsideError> {
-    if config.command.is_empty() {
-        return Err(OutsideError::Config("the command is empty".into()));
+    if config.program.as_os_str().is_empty() {
+        return Err(OutsideError::Config("the program is empty".into()));
     }
-    if config.points.is_empty() {
-        return Err(OutsideError::Config("no points are named".into()));
-    }
-    // Every point is checked before the process starts, so a bad row attaches nothing.
+    // Named points are checked before the process starts, so a bad row starts nothing.
     for point in &config.points {
         scope.bus().inner().attacher(point)?;
     }
     let listener = StdioListener::spawn(config).await?;
-    let mut handles = Vec::with_capacity(config.points.len());
-    for point in &config.points {
-        handles.push(scope.on_json(point, listener.clone(), ListenOptions::APPEND)?);
+    let declarations: Vec<ListenerDeclaration> = if config.points.is_empty() {
+        listener.declared()
+    } else {
+        config.points.iter().map(ListenerDeclaration::on).collect()
+    };
+    if declarations.is_empty() {
+        listener.shutdown().await;
+        return Err(OutsideError::Config(
+            "no points are named and the process declared no listeners".into(),
+        ));
     }
-    Ok(handles)
+    let attached = attach_declared(scope, listener.clone(), &declarations);
+    if attached.is_err() {
+        listener.shutdown().await;
+    }
+    attached
 }
 
 #[cfg(test)]
@@ -839,20 +1088,53 @@ mod tests {
     }
 
     #[test]
-    fn a_configuration_row_reads_with_camel_case_keys_and_refuses_unknown_ones() {
+    fn a_component_reads_as_program_args_and_config_and_refuses_unknown_keys() {
         let config: OutsideListenerConfig = serde_json::from_str(
-            r#"{"command":["node","./retarget.mjs"],"points":["model/request"],"timeoutMs":500}"#,
+            r#"{"program":"node","args":["./retarget.mjs"],"config":{"label":"x"},"timeoutMs":500}"#,
         )
         .unwrap();
-        assert_eq!(config.command, ["node", "./retarget.mjs"]);
-        assert_eq!(config.points, ["model/request"]);
+        assert_eq!(config.program, PathBuf::from("node"));
+        assert_eq!(config.args, ["./retarget.mjs"]);
+        assert_eq!(config.config, serde_json::json!({"label": "x"}));
+        assert!(config.points.is_empty(), "the process declares its points");
         assert_eq!(config.timeout_ms, Some(500));
+        let bare: OutsideListenerConfig = serde_json::from_str(r#"{"program":"./hook"}"#).unwrap();
+        assert!(bare.args.is_empty());
+        assert_eq!(bare.config, Value::Null);
         assert!(
-            serde_json::from_str::<OutsideListenerConfig>(
-                r#"{"command":["x"],"points":[],"timeout":1}"#
-            )
-            .is_err()
+            serde_json::from_str::<OutsideListenerConfig>(r#"{"command":["x"]}"#).is_err(),
+            "the pre-D-031 command key is refused, not silently ignored"
         );
+        assert!(
+            serde_json::from_str::<OutsideListenerConfig>(r#"{"program":"x","timeout":1}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn listener_declarations_decode_strictly() {
+        let declared = parse_listener_declarations(&[
+            serde_json::json!({"point": "model/request"}),
+            serde_json::json!({"point": "tools/pre-execute", "prepend": true, "once": true}),
+        ])
+        .unwrap();
+        assert_eq!(declared[0], ListenerDeclaration::on("model/request"));
+        assert!(declared[1].prepend && declared[1].once);
+        assert!(matches!(
+            parse_listener_declarations(&[serde_json::json!({"point": "x", "mode": "waterfall"})]),
+            Err(OutsideError::Declaration(_))
+        ));
+        assert!(matches!(
+            parse_listener_declarations(&[serde_json::json!({"name": "x"})]),
+            Err(OutsideError::Declaration(_))
+        ));
+        match parse_listener_declarations(&[
+            serde_json::json!({"point": "x"}),
+            serde_json::json!({"point": "x"}),
+        ]) {
+            Err(OutsideError::Declaration(message)) => assert!(message.contains("declared twice")),
+            other => panic!("expected a duplicate refusal, got {other:?}"),
+        }
     }
 
     fn reply_next(_call: &HookCall) -> HookFuture<HookReply> {
@@ -1126,7 +1408,9 @@ mod tests {
 
     fn script_config(script: &str, points: &[&str]) -> OutsideListenerConfig {
         OutsideListenerConfig {
-            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), script.into()],
+            config: Value::Null,
             points: points.iter().map(|point| (*point).to_string()).collect(),
             cwd: None,
             env: BTreeMap::new(),
@@ -1251,11 +1535,17 @@ printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"replace","value":"replaced"}}\
             }
             other => panic!("expected an unknown point, got {other:?}"),
         }
-        let empty = script_config("cat > /dev/null\n", &[]);
-        assert!(matches!(
-            attach_outside_listener(&scope, &empty).await,
-            Err(OutsideError::Config(_))
-        ));
+        let silent = script_config(
+            "read handshake\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"listeners\":[]}}\\n'\ncat > /dev/null\n",
+            &[],
+        );
+        match attach_outside_listener(&scope, &silent).await {
+            Err(OutsideError::Config(message)) => {
+                assert!(message.contains("declared no listeners"), "{message}")
+            }
+            other => panic!("expected a configuration refusal, got {other:?}"),
+        }
+        assert_eq!(bus.listener_count(Echoed::NAME), 0);
     }
 
     #[tokio::test]
@@ -1360,5 +1650,202 @@ printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"replace","value":"still correl
                 value: serde_json::json!("still correlated")
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_process_attaches_to_the_listeners_it_declares_in_initialize() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let scope = bus.scope("hook-1");
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{"tools":[],"listeners":[{"point":"test/json-waterfall"}]}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"replace","value":"declared and answered"}}\n'
+"#;
+        let config = script_config(script, &[]);
+        let handles = attach_outside_listener(&scope, &config).await.unwrap();
+        assert_eq!(handles.len(), 1);
+        let value = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| payload.clone())
+            .await
+            .unwrap();
+        assert_eq!(value, "declared and answered");
+    }
+
+    #[tokio::test]
+    async fn a_declaration_on_a_point_nobody_exposed_attaches_nothing() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let scope = bus.scope("hook-1");
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{"listeners":[{"point":"test/json-waterfall"},{"point":"model/absent"}]}}\n'
+cat > /dev/null
+"#;
+        match attach_outside_listener(&scope, &script_config(script, &[])).await {
+            Err(OutsideError::UnknownPoint(error)) => assert_eq!(error.name, "model/absent"),
+            other => panic!("expected an unknown point, got {other:?}"),
+        }
+        assert_eq!(bus.listener_count(Echoed::NAME), 0, "nothing was attached");
+    }
+
+    #[tokio::test]
+    async fn a_declaration_that_does_not_decode_fails_the_handshake() {
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{"listeners":[{"point":"x","mode":"waterfall"}]}}\n'
+cat > /dev/null
+"#;
+        match StdioListener::spawn(&script_config(script, &[])).await {
+            Err(OutsideError::Handshake { message, .. }) => {
+                assert!(message.contains("does not decode"), "{message}")
+            }
+            Err(other) => panic!("expected a handshake failure, got {other}"),
+            Ok(_) => panic!("expected a handshake failure, got a listener"),
+        }
+    }
+
+    struct Posted;
+    impl Event for Posted {
+        const NAME: &'static str = "test/json-post";
+        type Payload = Value;
+    }
+    impl WaterfallEvent for Posted {
+        type Output = Value;
+    }
+
+    fn reply_merged(_call: &HookCall) -> HookFuture<HookReply> {
+        Box::pin(async {
+            Ok(HookReply::Merge {
+                value: serde_json::json!({"output": "redacted by the hook", "data": {"replacedBy": "post-hook"}}),
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn a_merge_runs_the_rest_first_and_keeps_what_it_produced() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Posted>();
+        let (listener, _seen) = memory(reply_merged);
+        let scope = bus.scope("post-hook");
+        scope
+            .on_json(Posted::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let ran_default = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ran_in_inner = ran_default.clone();
+        let value = bus
+            .waterfall::<Posted>(serde_json::json!({"name": "read_file"}), move |_payload| {
+                ran_in_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                serde_json::json!({"output": "the real contents", "exitCode": 0})
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ran_default.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "next ran"
+        );
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "output": "redacted by the hook",
+                "exitCode": 0,
+                "data": {"replacedBy": "post-hook"}
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_onto_a_result_that_is_not_an_object_fails() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let (listener, _seen) = memory(reply_merged);
+        let scope = bus.scope("post-hook");
+        scope
+            .on_json(Echoed::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let error = bus
+            .waterfall::<Echoed>("plain".to_string(), |payload| payload.clone())
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("not an object"), "{error}");
+        assert_eq!(error.listener(), Some("post-hook"));
+    }
+
+    #[tokio::test]
+    async fn an_rpc_listener_wraps_any_part_four_client() {
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let notified: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let sent_in_request = sent.clone();
+        let notified_in_notify = notified.clone();
+        let listener: Arc<dyn JsonListener> = Arc::new(RpcListener::new(
+            move |params: Value| -> futures::future::BoxFuture<'static, Result<Value, String>> {
+                sent_in_request.lock().unwrap().push(params.clone());
+                let answer = if params["point"] == "test/json-waterfall" {
+                    Ok(serde_json::json!({"kind": "replace", "value": "from the client"}))
+                } else {
+                    Err("this hook is broken".to_owned())
+                };
+                Box::pin(async move { answer })
+            },
+            move |params: Value| notified_in_notify.lock().unwrap().push(params),
+        ));
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        bus.expose_emit::<Reported>();
+        bus.expose_waterfall::<Posted>();
+        let scope = bus.scope("hook-1");
+        attach_declared(
+            &scope,
+            listener,
+            &[
+                ListenerDeclaration::on(Echoed::NAME),
+                ListenerDeclaration::on(Reported::NAME),
+                ListenerDeclaration::on(Posted::NAME),
+            ],
+        )
+        .unwrap();
+        let value = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| payload.clone())
+            .await
+            .unwrap();
+        assert_eq!(value, "from the client");
+        assert_eq!(sent.lock().unwrap()[0]["mode"], "waterfall");
+        bus.emit::<Reported>(&serde_json::json!({"seq": 3}));
+        assert_eq!(
+            notified.lock().unwrap()[0]["payload"],
+            serde_json::json!({"seq": 3})
+        );
+        let error = bus
+            .waterfall::<Posted>(serde_json::json!({}), |payload| payload.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a hook failed at test/json-post (hook-1) — this hook is broken"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_after_the_child_exited_fails_at_once_instead_of_waiting_for_the_timeout() {
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"next"}}\n'
+"#;
+        let mut config = script_config(script, &[Echoed::NAME]);
+        config.timeout_ms = Some(30_000);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        assert_eq!(
+            listener.call(waterfall_call("base")).await.unwrap(),
+            HookReply::Next
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = std::time::Instant::now();
+        let error = listener.call(waterfall_call("base")).await.unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "failed in {:?}, not at the 30s timeout",
+            started.elapsed()
+        );
+        assert_eq!(error.kind(), HookErrorKind::Failed);
     }
 }

@@ -24,8 +24,8 @@
 //! [`SandboxHost`], and a published approval question is a [`tokio::sync::broadcast`] receiver the server (or
 //! boot, onto the event bus) subscribes to.
 //!
-//! **Contract first:** the signatures and documents here are the API other crates build against; bodies marked
-//! `todo!()` are being ported, with unit tests beside each.
+//! **Every item above is implemented and tested**, with its unit tests beside the code. The crate's `INDEX.md`
+//! records which port-plan tasks have landed and what the judged-through-the-binary row still waits on.
 
 pub mod approvals;
 pub mod backend;

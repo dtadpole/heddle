@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.4.1
+version: 0.5.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -17,8 +17,8 @@ the routed endpoint's window, reduced by pruning before it is reduced by compact
 |---|---|
 | Ported from | `src/context/` (1,726 lines in seven files) |
 | Judged by | `_verifiers_/30-context-management`, through the `heddle` binary |
-| Sources | [`src/`](src/INDEX.md); integration tests in `tests/` (`typescript-agreement.rs`: values measured from the TypeScript build) |
-| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported. Step 5's remaining half is the `ContextStore` adapter for `heddle-session`'s store, which waits on that store reaching `main`; step 6 waits on the loop and the command line |
+| Sources | [`src/`](src/INDEX.md); integration tests in `tests/`: `typescript-agreement.rs` (prices, budgets, prune text and digests measured from the TypeScript build) and `engine-agreement.rs` (the TypeScript store and engine's own record of four scenarios, `tests/fixtures/engine-oracle.json`, replayed and compared event for event; regenerate it with `node tests/fixtures/generate-engine-oracle.mjs`) |
+| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported, and `ContextStore` is bound to `heddle-session`'s store. Step 6, the verifier through the binary, waits on the loop and the command line |
 
 ## Public API
 
@@ -38,6 +38,7 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | `store` | `PrunableStore` | the `ContextStore` trait this crate needs from the session store; `LogEvent`, `SurfaceState`, `SurfaceOp`, `AppendOptions` |
 | `types` | `src/llm/types.ts` | `heddle-llm`'s `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, re-exported under the same names; plus `text_message` for the single-block notes this crate writes |
 | `testing` | — | `MemoryStore`, an in-memory `ContextStore` with the TypeScript fold rules; behind the `testing` feature |
+| `session_store` | `PrunableStore` | the real store bound to this crate's trait: `impl ContextStore for heddle_session::SessionStore`, a mapping only |
 
 ### How the other crates call it
 
@@ -52,13 +53,17 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
   `ModelAccess` over the model layer, and registers `recover_overflow` on `agent/request-error`.
 - **The composer's context view** (`heddle-web-composer`) reads `assemble`'s report, and the recorded
   `breakdown` on `model/request`.
+- **The store the binary names**: `heddle_session::SessionStore` behind an `Arc`. `ContextService<S:
+  ContextStore>` is generic and this crate provides the one `impl` for the real store (`session_store`), so a
+  caller never writes a conversion; `MemoryStore` (behind the `testing` feature) is the double, not a
+  production store.
 
 ## What it builds against
 
 | Needed from | What | State |
 |---|---|---|
 | `heddle-llm` | `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, and the endpoint window behind `ModelAccess` | **taken**: `types` re-exports `heddle_llm`'s under the same names, plus one helper, `text_message`; the dependency is on `main` |
-| `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | the `ContextStore` trait stays here; the adapter `impl` for the real store lands in this crate once the store is on `main`. It is a **straight pass-through** only if `heddle-session` re-exports `heddle-llm`'s message types; while its stand-ins are its own types, the adapter would have to serialise every node to cross the type boundary, which this crate will not hide |
+| `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | **taken**: `impl ContextStore for heddle_session::SessionStore` lives in `session_store`. It is a straight pass-through — the session crate re-exports `heddle-llm`'s message types, so a node's message crosses without a conversion |
 | `heddle-config` | the context row's `config` handed over for deserialising; `heddle_home()` | `ContextConfig: Deserialize`; `ContextDependencies::heddle_home`; the profile row is the boot's to hand over |
 | `heddle-events` | registering `recover_overflow` on the `agent/request-error` waterfall | a plain async method; the boot wires it |
 
@@ -90,10 +95,10 @@ the TypeScript tests named.
    Landed.
 4. **The service** — `test/runtime-context.test.ts`, `test/session-folder.test.ts` (the baseline half), the usage
    anchor, and overflow recovery with a scripted `ModelAccess`. Landed.
-5. **The real dependencies**: the `types` half landed (`heddle-llm` is on `main`; `types` now re-exports it and
-   the same 97 tests pass). The `heddle-session` half — `impl ContextStore for SessionStore` — **waits**: the
-   store is not on `main` yet, and the adapter is written once it is and `heddle-session` re-exports the same
-   message types, so no per-node conversion is needed.
+5. **The real dependencies**: landed. `types` re-exports `heddle-llm`'s, and `impl ContextStore for
+   SessionStore` binds the real store, with three tests on a real on-disk session (write and read back, the
+   pruner's rewrite, a compaction whose log keeps its span) and one that replays the TypeScript build's record of a
+   landed compaction through it, event for event.
 6. **The verifier**: with the loop and the command line composed, `30-context-management` through `HEDDLE_BIN`,
    reported to the lane integrator with the command and the date. **Waiting** on the loop and the command line.
 

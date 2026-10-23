@@ -208,6 +208,73 @@ pub struct ContextView {
     pub instructions: Vec<PathBuf>,
 }
 
+impl ContextView {
+    /// What `heddle context <session>` prints without `--json`, line for line as the TypeScript
+    /// command writes it to stdout:
+    ///
+    /// ```text
+    /// heddle: <n> message(s), about <tokens> token(s)
+    /// heddle: budget <threshold> of <window>; pruned <n>; compacted <true|false>
+    ///   instruction <path>            (one per instruction file)
+    ///   <role>: <text>                (one per message)
+    /// ```
+    ///
+    /// A message's text is cut the way `text.slice(0, 80)` cuts it — eighty UTF-16 units, so a
+    /// character outside the BMP counts twice, and one split at the boundary prints as U+FFFD, the
+    /// replacement Node writes for the lone surrogate the slice leaves — and every `\n` becomes a space.
+    pub fn render_text(&self) -> String {
+        let mut out = format!(
+            "heddle: {} message(s), about {} token(s)\nheddle: budget {} of {}; pruned {}; compacted {}\n",
+            self.message_count,
+            self.estimated_tokens,
+            self.threshold_tokens,
+            self.context_window,
+            self.pruned,
+            self.compacted
+        );
+        for path in &self.instructions {
+            out.push_str(&format!("  instruction {}\n", path.display()));
+        }
+        for message in &self.messages {
+            out.push_str(&format!(
+                "  {}: {}\n",
+                role_word(message.role),
+                js_slice_units(&message.text, 80).replace('\n', " ")
+            ));
+        }
+        out
+    }
+}
+
+/// A role as the log spells it.
+fn role_word(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// `text.slice(0, units)` as JavaScript computes it and Node then prints it: a character that does
+/// not fit whole leaves its high surrogate behind, which UTF-8 output turns into U+FFFD.
+fn js_slice_units(text: &str, units: usize) -> String {
+    let mut taken = 0;
+    let mut out = String::new();
+    for character in text.chars() {
+        let width = character.len_utf16();
+        if taken + width > units {
+            if taken < units {
+                out.push('\u{FFFD}');
+            }
+            break;
+        }
+        out.push(character);
+        taken += width;
+    }
+    out
+}
+
 /// What [`ContextService::ensure_context`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaselineOutcome {
@@ -1748,6 +1815,85 @@ mod tests {
                 "pruned": 0,
                 "compacted": false,
             })
+        );
+    }
+
+    fn view_of(
+        messages: Vec<super::ViewMessage>,
+        instructions: Vec<PathBuf>,
+    ) -> super::ContextView {
+        super::ContextView {
+            session: "session-1".to_string(),
+            message_count: messages.len(),
+            messages,
+            estimated_tokens: 42,
+            threshold_tokens: 800,
+            context_window: 1000,
+            pruned: 1,
+            compacted: false,
+            instructions,
+        }
+    }
+
+    fn view_message(role: Role, text: &str) -> super::ViewMessage {
+        super::ViewMessage {
+            role,
+            tool_call_id: None,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_text_rendering_is_the_typescript_commands_lines() {
+        let view = view_of(
+            vec![
+                view_message(Role::System, "be brief"),
+                view_message(Role::User, "line one\nline two"),
+            ],
+            vec![PathBuf::from("/p/AGENTS.md")],
+        );
+        assert_eq!(
+            view.render_text(),
+            "heddle: 2 message(s), about 42 token(s)\n\
+             heddle: budget 800 of 1000; pruned 1; compacted false\n  \
+             instruction /p/AGENTS.md\n  \
+             system: be brief\n  \
+             user: line one line two\n"
+        );
+    }
+
+    #[test]
+    fn a_long_message_is_cut_at_eighty_utf16_units() {
+        let long = "x".repeat(100);
+        let view = view_of(vec![view_message(Role::Assistant, &long)], Vec::new());
+        assert!(
+            view.render_text()
+                .ends_with(&format!("  assistant: {}\n", "x".repeat(80)))
+        );
+
+        // 79 units of text then an emoji: the slice keeps its high surrogate, which prints as U+FFFD.
+        let split = format!("{}😀tail", "y".repeat(79));
+        let view = view_of(vec![view_message(Role::Tool, &split)], Vec::new());
+        assert!(
+            view.render_text()
+                .ends_with(&format!("  tool: {}\u{FFFD}\n", "y".repeat(79)))
+        );
+
+        // 40 emoji are exactly 80 units, so nothing is cut and nothing is replaced.
+        let emoji = "😀".repeat(41);
+        let view = view_of(vec![view_message(Role::User, &emoji)], Vec::new());
+        assert!(
+            view.render_text()
+                .ends_with(&format!("  user: {}\n", "😀".repeat(40)))
+        );
+    }
+
+    #[test]
+    fn an_empty_context_prints_only_the_two_summary_lines() {
+        let view = view_of(Vec::new(), Vec::new());
+        assert_eq!(
+            view.render_text(),
+            "heddle: 0 message(s), about 42 token(s)\nheddle: budget 800 of 1000; pruned 1; compacted false\n"
         );
     }
 }
