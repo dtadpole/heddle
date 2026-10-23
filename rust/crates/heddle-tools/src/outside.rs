@@ -519,7 +519,7 @@ impl OutsideComponent {
 
         Ok(Self {
             row,
-            tools: initialized.tools,
+            tools: initialized.tools.into_iter().map(ToolSpec::from).collect(),
             listeners: initialized.listeners,
             child: Mutex::new(Some(child)),
             connection,
