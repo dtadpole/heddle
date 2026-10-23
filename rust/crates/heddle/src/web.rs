@@ -59,6 +59,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
             sessions,
         }));
     }
+    if let Some(service) = boot.services.get::<Arc<heddle_todo::TodoService>>("todo") {
+        harness.todos = Some(Arc::new(Todos { service }));
+    }
+    if let Some(service) = boot.services.get::<Arc<heddle_team::TeamService>>("team") {
+        harness.team = Some(Arc::new(Team { service }));
+    }
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
     }
@@ -289,6 +295,38 @@ impl heddle_server::services::WorkspaceService for Roots {
 
     fn ensure_owner(&self, folder: &std::path::Path) {
         let _ = self.workspaces.ensure_owner(&folder.to_string_lossy());
+    }
+}
+
+/// A session's todo list as the page's panel reads it: the fold of its `todo/write` events.
+struct Todos {
+    service: Arc<heddle_todo::TodoService>,
+}
+
+impl heddle_server::services::TodoService for Todos {
+    fn get(&self, session: &str) -> Option<Value> {
+        let view = self.service.get(session).ok()??;
+        serde_json::to_value(view).ok()
+    }
+}
+
+/// A Lead session's team as the page's panel reads it: `heddle-team`'s own API view.
+struct Team {
+    service: Arc<heddle_team::TeamService>,
+}
+
+impl heddle_server::services::TeamService for Team {
+    fn view(&self, session: &str) -> Result<heddle_server::services::TeamView, ServiceError> {
+        let view = heddle_team::api::team_view(&self.service, session).map_err(service_error)?;
+        let value = serde_json::to_value(view).map_err(service_error)?;
+        let field = |key: &str| value.get(key).cloned().unwrap_or(Value::Null);
+        Ok(heddle_server::services::TeamView {
+            lead: field("lead"),
+            members: field("members"),
+            tasks: field("tasks"),
+            messages: field("messages"),
+            delivered: field("delivered"),
+        })
     }
 }
 
