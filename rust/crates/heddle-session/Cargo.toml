@@ -10,3 +10,17 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+heddle-config.workspace = true
+# `preserve_order` keeps a JSON object's keys in insertion order, which is what makes an event, a
+# meta record and a definition byte-identical to what the TypeScript store writes with
+# `JSON.stringify`. Cargo unifies features, so every crate in the build sees an ordered `Map`.
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+zstd.workspace = true
+# Not yet in `[workspace.dependencies]`; the integrator is asked to hoist them.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
