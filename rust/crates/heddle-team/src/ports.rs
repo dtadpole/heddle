@@ -1,7 +1,7 @@
 //! The seams this crate needs from the rest of the harness, as traits it owns.
 //!
 //! The team layer is written against these and tested against in-memory doubles
-//! ([`crate::testing`], feature `test-doubles`). The binary composes the real implementations as thin
+//! (`crate::testing`, feature `test-doubles`). The binary composes the real implementations as thin
 //! adapters over the crates that own them:
 //!
 //! | Port | Implemented over | What the TypeScript build used |
