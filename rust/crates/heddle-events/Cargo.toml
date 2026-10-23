@@ -1,6 +1,6 @@
 [package]
 name = "heddle-events"
-description = "Heddle in Rust: the event bus and the named hook points, with the emit, parallel, bail and waterfall modes"
+description = "Heddle in Rust: the event bus and the named hook points, with the emit, parallel, serial, bail and waterfall modes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,3 +10,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The stdio transport of an outside listener: a child process spoken to as line-delimited JSON.
+tokio.workspace = true
+tracing.workspace = true

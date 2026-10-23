@@ -153,11 +153,88 @@ pub enum ContextEvent {
 impl ContextEvent {
     /// The event as the JSON object [`crate::ContextStore::append`] takes.
     pub fn to_value(&self) -> Value {
-        todo!("ContextEvent::to_value")
+        serde_json::to_value(self).expect("a context event serialises as JSON")
     }
 
     /// The event's `type`.
     pub fn kind(&self) -> &'static str {
-        todo!("ContextEvent::kind")
+        match self {
+            ContextEvent::Note { .. } => "context/note",
+            ContextEvent::Prune { .. } => "compaction/prune",
+            ContextEvent::Start { .. } => "compaction/start",
+            ContextEvent::Summary { .. } => "compaction/summary",
+            ContextEvent::End { .. } => "compaction/end",
+            ContextEvent::Measured { .. } => "compaction/measured",
+            ContextEvent::Failed { .. } => "compaction/failed",
+            ContextEvent::Recovery { .. } => "compaction/recovery",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextEvent, ShadowedRange, origin};
+    use crate::types::{Role, text_message};
+    use serde_json::json;
+
+    #[test]
+    fn a_note_serialises_with_its_type_first_and_no_absent_optional_fields() {
+        let note = ContextEvent::Note {
+            message: text_message(Role::User, "the rules"),
+            origin: origin::INSTRUCTIONS.to_string(),
+            identity: None,
+            files: None,
+        };
+        let value = note.to_value();
+        assert_eq!(value["type"], json!("context/note"));
+        assert_eq!(value["origin"], json!("instructions"));
+        assert_eq!(
+            value["message"],
+            json!({"role": "user", "content": [{"type": "text", "text": "the rules"}]})
+        );
+        assert!(value.get("identity").is_none());
+        assert!(value.get("files").is_none());
+        assert_eq!(note.kind(), "context/note");
+    }
+
+    #[test]
+    fn a_prune_names_its_span_and_shadow_price_in_camel_case() {
+        let prune = ContextEvent::Prune {
+            shadowed_range: ShadowedRange { start: 2, end: 2 },
+            shadowed_seqs: vec![2],
+            shadowed_token_count: 9000,
+        };
+        let value = prune.to_value();
+        assert_eq!(
+            value,
+            json!({
+                "type": "compaction/prune",
+                "shadowedRange": { "start": 2, "end": 2 },
+                "shadowedSeqs": [2],
+                "shadowedTokenCount": 9000,
+            })
+        );
+        assert_eq!(prune.kind(), "compaction/prune");
+    }
+
+    #[test]
+    fn every_variant_names_the_type_the_typescript_build_writes() {
+        let measured = ContextEvent::Measured {
+            before: 100,
+            after: 40,
+        };
+        assert_eq!(
+            measured.to_value(),
+            json!({"type": "compaction/measured", "before": 100, "after": 40})
+        );
+        assert_eq!(measured.kind(), "compaction/measured");
+        let failed = ContextEvent::Failed {
+            from_seq: 1,
+            through_seq: 2,
+            refused: true,
+            reason: "no".to_string(),
+        };
+        assert_eq!(failed.kind(), "compaction/failed");
+        assert_eq!(failed.to_value()["refused"], json!(true));
     }
 }

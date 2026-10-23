@@ -1,6 +1,6 @@
 ---
 title: The heddle-context sources
-version: 0.2.0
+version: 0.3.0
 description: The sources of the heddle-context crate, one file per TypeScript module plus the port's own seams, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -24,7 +24,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`service.rs`](service.rs) | the seam the agent loop, the command line and the composer call (`service.ts`) |
 | [`events.rs`](events.rs) | the `context/note` and `compaction/*` events this crate writes, typed |
 | [`store.rs`](store.rs) | the `ContextStore` port this crate needs from the session store |
-| [`types.rs`](types.rs) | provisional stand-ins for `heddle-llm`'s message types |
+| [`types.rs`](types.rs) | `heddle-llm`'s message types, re-exported, and `text_message` |
 | [`testing.rs`](testing.rs) | `MemoryStore`, an in-memory `ContextStore`, behind the `testing` feature |
 | [`error.rs`](error.rs) | `ContextError` |
 | [`text.rs`](text.rs) | the JavaScript string rules the numbers rest on: UTF-16 length and `trim()` |
