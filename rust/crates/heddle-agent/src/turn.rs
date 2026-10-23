@@ -31,7 +31,7 @@ use crate::ports::{
     ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord, PortError, PreStep,
     RequestErrorAction, RequestErrorPayload, SessionPort, TurnHooks,
 };
-use crate::turns::TurnRegistry;
+use crate::turns::{LiveTurn, TurnRegistry};
 use crate::upstream::{
     Chunk, ContentPart, GenerateRequest, Message, PrepareOptions, Role, RuntimeContextSection,
     SessionHandle, TokenUsage, merge_token_usage,
@@ -221,40 +221,120 @@ pub enum TurnError {
     Port(#[from] PortError),
 }
 
-/// Run one turn.
+/// One turn, whose live registration and prompt are already durable.
 ///
-/// Registers the turn with the live-turn registry when there is one (its token a child of the caller's),
-/// and settles it however the turn ends.
-pub async fn run_turn(
-    runtime: &AgentRuntime,
+/// This is the begin/remainder split the team layer needs: before [`begin_turn`] returns, the turn is in the
+/// live-turn registry and the prompt is in the session's own log with its `source` verbatim — so a caller that
+/// reads the log immediately after `begin` sees a delivery, and a turn cut off before it is polled can still
+/// be found and resumed. The rest of the turn is [`BegunTurn::run`], which settles the registration however it
+/// ends (an early return or a drop settles it too).
+pub struct BegunTurn {
+    runtime: AgentRuntime,
     options: RunTurnOptions,
-) -> Result<TurnResult, TurnError> {
+    /// The live token, a child of the caller's, so a Stop and an interrupt both stop the turn and an
+    /// interrupt does not reach the caller.
+    cancel: Option<CancellationToken>,
+    /// The session's event count before the prompt, so the result counts the turn's own writes.
+    started: usize,
+    live: Option<LiveTurn>,
+}
+
+impl std::fmt::Debug for BegunTurn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BegunTurn")
+            .field("session", &self.options.session.id)
+            .field("endpoint", &self.options.endpoint)
+            .field("live", &self.live.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl BegunTurn {
+    /// The token that stops this turn: the caller's Stop combined with the live registration's.
+    pub fn token(&self) -> Option<&CancellationToken> {
+        self.cancel.as_ref()
+    }
+
+    /// The session id this turn belongs to.
+    pub fn session(&self) -> &SessionHandle {
+        &self.options.session
+    }
+
+    /// Run the rest of the turn.
+    pub async fn run(self) -> Result<TurnResult, TurnError> {
+        let BegunTurn {
+            runtime,
+            options,
+            cancel,
+            started,
+            live,
+        } = self;
+        let result = run_turn_body(&runtime, &options, cancel, started).await;
+        if let Some(live) = &live {
+            live.settle();
+        }
+        result
+    }
+}
+
+/// Begin a turn: register it live and write the prompt, then hand back the rest as [`BegunTurn::run`].
+///
+/// The ordering is the contract: a caller that reads the target session's log right after this returns sees
+/// the prompt, and [`TurnRegistry::is_running`](crate::TurnRegistry::is_running) already answers `true` for the
+/// session. A failed prompt write settles the registration rather than leaving the session marked running.
+pub fn begin_turn(runtime: &AgentRuntime, options: RunTurnOptions) -> Result<BegunTurn, TurnError> {
     let live = runtime
         .turns
         .as_ref()
         .map(|turns| turns.begin(&options.session.id, options.cancel.as_ref()));
-    // The live token is a child of the caller's, so it honours a person's Stop and an interrupt at once,
-    // and an interrupt does not reach the caller.
     let cancel = match (&live, &options.cancel) {
         (Some(live), _) => Some(live.token().clone()),
         (None, Some(caller)) => Some(caller.clone()),
         (None, None) => None,
     };
-    let result = run_turn_body(runtime, &options, cancel).await;
-    if let Some(live) = &live {
-        live.settle();
+    // Counted before the prompt, as the turn's own writes: the completed result reports what it added.
+    let started = runtime.session.count(&options.session);
+    let mut content = vec![ContentPart::text(options.prompt.clone())];
+    content.extend(options.attachments.iter().cloned());
+    if let Err(error) =
+        runtime
+            .session
+            .user_content(&options.session, content, options.source.clone())
+    {
+        if let Some(live) = &live {
+            live.settle();
+        }
+        return Err(TurnError::Port(error));
     }
-    result
+    Ok(BegunTurn {
+        runtime: runtime.clone(),
+        options,
+        cancel,
+        started,
+        live,
+    })
 }
 
-/// One turn's body; the exported [`run_turn`] adds the live-turn registration around it.
+/// Run one turn.
+///
+/// Registers the turn with the live-turn registry when there is one (its token a child of the caller's),
+/// writes the prompt, and settles it however the turn ends. [`begin_turn`] is the same turn, split so the
+/// prompt and the registration are durable before its future is polled.
+pub async fn run_turn(
+    runtime: &AgentRuntime,
+    options: RunTurnOptions,
+) -> Result<TurnResult, TurnError> {
+    begin_turn(runtime, options)?.run().await
+}
+
+/// One turn's body, after [`begin_turn`] wrote the prompt.
 async fn run_turn_body(
     runtime: &AgentRuntime,
     options: &RunTurnOptions,
     cancel: Option<CancellationToken>,
+    started: usize,
 ) -> Result<TurnResult, TurnError> {
     let session = &options.session;
-    let started = runtime.session.count(session);
     let max_rounds = match options.max_rounds {
         RoundLimit::Rounds(rounds) => rounds,
         RoundLimit::Unbounded => u32::MAX,
@@ -265,12 +345,6 @@ async fn run_turn_body(
         .session
         .folder(session)
         .unwrap_or_else(|| workspace_root.clone());
-
-    let mut content = vec![ContentPart::text(options.prompt.clone())];
-    content.extend(options.attachments.iter().cloned());
-    runtime
-        .session
-        .user_content(session, content, options.source.clone())?;
 
     let tools = runtime.tools.describe();
     let mut denials: Vec<Denial> = Vec::new();
@@ -829,11 +903,15 @@ mod tests {
     /// it recorded are what the context double derives a request from.
     struct RecordingSession {
         state: Mutex<SessionState>,
+        sources: Mutex<Vec<Option<serde_json::Value>>>,
+        fail_user_content: AtomicBool,
     }
 
     impl RecordingSession {
         fn new() -> Arc<Self> {
             Arc::new(Self {
+                sources: Mutex::new(Vec::new()),
+                fail_user_content: AtomicBool::new(false),
                 state: Mutex::new(SessionState {
                     events: Vec::new(),
                     messages: Vec::new(),
@@ -870,6 +948,14 @@ mod tests {
 
         fn push_user(&self, text: &str) {
             self.push_message(Role::User, text);
+        }
+
+        fn sources(&self) -> Vec<Option<serde_json::Value>> {
+            self.sources.lock().unwrap().clone()
+        }
+
+        fn fail_user_content(&self, fail: bool) {
+            self.fail_user_content.store(fail, Ordering::SeqCst);
         }
 
         fn messages(&self) -> Vec<Message> {
@@ -910,8 +996,12 @@ mod tests {
             &self,
             _: &SessionHandle,
             content: Vec<ContentPart>,
-            _source: Option<serde_json::Value>,
+            source: Option<serde_json::Value>,
         ) -> Result<(), PortError> {
+            if self.fail_user_content.load(Ordering::SeqCst) {
+                return Err(PortError("the session store refused the write".into()));
+            }
+            self.sources.lock().unwrap().push(source);
             let text = content
                 .iter()
                 .filter_map(|part| match part {
@@ -1953,5 +2043,104 @@ mod tests {
             .filter(|message| message.role == Role::Tool)
             .count();
         assert_eq!(tool_messages, 1);
+    }
+
+    #[tokio::test]
+    async fn begin_turn_makes_the_prompt_and_the_live_turn_durable_before_it_returns() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![done("stop")])]);
+        let turns = TurnRegistry::new();
+        let runtime = AgentRuntime {
+            model,
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(turns.clone()),
+        };
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "hello");
+        options.source = Some(serde_json::json!({ "kind": "team", "member": "one" }));
+        let begun = begin_turn(&runtime, options).unwrap();
+
+        // Before the remainder is polled: the live registry knows the session and the prompt is durable.
+        assert!(turns.is_running("s"));
+        let user_messages = session
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == Role::User)
+            .collect::<Vec<_>>();
+        assert_eq!(user_messages.len(), 1);
+        assert!(
+            user_messages[0]
+                .content
+                .iter()
+                .any(|part| matches!(part, ContentPart::Text { text } if text == "hello"))
+        );
+        assert_eq!(
+            session.sources(),
+            [Some(serde_json::json!({ "kind": "team", "member": "one" }))],
+            "the source is recorded verbatim with the prompt"
+        );
+
+        let result = begun.run().await.unwrap();
+        assert_eq!(result.rounds, 1);
+        assert_eq!(result.text, "");
+        assert!(
+            !turns.is_running("s"),
+            "the finished turn settles its registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_turn_settles_the_registration_when_the_prompt_cannot_be_written() {
+        let session = RecordingSession::new();
+        session.fail_user_content(true);
+        let turns = TurnRegistry::new();
+        let runtime = AgentRuntime {
+            model: ScriptedModel::new(vec![]),
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(turns.clone()),
+        };
+        let error = begin_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, TurnError::Port(_)));
+        assert!(
+            !turns.is_running("s"),
+            "a failed prompt write must not leave the session marked running"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_begun_turn_that_is_dropped_settles_its_registration() {
+        let session = RecordingSession::new();
+        let turns = TurnRegistry::new();
+        let runtime = AgentRuntime {
+            model: ScriptedModel::new(vec![]),
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(turns.clone()),
+        };
+        let begun = begin_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .unwrap();
+        assert!(turns.is_running("s"));
+        drop(begun);
+        assert!(!turns.is_running("s"));
     }
 }
