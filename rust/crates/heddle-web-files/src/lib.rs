@@ -3,7 +3,8 @@
 //! Ported from the TypeScript build: `src/server/attachments.ts`, `src/server/uploads.ts`, `src/server/picker.ts`,
 //! `src/server/code.ts`, `src/server/docs.ts`, `src/server/markdown.ts`, `src/server/highlight.ts`,
 //! `src/server/sanitize.ts`, and the file routes of `src/server/web.ts` (`/api/file`, `/api/raw`, `/api/uploads`,
-//! `/api/uploads/{leaf}`, `/api/markdown`, `/api/workspaces/pick`, and — proposed, see [`html_preview`] — `/api/html`).
+//! `/api/uploads/{leaf}`, `/api/markdown`, `/api/workspaces/pick`). `html.ts` and its `GET /api/html` were proposed
+//! here during the contract and stayed with `heddle-server` (with `/vendor/purify.js`), so they are that crate's.
 //! Judged through the `heddle` binary (`HEDDLE_BIN`) by `_verifiers_/88-file-preview` and `_verifiers_/80-web-ui`
 //! (check-file-view).
 //!
@@ -11,7 +12,7 @@
 //!
 //! The crate is four layers, and each depends only on the ones above it:
 //!
-//! 1. **Pure renderers** — [`sanitize`], [`highlight`], [`markdown`], [`code`], [`html_preview`]: text in, markup out,
+//! 1. **Pure renderers** — [`sanitize`], [`highlight`], [`markdown`], [`code`]: text in, markup out,
 //!    no I/O, no global state. The one rule they share is that **this crate writes every tag**: a file's bytes are
 //!    somebody else's, so they are escaped or reduced to an allow-list, never interpolated.
 //! 2. **Stores** — [`uploads`], [`attachments`], [`docs`]: the filesystem, always rooted at a directory the caller
@@ -33,7 +34,6 @@ pub mod code;
 pub mod docs;
 pub mod highlight;
 pub mod host;
-pub mod html_preview;
 pub mod markdown;
 pub mod picker;
 pub mod routes;
