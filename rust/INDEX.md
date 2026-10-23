@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.2.0
+version: 0.3.1
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -36,10 +36,48 @@ team shares ten cores and one disk.
 
 ## Status
 
-| Part | Status | Evidence |
+Written only from a verifier run **against the binary**, with the command and the date
+([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
+whose checks skip has not been judged, and a part that failed has not been met.
+
+**Run 2026-10-22, in `~/heddle--int-backend`, on the merged candidate at `b4f8abf` that became `main`:**
+
+```bash
+_tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
+HEDDLE_BIN="$PWD/rust/target/release/heddle" \
+  node _tools_/verify-runner/run.mjs _verifiers_/<part>/check*.mjs --json
+```
+
+**18 check files, 116 checks: 0 passed, 0 failed, 116 unjudged.** Every backend check skipped at its capability
+probe because the binary's `--help` does not name the option it needs (`--profile`, `--endpoint`, `--turn`, …), and
+every other command exits 2 with `heddle: not ported to Rust yet: <command>`. So no part of the goal was judged, and
+none passed.
+
+The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies. `heddle-config`
+(`c477822`) and `heddle-context` (`8dbdcf8`) were on `main` before this run; the `heddle-team` and `heddle-llm`
+contracts landed with the candidate it ran on (`b4f8abf`). The event, session, workspace, tools, agent, sandbox and
+binary contracts are still on the lane's branches. A contract is not a port: what has not happened is a **part**
+passing its verifier on this binary.
+
+| Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
-| toolchain, workspace, `HEDDLE_BIN` seam | in place | 2026-10-22: fmt and clippy clean; the seam's unit test passes |
-| 0–11 | not started | the binary answers `--help` and exits 2 otherwise |
+| 0 configuration system | `_verifiers_/05-config-system` | 10 checks — unjudged |
+| 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged |
+| 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
+| 3 context management | `_verifiers_/30-context-management` | 8 checks — unjudged |
+| 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
+| 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
+| 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged |
+| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — unjudged |
+| 8 permission sandbox | `_verifiers_/75-permission-sandbox` | 17 checks — unjudged |
+| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |
+| 10 token | `_verifiers_/90-web-ui-token` | not judged in the backend lane; `web` exits 2 |
+| 11 Web UI daemon | `_verifiers_/95-web-daemon` | not judged in the backend lane; `web` exits 2 |
+| model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged |
+
+What is **in place** is the toolchain and the seam, not a part: rust 1.99.1 from rustup, the workspace, and the
+`HEDDLE_BIN` path the checks reach the binary through — 13 of 13 `_tools_/verify-runner/_tests_/helper-rules` pass,
+and the seam's own cases are among them.
 
 ## Read next
 
