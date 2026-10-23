@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { evidencePath, chatDouble, fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
@@ -25,6 +25,28 @@ import { evidencePath, chatDouble, fixtureDir, heddleCommand, isolatedHome, remo
  * - the arrow button submits exactly what Enter would.
  */
 
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
+
 const CAPABILITY = 'a Web UI on localhost with a live stream'
 
 /**
@@ -45,13 +67,13 @@ async function until(predicate, timeoutMs = 10_000) {
 async function startServer(label, options = {}) {
   const home = isolatedHome(`composer-${label}`)
   const work = fixtureDir(`composer-${label}-work`)
-  const double = await chatDouble({
+  const double = held(await chatDouble({
     content: options.content ?? 'the answer',
     reasoning: 'thinking',
     holdOpenMs: options.holdOpenMs ?? 1200,
     ...(options.usage !== undefined ? { usage: options.usage } : {}),
     ...(options.modelList !== undefined ? { modelList: options.modelList } : {}),
-  })
+  }))
   const config = writeJson(join(home, 'heddle.json'), {
     default: 'held',
     endpoints: [
