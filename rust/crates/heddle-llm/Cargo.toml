@@ -9,4 +9,20 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# One heddle dependency: `heddle-config`, which owns the endpoint vocabulary (`EndpointConfig` and its model
+# catalogue). Nothing here reads configuration files, sessions or the event bus; see INDEX.md, "Where it sits".
 [dependencies]
+bytes.workspace = true
+heddle-config.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+# `preserve_order`: a JSON object keeps its insertion order, as `JSON.stringify` does. Tool schemas, raw provider
+# frames and anything re-serialized into the session log must not come back key-sorted. Cargo unifies features, so
+# this applies to every crate in the build — deliberately, for byte compatibility with the TypeScript store.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
