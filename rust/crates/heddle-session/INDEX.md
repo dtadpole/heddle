@@ -87,7 +87,7 @@ is pushed to its owner's branch on its own.
 
 ## Where it stands, 2026-10-22
 
-Steps 1–8 are ported, each with the unit tests the table names: **120 unit tests pass** with
+Steps 1–8 are ported, each with the unit tests the table names: **124 unit tests pass** with
 `cargo test --manifest-path rust/Cargo.toml -p heddle-session`, and `rustfmt` and
 `clippy -D warnings` are clean on both crates. Step 9 is green in both directions:
 

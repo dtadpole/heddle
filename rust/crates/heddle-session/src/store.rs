@@ -1801,6 +1801,69 @@ mod tests {
     }
 
     #[test]
+    fn appends_from_several_threads_keep_one_contiguous_sequence() {
+        let (_dir, store) = store();
+        let handle = store.create(CreateOptions::default()).unwrap();
+        let threads: Vec<std::thread::JoinHandle<()>> = (0..4)
+            .map(|worker| {
+                let store = store.clone();
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    for round in 0..25u64 {
+                        store
+                            .append(
+                                &handle,
+                                NewEvent::new("turn/retry")
+                                    .field("worker", worker)
+                                    .field("round", round),
+                                AppendOptions::default(),
+                            )
+                            .expect("an append inside the lock");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("a writer thread");
+        }
+
+        // 1 creation + 4 x 25, with no hole and no duplicate, because the seq is assigned and written
+        // under the store's one lock.
+        let events = store.read(&handle).unwrap();
+        assert_eq!(events.len(), 101);
+        let seqs: Vec<u64> = events.iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, (0..=100u64).collect::<Vec<_>>());
+        // And the file has every one of them, whole: a concurrent writer cannot tear a frame.
+        let decoded = decode_transcript(&store.bytes(&handle));
+        assert_eq!(decoded.frames, 101);
+        assert!(!decoded.torn);
+        assert_eq!(decoded.readable_bytes, store.bytes(&handle).len());
+    }
+
+    #[test]
+    fn open_newest_answers_the_newest_record() {
+        let (_dir, store) = store();
+        let older = store
+            .create(CreateOptions {
+                id: Some("session-older".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let newer = store
+            .create(CreateOptions {
+                id: Some("session-newer".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        stamp(&older.meta, "2026-10-22T18:00:00.000Z");
+        stamp(&newer.meta, "2026-10-22T19:00:00.000Z");
+        assert_eq!(
+            store.open_newest().map(|handle| handle.id),
+            Some("session-newer".to_string())
+        );
+    }
+
+    #[test]
     fn the_default_root_follows_heddle_home() {
         let env = Env::from_pairs([("HEDDLE_HOME", "/tmp/hd-home")]);
         assert_eq!(default_session_root(&env), "/tmp/hd-home/sessions");

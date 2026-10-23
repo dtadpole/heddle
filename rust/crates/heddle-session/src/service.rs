@@ -573,6 +573,16 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    /// Pin a session's `created`, so "the folder's newest" is decided by the test and not by which
+    /// millisecond two creations landed in.
+    fn stamp(handle: &SessionHandle, created: &str) {
+        let text = std::fs::read_to_string(&handle.meta).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut meta = SessionMeta::from_value(value).unwrap();
+        meta.set("created", json!(created));
+        std::fs::write(&handle.meta, meta.to_file_text()).unwrap();
+    }
+
     #[test]
     fn a_title_is_one_trimmed_line_without_trailing_punctuation() {
         assert_eq!(
@@ -584,6 +594,43 @@ mod tests {
         assert_eq!(title_from("ends with dots..."), "ends with dots");
         assert_eq!(title_from("   "), "");
         assert_eq!(title_from(""), "");
+    }
+
+    #[test]
+    fn a_title_at_or_under_forty_eight_units_is_kept_whole() {
+        // Exactly the limit, in UTF-16 units: no ellipsis, no cut.
+        let exact = "a".repeat(48);
+        assert_eq!(title_from(&exact), exact);
+        // One unit more is cut hard at 48 and marked.
+        let over = "a".repeat(49);
+        assert_eq!(title_from(&over), format!("{}…", "a".repeat(48)));
+    }
+
+    #[test]
+    fn the_word_cut_needs_a_space_past_the_half_way_point() {
+        // A space at unit 24 exactly is not past the half-way point: the cut is hard at 48.
+        let mut text = "a".repeat(24);
+        text.push(' ');
+        text.push_str(&"b".repeat(30));
+        let title = title_from(&text);
+        // The space at unit 24 is *in* the cut, because the rule needs one past the half-way point to
+        // prefer it; the title therefore ends where the clock says, not at that word.
+        assert_eq!(title, format!("{}…", &text[..48]));
+        assert!(title.contains(' '));
+
+        // A space at unit 25 is past it, so the title ends at the word.
+        let mut text = "a".repeat(25);
+        text.push(' ');
+        text.push_str(&"b".repeat(30));
+        let title = title_from(&text);
+        assert_eq!(title, format!("{}…", "a".repeat(25)));
+
+        // Trailing punctuation is removed after the cut as well.
+        let mut text = "a".repeat(25);
+        text.push_str(&" b.".repeat(20));
+        let title = title_from(&text);
+        assert!(title.ends_with("…"), "{title}");
+        assert!(!title.trim_end_matches('…').ends_with('.'), "{title}");
     }
 
     #[test]
@@ -648,6 +695,7 @@ mod tests {
         service
             .user(&first, "the first conversation", None)
             .unwrap();
+        stamp(&first, "2026-10-22T10:00:00.000Z");
         let again = service
             .open_at(folder_path, OpenAtOptions::default())
             .unwrap();
@@ -662,6 +710,9 @@ mod tests {
                 },
             )
             .unwrap();
+        // `--new` can land in the same millisecond as the first session; the record's clock is what
+        // "the folder's newest" reads, so pin it rather than depend on the wall clock.
+        stamp(&second, "2026-10-22T11:00:00.000Z");
         assert_ne!(second.id, first.id);
         assert_eq!(
             service.list().len(),
