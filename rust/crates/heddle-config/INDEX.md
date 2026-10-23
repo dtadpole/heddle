@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:17:17Z
+modified: 2026-10-23T08:21:42Z
 version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -306,6 +306,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-23 | lane `46b727a`, now main `c072e63` (this crate's fidelity fixes `a042777` and `e31f096` over lane `9319116`; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 46b727a> sh _verifiers_/05-config-system/verify.sh --json`; the backend lane written as a baseline from a debug build of `9319116`, then `lane.mjs --baseline` with `46b727a` in the same tree (the binary checked to carry the fix: a `null` layer reads as 0 rows) | 10/10 passed, verdict 0; backend lane 108 pass, 5 fail, 4 unjudged, against the baseline 0 newly passing and 0 regressed — this crate's change turns no passing check anywhere into a failure (D-048) |
 | 2026-10-23 | main `77fb012` (UI merges: `heddle-web-composer`'s context view and `heddle-web-files`' highlighter, both in the binary's tree since `web` was wired) | `HEDDLE_BIN=<debug build of exactly 77fb012> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
 | 2026-10-23 | lane `cce4bec` (a baseline regression must reproduce on a re-run to block; no Rust changed since `77fb012`) | `HEDDLE_BIN=<release build of this branch at 77fb012's code> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at `cce4bec`; its `lane.mjs 05-config-system`; then `--write-baseline` and `--baseline` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline 0 newly passing, 0 regressed |
+| 2026-10-23 | lane `6549572` (`heddle-team` proves mail to an idle teammate is delivered before send returns — a test file only — and the check-teams metadata-read fix) | `HEDDLE_BIN=<debug build of exactly 6549572> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green |
 
 ## Known differences from the TypeScript build
 
