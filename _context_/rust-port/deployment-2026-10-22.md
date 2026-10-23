@@ -90,20 +90,29 @@ URL is this build's page byte for byte, and the checkout is a clean deployment c
 The one open question — whether the committed wording should say `main` or `origin/main` for a worktree
 deployment — is D-015's, and the branch takes the wording that matches the machine.
 
-## A turn does not answer, and the page is not why
+## A turn answers — with a labelled offline fixture, not a model
 
-Reproduced 2026-10-22 20:27 PDT against `3082` with a session cookie: the stream opens, records the user message
-and the context notes, sends `model/request endpoint=scripted`, then `compaction/recovery code=SCRIPT` and
-`event: error — the script for 'scripted' could not be read at scripted.json`.
+**Before D-030** a turn ended in `event: error — the script for 'scripted' could not be read at scripted.json`.
+The cause was the configuration, not the page: the repository's offline default endpoint (`src/endpoints.ts`,
+`kind: 'scripted'`, `baseUrl: 'scripted.json'`) resolves a relative path against the server's working directory,
+which is this checkout, and the repository carries no such file (every check suite writes its own and removes it).
+A file dropped into the checkout would also make it dirty and fail `96-deployment`'s third check.
 
-That is the repository's offline default endpoint (`src/endpoints.ts`: `kind: 'scripted'`,
-`baseUrl: 'scripted.json'`), and a relative `baseUrl` is resolved against the server's working directory, which is
-this checkout. The repository carries no such file and does not ignore one, because every check suite writes its
-own and removes it; a file dropped here would also make the checkout dirty and fail `96-deployment`'s third check.
-So the deployment serves the UI and the API, and **a turn cannot answer until an endpoint is configured on this
-machine** — in `~/.heddle/heddle.json`, either pointing the scripted endpoint at an absolute script path (canned
-answers, which is a choice about the owner's page and not this seat's to make) or naming a real endpoint with a
-key. Nothing in the checkout changes either way.
+**Since D-030** the page answers, and says what it is in its first line. Two files, both outside the checkout, so
+the deployment stays clean:
+
+| File | What it holds |
+|---|---|
+| `~/.heddle/deployment-scripted.json` | the script: one turn step whose text begins **`scripted endpoint: offline fixture reply, not a model`** |
+| `~/.heddle/heddle.json` | `{"endpoints": [{"name": "scripted", "baseUrl": "/Users/zhenchen/.heddle/deployment-scripted.json"}]}` — the machine's endpoint list is an **array** of partial endpoints, merged over the repository defaults by name |
+
+Measured 2026-10-22 20:34 PDT, after a restart (the configuration is read at start): a turn through
+`POST /api/turn` with a session cookie wrote 8 session events, `assistant/chunk` seq 5 as a `text-delta` beginning
+with that sentence, `assistant/completed` seq 7 and `turn/completed`, and **zero** `event: error`. The owner's page
+therefore answers, and nobody can mistake the answer for a model's: the first line says it is the fixture.
+
+A real endpoint is the owner's decision (D-030 condition 4): put one in the same `heddle.json` and it replaces the
+fixture for the endpoint that is nominated; nothing about the page, the token or the stream changes.
 
 ## What stopped it, and what brings it back
 
@@ -140,6 +149,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 |---|---|---|---|
 | 20:12 | `a5b0c66` | `a5b0c66`, clean | 8082 200, page 533,283 bytes against 533,280, marker `dd6d45d28567`; 96 3/3 with the branch's checks, 2/3 with main's |
 | 20:33 | `b4f8abf` (Rust lockfile chore) | `b4f8abf`, clean | 8082 200, healthz 200, page identical (533,283 / 533,280, same marker); 96 3/3 with the branch's checks, 2/3 with main's |
+| 20:34 | `eaaa6bb` (Rust status run) | `eaaa6bb`, clean | 8082 200, healthz 200, page identical; a turn answers with the labelled offline fixture (D-030), 0 errors; 96 3/3 with the branch's checks, 2/3 with main's |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
