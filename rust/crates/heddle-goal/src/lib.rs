@@ -33,6 +33,8 @@ mod driver;
 pub mod http;
 mod log;
 mod service;
+#[cfg(test)]
+mod test_support;
 pub mod tool;
 
 pub use driver::{
