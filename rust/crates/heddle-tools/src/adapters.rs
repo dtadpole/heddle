@@ -625,4 +625,89 @@ mod tests {
         assert!(!work.join("inside.txt").exists(), "nothing landed");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// What 75-permission-sandbox's check-escalation judges for a run with no one to answer, through the registry
+    /// over the real services as the turn calls it: a read-only session's write is refused by the fence, the one
+    /// wider retry with a justification is refused because nobody can approve it, and nothing is written.
+    #[tokio::test]
+    async fn an_escalated_retry_with_no_one_to_answer_is_refused_and_writes_nothing() {
+        let root = scratch("escalation-unattended");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let sessions = sessions_at(&root.join("sessions"));
+        let session = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let config = SandboxConfig {
+            mode: SandboxMode::ReadOnly,
+            workspace_root: Some(work.clone()),
+            backend: BackendChoice::Disabled,
+            ..SandboxConfig::default()
+        };
+        let host = SandboxHost {
+            cwd: work.clone(),
+            harness_home: root.join(".heddle"),
+            platform: Platform::current(),
+        };
+        // The verifier's approvals row is `mode: allow`, the default, with nothing attached to answer a question.
+        let registry = crate::ToolRegistry::from_config(
+            gates_over(
+                Arc::new(SandboxService::new(&config, &host)),
+                Arc::new(ApprovalService::new(ApprovalsConfig::default())),
+                Arc::clone(&sessions),
+            ),
+            &crate::config::ToolsConfig::default(),
+        );
+        let context = || {
+            let mut context = crate::ToolContext::new(&work);
+            context.session = Some(session.clone());
+            context
+        };
+        let args = |value: serde_json::Value| value.as_object().cloned().unwrap();
+
+        let denied = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "escalated.txt", "content": "x" })),
+                context(),
+            )
+            .await;
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some(crate::codes::SANDBOX),
+            "{denied:?}"
+        );
+
+        let retried = registry
+            .call(
+                "write_file",
+                args(json!({
+                    "path": "escalated.txt",
+                    "content": "x",
+                    "sandbox_permissions": "workspace-write",
+                    "justification": "the session started read-only and this file is inside its workspace"
+                })),
+                context(),
+            )
+            .await;
+        let error = retried
+            .error
+            .clone()
+            .unwrap_or_else(|| panic!("not refused: {retried:?}"));
+        assert_eq!(error.code, crate::codes::ESCALATION_REFUSED);
+        assert!(
+            error.message.to_lowercase().contains("no one can approve"),
+            "the call says no one could approve it: {}",
+            error.message
+        );
+        assert!(!work.join("escalated.txt").exists(), "nothing was written");
+        assert_eq!(
+            sessions
+                .effective_mode(&session, SandboxMode::ReadOnly)
+                .unwrap(),
+            SandboxMode::ReadOnly,
+            "the session's own mode never moved"
+        );
+    }
 }
