@@ -199,18 +199,23 @@ pub fn routes<H: ContextHost>(host: Arc<H>) -> axum::Router {
                     let Some(session) = session else {
                         return error(StatusCode::BAD_REQUEST, "a session is required");
                     };
-                    let Some(events) = host.session_events(session) else {
+                    // `ctx.session.store.open(wanted) === null`: existence only. The log is read after assembling.
+                    if !host.session_exists(session) {
                         return error(StatusCode::NOT_FOUND, &format!("no session {session}"));
-                    };
+                    }
                     let request = AssembleRequest {
                         cwd: host.session_cwd(session),
                         endpoint: query.get("endpoint").cloned().filter(|value| !value.is_empty()),
                         model: query.get("model").cloned().filter(|value| !value.is_empty()),
                     };
                     // Assemble first: the baseline notes may be written by this call, and the surface and the
-                    // notes are read afterwards so both describe the same composition.
+                    // notes are read afterwards so both describe the same composition (web.ts reads
+                    // `ctx.session.events(handle)` after `context.assemble`). Reading the log before assembling
+                    // dropped the notes the first assembly writes — check-context-view's "the composition
+                    // includes what the harness wrote".
                     let assembly = host.assemble_context(session, &request);
                     let surface = host.surface(session);
+                    let events = host.session_events(session).unwrap_or_default();
                     json_pretty(StatusCode::OK, &context_view(session, &request, assembly, surface, &events))
                 },
             ),
@@ -290,6 +295,81 @@ mod tests {
         assert_eq!(serialised["estimatedTokens"], 42);
         assert_eq!(serialised["surface"]["nodes"], json!([2, 3]));
         assert_eq!(serialised["messages"][0]["text"], "hello");
+    }
+
+    /// A host whose assembly writes a baseline note into the session's log, as the harness's first `assemble`
+    /// does — the case the route must read the log *after*.
+    struct NotingHost {
+        events: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl crate::session::SessionLookup for NotingHost {
+        fn session_events(&self, id: &str) -> Option<Vec<serde_json::Value>> {
+            (id == SESSION).then(|| self.events.lock().expect("not poisoned").clone())
+        }
+    }
+
+    impl ContextHost for NotingHost {
+        fn has_context(&self) -> bool {
+            true
+        }
+
+        fn session_cwd(&self, _id: &str) -> String {
+            "/work".to_owned()
+        }
+
+        fn assemble_context(&self, _id: &str, _request: &AssembleRequest) -> ContextAssembly {
+            self.events.lock().expect("not poisoned").push(json!({
+                "seq": 2,
+                "type": "context/note",
+                "origin": "baseline",
+                "message": {"content": [{"type": "text", "text": "written by the first assembly"}]}
+            }));
+            ContextAssembly {
+                instructions: vec![],
+                estimated_tokens: 0,
+                context_window: 128_000,
+                threshold_tokens: 96_000,
+                pruned: 0,
+                compacted: false,
+                messages: vec![],
+            }
+        }
+
+        fn surface(&self, _id: &str) -> Surface {
+            Surface {
+                nodes: vec![],
+                replacements: vec![],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_notes_the_assembly_writes_are_in_the_view() {
+        // Measured by developer-ten through the binary: the route read the log before assembling, so the
+        // baseline note the first assembly writes was missing and check-context-view's "the composition
+        // includes what the harness wrote" failed. web.ts reads the events after `context.assemble`.
+        let host = NotingHost {
+            events: std::sync::Mutex::new(vec![json!({"seq": 1, "type": "session/created"})]),
+        };
+        let response = call(
+            routes(Arc::new(host)),
+            Method::GET,
+            &format!("/api/context?session={SESSION}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        let report: serde_json::Value =
+            serde_json::from_str(&body_text(response).await).expect("a JSON report");
+        let notes = report["notes"].as_array().expect("notes is an array");
+        assert_eq!(
+            notes.len(),
+            1,
+            "the note written by assembling is reported: {report}"
+        );
+        assert_eq!(notes[0]["text"], "written by the first assembly");
+        assert_eq!(notes[0]["origin"], "baseline");
     }
 
     #[tokio::test]

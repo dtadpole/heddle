@@ -32,3 +32,13 @@
 {"at": "2026-10-22T23:17-07:00", "deployed": "3c12b45", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the 3097 preview rebuilt from 3c12b45 (Markdown renderer): /api/markdown 200, every checked route 200"}
 {"at": "2026-10-22T23:26-07:00", "deployed": "3b03427", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview rebuilt from 3b03427 and reinstalled with its own session root"}
 {"at": "2026-10-22T23:33-07:00", "deployed": "adb5c5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (nothing it serves changed)"}
+{"at": "2026-10-22T23:35-07:00", "deployed": "08a40ca", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart"}
+{"at": "2026-10-22T23:37-07:00", "deployed": "b7bfb32", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "restart (52043e2 changed _tools_/web-daemon); the preview re-rendered by main preview.sh --force with its own session root"}
+{"at": "2026-10-23T00:03-07:00", "deployed": "d171876", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; main's binary now advertises web; the preview rebuilt from d171876; rehearse.sh with that binary 8 of 8, 95 4/4"}
+{"at": "2026-10-23T00:11-07:00", "deployed": "f7b2c5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T00:17-07:00", "deployed": "bc3ce8b", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T00:41-07:00", "deployed": "9319116", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt from 9319116, every checked route 200, its own store"}
+{"at": "2026-10-23T00:44-07:00", "deployed": "c072e63", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the binary is fully ported on main; the preview, behind on heddle-config which the old watch missed, rebuilt from c072e63"}
+{"at": "2026-10-23T00:49-07:00", "deployed": "2942ee2", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
+{"at": "2026-10-23T00:51-07:00", "deployed": "8775bfe", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
+{"at": "2026-10-23T00:55-07:00", "deployed": "8248e5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}

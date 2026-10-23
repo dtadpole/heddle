@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:45:36Z
-version: 0.4.0
+modified: 2026-10-23T07:45:56Z
+version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -64,9 +64,10 @@ What a caller does to turn command-line flags into rows, and what it may rely on
 today: every command that boots, `web` included, goes through `rust/crates/heddle/src/commands.rs` `boot_tree`, which
 builds `cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `boot_then` answers a booted command from
 it, and `web` hands it to `crate::web::web`. `profiles` and `config` pass `cli::config_args` to `command::run`.
-**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `e3f9d91` it is
-routed but not yet listed in `--help`; it takes the launch secret's directory from `heddle_home(&invocation.env)`
-(step 7), and an unknown `--profile` or a missing `--config` reaches the user as this crate's sentence with exit 1.
+**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `c072e63` it is
+served and listed in `--help` (D-048), and the binary has no `todo!(` left; `web` takes the launch secret's directory
+from `heddle_home(&invocation.env)` (step 7), and an unknown `--profile` or a missing `--config` reaches the user as
+this crate's sentence with exit 1.
 
 ### 1. One environment, built once
 
@@ -108,9 +109,10 @@ directory differs from the process's must pass absolute paths.
 | a profile's file | `{profile}/{file}`, e.g. `dev/heddle.patch.yml`; a directory profile's name is its absolute path | absolute |
 | the base, the project patch, each `--patch` | the absolute path | the absolute path |
 
-It stops at the first layer it cannot read and returns one `ConfigError`: an unknown profile (the sentence lists the
-profiles that exist), an include cycle (naming every file in it), a file that is not YAML, or a layer of the wrong
-shape. Then append the in-memory layers **after** every file layer:
+A file whose document is empty, only comments, `null` or `~` is **no layers**, as `readLayer` reads it; any other
+document must be a top-level array. It stops at the first layer it cannot read and returns one `ConfigError`: an
+unknown profile (the sentence lists the profiles that exist), an include cycle (naming every file in it), a file that
+is not YAML, or a layer of the wrong shape. Then append the in-memory layers **after** every file layer:
 `layers.push(NamedLayer::inline(1, Layer::patching([json!({ "id": "session", "config": { "root": root } })])))`.
 An inline layer is named `override N` with the file `(inline)`. Like every patch, it **replaces** the row's whole
 `config`. `command::run` reads the file layers only, so `heddle --session-root X config` does not show the override,
@@ -130,6 +132,8 @@ as `runConfigCommand` did not.
 - **No config is `None`.** A row that writes no `config`, or writes `config: null`, composes to `config: None`, and
   a patch writing `config: null` clears it. Validation checks `None` as `{}`; a caller starting a component hands it
   `{}`, as a Cordis plugin received, so its schema's defaults apply — never `null`, which every typed config refuses.
+  `config --json` still prints a *written* `config: null` back, after `name`, as the TypeScript row kept it; the
+  written null is known by its `config` origin, which an absent config does not have.
 - **Provenance** is one entry per leaf field, naming only the layer that won; `origin_of` answers a parent field
   (`config`) with the first leaf beneath it.
 - **Every problem is collected** before it fails (a duplicate insert, a patch or remove naming a row no earlier layer
@@ -194,7 +198,7 @@ the one place this crate's deliberate difference (see *Where it differs on purpo
 
 ### 8. Starting an outside component
 
-How the binary turns an outside row into a process, as of main `67c2587` (`rust/crates/heddle/src/adapters.rs`,
+How the binary turns an outside row into a process, as of main `c072e63` (`rust/crates/heddle/src/adapters.rs`,
 `OutsideRow`). `--validate` and the start read the manifest through the same `read_component_manifest`, so a manifest
 that validates is one that starts.
 
@@ -208,7 +212,7 @@ that validates is one that starts.
 | the name in `initialize`, errors and logs | **the row's `id`**, the same name `config --validate` and the boot's `N row(s) failed to load: <id>` use, so one broken row has one name everywhere |
 
 The two last rows are agreed with developer-five, who owns the process protocol (2026-10-22). **Where the binary still
-differs:** as of main `43fd346` it names the running component by the manifest's file name without `.component.yml`,
+differs:** as of main `c072e63` it names the running component by the manifest's file name without `.component.yml`,
 so `id: alpha` naming `./shout.component.yml` says `shout` once running. `Catalog::component(&ComponentRef)` does not
 carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change is developer-two's.
 
@@ -296,6 +300,33 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `27157e4`, now main `999984c` (web composes the statistics and uploads; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 27157e4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and the uploads directory comes from `heddle_home` on the invocation's `Env` (step 7) |
 | 2026-10-22 | main `5c2ca91` (`5e164c4`: a model switched mid-turn lands on that turn's next model call, in `web.rs`; then a status doc) | `HEDDLE_BIN=<debug build of exactly 5c2ca91> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots; the new `Env::default()` and `default_endpoints()` calls are test-only |
 | 2026-10-22 | lane `e9a0836` (D-048: the binary advertises web, the turn, context, tools, hooks and models) | `HEDDLE_BIN=<debug build of exactly e9a0836> sh _verifiers_/05-config-system/verify.sh --json`, and with the same binary the backend lane `lane.mjs --json 05-config-system 10-llm-backends 20-streaming 30-context-management 40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints` | 10/10 passed, verdict 0 — no passing check turns into a failure for part 0. Backend lane: 117 checks, 101 pass, 7 fail, 9 unjudged; the 7 failures (50 teams, 70 session ordering, 75 sandbox enforcement) are none of this crate's: the sandbox row's configuration reaches the binary intact |
+| 2026-10-22 | lane `b72cc1a` (rebuilt without `e9a0836`: developer-two's branch with `--stream` through the stream hub, models and streaming advertised, the hidden adapter-call command, and the team row through `start_row`) | `HEDDLE_BIN=<debug build of exactly b72cc1a> sh _verifiers_/05-config-system/verify.sh --json`, and the backend lane with the same binary | 10/10 passed, verdict 0. Backend lane: 117 checks, 108 pass, 5 fail, 4 unjudged; the team failures are gone, and the five left (70 session ordering, 75 sandbox enforcement) are none of this crate's. `web --dry-run` boots; the repository's own profile validates, 16 rows checked, 0 problems |
+| 2026-10-22 | lane `f7b2c5e` (the lane gate judges a candidate against a per-check baseline, D-048; no Rust changed since `b72cc1a`, now main `d171876`) | `HEDDLE_BIN=<debug build of exactly f7b2c5e> sh _verifiers_/05-config-system/verify.sh --json`; the new `lane.mjs 05-config-system`; then `lane.mjs --write-baseline <file> 05-config-system` and `lane.mjs --baseline <file> 05-config-system` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline: 0 newly passing, 0 regressed. The baseline lists part 0's ten checks by name, all `pass` |
+| 2026-10-23 | lane `ffd5f27` (the bare application and the printed tree, the binary's last unported paths; the printed tree boots through `boot_tree`) | `HEDDLE_BIN=<debug build of exactly ffd5f27> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; an unknown `--profile` or a missing `--config` on the bare path gives this crate's sentence and exit 1. A third probe found this crate refusing a `null` layer document that `readLayer` reads as no layers; fixed in `a042777` |
+| 2026-10-23 | lane `46b727a`, now main `c072e63` (this crate's fidelity fixes `a042777` and `e31f096` over lane `9319116`; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 46b727a> sh _verifiers_/05-config-system/verify.sh --json`; the backend lane written as a baseline from a debug build of `9319116`, then `lane.mjs --baseline` with `46b727a` in the same tree (the binary checked to carry the fix: a `null` layer reads as 0 rows) | 10/10 passed, verdict 0; backend lane 108 pass, 5 fail, 4 unjudged, against the baseline 0 newly passing and 0 regressed — this crate's change turns no passing check anywhere into a failure (D-048) |
+
+## Known differences from the TypeScript build
+
+Measured 2026-10-23 by running the same 39 edge-case layer files through `heddle --config <file> config --json` on
+both builds (the TypeScript `dist/cli.js` and a release build of this crate's branch), comparing exit codes, rows and
+the first error line. 34 agree; the other five come down to four differences kept on purpose (two cases show the key
+order):
+
+| Case | TypeScript | Rust | Why it stays |
+|---|---|---|---|
+| `insert` written as a mapping | a JavaScript `TypeError` ("object is not iterable") | `layer 0: insert must be a list` | the TypeScript text is a crash, not a sentence; both exit 1 |
+| row key order in `config --json` | the order the layer wrote the row's keys | `id`, `name`, `config`, `group`, `disabled`, `inject`, then other keys in written order | same values; every consumer parses the JSON |
+| an `id` that is a number | accepted and printed as `7` | `a row's 'id' must be a string` | rows are addressed by string `id`; a number could not be patched by name |
+| a layer file that does not exist | Node's `ENOENT: no such file or directory, open '…'` | the OS's `No such file or directory (os error 2)` | each runtime's own I/O text; the sentence around it is the same |
+
+Closed by the same measurement: a `null` layer document (`a042777`), a written `config: null` printed back, the
+two-document and top-level `!include` sentences, and keys kept in written order without relying on another crate's
+`preserve_order`.
+
+A second measurement the same night, 13 cases, agrees on every one, output and exit code: `profiles` in text and
+`--json` with no profiles directory, an empty one, and one mixing two real profiles with a directory holding no layer
+and a stray file; `--profile` by name, by absolute directory, and unknown (with other profiles present, and with
+none); `config` text output and `--origins`; and `config --validate` on a checkout's own profile.
 
 ## Decisions the contract makes
 

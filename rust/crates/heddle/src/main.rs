@@ -95,15 +95,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unwired_command_says_so_on_stderr_and_exits_two() {
-        // With every command wired, the bare application is what still says so.
+    fn a_bare_run_is_the_three_plugin_application_and_announces_itself() {
         let (exit, stdout, stderr) = run_captured(&[]);
-        assert_eq!(exit, Exit::Unported);
-        assert_eq!(exit.code(), 2);
-        assert_eq!(stdout, "");
-        assert_eq!(
-            stderr,
-            "heddle: not ported to Rust yet: the bare application\n"
+        assert_eq!(exit, Exit::Success);
+        assert_eq!(exit.code(), 0);
+        assert_eq!(stderr, "");
+        assert!(
+            stdout.starts_with("heddle: 3 plugin(s) loaded\n"),
+            "{stdout}"
         );
+        assert!(stdout.ends_with("announce hello, heddle!\n"), "{stdout}");
     }
 }
