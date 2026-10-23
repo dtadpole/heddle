@@ -20,6 +20,7 @@ path = "src/main.rs"
 futures.workspace = true
 heddle-agent.workspace = true
 heddle-config.workspace = true
+heddle-context.workspace = true
 heddle-llm.workspace = true
 heddle-goal.workspace = true
 heddle-sandbox.workspace = true

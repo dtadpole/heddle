@@ -420,6 +420,9 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
             }
+            ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
+                crate::adapters::ContextComponent::new(self.env.clone()),
+            )),
             // The rest land with their crate's API: a built-in with no adapter answers `None`, so its
             // row fails naming itself rather than starting nothing.
             ComponentRef::Builtin(_) | ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => {

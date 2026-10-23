@@ -25,8 +25,9 @@ use serde_json::Value;
 
 use crate::builtins::Component;
 use crate::ports::{
-    CreateAt, GoalPort, ModelPort, OpenAt, PortError, PortResult, Record, SandboxPort,
-    SessionDefinition, SessionHandle, SessionPort, ToolsPort, TreeRoot, WorkspacePort,
+    AssembleOptions, ContextPort, CreateAt, GoalPort, ModelPort, OpenAt, PortError, PortResult,
+    Record, SandboxPort, SessionDefinition, SessionHandle, SessionPort, ToolsPort, TreeRoot,
+    WorkspacePort,
 };
 use crate::services::Services;
 
@@ -1034,6 +1035,215 @@ impl Component for TurnsComponent {
     }
 }
 
+/// One shape to another through their shared serialization: the crates each declare the TypeScript
+/// message and request types, so a value crosses a crate boundary by its JSON.
+fn bridge<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, String> {
+    serde_json::to_value(value)
+        .and_then(serde_json::from_value)
+        .map_err(|error| error.to_string())
+}
+
+fn store_error(error: impl std::fmt::Display) -> heddle_context::StoreError {
+    heddle_context::StoreError(error.to_string().into())
+}
+
+/// `heddle-session`'s store as the log `heddle-context` derives a request from.
+pub struct ContextLog {
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+impl heddle_context::ContextStore for ContextLog {
+    type Handle = heddle_session::SessionHandle;
+
+    fn count(&self, session: &Self::Handle) -> Result<u64, heddle_context::StoreError> {
+        Ok(self.sessions.events(session).map_err(store_error)?.len() as u64)
+    }
+
+    fn read(
+        &self,
+        session: &Self::Handle,
+    ) -> Result<Vec<heddle_context::LogEvent>, heddle_context::StoreError> {
+        let events = self.sessions.events(session).map_err(store_error)?;
+        Ok(events
+            .iter()
+            .map(|event| heddle_context::LogEvent {
+                seq: event.seq,
+                kind: event.kind.clone(),
+                fields: event.fields.clone(),
+            })
+            .collect())
+    }
+
+    fn surface(
+        &self,
+        session: &Self::Handle,
+    ) -> Result<heddle_context::SurfaceState, heddle_context::StoreError> {
+        let surface = self.sessions.surface(session).map_err(store_error)?;
+        Ok(heddle_context::SurfaceState {
+            nodes: surface.nodes.clone(),
+            content_generation: surface.content_generation,
+            replace_generation: surface.replace_generation,
+        })
+    }
+
+    fn derive_node(
+        &self,
+        session: &Self::Handle,
+        seq: u64,
+    ) -> Result<Option<heddle_context::Message>, heddle_context::StoreError> {
+        let node = self.sessions.node(session, seq).map_err(store_error)?;
+        node.map(|message| bridge(&message).map_err(store_error))
+            .transpose()
+    }
+
+    fn append(
+        &self,
+        session: &Self::Handle,
+        event: Value,
+        options: heddle_context::AppendOptions,
+    ) -> Result<u64, heddle_context::StoreError> {
+        let event = heddle_session::NewEvent::try_from(event).map_err(store_error)?;
+        let surface_op = options.surface_op.map(|op| match op {
+            heddle_context::SurfaceOp::Append => heddle_session::SurfaceOp::Append,
+            heddle_context::SurfaceOp::Replace(range) => heddle_session::SurfaceOp::Replace {
+                start_seq: range.start_seq,
+                end_seq: range.end_seq,
+            },
+        });
+        let written = self
+            .sessions
+            .store()
+            .append(
+                session,
+                event,
+                heddle_session::AppendOptions {
+                    surface_op,
+                    source_event_seqs: options.source_event_seqs,
+                },
+            )
+            .map_err(store_error)?;
+        Ok(written.seq)
+    }
+}
+
+/// `heddle-llm`'s service as what `heddle-context` asks of the model layer: an endpoint's window and a
+/// summary call.
+struct ContextModels {
+    service: Arc<heddle_llm::ModelService>,
+}
+
+impl heddle_context::ModelAccess for ContextModels {
+    fn endpoint_window(&self, endpoint: &str, model: Option<&str>) -> Option<u64> {
+        self.service.endpoint(endpoint)?.context_window_for(model)
+    }
+
+    fn complete(
+        &self,
+        request: heddle_context::SummaryRequest,
+    ) -> futures::future::BoxFuture<'_, Result<String, heddle_context::SummarizeError>> {
+        Box::pin(async move {
+            let messages = bridge(&request.messages).map_err(|error| {
+                heddle_context::SummarizeError(format!("the summary request: {error}"))
+            })?;
+            let generated = self
+                .service
+                .generate(heddle_llm::GenerateRequest {
+                    endpoint: request.endpoint,
+                    model: request.model,
+                    messages,
+                    max_output_tokens: request.max_output_tokens,
+                    purpose: request.purpose,
+                    ..heddle_llm::GenerateRequest::default()
+                })
+                .await
+                .map_err(|error| heddle_context::SummarizeError(error.to_string()))?;
+            Ok(generated.text)
+        })
+    }
+}
+
+/// The context service the binary composes: over the session store, with the model layer.
+pub type Context = heddle_context::ContextService<ContextLog>;
+
+/// `src/context/service.ts`: context assembly, the budget and compaction.
+pub struct ContextComponent {
+    env: Env,
+}
+
+impl ContextComponent {
+    /// The adapter for a run whose environment is this one.
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+}
+
+impl Component for ContextComponent {
+    fn requires(&self) -> Vec<String> {
+        // `src/context/service.ts` injects the model and the session.
+        vec!["model".to_owned(), "session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_context::ContextConfig =
+            serde_json::from_value(config.clone()).map_err(|error| format!("context: {error}"))?;
+        let sessions = session_service(services, "context")?;
+        let models = services
+            .get::<Arc<heddle_llm::ModelService>>("model")
+            .ok_or_else(|| "context: the model service is not provided".to_owned())?;
+        let service = Arc::new(heddle_context::ContextService::new(
+            Arc::new(ContextLog { sessions }),
+            config,
+            heddle_context::ContextDependencies {
+                model: Some(Arc::new(ContextModels { service: models })),
+                heddle_home: heddle_home(&self.env),
+            },
+        ));
+        services.provide("context", Arc::clone(&service));
+        services.provide(
+            "context",
+            Arc::new(ContextView { service }) as Arc<dyn ContextPort>,
+        );
+        Ok(())
+    }
+}
+
+/// `ctx.context` over the context service: the report the `context` command prints.
+struct ContextView {
+    service: Arc<Context>,
+}
+
+impl ContextPort for ContextView {
+    fn assemble(&self, handle: &SessionHandle, options: AssembleOptions) -> PortResult<Record> {
+        let inner = inner_of(handle)?;
+        let tools: Vec<heddle_context::ToolSpec> = options
+            .tools
+            .iter()
+            .filter_map(|tool| serde_json::from_value(tool.clone()).ok())
+            .collect();
+        let cwd = options.cwd.unwrap_or_else(|| PathBuf::from("."));
+        let report = self
+            .service
+            .assemble(
+                inner,
+                &heddle_context::AssembleOptions {
+                    cwd: &cwd,
+                    tools: &tools,
+                    system: None,
+                    endpoint: options.endpoint.as_deref(),
+                    model: options.model.as_deref(),
+                },
+            )
+            .map_err(port_error)?;
+        // The view is the TypeScript `context --json` object; its messages are already described as
+        // `{ role, toolCallId?, text }`, which is what the command prints.
+        serde_json::to_value(report.view(&handle.id)).map_err(port_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1481,6 +1691,43 @@ mod tests {
             read.last().map(|event| event["type"].clone()),
             Some(json!("todo/write"))
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_context_row_assembles_a_sessions_request_without_calling_a_model() {
+        let home = scratch("context");
+        let mut services = Services::new();
+        ModelComponent::new(env_at(&home))
+            .start(&json!({ "readLocalConfig": false }), &mut services)
+            .expect("the model row starts");
+        SessionComponent::new(env_at(&home))
+            .start(&json!({ "root": home.join("sessions") }), &mut services)
+            .expect("the session row starts");
+        ContextComponent::new(env_at(&home))
+            .start(&json!({}), &mut services)
+            .expect("the context row starts");
+        let session = services.session().expect("ctx.session");
+        let handle = session
+            .current(&home)
+            .expect("a session starts in the folder");
+        let report = services
+            .context()
+            .expect("ctx.context")
+            .assemble(
+                &handle,
+                AssembleOptions {
+                    cwd: Some(home.clone()),
+                    tools: Vec::new(),
+                    endpoint: Some("scripted".to_owned()),
+                    model: None,
+                },
+            )
+            .expect("the context assembles");
+        assert_eq!(report["session"], handle.id.as_str());
+        assert!(report["messageCount"].is_u64(), "{report}");
+        assert!(report["estimatedTokens"].is_u64(), "{report}");
+        assert!(report["instructions"].is_array(), "{report}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
