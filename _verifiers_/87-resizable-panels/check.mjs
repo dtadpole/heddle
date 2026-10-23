@@ -99,16 +99,13 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
 
     /**
      * **Which build is this?** The served page carries its own file's hash in `meta[name=heddle-page]`; the check
-     * recomputes it from the file this server reads — `dist/server/page.html` on the TypeScript build, the
-     * `src/server/page.html` a binary through `HEDDLE_BIN` serves. Measured failure this prevents: the
+     * recomputes it from `src/server/page.html`, the source of the one page both builds serve (the TypeScript
+     * build copies it into `dist/`). Measured failure this prevents: the
      * live daemon ran a deployment checkout an hour behind the source, and a row's geometry read as "not
      * implemented" while the source and the claim were already correct. A page that predates a rebuild must say so
      * rather than look like a missing feature.
      */
-    const pageFile = process.env.HEDDLE_BIN
-      ? join(repoRoot, 'src', 'server', 'page.html')
-      : join(repoRoot, 'dist', 'server', 'page.html')
-    const pageHash = createHash('sha256').update(readFileSync(pageFile)).digest('hex').slice(0, 12)
+    const pageHash = createHash('sha256').update(readFileSync(join(repoRoot, 'src', 'server', 'page.html'))).digest('hex').slice(0, 12)
     const servedHash = await browser.evaluate(`document.querySelector('meta[name="heddle-page"]')?.getAttribute('content') ?? null`)
     assert.equal(servedHash, pageHash, `the served page states the build it is (${pageHash})`)
 

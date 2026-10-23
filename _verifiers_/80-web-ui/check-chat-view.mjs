@@ -920,14 +920,11 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     /**
      * The server marks the page with the hash of the document's original bytes, computed when it serves it.
      * The source has an `unbuilt` placeholder, not a rail-specific version label. Compare with the exact build
-     * this fixture starts — the built copy beside `dist/` on the TypeScript build, the source a binary through
-     * `HEDDLE_BIN` serves; accepting any hash would not distinguish a current page from a stale one.
+     * this fixture starts — `src/server/page.html`, the source of the one page both builds serve (`dist/` holds
+     * the TypeScript build's copy); accepting any hash would not distinguish a current page from a stale one.
      */
-    const pageFile = process.env.HEDDLE_BIN
-      ? join(repoRoot, 'src', 'server', 'page.html')
-      : join(repoRoot, 'dist', 'server', 'page.html')
     const pageBuild = createHash('sha256')
-      .update(readFileSync(pageFile))
+      .update(readFileSync(join(repoRoot, 'src', 'server', 'page.html')))
       .digest('hex')
       .slice(0, 12)
     assert.equal(
