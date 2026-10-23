@@ -143,6 +143,52 @@ mod tests {
         );
     }
 
+    /// The placeholder rule, over the 32 hex digits of a UUID: ignoring the version nibble (index 12) and the
+    /// variant nibble (index 16), at least 29 of the remaining 30 digits are one and the same digit. No
+    /// generated UUID meets it, which is what makes it safe to publish.
+    fn is_placeholder_uuid(hex: &str) -> bool {
+        let digits: Vec<u8> = hex
+            .bytes()
+            .enumerate()
+            .filter(|(index, _)| *index != 12 && *index != 16)
+            .map(|(_, digit)| digit)
+            .collect();
+        digits.len() == 30
+            && digits
+                .iter()
+                .any(|candidate| digits.iter().filter(|digit| *digit == candidate).count() >= 29)
+    }
+
+    #[test]
+    fn the_placeholder_rule_tells_a_placeholder_from_a_generated_uuid() {
+        let hex =
+            |uuid: &str| -> String { uuid.chars().filter(|character| *character != '-').collect() };
+        for placeholder in [
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000000",
+            "11111111-1111-4111-8111-111111111111",
+        ] {
+            assert!(
+                is_placeholder_uuid(&hex(placeholder)),
+                "{placeholder} is a placeholder"
+            );
+        }
+        // The refused cases are built from digit patterns rather than written as UUIDs: this file is public,
+        // and a UUID-shaped literal is exactly what the gate exists to keep out. None of them is an id from a run.
+        let cycling: String = (0..32)
+            .map(|index| b"0123456789abcdef"[index % 16] as char)
+            .collect();
+        let mut two_stray = hex("00000000-0000-4000-8000-000000000001").into_bytes();
+        two_stray[30] = b'1';
+        let two_stray = String::from_utf8(two_stray).expect("ascii hex");
+        for refused in [cycling, two_stray] {
+            assert!(
+                !is_placeholder_uuid(&refused),
+                "{refused} is not a placeholder: two stray digits are already too many"
+            );
+        }
+    }
+
     #[test]
     fn the_recorded_identifiers_are_version_four_uuids() {
         let request = question();
@@ -166,6 +212,11 @@ mod tests {
             assert!(
                 matches!(hex.as_bytes()[16], b'8' | b'9' | b'a' | b'b'),
                 "the {label}'s RFC 4122 variant nibble"
+            );
+            assert!(
+                is_placeholder_uuid(&hex),
+                "the {label} {value} must be a canonical placeholder (29 of the 30 non-nibble digits the same), \
+                 so a real run's id cannot be recorded into this public fixture"
             );
         }
         assert_eq!(
