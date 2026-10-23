@@ -1,5 +1,7 @@
 ---
 title: Verifier 11 — Web Daemon
+created: 2026-10-11T20:54:23Z
+modified: 2026-10-23T05:14:51Z
 version: 2.0.0
 description: a supervised user service keeps the Web UI running at the documented port, survives a kill, and does not weaken the token — judged on the deployment or on a scratch service.
 grounded_in:
