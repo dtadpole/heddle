@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use heddle_server::Harness;
 use heddle_server::services::{
-    ModelService as ServerModels, SandboxService as ServerSandbox, ServiceError, TurnOutcome,
-    TurnRequest, TurnRunner,
+    ApprovalOutcome, ApprovalService as ServerApprovals, ModelService as ServerModels,
+    SandboxService as ServerSandbox, ServiceError, TurnOutcome, TurnRequest, TurnRunner,
 };
 use serde_json::Value;
 
@@ -57,6 +57,37 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.sandbox = Arc::new(Sandbox { service });
     }
+    // The workspace row: the tree, the roots, and the folder a new chat starts in. Without it
+    // `/api/tree` and a turn started in a folder answer 503, which is a page with nothing to click.
+    if let (Some(service), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_workspace::WorkspaceService>>("workspace"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        harness.workspaces = Some(Arc::new(Workspaces { service, sessions }));
+    }
+    // The goal, todo and team rows: the page's goal, todo and team panels read them.
+    if let Some(service) = boot.services.get::<Arc<heddle_goal::GoalService>>("goal") {
+        harness.goals = Some(Arc::new(Goals { service }));
+    }
+    if let Some(service) = boot.services.get::<Arc<heddle_todo::TodoService>>("todo") {
+        harness.todos = Some(Arc::new(Todos { service }));
+    }
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_team::service::TeamService>>("team")
+    {
+        harness.team = Some(Arc::new(Team { service }));
+    }
+    // The approvals row: the page becomes the answerer while the server runs, and every question the
+    // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_sandbox::ApprovalService>>("approvals")
+    {
+        harness.approvals = Some(Arc::new(Approvals { service }));
+    }
     harness
 }
 
@@ -84,17 +115,22 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         out.err(&format!("heddle web: row '{id}' ({name}) did not load\n"));
     }
     let harness = harness(&boot, invocation.cwd.clone());
+    let runtime = crate::runtime::tokio();
+    // The goal driver follows the sessions' events for as long as the server runs, so a goal keeps
+    // pushing after each turn; then the boot sweep resumes the goals a previous process left active.
+    let goal_edges = drive_goals(&boot);
+    let notes = runtime.block_on(boot_notes(&boot));
     let shutdown = heddle_tools::CancellationToken::new();
     let context = heddle_server::command::Context {
         cwd: invocation.cwd.clone(),
         harness: &harness,
         // The hub the session store was given its listener over at boot.
         events: boot.services.get::<heddle_server::EventHub>("event-hub"),
-        routers: page_routers(&boot, &invocation.env),
+        routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref()),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
-        notes: Vec::new(),
+        notes,
         shutdown: shutdown.clone(),
     };
     let web_args = heddle_server::command::Args {
@@ -105,7 +141,6 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         dry_run: args.dry_run,
         json: args.json,
     };
-    let runtime = crate::runtime::tokio();
     // The only honest lifetime for a server: until it is interrupted.
     runtime.spawn(async move {
         wait_for_stop().await;
@@ -119,6 +154,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         stdout,
         stderr,
     ));
+    drop(goal_edges);
     boot.dispose();
     if code == 0 {
         Exit::Success
@@ -218,15 +254,173 @@ fn page_host(boot: &Boot, env: &heddle_config::Env) -> Option<Arc<PageHost>> {
     }))
 }
 
-/// The feature routers mounted behind the door: the files panel and the trajectory's log and stats.
-fn page_routers(boot: &Boot, env: &heddle_config::Env) -> Vec<axum::Router> {
+/// The feature routers mounted behind the door: the files panel, the trajectory's log and stats, and the
+/// composer's model switcher and context view (`/api/endpoints`, `POST /api/sessions/{id}/model`,
+/// `/api/context`), which is what lets the page show and choose a model.
+fn page_routers(
+    boot: &Boot,
+    env: &heddle_config::Env,
+    nominated: Option<&str>,
+) -> Vec<axum::Router> {
     let Some(host) = page_host(boot, env) else {
         return Vec::new();
     };
-    vec![
+    let mut routers = vec![
         heddle_web_files::routes::mount(axum::Router::new(), host.clone()),
-        heddle_web_trajectory::routes::router(host),
-    ]
+        heddle_web_trajectory::routes::router(host.clone()),
+    ];
+    if let Some(composer) = composer_host(boot, &host, nominated) {
+        routers.push(heddle_web_composer::router(composer));
+    }
+    routers
+}
+
+/// What the composer's routes read: the booted session store, the model service and the sandbox.
+struct Composer {
+    sessions: Arc<heddle_session::SessionService>,
+    models: Arc<heddle_llm::ModelService>,
+    sandbox: Option<Arc<heddle_sandbox::SandboxService>>,
+    /// `--endpoint`, the endpoint the page offers as the default.
+    nominated: Option<String>,
+}
+
+fn composer_host(boot: &Boot, host: &PageHost, nominated: Option<&str>) -> Option<Arc<Composer>> {
+    Some(Arc::new(Composer {
+        sessions: Arc::clone(&host.sessions),
+        models: boot
+            .services
+            .get::<Arc<heddle_llm::ModelService>>("model")?,
+        sandbox: boot
+            .services
+            .get::<Arc<heddle_sandbox::SandboxService>>("sandbox"),
+        nominated: nominated.map(str::to_owned),
+    }))
+}
+
+impl heddle_web_composer::session::SessionLookup for Composer {
+    fn session_events(&self, id: &str) -> Option<Vec<Value>> {
+        let handle = self.sessions.open(id)?;
+        let events = self.sessions.events(&handle).ok()?;
+        Some(events.iter().map(|event| event.to_value()).collect())
+    }
+}
+
+impl heddle_web_composer::status::StatusHost for Composer {
+    fn sandbox_mode(&self) -> String {
+        self.sandbox
+            .as_ref()
+            .map(|sandbox| sandbox.mode().to_string())
+            .unwrap_or_else(|| "workspace-write".to_owned())
+    }
+
+    fn workspace_root(&self) -> Option<String> {
+        self.sandbox
+            .as_ref()
+            .map(|sandbox| sandbox.workspace_root().to_string_lossy().into_owned())
+    }
+}
+
+impl heddle_web_composer::model_switcher::ModelHost for Composer {
+    fn describe_endpoints(&self) -> heddle_web_composer::model_switcher::EndpointListing {
+        let nominated = self.nominated.clone().or_else(|| self.models.nominated());
+        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref());
+        heddle_web_composer::model_switcher::EndpointListing {
+            endpoints: view
+                .endpoints
+                .into_iter()
+                .filter_map(|endpoint| endpoint.as_object().cloned())
+                .collect(),
+            default: view.default,
+        }
+    }
+
+    /// No window is discovered over the network here; the page shows the configured window, if any.
+    fn discover_context_window(
+        &self,
+        _endpoint: &str,
+    ) -> impl std::future::Future<Output = Option<u64>> + Send {
+        std::future::ready(None)
+    }
+
+    fn endpoint_names(&self) -> Vec<String> {
+        self.models.names()
+    }
+
+    fn selection_problem(
+        &self,
+        endpoint: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) -> Option<String> {
+        match self.models.endpoint(endpoint) {
+            Some(config) => heddle_config::selection_problem(&config, model, reasoning_effort),
+            None => Some(format!("unknown endpoint '{endpoint}'")),
+        }
+    }
+
+    fn set_session_model(
+        &self,
+        id: &str,
+        choice: &heddle_web_composer::model_switcher::ModelChoice,
+    ) -> Option<Value> {
+        self.sessions
+            .set_model(
+                id,
+                heddle_session::ModelSelection {
+                    endpoint: choice.endpoint.clone(),
+                    model: choice.model.clone(),
+                    reasoning_effort: choice.reasoning_effort.clone(),
+                },
+            )
+            .ok()
+            .flatten()
+            .map(|meta| meta.to_value())
+    }
+}
+
+impl heddle_web_composer::context_view::ContextHost for Composer {
+    /// The context row is not composed into the page yet, so `/api/context` says the plugin is missing
+    /// rather than inventing an assembly.
+    fn has_context(&self) -> bool {
+        false
+    }
+
+    fn session_cwd(&self, id: &str) -> String {
+        self.sessions
+            .meta(id)
+            .map(|meta| meta.cwd().to_owned())
+            .unwrap_or_default()
+    }
+
+    fn assemble_context(
+        &self,
+        _id: &str,
+        _request: &heddle_web_composer::context_view::AssembleRequest,
+    ) -> heddle_web_composer::context_view::ContextAssembly {
+        heddle_web_composer::context_view::ContextAssembly::default()
+    }
+
+    fn surface(&self, _id: &str) -> heddle_web_composer::context_view::Surface {
+        heddle_web_composer::context_view::Surface::default()
+    }
+}
+
+/// The composer's router mounts no turn-control route (steer and stop are the server's, D-039), so
+/// these are never called through it; they answer as a session with no running turn would.
+impl heddle_web_composer::turn_control::TurnControlHost for Composer {
+    fn is_running(&self, _id: &str) -> bool {
+        false
+    }
+
+    fn abort_session(&self, _id: &str) -> u64 {
+        0
+    }
+
+    fn read_attachments(&self, _raw: Option<&Value>) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+
+    fn record_user_content(&self, _id: &str, _content: Vec<Value>) {}
 }
 
 /// The `?view=` projections of a session: the trajectory's ledger.
@@ -377,11 +571,482 @@ impl ServerSandbox for Sandbox {
     }
 }
 
+/// The workspace row's service as the server's port. The sessions a row counts and a removal checks
+/// come from the booted store itself, the same records the server lists.
+struct Workspaces {
+    service: Arc<heddle_workspace::WorkspaceService>,
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+fn path_text(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn refusal(error: impl std::fmt::Display) -> ServiceError {
+    ServiceError::new(error.to_string())
+}
+
+impl heddle_server::services::WorkspaceService for Workspaces {
+    fn owns(&self, path: &std::path::Path) -> bool {
+        self.service.owner(&path_text(path)).is_some()
+    }
+
+    fn tree(
+        &self,
+        path: Option<&std::path::Path>,
+        archived: heddle_server::services::ArchivedFilter,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Value, ServiceError> {
+        use heddle_server::services::ArchivedFilter as Server;
+        use heddle_workspace::ArchivedFilter as Workspace;
+        let input = heddle_workspace::TreeInput {
+            roots: self
+                .service
+                .list()
+                .iter()
+                .map(heddle_workspace::TreeRoot::from)
+                .collect(),
+            sessions: self.sessions.list(),
+            generated: self.service.generated().to_vec(),
+            archived: match archived {
+                Server::Hide => Workspace::Hide,
+                Server::Show => Workspace::Show,
+                Server::Only => Workspace::Only,
+            },
+        };
+        let path = path.map(path_text);
+        serde_json::to_value(heddle_workspace::tree(path.as_deref(), &input)).map_err(refusal)
+    }
+
+    fn add(
+        &self,
+        path: &std::path::Path,
+        name: Option<&str>,
+    ) -> Result<(Value, bool), ServiceError> {
+        let addition = self.service.add(&path_text(path), name).map_err(refusal)?;
+        let record = serde_json::to_value(&addition.record).map_err(refusal)?;
+        Ok((record, addition.created))
+    }
+
+    fn find(&self, id: &str) -> bool {
+        self.service.find(id).is_some()
+    }
+
+    fn remove(
+        &self,
+        id: &str,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Value, ServiceError> {
+        let removal = self
+            .service
+            .remove(id, &self.sessions.list(), false)
+            .map_err(refusal)?;
+        serde_json::to_value(&removal).map_err(refusal)
+    }
+
+    fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
+        match self.service.rename(id, title).map_err(refusal)? {
+            Some(record) => serde_json::to_value(&record).map(Some).map_err(refusal),
+            None => Ok(None),
+        }
+    }
+
+    fn ensure_owner(&self, folder: &std::path::Path) {
+        let _ = self.service.ensure_owner(&path_text(folder));
+    }
+}
+
+/// What the boot reports before the URL, in the TypeScript order: the teams the team row recovered
+/// (`recovered N team(s) (S settled, D delivered[, F failed])`). Each is printed as `heddle web: <note>`.
+async fn boot_notes(boot: &Boot) -> Vec<String> {
+    let mut notes = Vec::new();
+    // Goals first, as runWeb prints them: every session whose goal is runnable is requested once, and
+    // its chain runs on this runtime without being awaited here.
+    if let (Some(driver), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_goal::GoalDriver>>("goalDriver"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        let ids: Vec<String> = sessions
+            .list()
+            .iter()
+            .map(|meta| meta.id().to_owned())
+            .collect();
+        let resumed = driver.resume_at_start(&ids);
+        if resumed.requested > 0 {
+            notes.push(format!("resuming {} active goal(s)", resumed.requested));
+        }
+    }
+    if let Some(team) = boot
+        .services
+        .get::<Arc<heddle_team::service::TeamService>>("team")
+        && let Some(note) = heddle_team::command::web_start_note(&team).await
+    {
+        notes.push(note);
+    }
+    notes
+}
+
+/// The goal driver's trigger on the run's bus. Dropping it detaches the listener.
+pub struct GoalEdges {
+    _listener: heddle_events::Listener,
+    _scope: heddle_events::Scope,
+}
+
+/// Forward every `session/event` on the bus to the goal driver's trigger, which requests a round on the
+/// edges that can make one due (a completed turn, a goal change). `None` without a driver or a bus.
+pub fn drive_goals(boot: &Boot) -> Option<GoalEdges> {
+    let driver = boot
+        .services
+        .get::<Arc<heddle_goal::GoalDriver>>("goalDriver")?;
+    let bus = boot.services.get::<heddle_events::EventBus>("events")?;
+    let trigger = heddle_goal::DriverTrigger::new(driver);
+    let scope = bus.scope("web-goal-driver");
+    let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+        move |payload: &Value| {
+            let session = payload.get("session").and_then(Value::as_str);
+            let kind = payload
+                .get("event")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str);
+            if let (Some(session), Some(kind)) = (session, kind) {
+                // The chain is not awaited: a turn is not held open by the rounds it starts.
+                drop(trigger.on_session_event(session, kind));
+            }
+        },
+        heddle_events::ListenOptions::default(),
+    );
+    Some(GoalEdges {
+        _listener: listener,
+        _scope: scope,
+    })
+}
+
+fn to_json(value: impl serde::Serialize) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// The goal row's service as the server's port.
+struct Goals {
+    service: Arc<heddle_goal::GoalService>,
+}
+
+fn goal_refusal(error: heddle_goal::GoalError) -> ServiceError {
+    match error.code() {
+        Some(code) => ServiceError::with_code(error.to_string(), code.as_str()),
+        None => ServiceError::new(error.to_string()),
+    }
+}
+
+impl heddle_server::services::GoalService for Goals {
+    fn get(&self, session: &str) -> Option<Value> {
+        self.service.get(session).ok().flatten().map(to_json)
+    }
+
+    fn act(
+        &self,
+        session: &str,
+        action: heddle_server::services::GoalAction,
+    ) -> Result<heddle_server::services::GoalAnswer, ServiceError> {
+        use heddle_server::services::{GoalAction, GoalAnswer};
+        let of = |goal: &heddle_server::services::GoalRef| heddle_goal::GoalRef {
+            id: goal.id.clone(),
+            revision: goal.revision,
+        };
+        let rounds = |rounds: Option<u64>| rounds.map(|rounds| rounds as f64);
+        let view = match action {
+            GoalAction::Create {
+                objective,
+                max_goal_rounds,
+            } => self.service.create(
+                session,
+                heddle_goal::CreateGoal {
+                    objective,
+                    max_goal_rounds: rounds(max_goal_rounds),
+                },
+            ),
+            GoalAction::Edit {
+                goal,
+                objective,
+                max_goal_rounds,
+            } => self.service.edit(
+                session,
+                &of(&goal),
+                heddle_goal::EditGoal {
+                    objective,
+                    max_goal_rounds: rounds(max_goal_rounds),
+                },
+            ),
+            GoalAction::Pause(goal) => self.service.pause(session, &of(&goal)),
+            GoalAction::Resume(goal) => self.service.resume(session, &of(&goal)),
+            GoalAction::Complete(goal) => self.service.complete(session, &of(&goal)),
+            GoalAction::Blocked { goal, reason } => {
+                self.service.block(session, &of(&goal), &reason)
+            }
+            GoalAction::Clear(goal) => {
+                return self
+                    .service
+                    .clear(session, &of(&goal))
+                    .map(|cleared| GoalAnswer::Cleared(to_json(cleared)))
+                    .map_err(goal_refusal);
+            }
+        };
+        view.map(|view| GoalAnswer::Goal(to_json(view)))
+            .map_err(goal_refusal)
+    }
+}
+
+/// The todo row's service as the server's port.
+struct Todos {
+    service: Arc<heddle_todo::TodoService>,
+}
+
+impl heddle_server::services::TodoService for Todos {
+    fn get(&self, session: &str) -> Option<Value> {
+        self.service.get(session).ok().flatten().map(to_json)
+    }
+}
+
+/// The team row's service as the server's port: one fold, so roster, board and mailbox describe one
+/// moment; a log the fold refuses is the route's 500.
+struct Team {
+    service: Arc<heddle_team::service::TeamService>,
+}
+
+impl heddle_server::services::TeamService for Team {
+    fn view(&self, session: &str) -> Result<heddle_server::services::TeamView, ServiceError> {
+        let view = heddle_team::api::team_view(&self.service, session)
+            .map_err(|error| ServiceError::new(error.to_string()))?;
+        Ok(heddle_server::services::TeamView {
+            lead: to_json(&view.lead),
+            members: to_json(&view.members),
+            tasks: to_json(&view.tasks),
+            messages: to_json(&view.messages),
+            delivered: to_json(&view.delivered),
+        })
+    }
+}
+
+/// The approval service the sandbox row provides, as the server's port.
+struct Approvals {
+    service: Arc<heddle_sandbox::ApprovalService>,
+}
+
+impl ServerApprovals for Approvals {
+    fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+        let guard = self.service.attach_answerer();
+        Box::new(move || guard.detach())
+    }
+
+    fn pending_requests(&self) -> Vec<Value> {
+        self.service
+            .pending_requests()
+            .iter()
+            .filter_map(|request| serde_json::to_value(request).ok())
+            .collect()
+    }
+
+    fn answer(&self, id: &str, outcome: ApprovalOutcome) -> bool {
+        let word = match outcome {
+            ApprovalOutcome::AllowedOnce => "allowed-once",
+            ApprovalOutcome::Rejected => "rejected",
+            ApprovalOutcome::Cancelled => "cancelled",
+        };
+        heddle_sandbox::Answer::parse(word).is_some_and(|answer| self.service.answer(id, answer))
+    }
+
+    /// Every question the service publishes from now on; a lagging receiver skips what it missed (the
+    /// page repaints from `pending_requests`), and the stream ends when the service is gone.
+    fn subscribe(&self) -> Option<futures::stream::BoxStream<'static, Value>> {
+        let receiver = self.service.subscribe();
+        Some(Box::pin(futures::stream::unfold(
+            receiver,
+            |mut receiver| async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(request) => {
+                            let value = serde_json::to_value(&request).unwrap_or(Value::Null);
+                            return Some((value, receiver));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            },
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::Services;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn the_approvals_row_becomes_the_server_approval_service() {
+        let service = Arc::new(heddle_sandbox::ApprovalService::new(
+            heddle_sandbox::ApprovalsConfig::default(),
+        ));
+        let mut boot = empty_boot();
+        boot.services.provide("approvals", Arc::clone(&service));
+        let harness = harness(&boot, PathBuf::from("/work"));
+        let approvals = harness.approvals.expect("the approvals row is composed");
+
+        assert!(!service.can_answer());
+        let detach = approvals.attach_answerer();
+        assert!(
+            service.can_answer(),
+            "the page is the answerer while the server runs"
+        );
+        detach();
+        assert!(!service.can_answer());
+
+        assert!(approvals.pending_requests().is_empty());
+        assert!(
+            !approvals.answer(
+                "approval-00000000-0000-0000-0000-000000000000",
+                ApprovalOutcome::AllowedOnce
+            ),
+            "nothing is waiting under that id"
+        );
+        assert!(
+            approvals.subscribe().is_some(),
+            "questions are relayed by the server"
+        );
+    }
+
+    fn composer_boot(root: &std::path::Path) -> Boot {
+        let mut boot = empty_boot();
+        let sessions = Arc::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(root.to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        boot.services.provide("session", sessions);
+        boot.services.provide(
+            "model",
+            Arc::new(
+                heddle_llm::ModelService::new(heddle_config::default_endpoints())
+                    .expect("the default endpoints are valid"),
+            ),
+        );
+        boot
+    }
+
+    #[test]
+    fn the_composer_lists_the_booted_endpoints_and_switches_a_session() {
+        use heddle_web_composer::model_switcher::{ModelChoice, ModelHost};
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-composer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let boot = composer_boot(&root);
+        let host = page_host(&boot, &heddle_config::Env::default()).expect("a session store");
+        let composer = composer_host(&boot, &host, Some("scripted")).expect("a model service");
+
+        let listing = composer.describe_endpoints();
+        assert_eq!(listing.default.as_deref(), Some("scripted"));
+        assert_eq!(listing.endpoints.len(), 1);
+        assert_eq!(listing.endpoints[0]["name"], "scripted");
+        assert_eq!(composer.endpoint_names(), vec!["scripted".to_owned()]);
+        assert!(composer.selection_problem("scripted", None, None).is_none());
+        assert_eq!(
+            composer.selection_problem("absent", None, None).as_deref(),
+            Some("unknown endpoint 'absent'")
+        );
+
+        let id = host
+            .sessions
+            .start(heddle_session::StartOptions::default())
+            .unwrap()
+            .id;
+        let meta = composer
+            .set_session_model(
+                &id,
+                &ModelChoice {
+                    endpoint: "scripted".into(),
+                    model: None,
+                    reasoning_effort: None,
+                },
+            )
+            .expect("a known session");
+        assert_eq!(meta["endpoint"], "scripted");
+        assert_eq!(
+            page_routers(&boot, &heddle_config::Env::default(), None).len(),
+            3,
+            "files, trajectory and the composer"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_workspace_row_becomes_the_server_workspace_service() {
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-workspaces-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = std::fs::canonicalize(&project).unwrap();
+        let mut boot = composer_boot(&root.join("sessions"));
+        boot.services.provide(
+            "workspace",
+            Arc::new(heddle_workspace::WorkspaceService::new(
+                &heddle_workspace::WorkspaceConfig {
+                    file: Some(root.join("workspaces.json").to_string_lossy().into_owned()),
+                    generated: Vec::new(),
+                },
+                &heddle_config::Env::default(),
+            )),
+        );
+        let harness = harness(&boot, root.clone());
+        let workspaces = harness.workspaces.expect("the workspace row is composed");
+
+        assert!(!workspaces.owns(&project), "nothing is a root yet");
+        let (record, created) = workspaces.add(&project, Some("project")).unwrap();
+        assert!(created);
+        assert_eq!(record["path"], project.to_string_lossy().as_ref());
+        assert!(
+            workspaces.owns(&project.join("src")),
+            "a path under a root is owned"
+        );
+        let tree = workspaces
+            .tree(None, heddle_server::services::ArchivedFilter::Hide, &[])
+            .unwrap();
+        assert!(tree.to_string().contains("project"), "{tree}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_boot_without_a_goal_driver_attaches_no_goal_edges() {
+        let mut boot = empty_boot();
+        assert!(drive_goals(&boot).is_none());
+        boot.services
+            .provide("events", heddle_events::EventBus::new());
+        assert!(drive_goals(&boot).is_none(), "a bus alone is not a driver");
+    }
+
+    #[tokio::test]
+    async fn a_boot_without_goal_todo_or_team_rows_composes_none_and_notes_nothing() {
+        let boot = empty_boot();
+        let harness = harness(&boot, PathBuf::from("/work"));
+        assert!(harness.goals.is_none());
+        assert!(harness.todos.is_none());
+        assert!(harness.team.is_none());
+        assert!(boot_notes(&boot).await.is_empty());
+    }
 
     fn empty_boot() -> Boot {
         Boot {
