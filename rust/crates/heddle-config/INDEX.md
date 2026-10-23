@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:11:41Z
-version: 0.4.0
+modified: 2026-10-23T07:17:09Z
+version: 0.4.1
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -108,9 +108,10 @@ directory differs from the process's must pass absolute paths.
 | a profile's file | `{profile}/{file}`, e.g. `dev/heddle.patch.yml`; a directory profile's name is its absolute path | absolute |
 | the base, the project patch, each `--patch` | the absolute path | the absolute path |
 
-It stops at the first layer it cannot read and returns one `ConfigError`: an unknown profile (the sentence lists the
-profiles that exist), an include cycle (naming every file in it), a file that is not YAML, or a layer of the wrong
-shape. Then append the in-memory layers **after** every file layer:
+A file whose document is empty, only comments, `null` or `~` is **no layers**, as `readLayer` reads it; any other
+document must be a top-level array. It stops at the first layer it cannot read and returns one `ConfigError`: an
+unknown profile (the sentence lists the profiles that exist), an include cycle (naming every file in it), a file that
+is not YAML, or a layer of the wrong shape. Then append the in-memory layers **after** every file layer:
 `layers.push(NamedLayer::inline(1, Layer::patching([json!({ "id": "session", "config": { "root": root } })])))`.
 An inline layer is named `override N` with the file `(inline)`. Like every patch, it **replaces** the row's whole
 `config`. `command::run` reads the file layers only, so `heddle --session-root X config` does not show the override,

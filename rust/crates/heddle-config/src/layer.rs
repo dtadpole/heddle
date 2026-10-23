@@ -121,6 +121,11 @@ fn read_layer_inner(file: &Path, stack: &[PathBuf], env: &Env) -> Result<Vec<Lay
     let Some(document) = load_document(&text, &absolute.display().to_string())? else {
         return Ok(Vec::new());
     };
+    // A document that is `null` or `~` is no layers, as `src/config/schema.ts` reads it
+    // (`if (parsed === null || parsed === undefined) return []`).
+    if matches!(document, Yaml::Value(Scalar::Null)) {
+        return Ok(Vec::new());
+    }
     let Yaml::Sequence(entries) = document else {
         return Err(ConfigError::one(format!(
             "{}: expected a top-level array of layers",
@@ -524,6 +529,26 @@ mod tests {
                 root.join("p.yml").display()
             )]
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_layer_file_whose_document_is_null_reads_as_no_layers() {
+        let root = scratch("null-layer");
+        for (name, text) in [
+            ("null.yml", "null\n"),
+            ("tilde.yml", "~\n"),
+            ("comment.yml", "# nothing yet\n"),
+            ("empty.yml", ""),
+        ] {
+            write(&root.join(name), text);
+            assert!(
+                read_layer(&root.join(name), &Env::default())
+                    .unwrap_or_else(|error| panic!("{name}: {:?}", error.problems()))
+                    .is_empty(),
+                "{name} reads as no layers, as the TypeScript build reads it"
+            );
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 
