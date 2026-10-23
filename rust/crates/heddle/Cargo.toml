@@ -28,7 +28,7 @@ heddle-goal.workspace = true
 heddle-sandbox.workspace = true
 heddle-server.workspace = true
 heddle-session.workspace = true
-heddle-team.workspace = true
+heddle-team = { workspace = true, features = ["compose"] }
 heddle-todo.workspace = true
 heddle-tools.workspace = true
 heddle-web-composer.workspace = true
