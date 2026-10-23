@@ -66,6 +66,13 @@ impl Exit {
 /// turn. An error anywhere is printed as `heddle: <message>` on stderr with [`Exit::Failure`], exactly as
 /// the TypeScript build's top-level `catch` does.
 pub fn run(invocation: &Invocation, out: &mut output::Output<'_>) -> Exit {
-    let _ = (invocation, out);
-    todo!("port main() from src/cli.ts: dispatch through commands::dispatch")
+    let args = match cli::parse_args(&invocation.argv) {
+        Ok(args) => args,
+        Err(error) => return out.fail(&error.0),
+    };
+    if args.help {
+        out.out(&usage::usage(usage::SERVED));
+        return Exit::Success;
+    }
+    commands::dispatch(&args, invocation, out)
 }

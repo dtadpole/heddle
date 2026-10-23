@@ -266,6 +266,11 @@ pub const LINES: &[(&str, Capability)] = &[
     ("credential of its own.", Capability::Always),
 ];
 
+/// Whether this build serves `capability`: a command wired to its crate and able to answer.
+pub fn served(capability: Capability) -> bool {
+    SERVED.contains(&capability)
+}
+
 /// Whether a line may be printed when `served` is what the binary serves.
 pub fn line_is_served(line: &str, capability: Capability, served: &[Capability]) -> bool {
     served.contains(&capability)

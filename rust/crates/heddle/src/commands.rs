@@ -6,9 +6,10 @@
 //! those views; a profile that leaves a service out gets the TypeScript build's sentence for it.
 
 use crate::boot::Boot;
-use crate::cli::Args;
+use crate::cli::{Args, CommandWord};
 use crate::output::Output;
 use crate::services::Services;
+use crate::usage::{Capability, served};
 use crate::{Exit, Invocation};
 
 /// Route a parsed command line: port of `main()` after `parseArgs`.
@@ -16,9 +17,35 @@ use crate::{Exit, Invocation};
 /// `--help` → [`crate::usage::usage`]; `web` → [`web`]; `profiles` and `config` → [`config_command`]
 /// without booting; any other command word → [`booted_command`]; no command and no tree named →
 /// [`bare_application`]; otherwise boot, check the tree, and either print it or run [`turn`].
+///
+/// A command whose capability is not served yet exits [`Exit::Unported`] naming itself, which is what
+/// keeps a verifier from judging a part that does not exist.
 pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    let _ = (args, invocation, out);
-    todo!("port main() from src/cli.ts")
+    if let Some(command) = args.command {
+        return match command {
+            CommandWord::Web if served(Capability::Web) => web(args, invocation, out),
+            CommandWord::Profiles | CommandWord::Config if served(Capability::Config) => {
+                config_command(args, invocation, out)
+            }
+            other => unported(other.as_str(), out),
+        };
+    }
+    if args.turn.is_some() {
+        return unported("--turn", out);
+    }
+    let project_base = invocation.cwd.join(heddle_config::PROJECT_BASE).exists();
+    if crate::cli::names_a_tree(args, project_base) {
+        unported("the configured tree", out)
+    } else {
+        unported("the bare application", out)
+    }
+}
+
+/// A request whose part is not wired yet: the binary says so on stderr and exits 2, so a verifier
+/// reports unjudged rather than passing on an empty answer.
+fn unported(what: &str, out: &mut Output<'_>) -> Exit {
+    out.err(&format!("heddle: not ported to Rust yet: {what}\n"));
+    Exit::Unported
 }
 
 /// `profiles`, `config`, `config --validate`, `config --origins`, each with `--json`: answered from the
@@ -134,6 +161,88 @@ pub fn describe_hooks(points: &[HookPoint]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::output::Captured;
+    use heddle_config::Env;
+    use std::path::PathBuf;
+
+    fn parsed(argv: &[&str]) -> Args {
+        let list: Vec<String> = argv.iter().map(|word| (*word).to_owned()).collect();
+        crate::cli::parse_args(&list).expect("the command line parses")
+    }
+
+    fn invocation(cwd: &str) -> Invocation {
+        Invocation {
+            argv: Vec::new(),
+            env: Env::from_pairs(Vec::<(String, String)>::new()),
+            cwd: PathBuf::from(cwd),
+        }
+    }
+
+    #[test]
+    fn a_command_whose_crate_is_not_wired_says_so_and_exits_two() {
+        for word in ["web", "profiles", "config", "models", "hooks", "workspaces"] {
+            let mut captured = Captured::default();
+            let exit = {
+                let mut out = captured.output();
+                dispatch(&parsed(&[word]), &invocation("/nonexistent"), &mut out)
+            };
+            assert_eq!(exit, Exit::Unported, "{word}");
+            assert_eq!(
+                captured.stderr_text(),
+                format!("heddle: not ported to Rust yet: {word}\n"),
+                "{word}"
+            );
+            assert!(captured.stdout.is_empty(), "{word} prints no answer");
+        }
+    }
+
+    #[test]
+    fn a_turn_names_its_flag_and_a_bare_run_names_the_application() {
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(
+                &parsed(&["--turn", "hello"]),
+                &invocation("/nonexistent"),
+                &mut out,
+            )
+        };
+        assert_eq!(exit, Exit::Unported);
+        assert_eq!(
+            captured.stderr_text(),
+            "heddle: not ported to Rust yet: --turn\n"
+        );
+
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(&Args::default(), &invocation("/nonexistent"), &mut out)
+        };
+        assert_eq!(exit, Exit::Unported);
+        assert_eq!(
+            captured.stderr_text(),
+            "heddle: not ported to Rust yet: the bare application\n"
+        );
+    }
+
+    #[test]
+    fn a_run_that_names_a_tree_says_the_tree_is_what_is_unported() {
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(
+                &parsed(&["--profile", "dev"]),
+                &invocation("/nonexistent"),
+                &mut out,
+            )
+        };
+        assert_eq!(exit, Exit::Unported);
+        assert_eq!(
+            captured.stderr_text(),
+            "heddle: not ported to Rust yet: the configured tree\n"
+        );
+    }
 
     #[test]
     fn hooks_print_as_the_typescript_build_prints_them() {
