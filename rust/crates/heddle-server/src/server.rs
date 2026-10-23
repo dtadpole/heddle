@@ -2182,9 +2182,11 @@ mod tests {
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
         let (status, _, bytes) = call(&router, Method::GET, "/api/status", Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK);
+        // web.ts writes `{ sandbox, cwd }`; with serde_json's preserve_order (enabled by
+        // heddle-llm in the lane) the insertion order is the emitted order, so the bytes match.
         assert_eq!(
             body_text(&bytes),
-            "{\n  \"cwd\": \"/work\",\n  \"sandbox\": {\n    \"mode\": \"workspace-write\"\n  }\n}\n"
+            "{\n  \"sandbox\": {\n    \"mode\": \"workspace-write\"\n  },\n  \"cwd\": \"/work\"\n}\n"
         );
     }
 
