@@ -1164,7 +1164,7 @@ mod tests {
             event(
                 4,
                 "2026-10-11T10:00:00.200Z",
-                json!({"type": "message", "message": {"role": "tool", "toolCallId": "c1", "content": [{"type": "text", "text": "/Users/zhenc"}]}}),
+                json!({"type": "message", "message": {"role": "tool", "toolCallId": "c1", "content": [{"type": "text", "text": "/tmp/work"}]}}),
             ),
             event(
                 5,
@@ -1194,7 +1194,7 @@ mod tests {
         );
         assert_eq!(
             calls[0].result.as_deref(),
-            Some("/Users/zhenc"),
+            Some("/tmp/work"),
             "with the answer on the same record"
         );
         assert_eq!(calls[0].state, Some(ToolState::Ok));

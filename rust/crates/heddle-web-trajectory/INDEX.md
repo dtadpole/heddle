@@ -79,7 +79,7 @@ key order kept), so it depends on no session type.
   than the happy path (turn and step boundaries, prologue folded once, tool pairing by id and by newest-open,
   refusals, orphan results, context notes, unknown events, unfinished streams, provider-vs-estimated usage,
   a two-turn axis, a running axis and the stats rows), plus the 8 session logs the TypeScript build wrote for
-  the live deployment under `~/.heddle/sessions/--Users-zhenchen-heddle-live--/` (129 events, one to twelve
+  the live deployment in its session folder (`~/.heddle/sessions/--<home>-heddle-live--/`; 129 events, one to twelve
   turns, runtime-context notes, compaction/recovery records) and the 3 recorded stores in
   `_verifiers_/50-agentic-loop/fixtures/team-recover/`. `src/server/ledger.ts` (run from source with Node 24)
   and this crate agree: **ledger, rows, timeline and stats are semantically identical in all 26**.
