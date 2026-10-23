@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:52:23Z
-version: 0.6.7
+modified: 2026-10-23T07:07:16Z
+version: 0.7.0
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -77,7 +77,10 @@ the loop reads), and the session-meta and create-session records, converted at t
   live-turn registry's clones share one table. `check.mjs` and `check-subagents.mjs` pass in the same runs.
 - **Through the binary owner's own advertising build (2026-10-22, `hd/developer-two` `09a3f14`, unmodified — it serves
   Tools, Turn and Web itself):** `sh _verifiers_/50-agentic-loop/verify.sh` exits **0** — `check.mjs` 6/6,
-  `check-subagents.mjs` 1/1 and `check-teams.mjs` 2/2. What remains is that build reaching main.
+  `check-subagents.mjs` 1/1 and `check-teams.mjs` 2/2.
+- **Judged on main (2026-10-23):** the binary advertises Turn, Tools and Web on main (`b72cc1a`, D-048). The backend
+  lane's release binary passes part 5 in full, **9/9**; an unmodified debug build of main `d171876` agrees
+  (`verify.sh` exit 0).
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
   runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
   starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.
