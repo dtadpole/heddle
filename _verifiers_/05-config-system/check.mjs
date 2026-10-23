@@ -61,7 +61,8 @@ const componentFile = (name) => (binaryUnderTest ? `./${name}.component.yml` : `
 
 /** A component manifest: what a row names under `HEDDLE_BIN`, carrying the same schema as the `.ts` plugin. */
 function manifestSource(name) {
-  return `command: ./${name}.ts
+  return `program: ./${name}.ts
+args: []
 config:
   type: object
   properties:
