@@ -1,11 +1,11 @@
 ---
 title: Live health — the deployment at 127.0.0.1:8082
-version: 1.0.0
+version: 1.1.0
 description: What the live-monitor pass judges every 20 minutes, the topology it judges it through, and the pinned passes — the gate, the token door, the build marker, a streamed turn, a clean console, and the DSH reference.
 level: L2
 status: unverified
 created: 2026-10-23T03:18:00Z
-modified: 2026-10-23T03:18:00Z
+modified: 2026-10-23T03:35:00Z
 grounded_in:
   - source: [hd] Live Monitor responsibilities, 2026-10-22
   - source: heddle-web-gate INDEX (dsh-web-ops), read 2026-10-22: 8082 is the token-supplying gate over heddle's 3082, token read from ~/.heddle/web.log
@@ -55,18 +55,50 @@ deployment checkout clean for `96-deployment`.
 ## Pinned passes
 
 Times are PDT. `pass` = every judged check passed; `fail` = one failed; `----` = unjudged (the address
-did not answer, or no token was readable).
+did not answer, or no token was readable). The full record is [`live-health.jsonl`](live-health.jsonl).
 
-| At | Deployment | Gate | Door | Load | Marker | Turn | Console | DSH | Verdict |
-|---|---|---|---|---|---|---|---|---|---|
-| 2026-10-22 20:15:44 (manual) | `~/heddle-live` @ `a5b0c66`, clean, main tip | `200`, app shell, marker `dd6d45d28567` | not tested by hand | app served | `dd6d45d28567` = built page | not tested | not read | — | observed serving |
-| 2026-10-22 20:18:14 | `~/heddle-live` @ `a5b0c66`, clean, behind 0 | **`502`** upstream refused | `----` 3082 not listening | `----` | `----` | `----` | `----` | pass: `DeepSeek Harness`, boot `rev/release/entries/batches`, 0 console errors | **fail** — not up |
+| At | Deployment | Gate | Door | Load | Marker | Turn | Console | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| 20:15:44 (manual) | `a5b0c66`, clean, main tip | `200` app shell | — | app served | `dd6d45d28567` = built page | — | — | observed serving |
+| 20:18:14 | `a5b0c66` | **`502`** upstream refused | `----` 3082 down | `----` | `----` | `----` | `----` | **fail** — flap |
+| 20:21:30 | `a5b0c66` | pass | pass | pass | pass | **fail** — no answer, no notice | pass | **fail** |
+| 20:24:14 | `a5b0c66` | pass | pass | pass | pass | **fail** — no answer | pass | **fail** |
+| 20:25:44 | `a5b0c66` | pass | pass | pass | pass | **fail** — no answer | pass | **fail** |
+| 20:28:29 | `a5b0c66` | pass | pass | pass | pass | **fail** — no answer | pass | **fail** |
+| 20:29:28 | `b4f8abf` | pass | pass | pass | pass | **fail** — no answer | pass | **fail** |
+| 20:31:01 | `eaaa6bb` | pass | pass | pass | pass | pass — reused session, 2 chunks | pass | **pass** |
+| 20:32:04 | `eaaa6bb` | pass | pass | pass | pass | pass — 2 chunks | pass | **pass** |
+| 20:34:03 | `eaaa6bb` | pass | pass | pass | pass | pass — 2 chunks, fixture reply | pass | **pass** |
 
-The 20:18 pass is the first pinned one. Between 20:15:44 (the gate served the app) and 20:16:49 (the
-gate answered `502`) the deployment's server on 3082 stopped: `~/.heddle/web.log` records two starts on
-3082, both followed by no listening process. **This is live-deploy's to fix; the monitor reports it and
-does not restart it.** The coordinator's direction for this period is explicit: while live-deploy is
-bringing the deployment up, a down address is reported to live-deploy as *not up yet*, not as an alert.
+**The flap.** 20:15:44 the gate served the app; 20:16:49 it answered `502` with
+`heddle-proxy: the upstream did not answer (ECONNREFUSED 127.0.0.1:3082)`. `~/.heddle/guard.log` reads
+`2026-10-23T03:21:41Z port 3082 silent, kickstarting`: launchd on this Mac loads the agent but never
+restarts it, and live-deploy's interim guard brought 3082 back. Not a build fault; the deployment's
+supervisor fix is in `hd/live-deploy` awaiting merge.
+
+**The turns that failed.** From 20:21 to 20:29 a turn drew the user row and nothing else — no answer,
+no notice, a clean console. The deployment's own session log recorded `model/request
+endpoint=scripted` then `compaction/recovery code=SCRIPT retry=false reason='not a window overflow'`,
+which is what `src/context/service.ts` appends on a non-window `agent/request-error`. The cause was
+configuration, not the build: the default `scripted` endpoint resolves `scripted.json` from the
+server's cwd, `~/heddle-live` carries no such file, and invoking the deployed adapter says exactly
+`the script for 'scripted' could not be read at scripted.json`. Live-deploy fixed it by decision
+(D-030) with two files **outside** the checkout — `~/.heddle/deployment-scripted.json` and
+`~/.heddle/heddle.json` — so turns now answer with a labelled offline fixture whose first line is
+`scripted endpoint: offline fixture reply, not a model`. The record keeps that line
+(`answerHead`) so a pass can show that no model answered.
+
+**The note that overstated a pass.** The 20:21:30 entry first read "first healthy pass" while its own
+`turn` check said `fail`; the coordinator's review caught the contradiction (20:27) and the note was
+corrected in the record. A note must never be kinder than the checks.
+
+**One health session, not one per pass.** The pass continues the session titled
+`live health check …` (the composer's turned into it; the tree row is clicked when drawn, and the
+page's own `showSession` selects it when it is not), so the owner's session list does not fill with
+monitor rows.
+
+**What the record does not carry.** No session ids and no absolute home paths: the repository is
+public, paths are stated under `~`, and the repository's public-hygiene gate checks both before main.
 
 ## The DSH reference, measured
 
@@ -77,6 +109,13 @@ bringing the deployment up, a down address is reported to live-deploy as *not up
 The heddle page follows DSH for the composer, tree, trajectory and access control; the comparison
 method is the seat's `ui-comparison` baseline, numbers only, recorded in
 [`INDEX.md`](INDEX.md) and the parity skill.
+
+## How often
+
+A `schedule_create` in this seat fires **every 20 minutes**: it runs the pass, pins the entry, and reports
+only on a change — a new failure or a recovery goes to live-deploy, integrator-two and the coordinator
+with the pinned numbers; a failure already reported is not re-alerted. A deployment that does not answer
+at all is reported to live-deploy as **not up yet**, not as an alert, while it is being brought up.
 
 ## Read next
 
