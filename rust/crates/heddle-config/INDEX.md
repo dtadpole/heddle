@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:17:31Z
+modified: 2026-10-23T06:25:51Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -293,6 +293,8 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `74fccb4`, now main `5d9d0f9` (web drives goals, following session events and resuming at start; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 74fccb4> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, made after the candidate on a clean lane; the lane gate with each | 10/10 passed, verdict 0, both binaries; lane gate green; `web --dry-run` boots |
 | 2026-10-22 | main `97f7435` (a `heddle-server` fix: a turn in a folder adopts it instead of requiring a workspace; `heddle-server` is in the binary's tree since `web` was wired) | `HEDDLE_BIN=<debug build of exactly 97f7435> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
 | 2026-10-22 | lane `b8c3d6e`, now main `3c12b45` (web always carries the markdown renderer; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly b8c3d6e> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
+| 2026-10-22 | lane `27157e4`, now main `999984c` (web composes the statistics and uploads; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 27157e4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and the uploads directory comes from `heddle_home` on the invocation's `Env` (step 7) |
+| 2026-10-22 | main `5c2ca91` (`5e164c4`: a model switched mid-turn lands on that turn's next model call, in `web.rs`; then a status doc) | `HEDDLE_BIN=<debug build of exactly 5c2ca91> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots; the new `Env::default()` and `default_endpoints()` calls are test-only |
 
 ## Decisions the contract makes
 

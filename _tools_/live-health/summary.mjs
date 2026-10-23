@@ -24,7 +24,7 @@ const entries = readFileSync(join(REPO, '_context_', 'rust-port', 'live-health.j
 const last = Number(options.last)
 const shown = Number.isFinite(last) && last > 0 ? entries.slice(-last) : entries
 
-const header = ['At (UTC)', 'Deployment', 'Gate', 'Process', 'Door', 'Load', 'Marker', 'Turn', 'Console', 'Outage', 'Verdict']
+const header = ['At (UTC)', 'Deployment', 'Gate', 'Process', 'Door', 'Load', 'Marker', 'Turn', 'Console', 'Outage', 'Verdict', 'Preview']
 const lines = [`| ${header.join(' | ')} |`, `|${header.map(() => '---').join('|')}|`]
 for (const entry of shown) lines.push(`| ${summaryRow(entry).join(' | ')} |`)
 const failed = entries.filter((entry) => entry.verdict === 'fail').length

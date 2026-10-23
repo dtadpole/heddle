@@ -7,7 +7,8 @@
 #
 # The preview is a second service beside the deployment: the binary built from `origin/main` in a scratch checkout
 # (PREVIEW_CHECKOUT, default ~/heddle--rust-preview), served by its own agent on PREVIEW_PORT (3097) with its own
-# HEDDLE_HOME (PREVIEW_HOME, default ~/.heddle-rust-preview). The one order: fetch, move the scratch checkout to the tip
+# HEDDLE_HOME and session store (PREVIEW_HOME, default ~/.heddle-rust-preview; sessions in its sessions/, because the
+# profile pins the session root to the deployment's store otherwise). The one order: fetch, move the scratch checkout to the tip
 # (refused when it has changes), build release inside a build slot, dry-run `web`, swap the binary by rename so the
 # running server keeps its file, reinstall with the checkout's own installer, verify the port, record the commit in
 # PREVIEW_HOME/built-from-main, and print the owner's new link. It never touches the deployment's agent or ports.
@@ -65,7 +66,8 @@ cp "$binary" "$home/bin/heddle.new"
 chmod 755 "$home/bin/heddle.new"
 mv "$home/bin/heddle.new" "$home/bin/heddle"
 HEDDLE_WEB_LABEL="$label" HEDDLE_WEB_UNIT="heddle-web-rust-preview.service" HEDDLE_WEB_PORT="$port" \
-  HEDDLE_WEB_HOME="$home" HEDDLE_WEB_LOG="$home/web.log" HEDDLE_BIN="$home/bin/heddle" HEDDLE_ALLOW_DIRTY_INSTALL=1 \
+  HEDDLE_WEB_HOME="$home" HEDDLE_WEB_LOG="$home/web.log" HEDDLE_WEB_SESSION_ROOT="$home/sessions" \
+  HEDDLE_BIN="$home/bin/heddle" HEDDLE_ALLOW_DIRTY_INSTALL=1 \
   sh "$checkout/_tools_/web-daemon/install.sh" --restart >/dev/null \
   || { echo "preview.sh: the installer refused or the port did not answer; see its message above" >&2; exit 1; }
 printf '%s\n' "$tip" > "$home/built-from-main"
