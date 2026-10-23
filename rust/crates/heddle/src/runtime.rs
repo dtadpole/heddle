@@ -33,6 +33,18 @@ pub fn tokio() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// The one runtime every agent of this run shares — the turn, a subagent, a goal round, a teammate — so a
+/// delegated child runs with the same tools and the same session store as its parent. Built the first
+/// time a row or the turn asks for it, then kept under `agent-runtime`.
+pub fn shared_runtime(services: &mut Services) -> Result<Arc<AgentRuntime>, String> {
+    if let Some(runtime) = services.get::<Arc<AgentRuntime>>("agent-runtime") {
+        return Ok(runtime);
+    }
+    let runtime = Arc::new(agent_runtime(services)?);
+    services.provide("agent-runtime", Arc::clone(&runtime));
+    Ok(runtime)
+}
+
 /// The runtime a turn runs on, from what the boot provided; the sentence naming the first missing
 /// service otherwise, as the TypeScript build's `ctx.<service>` lookups would fail.
 pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
