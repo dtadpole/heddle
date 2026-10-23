@@ -100,20 +100,32 @@ trap cleanup EXIT INT TERM HUP
 
 echo "local-build: slot $SLOT/$SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
 
-if [ "$has_jobs" = 1 ]; then
-    exec "$CARGO" "$@"
-fi
+# Run cargo as a child, never with exec: the EXIT trap that frees the slot must still
+# run when cargo ends, and an exec would replace this shell and lose the trap.
+run_cargo() {
+    if [ "$has_jobs" = 1 ]; then
+        "$CARGO" "$@"
+        return $?
+    fi
+    # -j belongs after the subcommand: `cargo -j 3 build` works, but `cargo -j 3 --version`
+    # is rejected, and `cargo fmt` takes no jobs at all. Inject only for the subcommands
+    # that compile something.
+    case "${1-}" in
+        build|check|test|run|bench|doc|clippy|rustc|install|fix)
+            sub=$1
+            shift
+            "$CARGO" "$sub" -j "$JOBS" "$@"
+            ;;
+        *)
+            "$CARGO" "$@"
+            ;;
+    esac
+}
 
-# -j belongs after the subcommand: `cargo -j 3 build` works, but `cargo -j 3 --version`
-# is rejected, and `cargo fmt` takes no jobs at all. Inject only for the subcommands
-# that compile something.
-case "${1-}" in
-    build|check|test|run|bench|doc|clippy|rustc|install|fix)
-        sub=$1
-        shift
-        exec "$CARGO" "$sub" -j "$JOBS" "$@"
-        ;;
-    *)
-        exec "$CARGO" "$@"
-        ;;
-esac
+set +e
+run_cargo "$@"
+status=$?
+set -e
+cleanup
+trap - EXIT INT TERM HUP
+exit "$status"
