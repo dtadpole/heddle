@@ -26,6 +26,7 @@ import {
   outageHop,
   previewTurnVerdict,
   previewVerdict,
+  sharedSessions,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -244,10 +245,21 @@ test('a preview turn passes only when it completed with the fixture answer', () 
 })
 
 test("the preview's verdict needs 303, 200, 200 and a completed turn; an unspent turn leaves it unjudged", () => {
-  const ok = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: { verdict: 'pass' } }
+  const ok = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: { verdict: 'pass' }, shared: 0 }
   assert.equal(previewVerdict(ok).verdict, 'pass')
   assert.equal(previewVerdict({ ...ok, tokenStatus: 401 }).verdict, 'fail')
   assert.match(previewVerdict({ ...ok, treeStatus: 500 }).detail, /failing: tree/)
   assert.equal(previewVerdict({ ...ok, turn: { verdict: 'unjudged' } }).verdict, 'unjudged')
   assert.equal(previewVerdict({ ...ok, tokenStatus: null }).verdict, 'fail', 'a preview that does not answer fails')
+})
+
+test("the preview fails when it shares the deployment's session store, and is unjudged when that cannot be read", () => {
+  const deployment = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+  assert.equal(sharedSessions(deployment, [{ id: 'x' }, { id: 'y' }]), 0)
+  assert.equal(sharedSessions(deployment, [{ id: 'a' }, { id: 'c' }, { id: 'z' }]), 2)
+  assert.equal(sharedSessions(null, deployment), null)
+  const ok = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: { verdict: 'pass' } }
+  assert.equal(previewVerdict({ ...ok, shared: 0 }).verdict, 'pass')
+  assert.match(previewVerdict({ ...ok, shared: 18 }).detail, /failing: store/)
+  assert.equal(previewVerdict({ ...ok, shared: null }).verdict, 'unjudged')
 })

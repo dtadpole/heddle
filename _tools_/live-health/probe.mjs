@@ -71,6 +71,7 @@ import {
   fixtureOnly,
   previewTurnVerdict,
   previewVerdict,
+  sharedSessions,
   passVerdict,
   processVerdict,
   redactRecord,
@@ -834,6 +835,26 @@ async function judgePreview() {
   try {
     roots = (JSON.parse(tree.body ?? '').children ?? []).length
   } catch {}
+  /**
+   * The preview must keep its own session store. Both lists are read with each server's own cookie and
+   * compared by id; only the counts are pinned. While they overlap, no preview turn is sent, so a Rust
+   * write can never land in the deployment's sessions again.
+   */
+  const previewSessions = await previewFetch(`${origin}/api/sessions`, cookie)
+  let deploymentList = null
+  if (launchUrl !== null && serverOrigin !== null) {
+    const exchange = await previewFetch(launchUrl, null)
+    const deploymentCookie = (exchange.setCookie ?? '').split(';')[0] || null
+    const listed = await previewFetch(`${serverOrigin}/api/sessions`, deploymentCookie)
+    try {
+      deploymentList = JSON.parse(listed.body ?? '')
+    } catch {}
+  }
+  let previewList = null
+  try {
+    previewList = JSON.parse(previewSessions.body ?? '')
+  } catch {}
+  const shared = sharedSessions(deploymentList, previewList)
   let command = null
   try {
     const pid = execFileSync('lsof', ['-nP', `-iTCP:${portOf(origin)}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).trim().split('\n')[0]
@@ -843,10 +864,12 @@ async function judgePreview() {
     ? { verdict: 'unjudged', detail: '--no-turn' }
     : !PREVIEW_TURN
       ? { verdict: 'unjudged', detail: 'the preview turn is paused (--no-preview-turn) until its session store is separated from the deployment' }
-      : !fixtureOnly(kinds)
+      : shared !== 0
+        ? { verdict: 'unjudged', detail: `the preview's sessions are not separate from the deployment's (${shared ?? 'unreadable'} shared), so no turn was sent` }
+        : !fixtureOnly(kinds)
       ? { verdict: 'unjudged', detail: 'an endpoint other than the offline fixture is configured, so no turn was spent' }
       : await previewTurn(launch)
-  const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn })
+  const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn, shared })
   return {
     origin,
     agentRunning: agent,
@@ -854,6 +877,7 @@ async function judgePreview() {
     token: { status: token.status, httpOnly: /HttpOnly/i.test(token.setCookie ?? ''), sameSiteStrict: /SameSite=Strict/i.test(token.setCookie ?? ''), error: token.error ?? null },
     endpoints: { status: endpoints.status, type: endpoints.type ?? null, bytes: endpoints.bytes ?? null, kinds },
     tree: { status: tree.status, type: tree.type ?? null, bytes: tree.bytes ?? null, roots },
+    store: { previewSessions: Array.isArray(previewList) ? previewList.length : null, deploymentSessions: Array.isArray(deploymentList) ? deploymentList.length : null, shared },
     marker: /<meta name="heddle-page" content="([0-9a-f]+)"/.exec(page.body ?? '')?.[1] ?? null,
     turn,
     ...judged,

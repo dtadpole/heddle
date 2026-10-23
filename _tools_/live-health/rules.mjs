@@ -318,6 +318,17 @@ export function fixtureOnly(endpoints) {
   return Array.isArray(endpoints) && endpoints.length > 0 && endpoints.every((endpoint) => endpoint?.kind === 'scripted')
 }
 
+/**
+ * How many session ids two servers both list. The preview must keep its own store: any overlap means
+ * its writes can land in the deployment's sessions (live-deploy, 2026-10-22). Null when either list
+ * could not be read.
+ */
+export function sharedSessions(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return null
+  const ids = new Set(left.map((item) => item?.id).filter((id) => id !== undefined && id !== null))
+  return right.filter((item) => ids.has(item?.id)).length
+}
+
 /** A fixture turn on the Rust preview completed: the prompt and an answer appeared, it settled, and it is the fixture's. */
 export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead }) {
   if (userAppeared !== true) return { verdict: 'fail', detail: 'the prompt never appeared in the log' }
@@ -331,8 +342,9 @@ export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, a
  * The Rust preview on 3097, a second read-only target: the token link answers 303, `/api/endpoints`
  * and `/api/tree` answer 200, and a fixture turn completes. It never changes the deployment's verdict.
  */
-export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn }) {
+export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn, shared }) {
   const checks = {
+    store: shared === 0 ? 'pass' : typeof shared === 'number' ? 'fail' : 'unjudged',
     token: tokenStatus === 303 ? 'pass' : 'fail',
     endpoints: endpointsStatus === 200 ? 'pass' : 'fail',
     tree: treeStatus === 200 ? 'pass' : 'fail',
@@ -343,7 +355,7 @@ export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn 
   const verdict = failing.length > 0 ? 'fail' : unjudged.length > 0 ? 'unjudged' : 'pass'
   const detail =
     verdict === 'pass'
-      ? 'token link 303, /api/endpoints 200, /api/tree 200, a fixture turn completed'
+      ? 'own session store, token link 303, /api/endpoints 200, /api/tree 200, a fixture turn completed'
       : [failing.length > 0 ? `failing: ${failing.join(', ')}` : null, unjudged.length > 0 ? `unjudged: ${unjudged.join(', ')}` : null].filter(Boolean).join('; ')
   return { verdict, checks, detail }
 }
