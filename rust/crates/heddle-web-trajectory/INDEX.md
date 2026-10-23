@@ -75,19 +75,29 @@ key order kept), so it depends on no session type.
   heddle-web-composer` is green; every case of `test/ledger.test.ts`, `test/usage.test.ts`,
   `test/tool-catalog.test.ts`, `test/log-download.test.ts` and `test/tool-inspector.test.ts` is ported.
   `cargo fmt --check` and `cargo clippy --all-targets` are clean; `cargo check --workspace` is green.
-- **Differential against the TypeScript build** (2026-10-22, temporary harness, not committed): 15 scenarios
-  covering turn/step boundaries, prologue folding, tool pairing by id and by newest-open, refusals, orphan
-  results, context notes, unknown events, unfinished streams, usage merging, two-turn axes, a running axis and
-  the stats rows were projected by both `src/server/ledger.ts` (run from source with Node 24) and this crate.
-  Ledger, rows, timeline and stats were **semantically identical** in all 15.
-- **Against the live deployment's own sessions** (2026-10-22): the eight session logs the TypeScript build
-  wrote under `~/.heddle/sessions/--Users-zhenchen-heddle-live--/` (129 events, one to twelve turns, runtime
-  context notes, compaction/recovery records) were projected by both sides: ledger, rows, timeline and stats
-  were **semantically identical** in all eight.
-- **The download body**: re-serialising the three recorded stores in
-  `_verifiers_/50-agentic-loop/fixtures/team-recover/` and the eight live sessions through `ndjson` is
-  **byte-identical** to the decoded TypeScript logs (`session-recover-{lead,active,ghost}.v2.jsonl.zstd`;
-  `~/.heddle/sessions/--Users-zhenchen-heddle-live--/*.v2.jsonl.zstd`).
+- **Differential against the TypeScript build** (2026-10-22): 15 scenarios written to cover the rules rather
+  than the happy path (turn and step boundaries, prologue folded once, tool pairing by id and by newest-open,
+  refusals, orphan results, context notes, unknown events, unfinished streams, provider-vs-estimated usage,
+  a two-turn axis, a running axis and the stats rows), plus the 8 session logs the TypeScript build wrote for
+  the live deployment under `~/.heddle/sessions/--Users-zhenchen-heddle-live--/` (129 events, one to twelve
+  turns, runtime-context notes, compaction/recovery records) and the 3 recorded stores in
+  `_verifiers_/50-agentic-loop/fixtures/team-recover/`. `src/server/ledger.ts` (run from source with Node 24)
+  and this crate agree: **ledger, rows, timeline and stats are semantically identical in all 26**.
+- **The download body**: re-serialising the same 11 logs through `ndjson` is **byte-identical** to the decoded
+  TypeScript logs.
+
+### How to repeat the differential
+
+1. Decode a log: `zstd -dc session.v2.jsonl.zstd > /tmp/session.jsonl`.
+2. This crate's projection:
+   `LOCAL_BUILD_SLOTS=2 _tools_/local-build/run run --example project_log -p heddle-web-trajectory -- /tmp/session.jsonl > /tmp/rust.json`
+   (the example prints `{ledger, rows, timeline, stats}`, the four projections the view uses).
+3. The TypeScript build's, from the repository root (Node 24 runs the source directly):
+   `node --input-type=module -e 'import { readFileSync } from "node:fs"; import { projectLedger, projectRows, projectTimeline, projectSessionStats } from "./src/server/ledger.ts"; const events = readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map(JSON.parse); const ledger = projectLedger(events); console.log(JSON.stringify({ ledger, rows: projectRows(ledger), timeline: projectTimeline(ledger), stats: projectSessionStats(events) }, null, 2))' /tmp/session.jsonl > /tmp/ts.json`
+4. Compare the two documents **structurally**, not as text: same keys, same array lengths, and numbers
+   compared numerically (`0 == 0.0`). A first differing path is where to look. A same-shape difference in
+   `ledger.turns[..].steps[..].records` means a projection rule diverges and is a bug in this crate; a
+   difference confined to `timeline.spans[].start/end` formatting or to key order is the harmless one below.
 
 `?view=ledger` is not yet byte-identical to the TypeScript build: `TimelineSpan::start`/`end` are `f64` and
 `serde_json` writes an integral one as `0.0` where JavaScript writes `0` (the page parses both as numbers), and
