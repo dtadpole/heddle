@@ -13,14 +13,17 @@
 //! | [`turns`] | [`TurnRegistry`]: which sessions have a turn in flight, and how to stop one |
 //! | [`subagent`] | delegation to a child agent in its own session, and the `delegate` tool |
 //! | [`ports`] | what a turn asks of the model, session, context and hook services |
-//! | [`upstream`] | provisional mirrors of types `heddle-llm`, `heddle-session` and `heddle-context` own |
+//! | [`adapters`] | the turn's ports over the real crates: [`LlmModel`] over `heddle-llm`'s `ModelService` |
+//! | [`upstream`] | `heddle-llm`'s own model types, and provisional mirrors of `heddle-session`/`heddle-context` types |
 
+pub mod adapters;
 pub mod ports;
 pub mod subagent;
 pub mod turn;
 pub mod turns;
 pub mod upstream;
 
+pub use adapters::LlmModel;
 pub use ports::{
     ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord, NoTurnHooks, PortError,
     PreStep, RequestErrorAction, RequestErrorPayload, SessionPort, TurnHooks,

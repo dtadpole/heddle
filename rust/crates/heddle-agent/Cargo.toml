@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+heddle-llm.workspace = true
 heddle-tools.workspace = true
 futures.workspace = true
 serde.workspace = true

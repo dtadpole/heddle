@@ -420,12 +420,9 @@ async fn run_turn_body(
                 endpoint: options.endpoint.clone(),
                 model: options.model.clone(),
                 messages: prepared.messages.clone(),
-                tools: if prepared.tools.is_empty() {
-                    None
-                } else {
-                    Some(prepared.tools.clone())
-                },
-                max_output_tokens: options.max_output_tokens,
+                // Empty means none: every adapter then sends no `tools` field, the TypeScript build's rule.
+                tools: prepared.tools.clone(),
+                max_output_tokens: options.max_output_tokens.map(u64::from),
                 reasoning_effort: options.reasoning_effort.clone(),
                 session_id: Some(session.id.clone()),
                 round: Some(round),
@@ -463,11 +460,11 @@ async fn run_turn_body(
                         match &chunk {
                             Chunk::TextDelta { text: delta } => round_text.push_str(delta),
                             Chunk::ReasoningDelta { text: delta } => reasoning.push_str(delta),
-                            Chunk::ToolCall {
-                                id,
-                                name,
-                                arguments,
-                            } => calls.push((id.clone(), name.clone(), arguments.clone())),
+                            Chunk::ToolCall(call) => calls.push((
+                                call.id.clone(),
+                                call.name.clone(),
+                                call.arguments.clone(),
+                            )),
                             Chunk::ToolCallDelta { .. } => {}
                             Chunk::Done {
                                 finish_reason: finished,
@@ -597,14 +594,12 @@ async fn run_turn_body(
                     message: error.message.clone(),
                 });
             }
-            runtime.session.message(
-                session,
-                Message {
-                    role: Role::Tool,
-                    content: vec![ContentPart::text(tool_message_text(&result))],
-                    tool_call_id: Some(id),
-                },
-            )?;
+            let mut answer = Message::new(
+                Role::Tool,
+                vec![ContentPart::text(tool_message_text(&result))],
+            );
+            answer.tool_call_id = Some(id);
+            runtime.session.message(session, answer)?;
         }
     }
 
@@ -930,11 +925,9 @@ mod tests {
             state.next_seq += 1;
             state.nodes.push(seq);
             state.roles.insert(seq, role);
-            state.messages.push(Message {
-                role,
-                content: vec![ContentPart::text(text)],
-                tool_call_id: None,
-            });
+            state
+                .messages
+                .push(Message::new(role, vec![ContentPart::text(text)]));
             state.content_generation += 1;
             state.events.push(Recorded {
                 kind: "message".into(),
@@ -1365,11 +1358,11 @@ mod tests {
     }
 
     fn call_chunk(id: &str, name: &str, arguments: serde_json::Value) -> Chunk {
-        Chunk::ToolCall {
+        Chunk::ToolCall(crate::upstream::ToolCall {
             id: id.into(),
             name: name.into(),
             arguments: arguments.to_string(),
-        }
+        })
     }
 
     fn done(finish_reason: &str) -> Chunk {
@@ -2142,5 +2135,57 @@ mod tests {
         assert!(turns.is_running("s"));
         drop(begun);
         assert!(!turns.is_running("s"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_through_the_real_model_service_runs_a_scripted_task_to_its_answer() {
+        let service = crate::adapters::tests::scripted_service(
+            "turn",
+            serde_json::json!([
+                { "toolCall": { "name": "read_file", "arguments": { "path": "one.txt" } } },
+                { "text": "finished the task" }
+            ]),
+        );
+        let session = RecordingSession::new();
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(service)),
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(vec![answering_tool("read_file", "first")]),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: None,
+        };
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "write then read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rounds, 2);
+        assert_eq!(result.text, "finished the task");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "read_file");
+        assert_eq!(result.tool_calls[0].result.output, "first");
+        assert_eq!(result.finish_reason, "stop");
+        let tool_answers = session
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect::<Vec<_>>();
+        assert_eq!(tool_answers.len(), 1);
+        assert_eq!(
+            tool_answers[0].tool_call_id.as_deref(),
+            Some("call-read_file")
+        );
+        let requests = session
+            .kinds()
+            .into_iter()
+            .filter(|kind| kind == "model/request")
+            .count();
+        assert_eq!(requests, 2, "one model/request per round");
+        let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
+        assert_eq!(completed.fields["text"], "finished the task");
     }
 }
