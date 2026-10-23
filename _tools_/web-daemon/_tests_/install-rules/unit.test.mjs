@@ -486,3 +486,39 @@ test('uninstalling stops a server this service left behind on its port, and noth
     for (const child of [ours, theirs]) child.kill('SIGKILL')
   }
 })
+
+test('HEDDLE_WEB_SESSION_ROOT gives a second service its own session store, on both platforms; a relative one is refused', () => {
+  // The repository profile pins the session row's root to ~/.heddle/sessions, so HEDDLE_WEB_HOME alone did not
+  // separate the 3097 preview's sessions from the deployment's (measured 2026-10-22).
+  const f = fixture()
+  const mac = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SESSION_ROOT: '/srv/preview/sessions' })
+  assert.equal(mac.status, 0, mac.stderr)
+  assert.match(mac.stdout, /<string>--config<\/string>\s*<string>[^<]*\/cordis\.yml<\/string>\s*<string>--session-root<\/string>\s*<string>\/srv\/preview\/sessions<\/string>/)
+  const linux = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'linux', HEDDLE_ALLOW_NO_LINGER: '1', HEDDLE_WEB_SESSION_ROOT: '/srv/preview/sessions' })
+  assert.equal(linux.status, 0, linux.stderr)
+  assert.match(linux.stdout, /^ExecStart=.* web --host 127\.0\.0\.1 --port 8082 --config .*\/cordis\.yml --session-root \/srv\/preview\/sessions$/m)
+  const unset = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin' })
+  assert.doesNotMatch(unset.stdout, /session-root/, 'the deployment, which sets nothing, renders as before')
+  const relative = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SESSION_ROOT: 'sessions' })
+  assert.equal(relative.status, 2)
+  assert.match(relative.stderr, /HEDDLE_WEB_SESSION_ROOT must be an absolute path/)
+})
+
+test('with a session root, uninstall still recognises this service\'s leftover by its whole command line', async () => {
+  const f = fixture()
+  const ours = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`, '--session-root', '/srv/preview/sessions'], { stdio: 'ignore' })
+  const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+  const lsof = join(f.base, 'lsof-stand-in')
+  writeFileSync(lsof, `#!/bin/sh\necho ${ours.pid}\n`)
+  chmodSync(lsof, 0o755)
+  try {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    const result = install(f, ['--uninstall'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_LSOF: lsof, HEDDLE_WEB_SESSION_ROOT: '/srv/preview/sessions' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /stopped the server this service left on port 3082/)
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    assert.ok(!alive(ours.pid))
+  } finally {
+    ours.kill('SIGKILL')
+  }
+})
