@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:34:01Z
+modified: 2026-10-23T04:35:55Z
 level: L3
 version: 1.7.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
@@ -333,6 +333,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 21:27 | `c4c9292` (check-team-view fails instead of hanging) | `c4c9292`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567` |
 | 21:31 | `1157d4e` (30 commits; the bus adapts to the tools and agent ports) | `1157d4e`, clean | **first redeploy by `redeploy.sh`**: 3.8 s end to end, longest silence at 3082 300 ms; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
 | 21:32 | `5c87849` | `5c87849`, clean | `redeploy.sh`; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
+| 21:35 | `29cec5b` (via `c1cdb81`) | `29cec5b`, clean | `redeploy.sh`; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
