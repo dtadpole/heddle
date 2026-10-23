@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
-import { DOCUMENTED_PORT, LABEL, UNIT, installedService, listenerPid, parseUnit, serviceState, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
+import { installedService, listenerPid, parseUnit, serviceState, serviceTarget, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
 
 /**
  * Verifier 9 — the Web UI daemon.
@@ -32,7 +32,12 @@ import { DOCUMENTED_PORT, LABEL, UNIT, installedService, listenerPid, parseUnit,
 const CAPABILITY = 'a supervised user service that keeps the Web UI running at the documented port'
 const DAEMON = join(repoRoot, '_tools_', 'web-daemon')
 const SUPERVISOR = supervisorFor()
-const NAME = SUPERVISOR === 'launchd' ? `${LABEL} agent` : `${UNIT} user unit`
+/**
+ * The service judged: the deployment's, or the scratch service `rehearse.sh` names with `HEDDLE_WEB_LABEL` and
+ * `HEDDLE_WEB_PORT` — which is how the stays-up check is judged without killing the owner's server (D-042).
+ */
+const TARGET = serviceTarget()
+const NAME = `${SUPERVISOR === 'launchd' ? `${TARGET.label} agent` : `${TARGET.unit} user unit`}${TARGET.scratch ? ' (scratch)' : ''}`
 
 /** The installed service and its supervisor's state, or a reason this host cannot be judged. */
 function liveService() {
@@ -144,7 +149,7 @@ test('the daemon is loaded, owns the port and answers, or this host has none', a
    * search is not: `pgrep -f` matches the searcher's own command line and has been measured concluding a
    * dead service was up. A bound port cannot be satisfied by our own argv and cannot be satisfied twice.
    */
-  const documented = DOCUMENTED_PORT[process.platform]
+  const documented = TARGET.documentedPort
   assert.equal(service.port, documented, `the installed ${NAME} is written for the documented port ${documented} (${service.port})`)
   assert.equal(service.host, '127.0.0.1', 'and binds loopback')
 

@@ -644,6 +644,7 @@ dependencies = [
  "heddle-llm",
  "heddle-sandbox",
  "heddle-session",
+ "heddle-team",
  "heddle-todo",
  "heddle-tools",
  "heddle-workspace",
