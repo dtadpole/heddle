@@ -132,6 +132,9 @@ pub fn load(rows: Vec<ComposedRow>, anchor: &Path, catalog: &dyn Catalog) -> Boo
     let bus = heddle_events::EventBus::new();
     heddle_events::bridge::expose_catalog(&bus);
     services.provide("events", bus);
+    // The server's hub exists before the session store, which needs its listener when it is built:
+    // `heddle web` hands the same hub to the server, so the page sees every event the store appends.
+    services.provide("event-hub", heddle_server::EventHub::new());
     let mut entries = Vec::new();
     // The component each entry starts, in the entries' own order; `None` when the row names nothing
     // the catalog knows, which leaves that entry failed rather than pending forever.
