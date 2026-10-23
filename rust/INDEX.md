@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.7.3
+version: 0.7.4
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -67,11 +67,10 @@ this table names each failing check and the code that owns it — below, for bot
   `hostile.js`'s `<script>` is split across highlight spans instead of shown as text (owned by `heddle-web-files`).
   `web.rs`'s context row turned `check-composer` #13 and `check-context-view` #2 into passes at `9319116`.
 
-**Cause not established:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in about half of full lane runs at
-`46b727a` and never alone. Since `8248e5e` the check waits, bounded, for the delivery before asserting exactly as before,
-and has passed in every lane run since — but that wait is not shown to be the cause: in this port a message to an active
-teammate is journaled inside the sending call, and the asynchronous path covers only a member still provisioning. The
-root cause is being measured with a diagnostic that records the Lead's and the teammate's state at the moment of the read.
+**Fixed in the check:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in some full lane runs and never alone.
+Its poll for the teammate parsed each session's metadata while the binary could be writing it — both builds write that
+file in place — and a torn read ("Unexpected end of JSON input") escaped the wait. Since the fix the poll treats an
+unreadable file as not yet ready; in the loop that reproduced it, 4 of 22 runs failed before and 14 of 14 passed after.
 
 **Intermittent:** `70-workspaces-sessions` — *the four session shortcuts act on the selected session, and say so when
 there is none* failed once in six full lane runs tonight and passes when its file runs alone; it is a page check
@@ -96,7 +95,7 @@ check's capability probe asks for every command it runs, matched as a command li
 | 2 streaming | `_verifiers_/20-streaming` | **passes** — 5 of 5 |
 | 3 context management | `_verifiers_/30-context-management` | **passes** — 9 of 9 |
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | **passes** — 6 of 6; outside tools are processes under `HEDDLE_BIN` |
-| 5 agentic loop | `_verifiers_/50-agentic-loop` | **passes** — 9 of 9 (one check's earlier intermittent failure has no established cause; above) |
+| 5 agentic loop | `_verifiers_/50-agentic-loop` | **passes** — 9 of 9 |
 | 6 hooks | `_verifiers_/60-hooks` | **passes** — 6 of 6; hooks are processes under `HEDDLE_BIN` |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 44 pass, **1 fail** (above, with its owner) |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | **passes** — 17 of 17 (two consecutive runs) |
