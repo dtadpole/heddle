@@ -233,6 +233,23 @@ export function redactRecord(value, home) {
 }
 
 /**
+ * What a "down" reading was, once the pass has watched it.
+ *
+ * With a supervisor in the agent, a killed server is back in about a second, and the lane gate's
+ * `95-web-daemon` check kills the port's owner by design - so a single 502 instant is usually a
+ * restart, not an outage (live-deploy, 2026-10-22). The pass re-probes for a window before pinning:
+ *
+ * - `healthy` - the first reading was not down;
+ * - `restart` - it was down and answered again within the window: recorded, not a failure;
+ * - `outage`  - it stayed down through the window: a failure, and the restore rule decides the rest.
+ */
+export function classifyOutage({ down, recoveredAfterMs, windowMs }) {
+  if (down !== true) return 'healthy'
+  if (typeof recoveredAfterMs === 'number' && recoveredAfterMs <= windowMs) return 'restart'
+  return 'outage'
+}
+
+/**
  * Whether the delegated kickstart may run, given what the pass measured.
  *
  * A reading of "down" is not enough, and the reason was paid for: on 2026-10-22 at 03:54:07Z a pass

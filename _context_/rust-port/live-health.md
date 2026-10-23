@@ -189,6 +189,14 @@ install-window check alone could still have let a kickstart kill a booting serve
 launchd first: while the agent is running, its supervisor owns restarts and the kickstart is
 withheld. The delegation covers the agent being **gone**, and only then does `-k` have nothing to kill.
 
+## Restarts are recorded, not alerted
+
+live-deploy measured why short 502s happen now: the supervisor restarts a killed server in about a
+second, and integrator-two's lane gate runs `95-web-daemon`, whose stays-up check kills the process on
+the port. Since 2026-10-22 a pass watches any down reading for 20 s before pinning it; one that answers
+again is recorded as `outage.kind = restart` with its recovery time and is not a failure. Restarts in
+three consecutive passes would be a crash loop and are reported as one.
+
 ## How often
 
 A `schedule_create` in this seat fires **every 20 minutes**: it runs the pass, pins the entry, and reports

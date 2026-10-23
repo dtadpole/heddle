@@ -69,6 +69,15 @@ node --test _tools_/live-health/_tests_/pass-rules/unit.test.mjs
 The reading itself — a real page, a real deployment — stays an integration step. `probe.mjs` does the
 reading and calls these rules; a rule that is wrong fails a test before it can fail a quiet deployment.
 
+## A restart is not an outage
+
+With a supervisor in the agent, a killed server is back in about a second, and the lane gate's
+`95-web-daemon` check kills the port's owner by design. So a pass that reads the deployment down does
+not pin that instant: it watches the server's health route for 20 s (read-only) and records the reading
+in `outage` — `restart` when it answered again inside the window (the address checks are then re-read
+with the new launch token, and the pass is judged on what is there), `outage` when it stayed down.
+`classifyOutage` in [`rules.mjs`](rules.mjs) decides it, and only an outage can reach the restore rule.
+
 ## The one action it may take
 
 The deployment's owner delegates exactly one action (live-deploy, 2026-10-22): when the deployment is

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  classifyOutage,
   consoleVerdict,
   deploymentDown,
   doorVerdict,
@@ -173,6 +174,14 @@ test('only a gate with no upstream or a silent port counts as down enough to kic
   assert.equal(deploymentDown({ gate: { verdict: 'fail', status: 500, proxyError: false }, door: { verdict: 'pass' } }), false)
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'fail', detail: 'the deployed server answered 200 without a credential' } }), false)
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'pass' } }), false)
+})
+
+test('a down reading that answers again within the window is a restart, not an outage', () => {
+  assert.equal(classifyOutage({ down: false, recoveredAfterMs: null, windowMs: 20_000 }), 'healthy')
+  // The supervisor's one-second restart, or the lane gate's 95 kill test.
+  assert.equal(classifyOutage({ down: true, recoveredAfterMs: 1_200, windowMs: 20_000 }), 'restart')
+  assert.equal(classifyOutage({ down: true, recoveredAfterMs: null, windowMs: 20_000 }), 'outage')
+  assert.equal(classifyOutage({ down: true, recoveredAfterMs: 25_000, windowMs: 20_000 }), 'outage')
 })
 
 test('a kickstart never runs on a deployment that is up', () => {

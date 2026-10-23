@@ -57,6 +57,7 @@ import { fileURLToPath } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 
 import {
+  classifyOutage,
   consoleVerdict,
   deploymentDown,
   doorVerdict,
@@ -817,16 +818,30 @@ async function portAnswers() {
  * taken last and only when the other conditions already allow a restore, so a healthy pass and a
  * pass inside an install window never wait.
  */
-async function guardedRestore() {
+async function guardedRestore({ graceDone = false } = {}) {
   const sinceChange = secondsSinceDeployChange()
   const running = agentRunning()
   const early = restoreDecision({ down: true, agentRunning: running, secondsSinceDeployChange: sinceChange, stillDownAfterGrace: true })
   if (!early.allowed) return { attempted: false, withheld: true, agentRunning: running, secondsSinceDeployChange: sinceChange, reason: early.reason }
-  await new Promise((done) => setTimeout(done, GRACE_MS))
+  // A pass that already watched the port through the restart window has spent the grace.
+  if (!graceDone) await new Promise((done) => setTimeout(done, GRACE_MS))
   const stillDown = !(await portAnswers())
   const decision = restoreDecision({ down: true, agentRunning: agentRunning(), secondsSinceDeployChange: secondsSinceDeployChange(), stillDownAfterGrace: stillDown })
   if (!decision.allowed) return { attempted: false, withheld: true, secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
   return { ...(await restoreDeployment()), secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
+}
+
+/** How long a down reading is watched before it counts as an outage rather than a restart. */
+const RESTART_WINDOW_MS = 20_000
+
+/** Poll the server's health route until it answers or the window closes. Read-only. */
+async function watchForRecovery(windowMs) {
+  const started = Date.now()
+  while (Date.now() - started <= windowMs) {
+    if (await portAnswers()) return Date.now() - started
+    await new Promise((done) => setTimeout(done, 500))
+  }
+  return null
 }
 
 /** One delegated kickstart, then wait for the port to answer again. */
@@ -859,21 +874,31 @@ try {
 pass.checks.gate = await judgeGate()
 pass.checks.process = judgeProcess()
 pass.checks.door = await judgeDoor()
-if (options.restore === true && deploymentDown(pass.checks)) {
-  pass.restore = await guardedRestore()
-  if (pass.restore.withheld === true && (await portAnswers())) {
-    // The port came back by itself (the supervisor, or the install finishing): judge what is there now.
+/**
+ * A down reading is watched before it is pinned. A supervisor restart (or the lane gate's 95 kill
+ * test) clears in about a second and is recorded as a restart, not a failure; only a reading that
+ * stays down through the window is an outage. The kickstart is never part of this - it waits behind
+ * --restore and the restore rule.
+ */
+if (deploymentDown(pass.checks)) {
+  const firstReading = { gate: { status: pass.checks.gate.status ?? null, detail: pass.checks.gate.detail }, door: { detail: pass.checks.door.detail } }
+  const recoveredAfterMs = await watchForRecovery(RESTART_WINDOW_MS)
+  const kind = classifyOutage({ down: true, recoveredAfterMs, windowMs: RESTART_WINDOW_MS })
+  pass.outage = { kind, recoveredAfterMs, windowMs: RESTART_WINDOW_MS, agentRunning: agentRunning(), firstReading }
+  if (kind === 'restart') {
+    // A restarted server minted a new launch token: judge the door with the current one.
     refreshDeploymentTarget()
-    pass.checks.gate = { ...(await judgeGate()), afterGrace: true }
-    pass.checks.process = { ...judgeProcess(), afterGrace: true }
-    pass.checks.door = { ...(await judgeDoor()), afterGrace: true }
-  }
-  if (pass.restore.broughtBack === true) {
-    // The restart minted a new token: the door must be judged with the current one, not the one read before it.
-    refreshDeploymentTarget()
-    pass.checks.gate = { ...(await judgeGate()), restored: true }
-    pass.checks.process = { ...judgeProcess(), restored: true }
-    pass.checks.door = { ...(await judgeDoor()), restored: true }
+    pass.checks.gate = { ...(await judgeGate()), afterRestart: true }
+    pass.checks.process = { ...judgeProcess(), afterRestart: true }
+    pass.checks.door = { ...(await judgeDoor()), afterRestart: true }
+  } else if (options.restore === true) {
+    pass.restore = await guardedRestore({ graceDone: true })
+    if (pass.restore.broughtBack === true) {
+      refreshDeploymentTarget()
+      pass.checks.gate = { ...(await judgeGate()), restored: true }
+      pass.checks.process = { ...judgeProcess(), restored: true }
+      pass.checks.door = { ...(await judgeDoor()), restored: true }
+    }
   }
 }
 pass.checks.load = pass.checks.gate.verdict === 'pass' ? await judgeLoad() : { verdict: 'unjudged', detail: 'the gate did not serve the app, so the page was not loaded' }
@@ -923,6 +948,13 @@ if (options.json === true) {
   say(`live-health ${pass.at}`)
   say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}${deployment.mainTipFresh ? '' : ' (ref not refreshed)'}, behind ${deployment.behind ?? '?'}, ahead ${deployment.ahead ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
+  if (pass.outage !== undefined) {
+    say(
+      pass.outage.kind === 'restart'
+        ? `outage      restart  down at first reading, answered again after ${pass.outage.recoveredAfterMs}ms (agent ${pass.outage.agentRunning ? 'running' : 'not running'})`
+        : `outage      OUTAGE  still down after ${pass.outage.windowMs}ms (agent ${pass.outage.agentRunning ? 'running' : 'not running'})`,
+    )
+  }
   if (pass.restore !== undefined) {
     if (pass.restore.withheld === true) say(`restore     held  ${pass.restore.reason}`)
     else say(`restore     ${pass.restore.broughtBack ? 'used' : 'FAILED'}  ${pass.restore.note ?? pass.restore.error ?? ''} (${pass.restore.waitedMs}ms)`)
