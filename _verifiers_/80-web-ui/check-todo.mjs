@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, repoRoot, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, repoRoot, scriptedConfig, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The todo dock, judged where a model writes it and a person reads it.
@@ -64,6 +64,7 @@ async function startServer(steps) {
 }
 
 test('the model writes a todo list and the dock shows it live, updates it and hides it when emptied', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'browser')) return
   const plan = [
     { content: 'research the reference', status: 'in_progress' },
@@ -160,6 +161,7 @@ test('the model writes a todo list and the dock shows it live, updates it and hi
 })
 
 test('the todo panel sits above the goal dock when both exist', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'browser')) return
   /**
    * DSH gives the todo dock `order: 0` and the goal dock `order: 10` in the same `conversation.input.dock`

@@ -1,0 +1,18 @@
+{"at":"2026-10-22T20:12-07:00","deployed":"a5b0c66","how":"hand, main's installer with HEDDLE_ALLOW_DIRTY_INSTALL=1","verdict_96":"2/3 main's checks, 3/3 branch's checks","note":"bring-up; page 533283 vs dist 533280; marker dd6d45d28567"}
+{"at":"2026-10-22T20:29-07:00","deployed":"b4f8abf","how":"hand, override","verdict_96":"2/3 main's, 3/3 branch's","note":"Rust lockfile chore; page unchanged"}
+{"at":"2026-10-22T20:31-07:00","deployed":"eaaa6bb","how":"hand, override","verdict_96":"2/3 main's, 3/3 branch's","note":"D-030 fixture configured; a turn answers, 0 errors"}
+{"at":"2026-10-22T20:44-07:00","deployed":"51f198b","how":"hand, the deployment's own installer, no override","verdict_95":"4/4","verdict_96":"3/3","note":"tooling merge 085caaf on main; agent runs supervisor.mjs; SIGKILL to new pid in 1 s with no guard"}
+{"at":"2026-10-22T20:47-07:00","deployed":"c67f5ad","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"page unchanged"}
+{"at":"2026-10-22T20:50-07:00","deployed":"1bcff7e","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"agent booted out afterwards to read the unjudged path: 95 verdict 3, 96 verdict 3"}
+{"at":"2026-10-22T20:54-07:00","deployed":"59fd96f","how":"hand","verdict_95":"4/4","verdict_96":"3/3"}
+{"at":"2026-10-22T20:59-07:00","deployed":"0a10ceb","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"after the 03:57Z outage; redeploy silence 288 ms"}
+{"at":"2026-10-22T21:02-07:00","deployed":"480d9b8","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"binary web still exits 2"}
+{"at":"2026-10-22T21:13-07:00","deployed":"d28625d","how":"hand","verdict_95":"4/4","verdict_96":"3/3"}
+{"at":"2026-10-22T21:21-07:00","deployed":"b0ef8ab","how":"hand","verdict_96":"3/3","note":"95 judged on a scratch service from here on (D-042)"}
+{"at":"2026-10-22T21:24-07:00","deployed":"b89ad37","how":"hand","verdict_96":"3/3"}
+{"at":"2026-10-22T21:27-07:00","deployed":"c4c9292","how":"hand","verdict_96":"3/3"}
+{"at":"2026-10-22T21:31-07:00","deployed":"1157d4e","how":"redeploy.sh","verdict_96":"3/3","note":"first scripted redeploy: 3.8 s end to end, longest silence at 3082 300 ms"}
+{"at":"2026-10-22T21:32-07:00","deployed":"5c87849","how":"redeploy.sh","verdict_96":"3/3"}
+{"at":"2026-10-22T21:35-07:00","deployed":"29cec5b","how":"redeploy.sh","verdict_96":"3/3","note":"via c1cdb81"}
+{"at": "2026-10-22T21:43-07:00", "deployed": "a2d4ae4", "how": "redeploy.sh", "verdict_96": "3/3", "note": "146 commits: heddle-server and the web crates merged; page unchanged; the binary's web still exits 2"}
+{"at": "2026-10-22T21:45-07:00", "deployed": "1db2b4e", "how": "redeploy.sh", "verdict_96": "3/3", "note": "18 commits; page unchanged"}

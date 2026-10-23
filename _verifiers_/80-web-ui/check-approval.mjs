@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, scriptedConfig, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The approval card as a **control**, judged in a browser.
@@ -120,6 +120,7 @@ async function sendMessage(browser, text) {
 }
 
 test('the approval card appears with the justification, and Allow once runs the one denied call', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('allow', escalationSteps)
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -165,6 +166,7 @@ test('the approval card appears with the justification, and Allow once runs the 
 })
 
 test('Reject answers the card, and the denied call stays undone', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('reject', escalationSteps)
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -189,6 +191,7 @@ test('Reject answers the card, and the denied call stays undone', async (context
 })
 
 test('Stop ends a turn that is waiting on an approval, instead of leaving it stuck', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
    * The owner's report: approving the card seemed to change nothing, and then Stop did nothing either — the turn sat

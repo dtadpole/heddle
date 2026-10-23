@@ -644,6 +644,7 @@ dependencies = [
  "heddle-llm",
  "heddle-sandbox",
  "heddle-session",
+ "heddle-team",
  "heddle-todo",
  "heddle-tools",
  "heddle-workspace",
@@ -716,8 +717,12 @@ name = "heddle-goal"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-agent",
  "heddle-config",
+ "heddle-llm",
+ "heddle-sandbox",
  "heddle-session",
+ "heddle-tools",
  "serde",
  "serde_json",
  "thiserror",
