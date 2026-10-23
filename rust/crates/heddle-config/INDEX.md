@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:39:01Z
+modified: 2026-10-23T05:41:28Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -282,6 +282,7 @@ it judges.
 | 2026-10-22 | lane `e1d2fc0` (an unanswered escalated retry tested through the real services; `heddle-tools/src/adapters.rs` changed) | `HEDDLE_BIN=<debug build of exactly e1d2fc0> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | lane `b61b4e8` (goal chains run on a pinned runtime so the trigger works from any thread; `heddle-goal` changed) | `HEDDLE_BIN=<debug build of exactly b61b4e8> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | main `6be6ccd` (UI-verifier fixes and readings over `db3d76d`; no Rust changed, so the lane release build, made at 22:37:53 on a clean `db3d76d`, is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `6aee707` (`heddle web` over `heddle-server`, routed and not yet advertised; seven binary files) | `HEDDLE_BIN=<debug build of exactly 6aee707> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots the repository's own profile, and an unknown `--profile` or a missing `--config` through `web` gives this crate's sentence and exit 1 |
 
 ## Decisions the contract makes
 
