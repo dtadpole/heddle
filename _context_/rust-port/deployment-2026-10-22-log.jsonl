@@ -28,3 +28,4 @@
 {"at": "2026-10-22T23:02-07:00", "deployed": "d836e5b", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the 3097 preview rebuilt from the same main by preview.sh"}
 {"at": "2026-10-22T23:06-07:00", "deployed": "e57c5b6", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview.sh --check: current, nothing the preview serves changed"}
 {"at": "2026-10-22T23:09-07:00", "deployed": "74fccb4", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the 3097 preview rebuilt from 74fccb4 by preview.sh (web drives goals): endpoints, tree, goal, todo, team 200, a turn streams the fixture reply"}
+{"at": "2026-10-22T23:12-07:00", "deployed": "97f7435", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "restart, because preview.sh reached _tools_/web-daemon on main; the 3097 preview rebuilt from 97f7435 by main's preview.sh"}
