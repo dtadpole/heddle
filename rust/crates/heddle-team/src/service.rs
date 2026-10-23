@@ -295,11 +295,18 @@ impl TeamService {
     pub fn list(&self, caller: &str) -> TeamResult<Vec<TeamMemberView>> {
         let lead = self.lead_of(caller)?;
         let state = fold_team(&self.deps.store.read(&lead)?, &lead)?;
+        Ok(self.members_of(&state))
+    }
+
+    /// The roster of an already-folded team: the Lead, then every teammate in journal order, with live status.
+    /// [`Self::list`] is this over a fresh fold; a reader that needs the roster and the board from one moment
+    /// folds once and calls this.
+    pub fn members_of(&self, state: &TeamState) -> Vec<TeamMemberView> {
         let mut views = vec![TeamMemberView {
-            id: lead.clone(),
+            id: state.id.clone(),
             name: LEAD_NAME.to_owned(),
             role: TeamRole::Lead,
-            status: if self.is_running(&lead) {
+            status: if self.is_running(&state.id) {
                 TeamMemberStatus::Running
             } else {
                 TeamMemberStatus::Inactive
@@ -309,7 +316,7 @@ impl TeamService {
             diagnostics: Vec::new(),
         }];
         views.extend(state.members.iter().map(|member| self.view(member)));
-        Ok(views)
+        views
     }
 
     /// Create one durable teammate (Lead only): journal it provisioning, create its own attributed session
