@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — the Trajectory view.
@@ -30,7 +30,7 @@ function startCli(args, env) {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
         stdio: ['ignore', 'pipe', 'pipe'],

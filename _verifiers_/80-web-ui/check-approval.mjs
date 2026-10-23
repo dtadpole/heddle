@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The approval card as a **control**, judged in a browser.
@@ -30,9 +30,7 @@ function startServer(label, stepsFor) {
       const steps = stepsFor({ outsidePath })
       const { config } = scriptedConfig({ home, steps })
       const child = spawn(
-        process.execPath,
-        [
-          join(repoRoot, 'dist', 'cli.js'),
+        ...heddleCommand([
           'web',
           '--host',
           '127.0.0.1',
@@ -44,7 +42,7 @@ function startServer(label, stepsFor) {
           join(home, 'sessions'),
           '--sandbox-root',
           work,
-        ],
+        ]),
         { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''

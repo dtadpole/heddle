@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The composition of one session's context, asked for the way the page asks for it.
@@ -58,7 +58,7 @@ function startCli(args, options) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: options.cwd ?? repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...(options.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
