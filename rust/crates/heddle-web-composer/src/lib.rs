@@ -13,14 +13,21 @@
 //! (or the binary) implements the traits over the real crates and mounts [`router`]; authentication, the
 //! Host/Origin fence and the `404` fallback are the server's, applied around the merged router.
 //!
-//! | Route | Module | Host trait |
-//! |---|---|---|
-//! | `GET /api/status` | [`status`] | [`StatusHost`] |
-//! | `GET /api/context?session=&endpoint=&model=` | [`context_view`] | [`ContextHost`] |
-//! | `GET /api/endpoints` | [`model_switcher`] | [`ModelHost`] |
-//! | `POST /api/sessions/{id}/model` | [`model_switcher`] | [`ModelHost`] |
-//! | `POST /api/sessions/{id}/steer` | [`turn_control`] | [`TurnControlHost`] |
-//! | `POST /api/sessions/{id}/stop` | [`turn_control`] | [`TurnControlHost`] |
+//! | Route | Module | Host trait | Mounted by [`router`]? |
+//! |---|---|---|---|
+//! | `GET /api/context?session=&endpoint=&model=` | [`context_view`] | [`ContextHost`] | yes |
+//! | `GET /api/endpoints` | [`model_switcher`] | [`ModelHost`] | yes |
+//! | `POST /api/sessions/{id}/model` | [`model_switcher`] | [`ModelHost`] | yes |
+//! | `GET /api/status` | [`status`] | [`StatusHost`] | **no** — `heddle-server`'s `CORE_ROUTES` owns it |
+//! | `POST /api/sessions/{id}/steer` | [`turn_control`] | [`TurnControlHost`] | **no** — the server's turn registry owns it |
+//! | `POST /api/sessions/{id}/stop` | [`turn_control`] | [`TurnControlHost`] | **no** — the server's turn registry owns it |
+//!
+//! The last three are **not** mounted here, and their `(method, path)` pairs are not advertised in [`ROUTES`]: the
+//! server registers them itself (its `RunRegistry` owns steer and stop, and `/api/status` is the deployment's
+//! sandbox mode and root), and a mount that collided would fail the binary's start-up with a route error rather
+//! than a duplicate handler. Their modules, their [`StatusHost`]/[`TurnControlHost`] traits and their route
+//! functions stay in this crate — with the same answers and their tests — because their logic is the composer's;
+//! only the merged router and the advertised list are the three that the server does not have.
 //!
 //! Every answer keeps the TypeScript build's status codes, error sentences and body bytes
 //! (`JSON.stringify(value, null, 2)` plus a newline, `cache-control: no-store`), because the page and the
@@ -57,19 +64,17 @@ pub trait ComposerHost: StatusHost + ContextHost + ModelHost + TurnControlHost {
 
 impl<T: StatusHost + ContextHost + ModelHost + TurnControlHost> ComposerHost for T {}
 
-/// Every `(method, path)` this crate answers, in axum 0.8 path syntax.
+/// Every `(method, path)` [`router`] mounts, in axum 0.8 path syntax.
 ///
-/// The server registers routes of its own, and `Router::merge` rejects an overlapping path with a panic, so a
-/// caller can assert at boot that the two sets are disjoint instead of meeting the panic: `heddle-server` owns
-/// `/api/turn`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/permission`, `/api/tree`,
-/// `/api/workspaces`, `/api/folders/session`, the goal and approval routes, and everything else in `web.ts`.
+/// The server registers routes of its own, and its mount rejects an overlapping path at start-up, so a caller can
+/// assert the two sets are disjoint instead of meeting that error: `heddle-server` owns `/api/status`,
+/// `/api/sessions/{id}/steer`, `/api/sessions/{id}/stop`, `/api/turn`, `/api/sessions`,
+/// `/api/sessions/{id}`, `/api/sessions/{id}/permission`, `/api/tree`, `/api/workspaces`,
+/// `/api/folders/session`, the goal and approval routes, and everything else in `web.ts`.
 pub const ROUTES: &[(&str, &str)] = &[
-    ("GET", "/api/status"),
     ("GET", "/api/context"),
     ("GET", "/api/endpoints"),
     ("POST", "/api/sessions/{id}/model"),
-    ("POST", "/api/sessions/{id}/steer"),
-    ("POST", "/api/sessions/{id}/stop"),
 ];
 
 /// The composer's routes, ready to be merged into the server's router.
@@ -78,10 +83,8 @@ pub const ROUTES: &[(&str, &str)] = &[
 /// authentication of its own: the server wraps the merged router in its token and fence layers.
 pub fn router<H: ComposerHost>(host: Arc<H>) -> axum::Router {
     axum::Router::new()
-        .merge(status::routes(Arc::clone(&host)))
         .merge(context_view::routes(Arc::clone(&host)))
-        .merge(model_switcher::routes(Arc::clone(&host)))
-        .merge(turn_control::routes(host))
+        .merge(model_switcher::routes(host))
 }
 
 #[cfg(test)]
@@ -100,16 +103,24 @@ mod tests {
             );
         }
         for (method, path) in [
-            ("GET", "/api/status"),
             ("GET", "/api/context"),
             ("GET", "/api/endpoints"),
             ("POST", "/api/sessions/{id}/model"),
-            ("POST", "/api/sessions/{id}/steer"),
-            ("POST", "/api/sessions/{id}/stop"),
         ] {
             assert!(
                 ROUTES.contains(&(method, path)),
                 "{method} {path} is answered but not listed"
+            );
+        }
+        // The server's `CORE_ROUTES` own these three; advertising them here would make the binary's mount fail.
+        for (method, path) in [
+            ("GET", "/api/status"),
+            ("POST", "/api/sessions/{id}/steer"),
+            ("POST", "/api/sessions/{id}/stop"),
+        ] {
+            assert!(
+                !ROUTES.contains(&(method, path)),
+                "{method} {path} is the server's route and must not be mounted here"
             );
         }
     }
@@ -141,15 +152,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_text(response).await, "ok");
 
-        let response = call(app, Method::GET, "/api/status", None).await;
+        let response = call(app.clone(), Method::GET, "/api/endpoints", None).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()["x-stamped"],
             "yes",
             "the caller's layer covers the merged routes too"
         );
-        let body = body_text(response).await;
-        assert!(body.contains("workspace-write"), "{body}");
-        assert!(body.contains("\"cwd\""), "{body}");
+        // And the three the server owns are **not** here: mounting them would fail the binary's start-up.
+        let response = call(app, Method::GET, "/api/status", None).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/api/status is the server's route, not this router's"
+        );
     }
 }

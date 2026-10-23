@@ -3,6 +3,11 @@
 //! The checks themselves are browsers and a binary; this pins the part they read from the routes, so a change here
 //! fails in the crate rather than in a check hours later. The host is a fixed in-memory double: the point is the
 //! routes' statuses, sentences and body shapes, not the state behind them.
+//!
+//! The app below is the surface as it will be **served**: `router` mounts the three routes the composer owns, and
+//! the three the server owns (`/api/status`, steer, stop) are mounted from this crate's modules, which still carry
+//! their answers and tests. `router` alone mounts only the composer's three — `lib.rs` tests that the other three
+//! are absent from it, which is what keeps the binary's mount from failing on an overlap.
 
 use std::sync::Arc;
 
@@ -184,7 +189,10 @@ async fn request(
 async fn the_four_checks_api_expectations_hold_over_a_listener() {
     let app = axum::Router::new()
         .route("/api/health", axum::routing::get(|| async { "ok" }))
-        .merge(router(Arc::new(Host)));
+        .merge(router(Arc::new(Host)))
+        // The server's three, served from this crate's modules here so the whole contract is judged together.
+        .merge(heddle_web_composer::status::routes(Arc::new(Host)))
+        .merge(heddle_web_composer::turn_control::routes(Arc::new(Host)));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("a free port");
