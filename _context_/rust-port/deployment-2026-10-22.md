@@ -89,3 +89,32 @@ So on the evidence: the process behind `3082` runs this checkout's `dist/cli.js`
 URL is this build's page byte for byte, and the checkout is a clean deployment checkout at `origin/main`.
 The one open question — whether the committed wording should say `main` or `origin/main` for a worktree
 deployment — is D-015's, and the branch takes the wording that matches the machine.
+
+## What stopped it, and what brings it back
+
+Two stops were measured after the first proof, and both are recorded because a 502 on the owner's page looks the
+same whether the build is broken or nothing is running it.
+
+- **20:16 PDT — a stop during bring-up.** A manual probe server was started on 3082 to read its command line, and
+  the `pkill` that cleaned it up matched the agent's process too. The gate then answered 502
+  (`connect ECONNREFUSED 127.0.0.1:3082`) until it was started again. Nothing restarted it: the agent was loaded,
+  `state = not running`, `runs = 1`, and `KeepAlive` never fired. This is the second defect above, met as an
+  outage rather than as a reading.
+- **20:21 PDT — a deliberate stop.** `_verifiers_/95-web-daemon`'s stays-up check kills the process that owns the
+  port. The page was answering again from a new pid within about 15 s. The restore was the **interim guard**
+  below; its log records `port 3082 silent, kickstarting`.
+
+**What restarts it today.** Until this branch reaches `main`, the answer is an interim guard run from this
+session: every 15 s it probes `3082/healthz` and runs `launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`
+when the port is silent (`~/.heddle/guard.log`). That is a hand, not a design — it dies with the session. The
+landed answer is [`_tools_/web-daemon/supervisor.mjs`](../../_tools_/web-daemon/supervisor.mjs), which the agent
+runs so the server is restarted inside the service, plus
+[`_tools_/web-daemon/guard.sh`](../../_tools_/web-daemon/guard.sh) and `install.sh --guard`, one cron line for the
+case where launchd never starts the job at login. Both are on `hd/live-deploy`; they reach this checkout when
+`main` carries them and the deployment moves to it.
+
+**The manual command**, when a person has to do what the guard does:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
+```

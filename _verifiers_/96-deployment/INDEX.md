@@ -65,8 +65,24 @@ daemon must run from a folder that contains only committed main (the Mac: `/User
 deployment host: `~/heddle-live`). The installer refuses a non-main or dirty checkout, and this check fails one if
 it is nonetheless served.
 
-**Measured** on the Linux deployment host on 2026-10-22 (TypeScript build, `~/heddle-live` detached at
-`origin/main`, 127.0.0.1:8082): 3 checks, 3 passed.
+**Measured on the owner's Mac, 2026-10-22, 20:2x PDT** — the TypeScript build **as the oracle**, `~/heddle-live`
+detached at `a5b0c66` (= `origin/main`), clean, built with `npm run build`, the agent `com.dtadpole.heddle-web` on
+3082 and the gate on 8082:
+
+```bash
+cd ~/heddle-live && sh _verifiers_/96-deployment/verify.sh
+# this branch's checks: 3 checks, 3 passed
+# main's checks at a5b0c66: 2 passed, 1 failed — the third, "on main (it is on HEAD)"
+```
+
+The served page was 533,283 bytes against `dist/server/page.html` at 533,280: the 3-byte difference is the
+`heddle-page` marker filled with `dd6d45d28567`, which is this build's own sha256 prefix. The one failure with
+main's check is the deployment worktree's detached HEAD, which is the shape D-015 accepted and this branch's
+third check reads as `detached exactly at origin/main`.
+
+**Measured on the Linux deployment host on 2026-10-22** — that host's earlier arrangement (TypeScript build,
+`~/heddle-live` detached at `origin/main`, the server owning 127.0.0.1:8082 behind the owner's SSH forward): 3
+checks, 3 passed.
 
 ## Why this exists
 
