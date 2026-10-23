@@ -1534,7 +1534,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
     tokio::spawn(async move {
-        use futures::StreamExt;
+        use futures::{Stream, StreamExt};
         let mut running = Box::pin(runner.run_turn(request));
         let outcome = loop {
             tokio::select! {
@@ -1552,6 +1552,15 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 result = &mut running => break Some(result),
             }
         };
+        // A fast turn can publish its last events and return in the same poll. Drain what is already
+        // queued before the terminal frame, so a client never sees `done` before the answer it closes.
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        while let std::task::Poll::Ready(Some(frame)) = frames.as_mut().poll_next(&mut context) {
+            if sender.send(frame).is_err() {
+                break;
+            }
+        }
         let stopped = || {
             SseFrame::new(
                 names::CANCELLED,
@@ -2161,6 +2170,222 @@ mod tests {
             )
         );
         assert!(server.announce_json().contains("\"port\":"));
+        server.close().await;
+    }
+
+    /// A turn runner that publishes into the server's hub before it returns, so the streaming path is
+    /// judged end to end: the events and the terminal frame in one response.
+    struct StreamingTurns {
+        hub: Arc<std::sync::OnceLock<EventHub>>,
+        text: String,
+    }
+
+    impl TurnRunner for StreamingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let hub = Arc::clone(&self.hub);
+            let text = self.text.clone();
+            Box::pin(async move {
+                if let Some(hub) = hub.get() {
+                    hub.publish_session_event(
+                        &request.session,
+                        &serde_json::json!({
+                            "type": "assistant/chunk",
+                            "chunk": {"type": "text-delta", "text": text}
+                        }),
+                    );
+                    hub.publish_session_event(
+                        &request.session,
+                        &serde_json::json!({"type": "assistant/completed", "text": text}),
+                    );
+                }
+                Ok(TurnOutcome {
+                    text,
+                    finish_reason: "stop".into(),
+                    rounds: 1,
+                    denials: Vec::new(),
+                    ended: None,
+                    usage: None,
+                })
+            })
+        }
+    }
+
+    fn app_with_runner(label: &str, runner: Arc<StreamingTurns>) -> (Router, AppState) {
+        let mut harness = harness();
+        harness.turns = Arc::clone(&runner) as Arc<dyn TurnRunner>;
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret(label)),
+                ..ServerOptions::default()
+            },
+        );
+        let _ = runner.hub.set(builder.events());
+        builder.into_router(3082).expect("the test router")
+    }
+
+    async fn post_json(
+        router: &Router,
+        uri: &str,
+        cookie: &str,
+        body: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, bytes)
+    }
+
+    #[tokio::test]
+    async fn a_turn_streams_its_sessions_events_and_ends_with_done() {
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::clone(&hub),
+            text: "hello".into(),
+        });
+        let (router, _) = app_with_runner("turn-stream", runner);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, r#"{"prompt":"say hello"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(&bytes);
+        assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
+        assert!(text.contains("event: session\n"), "{text}");
+        assert!(
+            text.contains(r#""type":"text-delta""#) && text.contains(r#""text":"hello""#),
+            "{text}"
+        );
+        assert!(text.contains("event: done\n"), "{text}");
+        let session_at = text.find("event: session").unwrap();
+        let done_at = text.find("event: done").unwrap();
+        assert!(
+            session_at < done_at,
+            "the event arrives before the terminal frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_cancels_the_running_turn() {
+        let (router, state) = app("stop");
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let guard = state.runs().begin(id);
+        assert!(state.runs().is_running(id));
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, bytes) =
+            post_json(&router, &format!("/api/sessions/{id}/stop"), &cookie, "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(&bytes);
+        assert!(text.contains("\"stopped\": 1"), "{text}");
+        assert!(text.contains(id), "{text}");
+        assert!(guard.is_cancelled(), "the turn's token is cancelled");
+        drop(guard);
+    }
+
+    /// One raw HTTP/1.1 exchange, because the verifiers speak over a socket rather than through
+    /// `tower::ServiceExt`: the door's handshake and the refusal headers are judged on the wire.
+    async fn raw_request(port: u16, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("a connection to the test server");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buffer = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut buffer),
+        )
+        .await;
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_door_behaves_the_same_over_a_real_socket() {
+        let server = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("socket")),
+                ..ServerOptions::default()
+            },
+        )
+        .start()
+        .await
+        .expect("the server starts");
+        let port = server.port();
+
+        let health = raw_request(
+            port,
+            "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.contains(r#""service":"heddle-web""#), "{health}");
+
+        let refused = raw_request(
+            port,
+            "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+        assert!(refused.ends_with("unauthorized\n"), "{refused}");
+
+        let handshake = raw_request(
+            port,
+            "GET /?token=test-token HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(handshake.starts_with("HTTP/1.1 303"), "{handshake}");
+        assert!(handshake.contains("HttpOnly"), "{handshake}");
+        let cookie = handshake
+            .lines()
+            .find_map(|line| line.strip_prefix("set-cookie: "))
+            .and_then(|value| value.split(';').next())
+            .expect("the handshake set a cookie")
+            .to_owned();
+
+        let served = raw_request(
+            port,
+            &format!(
+                "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(served.starts_with("HTTP/1.1 200"), "{served}");
+
+        let fenced = raw_request(
+            port,
+            "GET /api/sessions HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(fenced.starts_with("HTTP/1.1 403"), "{fenced}");
+
         server.close().await;
     }
 

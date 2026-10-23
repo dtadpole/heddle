@@ -22,7 +22,9 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (101 tests).
+`cargo test -p heddle-server` is green (105 tests). The door is judged over a real socket as
+well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
+its `done` frame in one streamed response.
 
 The routes answer through the `services` traits, so the crate builds and is tested before the service
 crates exist. **Step 7 is not this crate's to finish**: `heddle web` lives in `rust/crates/heddle/`, and
