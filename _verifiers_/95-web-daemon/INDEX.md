@@ -1,6 +1,6 @@
 ---
 title: Verifier 11 — Web Daemon
-version: 1.3.0
+version: 1.4.0
 description: a supervised user service — a launchd agent on macOS, a systemd user unit on Linux — keeps the Web UI running at the documented port, survives a kill, and does not weaken the token.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -50,6 +50,16 @@ through [`_tools_/web-daemon/service.mjs`](../../_tools_/web-daemon/service.mjs)
    agent, which exists because launchd on the owner's Mac was measured not to restart a loaded job at all. The
    kill is real: it interrupts the live service for a few seconds (3 s measured on the Linux host, and the Mac,
    2026-10-22).
+
+## Judging it without killing the owner's server
+
+Check 4 kills the process that owns the port, so run against the deployment it is an outage on the owner's page
+(the ui lane gate stopped doing that under D-042). The same four checks judge a **scratch** service instead when
+`HEDDLE_WEB_LABEL` names one: `_tools_/web-daemon/rehearse.sh` installs the deployment's definition as
+`com.dtadpole.heddle-web.rehearsal` on port 3096 and runs this verifier against it as its last claim. Only a scratch
+label lets `HEDDLE_WEB_PORT` set the documented port; with the deployment's label the port stays 3082 (macOS) or 8082
+(Linux), so the environment cannot weaken the deployment's claim. Measured 2026-10-23 on the owner's Mac: 4 checks,
+4 passed against the scratch service, while the live server kept its pid and token.
 
 ## The Rust branch
 

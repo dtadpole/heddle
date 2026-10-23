@@ -202,6 +202,14 @@ During both runs the live deployment kept the same server pid (92313) and the sa
 answered 200: the rehearsal did not touch it. No scratch agent is left loaded (`launchctl print` on the rehearsal
 label fails), and the scratch state directory was removed.
 
+**A sixth claim: `95-web-daemon` judged on the scratch service.** The ui lane gate stopped running 95 against the
+deployment (D-042), because its stays-up check kills the owner's server. `95-web-daemon` now judges the service that
+`HEDDLE_WEB_LABEL` names when one is set, and `rehearse.sh` runs it against the scratch agent as its last claim. Run 3,
+21:19 PDT: started 320 ms, kill 357 ms (94784 → 95214), guard no action, reinstall 426 ms, agent gone restored in
+1170 ms, **95-web-daemon 4 pass, 0 fail, 0 skipped** — 6 of 6 held, while the live server kept pid 70020 and its token.
+`96-deployment` blanks those overrides, so it always reads the deployment: 3/3 at `b0ef8ab` both from a plain shell and
+from one with the scratch label set.
+
 ## Who acts on the service, and the guard's state (D-045)
 
 **No guard is scheduled or running.** The crontab has no guard line (it is TCC-blocked anyway), no LaunchAgent runs
@@ -216,8 +224,8 @@ Everything that has touched the service tonight, so a restart in `web.log` can b
 |---|---|---|
 | this seat | redeploys (`install.sh --restart` after `checkout --detach origin/main`), the measurements recorded here | throughout |
 | `supervisor.mjs` | restarts a server that exits, in about a second | the tooling merge, 20:44 PDT |
-| live-monitor `--restore` | one `kickstart`, delegated by this seat; used at 03:42:20Z and 03:54:07Z, the second inside an install window, where it killed a freshly started server. Now gated (live-monitor `d842a8d`): only when launchd reports the agent not running, no build or plist change within 180 s, and still silent after a 10 s grace; scheduled pass only | gated 03:58Z |
-| the ui lane gate | runs `95-web-daemon` against the deployment, whose stays-up check kills the server by design | each gate |
+| live-monitor | **observes only** since D-045: its restore code was removed (live-monitor `c791612`). It used one delegated `kickstart` at 03:42:20Z and 03:54:07Z, the second inside an install window, where it killed a freshly started server | read-only since 04:06Z |
+| the ui lane gate | ran `95-web-daemon` against the deployment four times on 2026-10-22 (each a real kill); **no longer** since D-042 — it cites 95 from a scratch install and 96 read-only | stopped 04:13Z |
 
 ## The flap at 20:49–20:50, and the guard race it exposed
 
@@ -287,6 +295,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 20:59 | `0a10ceb` (part 0 passes through the binary) | `0a10ceb`, clean | after the 20:57–20:58 outage below; redeploy silence 288 ms; 95 **4/4**, 96 **3/3**; marker `dd6d45d28567` |
 | 21:02 | `480d9b8` (a served command routes through the boot) | `480d9b8`, clean | 95 **4/4**, 96 **3/3** from the deployment; marker `dd6d45d28567`; the binary's `web` still exits 2, so the page is still the TypeScript oracle |
 | 21:13 | `d28625d` (a ui check whose harness cannot start fails instead of hanging) | `d28625d`, clean | 95 **4/4**, 96 **3/3** from the deployment; marker `dd6d45d28567` |
+| 21:21 | `b0ef8ab` (Rust status run on `ea1028b`) | `b0ef8ab`, clean | 96 **3/3** from the deployment; 95 judged on the scratch service instead (4/4, rehearsal run 3), so the owner's server was not killed |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when

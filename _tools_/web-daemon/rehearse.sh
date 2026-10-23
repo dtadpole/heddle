@@ -22,6 +22,7 @@
 #   guard          a guard run during that restart takes no action (it acts on the job, not on the port)
 #   reinstall      install.sh --restart leaves the port silent for less than 5 s
 #   agent gone     after a bootout, one guard run brings the service back within 20 s
+#   95-web-daemon  the verifier itself, judging the scratch service (its stays-up check kills the scratch server)
 # Exit 0 when every claim held, 1 when one failed, 2 when the rehearsal refused to start, 3 when this host
 # cannot be judged (no supervisor command).
 set -eu
@@ -187,6 +188,17 @@ sleep 1
 start=$(now_ms)
 scratch sh "$here/guard.sh" >/dev/null 2>&1 || true
 if ms=$(wait_answer 20000); then result "agent gone" held "guard restored it, $(( $(now_ms) - start )) ms"; else result "agent gone" failed "not answering 20 s after the guard ran"; fi
+
+# 95-web-daemon: the verifier, pointed at the scratch service, so its kill never lands on the owner's page (D-042).
+repo=$(CDPATH= cd -- "$here/../.." && pwd)
+verifier="$repo/_verifiers_/95-web-daemon/verify.sh"
+if [ -f "$verifier" ]; then
+  sleep 6
+  json=$(HEDDLE_WEB_LABEL="$label" HEDDLE_WEB_UNIT="$unit" HEDDLE_WEB_PORT="$port" sh "$verifier" --json 2>/dev/null | tail -1 || true)
+  verdict=$(printf '%s' "$json" | sed -n 's/.*"verdict":\([0-9]\).*/\1/p')
+  summary=$(printf '%s' "$json" | sed -n 's/.*"pass":\([0-9]*\).*"fail":\([0-9]*\).*"skipped":\([0-9]*\).*/\1 pass, \2 fail, \3 skipped/p')
+  if [ "$verdict" = 0 ]; then result 95-web-daemon held "$summary"; else result 95-web-daemon failed "verdict ${verdict:-none}: ${summary:-$json}"; fi
+fi
 
 echo "verdict: $held held, $failed failed"
 if [ "$mode" = "--keep" ]; then echo "kept: $label on $port; remove it with $0 --cleanup"; fi

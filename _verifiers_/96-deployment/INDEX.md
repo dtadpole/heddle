@@ -1,6 +1,6 @@
 ---
 title: Verifier 15 — Deployment
-version: 1.4.0
+version: 1.5.0
 description: the page the owner actually sees is the deployment checkout's build, served by a process running that checkout, and that checkout contains only committed main — on macOS behind the gate, on a Linux host behind the owner's SSH forward, with the TypeScript build or the binary HEDDLE_BIN names.
 grounded_in:
   - source: owner statement 2026-10-17 that a worktree may carry initial verification but the job is not done until merged to main and the deployment is verified
@@ -43,6 +43,11 @@ server, so a byte comparison is a statement about the deployment, not about timi
 The check reads the command line after the supervisor's `--` and the pid that owns the port, because those are the
 process and the build the deployment claims; reading the front of the command line would make `node` the entry and
 pass for any node process on the machine.
+
+**Always the deployment.** The scratch-service overrides `rehearse.sh` sets for `95-web-daemon`
+(`HEDDLE_WEB_LABEL`, `HEDDLE_WEB_UNIT`) are blanked here: the page behind 8082 is the deployment's whatever the shell
+names, so this check reads the deployment's agent even when run from a rehearsal's environment (measured: 3/3 both
+ways at `b0ef8ab`).
 
 **The owner's URL.** On macOS the service sits on 3082 behind the gate on `http://127.0.0.1:8082/`, and the gate
 is what is fetched. On a Linux host nothing fronts the server: it owns 8082, the port the owner's SSH forward
