@@ -9,6 +9,8 @@ use serde_json::Value;
 
 use heddle_web_composer::js;
 
+use crate::js_json;
+
 /// The name a downloaded log is filed under: the trimmed title with control characters as spaces,
 /// `\ / : * ? " < > |` as dashes, whitespace runs collapsed, at most 80 UTF-16 units, leading and trailing dots,
 /// spaces and dashes stripped — or the id when nothing usable is left — plus `.jsonl`.
@@ -64,7 +66,7 @@ pub fn content_disposition(id: &str, file_name: &str) -> String {
 pub fn ndjson(events: &[Value]) -> String {
     let mut body = String::new();
     for event in events {
-        body.push_str(&js::stringify_compact(event));
+        body.push_str(&js_json::stringify_compact(event));
         body.push('\n');
     }
     if events.is_empty() {
@@ -149,6 +151,41 @@ mod tests {
             "a Chinese title travels encoded"
         );
         assert!(!non_ascii.contains('会'), "and never raw in the header");
+    }
+
+    #[test]
+    fn a_logged_float_comes_back_byte_for_byte() {
+        // `JSON.parse` reads a float correctly rounded, so the TypeScript download writes back the bytes it
+        // read. serde_json does so only with `float_roundtrip`; without it the first case reads back as
+        // `…492` — measured on a live session's timeline position.
+        for text in [
+            "0.9999551342447491",
+            "0.9040877429444507",
+            "0.30000000000000004",
+            "0.1",
+            "5e-324",
+            "1.7976931348623157e+308",
+        ] {
+            let event: Value =
+                serde_json::from_str(&format!("{{\"seq\":1,\"x\":{text}}}")).unwrap();
+            assert_eq!(
+                ndjson(std::slice::from_ref(&event)),
+                format!("{{\"seq\":1,\"x\":{text}}}\n"),
+                "{text} survives the download unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_written_with_rust_style_numbers_downloads_as_javascript_writes_it() {
+        // The TypeScript route is `JSON.stringify(event)` over what it read, so `1500.0` leaves as `1500` and
+        // `1e21` as `1e+21`, whichever build wrote the log.
+        let event: Value =
+            serde_json::from_str("{\"durationMs\":1500.0,\"big\":1e21,\"n\":7}").unwrap();
+        assert_eq!(
+            ndjson(&[event]),
+            "{\"durationMs\":1500,\"big\":1e+21,\"n\":7}\n"
+        );
     }
 
     #[test]

@@ -298,6 +298,16 @@ impl ServerBuilder {
         self.events.clone()
     }
 
+    /// Stream from a hub the binary created first.
+    ///
+    /// The session store takes its event listener when it is built, which is before the harness and
+    /// so before this builder exists. Create the hub, give the store
+    /// [`crate::adapters::session_event_listener`] over it, then hand the same hub here.
+    pub fn with_event_hub(mut self, hub: EventHub) -> Self {
+        self.events = hub;
+        self
+    }
+
     /// The run registry, shared with anything that needs to know which sessions are running.
     pub fn runs(&self) -> RunRegistry {
         self.runs.clone()
@@ -405,7 +415,8 @@ impl ServerBuilder {
             // web.ts has no method table: a request whose path matches but whose method does not
             // falls through to the same `404 not found`, so a wrong method is not a 405 here either.
             .method_not_allowed_fallback(fallback_route)
-            .layer(middleware::from_fn_with_state(state.clone(), door));
+            .layer(middleware::from_fn_with_state(state.clone(), door))
+            .layer(middleware::from_fn(catch_panics));
         Ok((router, state))
     }
 
@@ -438,6 +449,22 @@ impl ServerBuilder {
             .approvals
             .as_ref()
             .map(|approvals| approvals.attach_answerer());
+        // A service that publishes its questions itself is relayed here, so a card reaches every
+        // `/api/events` subscriber as an `approval` frame without the binary wiring a listener.
+        let approval_relay = state
+            .harness()
+            .approvals
+            .as_ref()
+            .and_then(|approvals| approvals.subscribe())
+            .map(|mut questions| {
+                let hub = state.events().clone();
+                tokio::spawn(async move {
+                    use futures::StreamExt;
+                    while let Some(question) = questions.next().await {
+                        hub.publish_approval_request(&question);
+                    }
+                })
+            });
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router)
@@ -456,6 +483,7 @@ impl ServerBuilder {
             shutdown: Some(shutdown_tx),
             task: Some(task),
             detach_approvals,
+            approval_relay,
         })
     }
 }
@@ -471,6 +499,8 @@ pub struct WebServer {
     task: Option<tokio::task::JoinHandle<()>>,
     /// The approval service's detach function, held for as long as the server answers questions.
     detach_approvals: Option<Box<dyn FnOnce() + Send>>,
+    /// The task relaying the approval service's published questions into the hub.
+    approval_relay: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WebServer {
@@ -527,6 +557,9 @@ impl WebServer {
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
+        if let Some(relay) = self.approval_relay.take() {
+            relay.abort();
+        }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -572,6 +605,33 @@ where
                 })
                 .unwrap_or_else(|| "two routers claim the same route".to_owned());
             Err(ServerError::Route(format!("{name}: {detail}")))
+        }
+    }
+}
+
+/// A handler that panics answers `500 internal error: <message>` instead of dropping the connection.
+///
+/// web.ts wraps every request in a catch for the same reason: a route that throws must not take the
+/// connection (or the next check, which then reports "fetch failed" about the wrong thing) with it.
+/// Outermost, so the door and every mounted feature are covered.
+async fn catch_panics(request: Request, next: Next) -> Response {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(next.run(request))
+        .catch_unwind()
+        .await
+    {
+        Ok(response) => response,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                })
+                .unwrap_or_else(|| "the route failed".to_owned());
+            respond::internal_error(message)
         }
     }
 }
@@ -1074,12 +1134,11 @@ async fn permission_session(
     }
     let fallback = state.harness().sandbox.default_mode();
     let current = sessions.effective_mode(id.as_str(), &fallback);
-    let requested = body.get("mode").cloned().unwrap_or(Value::Null);
-    let confirm = body.get("confirm").cloned().unwrap_or(Value::Null);
+    // Passed as they arrived, so an absent mode is refused as 'undefined', as web.ts words it.
     match state
         .harness()
         .sandbox
-        .transition(&current, &requested, &confirm)
+        .transition(&current, body.get("mode"), body.get("confirm"))
     {
         Err(reason) => respond::json(
             StatusCode::CONFLICT,
@@ -1278,11 +1337,8 @@ async fn answer_approval(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: JsonBody,
 ) -> Response {
-    // The TypeScript route answers a question nobody is holding as a conflict, not as a missing
-    // plugin: a profile without the approval service simply has no question to answer.
-    let Some(service) = state.harness().approvals.as_ref() else {
-        return approval_not_waiting();
-    };
+    // web.ts checks the id's shape, then the outcome, and only then asks the service; a malformed
+    // request is a 400 whether or not an approval service is loaded.
     let looks_like_approval = id.strip_prefix("approval-").is_some_and(|rest| {
         rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
     });
@@ -1299,6 +1355,11 @@ async fn answer_approval(
                 "outcome must be 'allowed-once', 'rejected' or 'cancelled'",
             );
         }
+    };
+    // A question nobody is holding is a conflict, not a missing plugin: a profile without the approval
+    // service simply has no question to answer.
+    let Some(service) = state.harness().approvals.as_ref() else {
+        return approval_not_waiting();
     };
     if service.answer(&id, outcome) {
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
@@ -1358,7 +1419,10 @@ async fn get_team(
     if !state.harness().sessions.exists(&session) {
         return respond::no_session(&session);
     }
-    let view = team.view(&session);
+    let view = match team.view(&session) {
+        Ok(view) => view,
+        Err(error) => return respond::internal_error(error.message),
+    };
     respond::json(
         StatusCode::OK,
         &json!({
@@ -1849,8 +1913,8 @@ mod tests {
         fn transition(
             &self,
             _current: &str,
-            _requested: &Value,
-            _confirm: &Value,
+            _requested: Option<&Value>,
+            _confirm: Option<&Value>,
         ) -> Result<String, String> {
             Ok("read-only".into())
         }
@@ -1872,6 +1936,30 @@ mod tests {
         }
         fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
             false
+        }
+    }
+
+    /// An approval service that publishes questions on a channel, the way heddle-sandbox's broadcast does.
+    struct PublishingApprovals {
+        questions: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Value>>>,
+    }
+
+    impl ApprovalService for PublishingApprovals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            false
+        }
+        fn subscribe(&self) -> Option<futures::stream::BoxStream<'static, Value>> {
+            let receiver = self.questions.lock().unwrap().take()?;
+            Some(Box::pin(futures::stream::unfold(
+                receiver,
+                |mut receiver| async move { receiver.recv().await.map(|value| (value, receiver)) },
+            )))
         }
     }
 
@@ -2308,6 +2396,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_published_approval_question_reaches_the_event_stream() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut harness = harness();
+        harness.approvals = Some(Arc::new(PublishingApprovals {
+            questions: std::sync::Mutex::new(Some(receiver)),
+        }));
+        let server = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("approval-relay")),
+                ..ServerOptions::default()
+            },
+        )
+        .start()
+        .await
+        .expect("the server starts");
+        let mut frames = server.state().events().subscribe();
+
+        let question = serde_json::json!({
+            "id": "approval-00000000-0000-0000-0000-000000000000",
+            "tool": "write_file",
+            "reason": "write outside the workspace",
+            "displayReason": "write outside the workspace",
+            "at": "2026-10-23T01:16:42.123Z"
+        });
+        sender.send(question.clone()).unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next_frame())
+            .await
+            .expect("the question is relayed")
+            .expect("the hub is open");
+        assert_eq!(frame.event, "approval");
+        assert_eq!(
+            serde_json::from_str::<Value>(&frame.data).unwrap(),
+            question
+        );
+
+        server.close().await;
+        // After close the relay is gone: nothing is delivered to a closed hub.
+        let _ = sender.send(serde_json::json!({"id": "late"}));
+    }
+
+    #[tokio::test]
     async fn the_running_server_answers_approvals_and_detaches_on_close() {
         use std::sync::atomic::Ordering;
         let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2655,6 +2787,17 @@ mod tests {
         assert!(body.contains("no longer waiting"), "{body}");
         assert!(body.contains("\"answered\": false"), "{body}");
 
+        // The id's shape and the outcome are checked before the service, as web.ts orders them.
+        let (status, bytes) = post_json(
+            &router,
+            "/api/approvals/not-an-approval",
+            &cookie,
+            r#"{"outcome":"allowed-once"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(&bytes), "{\"error\":\"not an approval id\"}\n");
+
         // No workspace service: /api/html reports the path as outside every root, as web.ts does.
         let response = router
             .oneshot(
@@ -2794,6 +2937,204 @@ mod tests {
                 "{method} {path} fell through to the fallback"
             );
         }
+    }
+
+    struct BrokenTeam;
+
+    impl crate::services::TeamService for BrokenTeam {
+        fn view(&self, _session: &str) -> Result<crate::services::TeamView, ServiceError> {
+            Err(ServiceError::with_code(
+                "member alpha is active without provisioning",
+                "TEAM_MEMBER_PHASE",
+            ))
+        }
+    }
+
+    struct WorkingTeam;
+
+    impl crate::services::TeamService for WorkingTeam {
+        fn view(&self, _session: &str) -> Result<crate::services::TeamView, ServiceError> {
+            Ok(crate::services::TeamView {
+                lead: serde_json::json!("lead"),
+                members: serde_json::json!([{"name": "lead", "role": "lead", "status": "inactive"}]),
+                tasks: serde_json::json!([]),
+                messages: serde_json::json!([]),
+                delivered: serde_json::json!([]),
+            })
+        }
+    }
+
+    async fn team_answer(
+        team: Arc<dyn crate::services::TeamService>,
+        label: &str,
+    ) -> (StatusCode, String) {
+        let mut harness = harness();
+        harness.team = Some(team);
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret(label)),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/team?session=session-00000000-0000-0000-0000-000000000001",
+            Some(&cookie),
+        )
+        .await;
+        (status, body_text(&bytes))
+    }
+
+    #[tokio::test]
+    async fn a_refused_team_fold_is_the_typescript_internal_error() {
+        let (status, body) = team_answer(Arc::new(BrokenTeam), "team-broken").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body,
+            "internal error: member alpha is active without provisioning\n"
+        );
+
+        let (status, body) = team_answer(Arc::new(WorkingTeam), "team-working").await;
+        assert_eq!(status, StatusCode::OK);
+        let view: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["lead"], "lead");
+        assert_eq!(view["members"][0]["role"], "lead");
+    }
+
+    struct PanickingFeature;
+
+    impl Feature for PanickingFeature {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        fn routes(&self) -> Router<AppState> {
+            Router::new().route(
+                "/api/boom",
+                get(|| async {
+                    panic!("the boom route failed");
+                    #[allow(unreachable_code)]
+                    ""
+                }),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_route_answers_500_instead_of_dropping_the_connection() {
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("panic")),
+                ..ServerOptions::default()
+            },
+        )
+        .mount(PanickingFeature);
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/boom", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body_text(&bytes), "internal error: the boom route failed\n");
+        // The router keeps answering after the panic.
+        let (status, _, _) = call(&router, Method::GET, "/healthz", None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The routes over the real session store: what the store records is what the chat view draws,
+    /// and the store's own events reach the hub the server streams from.
+    #[tokio::test]
+    async fn the_routes_read_a_real_session_store() {
+        use crate::adapters::{StoreSessions, session_event_listener};
+        use crate::services::SessionService as _;
+
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-store-routes-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+
+        let hub = EventHub::new();
+        let sessions = StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            Some(session_event_listener(hub.clone())),
+        ));
+        let harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("store-routes")),
+                ..ServerOptions::default()
+            },
+        )
+        .with_event_hub(hub.clone());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let mut frames = state.events().subscribe();
+
+        let id = sessions
+            .start(StartSession {
+                cwd: Some(scratch.clone()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        sessions
+            .user_content(
+                &id,
+                vec![serde_json::json!({"type": "text", "text": "remember the word loom"})],
+            )
+            .unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next_frame())
+            .await
+            .expect("the store's event reached the server's hub")
+            .expect("the hub is open");
+        assert_eq!(frame.session_id().as_deref(), Some(id.as_str()));
+
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(listed[0]["id"], id.as_str());
+        assert_eq!(listed[0]["running"], false);
+
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{id}"),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["id"], id.as_str());
+        assert_eq!(view["permission"]["mode"], "workspace-write");
+        let turns = view["turns"].as_array().unwrap();
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
+            "{turns:?}"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     struct DuplicateFeature;

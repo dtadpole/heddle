@@ -15,6 +15,7 @@ axum.workspace = true
 heddle-web-composer.workspace = true
 serde.workspace = true
 # `preserve_order`: the log download and the ledger's fallback rows re-serialise events in their written order.
+# The workspace entry carries `float_roundtrip`, which the download's byte-for-byte test relies on.
 serde_json = { workspace = true, features = ["preserve_order"] }
 
 [dev-dependencies]

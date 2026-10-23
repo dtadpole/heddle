@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use heddle_web_composer::js;
 
+use crate::js_json;
 use crate::usage::TokenUsage;
 
 /// What produced a record. The vocabulary is DSH's, so a reader of either tool sees the same words.
@@ -827,7 +828,7 @@ impl Projector {
         let text = if rest.is_empty() {
             type_name.to_owned()
         } else {
-            js::utf16_slice(&js::stringify_pretty(&Value::Object(rest)), 2_000).to_owned()
+            js::utf16_slice(&js_json::stringify_pretty(&Value::Object(rest)), 2_000).to_owned()
         };
         self.put(LedgerRecord::started(
             LedgerKind::System,
@@ -1163,7 +1164,7 @@ mod tests {
             event(
                 4,
                 "2026-10-11T10:00:00.200Z",
-                json!({"type": "message", "message": {"role": "tool", "toolCallId": "c1", "content": [{"type": "text", "text": "/Users/zhenc"}]}}),
+                json!({"type": "message", "message": {"role": "tool", "toolCallId": "c1", "content": [{"type": "text", "text": "/tmp/work"}]}}),
             ),
             event(
                 5,
@@ -1193,7 +1194,7 @@ mod tests {
         );
         assert_eq!(
             calls[0].result.as_deref(),
-            Some("/Users/zhenc"),
+            Some("/tmp/work"),
             "with the answer on the same record"
         );
         assert_eq!(calls[0].state, Some(ToolState::Ok));

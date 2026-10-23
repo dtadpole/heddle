@@ -718,8 +718,12 @@ name = "heddle-goal"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-agent",
  "heddle-config",
+ "heddle-llm",
+ "heddle-sandbox",
  "heddle-session",
+ "heddle-tools",
  "serde",
  "serde_json",
  "thiserror",
@@ -760,6 +764,8 @@ dependencies = [
  "bytes",
  "futures",
  "getrandom 0.3.4",
+ "heddle-config",
+ "heddle-session",
  "http-body-util",
  "serde",
  "serde_json",

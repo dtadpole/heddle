@@ -1,208 +1,33 @@
-//! The four 80-web-ui checks' API expectations, as a regression test over a real listener.
+//! The four 80-web-ui checks' API expectations, judged over a real listener **behind a door double**.
 //!
-//! The checks themselves are browsers and a binary; this pins the part they read from the routes, so a change here
-//! fails in the crate rather than in a check hours later. The host is a fixed in-memory double: the point is the
-//! routes' statuses, sentences and body shapes, not the state behind them.
+//! The checks are browsers and a binary; this pins the part they read from the routes, so a change fails in the
+//! crate rather than in a check hours later. Since D-039 the composer mounts three routes and the server owns the
+//! other three the checks read (`/api/status`, steer, stop), so the app here is the surface as the binary will
+//! serve it: the server's core routes, the composer's [`heddle_web_composer::router`] merged after them, the 404
+//! fallback, and the server's door — fence, token decision, cross-site write rule, `401` — around everything.
+//! `support` documents where each piece of the double is read from.
 //!
-//! The app below is the surface as it will be **served**: `router` mounts the three routes the composer owns, and
-//! the three the server owns (`/api/status`, steer, stop) are mounted from this crate's modules, which still carry
-//! their answers and tests. `router` alone mounts only the composer's three — `lib.rs` tests that the other three
-//! are absent from it, which is what keeps the binary's mount from failing on an overlap.
+//! The first test is the 13 expectations with the page's cookie. The others judge what the door adds, which is the
+//! merge risk the lane cannot see until `heddle web` boots: that the composer's routes answer *behind* the door
+//! rather than around it, and that nothing the composer mounts collides with the server's routes.
+
+mod support;
 
 use std::sync::Arc;
 
-use heddle_web_composer::context_view::{AssembleRequest, ContextAssembly, ContextHost, Surface};
-use heddle_web_composer::model_switcher::{EndpointListing, ModelChoice, ModelHost};
-use heddle_web_composer::router;
-use heddle_web_composer::session::SessionLookup;
-use heddle_web_composer::status::StatusHost;
-use heddle_web_composer::turn_control::TurnControlHost;
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-const SESSION: &str = "session-11111111-1111-4111-8111-111111111111";
-const UNKNOWN: &str = "session-00000000-0000-4000-8000-000000000000";
-
-#[derive(Clone, Default)]
-struct Host;
-
-impl SessionLookup for Host {
-    fn session_events(&self, id: &str) -> Option<Vec<Value>> {
-        (id == SESSION).then(|| vec![json!({"type": "session/created", "seq": 1})])
-    }
-}
-
-impl StatusHost for Host {
-    fn sandbox_mode(&self) -> String {
-        "workspace-write".to_owned()
-    }
-
-    fn workspace_root(&self) -> Option<String> {
-        Some("/tmp/workspace".to_owned())
-    }
-}
-
-impl ContextHost for Host {
-    fn has_context(&self) -> bool {
-        true
-    }
-
-    fn session_cwd(&self, _id: &str) -> String {
-        "/tmp/workspace".to_owned()
-    }
-
-    fn assemble_context(&self, _id: &str, _request: &AssembleRequest) -> ContextAssembly {
-        ContextAssembly {
-            instructions: vec!["/tmp/workspace/AGENTS.md".to_owned()],
-            estimated_tokens: 120,
-            context_window: 128_000,
-            threshold_tokens: 100_000,
-            pruned: 0,
-            compacted: false,
-            messages: vec![],
-        }
-    }
-
-    fn surface(&self, _id: &str) -> Surface {
-        Surface {
-            nodes: vec![],
-            replacements: vec![],
-        }
-    }
-}
-
-impl ModelHost for Host {
-    fn describe_endpoints(&self) -> EndpointListing {
-        let mut entry = Map::new();
-        entry.insert("name".to_owned(), json!("scripted"));
-        entry.insert(
-            "models".to_owned(),
-            json!([{"id": "tiny", "contextWindow": 8192}]),
-        );
-        EndpointListing {
-            endpoints: vec![entry],
-            default: Some("scripted".to_owned()),
-        }
-    }
-
-    async fn discover_context_window(&self, _endpoint: &str) -> Option<u64> {
-        None
-    }
-
-    fn endpoint_names(&self) -> Vec<String> {
-        vec!["scripted".to_owned()]
-    }
-
-    fn selection_problem(
-        &self,
-        _endpoint: &str,
-        model: Option<&str>,
-        _reasoning_effort: Option<&str>,
-    ) -> Option<String> {
-        (model == Some("nope")).then(|| "no model named 'nope'".to_owned())
-    }
-
-    fn set_session_model(&self, id: &str, choice: &ModelChoice) -> Option<Value> {
-        (id == SESSION)
-            .then(|| json!({"id": id, "endpoint": choice.endpoint, "model": choice.model}))
-    }
-}
-
-impl TurnControlHost for Host {
-    fn is_running(&self, _id: &str) -> bool {
-        false
-    }
-
-    fn abort_session(&self, _id: &str) -> u64 {
-        0
-    }
-
-    fn read_attachments(&self, _raw: Option<&Value>) -> Result<Vec<Value>, String> {
-        Ok(vec![])
-    }
-
-    fn record_user_content(&self, _id: &str, _content: Vec<Value>) {}
-}
-
-/// One answer over HTTP: status, headers and body.
-struct Answer {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: String,
-}
-
-impl Answer {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.body).expect("a JSON body")
-    }
-}
-
-/// Speak HTTP/1.1 to the listener, as the checks do through fetch.
-async fn request(
-    address: std::net::SocketAddr,
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-) -> Answer {
-    let mut stream = tokio::net::TcpStream::connect(address)
-        .await
-        .expect("connected");
-    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
-    if let Some(body) = body {
-        head.push_str("Content-Type: application/json\r\n");
-        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    head.push_str("\r\n");
-    stream.write_all(head.as_bytes()).await.expect("written");
-    if let Some(body) = body {
-        stream.write_all(body.as_bytes()).await.expect("written");
-    }
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await.expect("read");
-    let text = String::from_utf8(raw).expect("a UTF-8 answer");
-    let (head, body) = text.split_once("\r\n\r\n").expect("a header block");
-    let mut lines = head.split("\r\n");
-    let status = lines
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse().ok())
-        .expect("a status line");
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
-        .collect();
-    Answer {
-        status,
-        headers,
-        body: body.to_owned(),
-    }
-}
+use serde_json::{Value, json};
+use support::{
+    CROSS_SITE_WRITE_REFUSAL, Host, LAUNCH_TOKEN, SERVER_CORE_ROUTES, SESSION, STALE_COOKIE,
+    UNKNOWN, authed, listen, merge_mounted, send, served, served_composer, server_core,
+    session_cookie,
+};
 
 #[tokio::test]
-async fn the_four_checks_api_expectations_hold_over_a_listener() {
-    let app = axum::Router::new()
-        .route("/api/health", axum::routing::get(|| async { "ok" }))
-        .merge(router(Arc::new(Host)))
-        // The server's three, served from this crate's modules here so the whole contract is judged together.
-        .merge(heddle_web_composer::status::routes(Arc::new(Host)))
-        .merge(heddle_web_composer::turn_control::routes(Arc::new(Host)));
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("a free port");
-    let address = listener.local_addr().expect("an address");
-    let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+async fn the_four_checks_api_expectations_hold_behind_the_door() {
+    let (address, server) = listen(served_composer()).await;
 
-    // composer: the access chip reads the deployment mode and the root after the page boots.
-    let status = request(address, "GET", "/api/status", None).await;
+    // composer: the access chip reads the deployment mode and the root after the page boots (the server's route).
+    let status = authed(address, "GET", "/api/status", None).await;
     assert_eq!(status.status, 200);
     assert_eq!(status.header("cache-control"), Some("no-store"));
     assert_eq!(
@@ -216,10 +41,10 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     );
 
     // context-view: no session is refused, an unknown one is not invented, a known one carries the composition.
-    let missing = request(address, "GET", "/api/context", None).await;
+    let missing = authed(address, "GET", "/api/context", None).await;
     assert_eq!(missing.status, 400);
     assert_eq!(missing.json()["error"], "a session is required");
-    let unknown = request(
+    let unknown = authed(
         address,
         "GET",
         &format!("/api/context?session={UNKNOWN}"),
@@ -228,7 +53,7 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     .await;
     assert_eq!(unknown.status, 404);
     assert_eq!(unknown.json()["error"], format!("no session {UNKNOWN}"));
-    let composed = request(
+    let composed = authed(
         address,
         "GET",
         &format!("/api/context?session={SESSION}"),
@@ -252,14 +77,14 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     assert!(composed.body.contains("\n  "), "the context view is pretty");
 
     // model-switcher: the list, and the switch validated in the TypeScript order.
-    let endpoints = request(address, "GET", "/api/endpoints", None).await;
+    let endpoints = authed(address, "GET", "/api/endpoints", None).await;
     assert_eq!(endpoints.status, 200);
     let listing = endpoints.json();
     assert_eq!(listing["default"], "scripted");
     assert_eq!(listing["endpoints"][0]["name"], "scripted");
     assert!(endpoints.body.contains("\n  "), "the list is pretty");
 
-    let malformed = request(
+    let malformed = authed(
         address,
         "POST",
         "/api/sessions/not-a-session/model",
@@ -268,7 +93,7 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     .await;
     assert_eq!(malformed.status, 400);
     assert_eq!(malformed.json()["error"], "not a session id");
-    let unconfigured = request(
+    let unconfigured = authed(
         address,
         "POST",
         &format!("/api/sessions/{SESSION}/model"),
@@ -282,7 +107,7 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
             .expect("a sentence")
             .starts_with("no endpoint named 'nope'")
     );
-    let undeclared = request(
+    let undeclared = authed(
         address,
         "POST",
         &format!("/api/sessions/{SESSION}/model"),
@@ -291,7 +116,7 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     .await;
     assert_eq!(undeclared.status, 400);
     assert_eq!(undeclared.json()["error"], "no model named 'nope'");
-    let switched = request(
+    let switched = authed(
         address,
         "POST",
         &format!("/api/sessions/{SESSION}/model"),
@@ -301,8 +126,8 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     assert_eq!(switched.status, 200);
     assert_eq!(switched.json()["endpoint"], "scripted");
 
-    // composer: a steer's refusals, with the prompt decided before what is running.
-    let steer_malformed = request(
+    // composer: a steer's refusals, with the prompt decided before what is running (the server's route).
+    let steer_malformed = authed(
         address,
         "POST",
         "/api/sessions/not-a-session/steer",
@@ -311,7 +136,7 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     .await;
     assert_eq!(steer_malformed.status, 400);
     assert_eq!(steer_malformed.json()["error"], "not a session id");
-    let steer_blank = request(
+    let steer_blank = authed(
         address,
         "POST",
         &format!("/api/sessions/{UNKNOWN}/steer"),
@@ -320,7 +145,7 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     .await;
     assert_eq!(steer_blank.status, 400);
     assert_eq!(steer_blank.json()["error"], "a prompt is required");
-    let steer_unavailable = request(
+    let steer_unavailable = authed(
         address,
         "POST",
         &format!("/api/sessions/{UNKNOWN}/steer"),
@@ -333,8 +158,8 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
         "session/steer-unavailable"
     );
 
-    // composer: stopping answers what it stopped, and zero is not an error.
-    let stopped = request(
+    // composer: stopping answers what it stopped, and zero is not an error (the server's route).
+    let stopped = authed(
         address,
         "POST",
         &format!("/api/sessions/{UNKNOWN}/stop"),
@@ -345,4 +170,253 @@ async fn the_four_checks_api_expectations_hold_over_a_listener() {
     assert_eq!(stopped.json(), json!({"stopped": 0, "session": UNKNOWN}));
 
     server.abort();
+}
+
+#[tokio::test]
+async fn the_query_token_the_runtime_context_check_sends_opens_the_door_and_the_routes_ignore_it() {
+    // check-runtime-context adds `?token=<launch token>` to every request instead of a cookie. The door accepts it,
+    // and the composer's own query reading must not trip on the extra key: `/api/context` reads `session`,
+    // `endpoint` and `model`, and a stricter extractor would answer 400 here.
+    let (address, server) = listen(served_composer()).await;
+
+    let composed = send(
+        address,
+        "GET",
+        &format!("/api/context?session={SESSION}&token={LAUNCH_TOKEN}"),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(composed.status, 200, "{}", composed.body);
+    assert_eq!(composed.json()["session"], SESSION);
+
+    let switched = send(
+        address,
+        "POST",
+        &format!("/api/sessions/{SESSION}/model?token={LAUNCH_TOKEN}"),
+        &[],
+        Some(r#"{"endpoint":"scripted"}"#),
+    )
+    .await;
+    assert_eq!(switched.status, 200, "{}", switched.body);
+
+    let wrong = send(
+        address,
+        "GET",
+        "/api/endpoints?token=not-the-launch-token",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(wrong.status, 401, "a wrong token is not a credential");
+    assert_eq!(wrong.body, "unauthorized\n");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_fence_refuses_before_any_composer_route_or_credential_is_judged() {
+    let (address, server) = listen(served_composer()).await;
+    let port = address.port();
+
+    // A foreign Host is refused even with a valid cookie: the fence runs before any secret is compared.
+    let foreign_host = send(
+        address,
+        "GET",
+        "/api/endpoints",
+        &[("Host", format!("evil.example:{port}")), session_cookie()],
+        None,
+    )
+    .await;
+    assert_eq!(foreign_host.status, 403);
+    assert_eq!(
+        foreign_host.body,
+        format!("refused: Host evil.example:{port} is not loopback\n")
+    );
+    assert_eq!(foreign_host.header("content-type"), Some("text/plain"));
+
+    // An Origin that is not a URL — what a sandboxed frame sends.
+    let null_origin = send(
+        address,
+        "POST",
+        &format!("/api/sessions/{SESSION}/model"),
+        &[("Origin", "null".to_owned()), session_cookie()],
+        Some(r#"{"endpoint":"scripted"}"#),
+    )
+    .await;
+    assert_eq!(null_origin.status, 403);
+    assert_eq!(null_origin.body, "refused: Origin null is not a URL\n");
+
+    // A page on another site.
+    let foreign_origin = send(
+        address,
+        "GET",
+        &format!("/api/context?session={SESSION}"),
+        &[
+            ("Origin", "https://evil.example".to_owned()),
+            session_cookie(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(foreign_origin.status, 403);
+    assert_eq!(
+        foreign_origin.body,
+        "refused: Origin https://evil.example is not this machine\n"
+    );
+
+    // A loopback origin on another port is this machine — the owner's token gate — and passes to the route.
+    let gate = send(
+        address,
+        "GET",
+        "/api/endpoints",
+        &[
+            ("Origin", "http://127.0.0.1:1".to_owned()),
+            session_cookie(),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(gate.status, 200, "{}", gate.body);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_unauthenticated_request_gets_the_doors_401_not_the_routes_own_refusal() {
+    // Without the door, `GET /api/context` with no session is the route's `400 a session is required`. Behind it,
+    // the request never reaches the route: a page that lost its cookie reads `401`, which is what tells it to
+    // re-authenticate rather than show a validation error.
+    let (address, server) = listen(served_composer()).await;
+    for (method, path, body) in [
+        ("GET", "/api/context".to_owned(), None),
+        ("GET", format!("/api/context?session={SESSION}"), None),
+        ("GET", "/api/endpoints".to_owned(), None),
+        (
+            "POST",
+            format!("/api/sessions/{SESSION}/model"),
+            Some(r#"{"endpoint":"scripted"}"#),
+        ),
+        ("GET", "/api/status".to_owned(), None),
+    ] {
+        let answer = send(address, method, &path, &[], body).await;
+        assert_eq!(answer.status, 401, "{method} {path}: {}", answer.body);
+        assert_eq!(answer.body, "unauthorized\n", "{method} {path}");
+        assert_eq!(answer.header("content-type"), Some("text/plain"));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_state_changing_request_with_a_stale_cookie_is_the_cross_site_refusal() {
+    let (address, server) = listen(served_composer()).await;
+    let stale = ("Cookie", format!("{}={STALE_COOKIE}", support::COOKIE_NAME));
+
+    // A switch that offered a cookie the server does not verify: 403 with the server's sentence, not 401.
+    let switch = send(
+        address,
+        "POST",
+        &format!("/api/sessions/{SESSION}/model"),
+        std::slice::from_ref(&stale),
+        Some(r#"{"endpoint":"scripted"}"#),
+    )
+    .await;
+    assert_eq!(switch.status, 403);
+    assert_eq!(switch.body, CROSS_SITE_WRITE_REFUSAL);
+
+    // A read with the same stale cookie is only unauthorized: reading changes nothing.
+    let read = send(
+        address,
+        "GET",
+        "/api/endpoints",
+        std::slice::from_ref(&stale),
+        None,
+    )
+    .await;
+    assert_eq!(read.status, 401);
+    assert_eq!(read.body, "unauthorized\n");
+
+    // `authorize` checks the cookie first and the token second: a stale cookie beside the launch token passes.
+    let rescued = send(
+        address,
+        "POST",
+        &format!("/api/sessions/{SESSION}/model?token={LAUNCH_TOKEN}"),
+        &[stale],
+        Some(r#"{"endpoint":"scripted"}"#),
+    )
+    .await;
+    assert_eq!(rescued.status, 200, "{}", rescued.body);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_fallback_is_inside_the_door_and_a_wrong_method_is_404_not_405() {
+    let (address, server) = listen(served_composer()).await;
+
+    let unclaimed = authed(address, "GET", "/api/no-such-route", None).await;
+    assert_eq!(unclaimed.status, 404);
+    assert_eq!(unclaimed.body, "not found\n");
+    assert_eq!(unclaimed.header("content-type"), Some("text/plain"));
+
+    // web.ts has no method table, so a composer path asked with the wrong method is the same plain 404. axum's
+    // default would be 405 from the composer's own method router; the server's method fallback must reach the
+    // routes merged into it, which is exactly what a mounted router could get wrong.
+    for (method, path) in [
+        ("GET", format!("/api/sessions/{SESSION}/model")),
+        ("POST", "/api/context".to_owned()),
+        ("DELETE", "/api/endpoints".to_owned()),
+    ] {
+        let answer = authed(address, method, &path, None).await;
+        assert_eq!(answer.status, 404, "{method} {path}: {}", answer.body);
+        assert_eq!(answer.body, "not found\n", "{method} {path}");
+    }
+
+    // And the fallback is behind the door: without a credential an unclaimed /api path is 401, not 404.
+    let unauthenticated = send(address, "GET", "/api/no-such-route", &[], None).await;
+    assert_eq!(unauthenticated.status, 401);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_composer_mounts_beside_the_servers_routes_and_a_collision_is_a_start_up_error() {
+    // The composer's advertised routes and the server's are disjoint — the condition `mount_router` enforces.
+    for route in heddle_web_composer::ROUTES {
+        assert!(
+            !SERVER_CORE_ROUTES.contains(route),
+            "{route:?} is claimed by both the composer and the server"
+        );
+    }
+    // And the three D-039 gave to the server are the server's, so the double's core is not inventing routes.
+    for route in [
+        ("GET", "/api/status"),
+        ("POST", "/api/sessions/{id}/steer"),
+        ("POST", "/api/sessions/{id}/stop"),
+    ] {
+        assert!(
+            SERVER_CORE_ROUTES.contains(&route),
+            "{route:?} should be a server core route"
+        );
+    }
+
+    let host = Arc::new(Host);
+    assert!(
+        served(
+            server_core(Arc::clone(&host)),
+            heddle_web_composer::router(Arc::clone(&host))
+        )
+        .is_ok(),
+        "the composer mounts beside the server's core routes"
+    );
+
+    // The guard is real: had the composer kept `/api/status` (the pre-D-039 router), the mount would fail.
+    let pre_d039 = heddle_web_composer::router(Arc::clone(&host))
+        .merge(heddle_web_composer::status::routes(Arc::clone(&host)));
+    let collision = merge_mounted(server_core(Arc::clone(&host)), pre_d039, "a mounted router")
+        .expect_err("a router that claims /api/status again does not mount");
+    assert!(
+        collision.contains("/api/status"),
+        "the start-up error names the route: {collision}"
+    );
 }

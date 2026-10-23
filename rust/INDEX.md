@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.4.5
+version: 0.4.8
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,12 +40,13 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `c1cdb81`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `d7facb5`, judged with `_tools_/verify-runner/lane.mjs`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
 HEDDLE_BIN="$PWD/rust/target/release/heddle" \
-  node _tools_/verify-runner/run.mjs _verifiers_/<part>/check*.mjs --json
+  node _tools_/verify-runner/lane.mjs 05-config-system 10-llm-backends 20-streaming 30-context-management \
+    40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
 **18 check files, 117 checks: 10 passed, 0 failed, 107 unjudged. Part 0 passes.** `05-config-system` exits `0`
@@ -59,12 +60,14 @@ TypeScript build at the same revision. Every other backend check skipped at its 
 
 Behind the binary, every backend library crate on `main` carries its port: `git grep -c 'todo!('` finds none in
 `heddle-config`, `heddle-session`, `heddle-workspace`, `heddle-llm`, `heddle-context`, `heddle-tools`, `heddle-agent`,
-`heddle-sandbox`, `heddle-events`, `heddle-goal`, `heddle-todo` or `heddle-team`. The binary has three, and they are the
-remaining work for parts 1 to 8: the bare boot, the `--turn` branch and `web`. No backend verifier imports `dist/`,
-so a lane with no TypeScript build judges every one of them. Each check's capability probe asks for every command
-the check runs, matched as a command line in `--help`, so a binary that advertises one command before another
-leaves the dependent checks unjudged instead of failing them. The ui-lane crates (`heddle-server`
-and the three `heddle-web-*`) are still 24-line placeholders on `main`; they arrive through the ui lane.
+`heddle-sandbox`, `heddle-events`, `heddle-goal`, `heddle-todo` or `heddle-team`. The ui-lane crates arrived through
+the ui lane at `a2d4ae4` — `heddle-server`, `heddle-web-files`, `heddle-web-composer` and `heddle-web-trajectory` carry
+their implementations (407 unit tests between them; `heddle-web-files` has two `todo!(` left). The binary dispatches
+the owners' entry points and the turn, but advertises only `--profile`, `profiles` and `config` until each command's
+checks pass, and two `todo!(` remain in it: the bare boot and `web`. No backend verifier imports `dist/`, so a lane
+with no TypeScript build judges every one of them. Each check's capability probe asks for every command the check
+runs, matched as a command line in `--help`, so a binary that advertises one command before another leaves the
+dependent checks unjudged instead of failing them.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|

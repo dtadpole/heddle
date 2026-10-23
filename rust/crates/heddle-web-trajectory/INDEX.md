@@ -20,7 +20,7 @@ key order kept), so it depends on no session type.
 | Ported from | `src/server/ledger.ts`, `src/server/log-download.ts`, `src/server/tool-inspector.ts` |
 | Judged by | `_verifiers_/85-trajectory-view`, `_verifiers_/80-web-ui` (check-trajectory-view; the ledger half of check-runtime-context; the dock of check-composer), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and unit-tested — 96 tests across the two crates (62 here); the routes are mounted by `heddle-server` and the binary, which is the remaining step** |
+| Status | **implemented and tested — 69 unit tests and 6 verifier-expectation tests; served through the real `heddle-server` router in a probe (below); the binary's `web` composition is the remaining step** |
 
 ## Public API
 
@@ -71,7 +71,7 @@ key order kept), so it depends on no session type.
 
 ## Verification so far
 
-- **Unit tests**: 62 here (96 with `heddle-web-composer`). `cargo test -p heddle-web-trajectory -p
+- **Unit tests**: 69 here. (`heddle-web-composer` moved to developer-twelve under D-037 and carries its own suite; this crate builds against that crate's `SessionLookup`, `http`, `js` and `catalog` surfaces, which the two seats agreed to keep stable.) `cargo test -p heddle-web-trajectory -p
   heddle-web-composer` is green; every case of `test/ledger.test.ts`, `test/usage.test.ts`,
   `test/tool-catalog.test.ts`, `test/log-download.test.ts` and `test/tool-inspector.test.ts` is ported.
   `cargo fmt --check` and `cargo clippy --all-targets` are clean; `cargo check --workspace` is green.
@@ -79,12 +79,51 @@ key order kept), so it depends on no session type.
   than the happy path (turn and step boundaries, prologue folded once, tool pairing by id and by newest-open,
   refusals, orphan results, context notes, unknown events, unfinished streams, provider-vs-estimated usage,
   a two-turn axis, a running axis and the stats rows), plus the 8 session logs the TypeScript build wrote for
-  the live deployment under `~/.heddle/sessions/--Users-zhenchen-heddle-live--/` (129 events, one to twelve
+  the live deployment in its session folder (`~/.heddle/sessions/--<home>-heddle-live--/`; 129 events, one to twelve
   turns, runtime-context notes, compaction/recovery records) and the 3 recorded stores in
   `_verifiers_/50-agentic-loop/fixtures/team-recover/`. `src/server/ledger.ts` (run from source with Node 24)
   and this crate agree: **ledger, rows, timeline and stats are semantically identical in all 26**.
 - **The download body**: re-serialising the same 11 logs through `ndjson` is **byte-identical** to the decoded
   TypeScript logs.
+
+- **Through the real server** (2026-10-22, ui lane tree at 525f632, a scratch probe outside the repository):
+  heddle-server's `ServerBuilder` booted with `router(host)` mounted beside its `CORE_ROUTES` (no route
+  conflict), the ledger registered as `SessionView` `"ledger"`, `stats` set through `stats_projector` over
+  `session_stats_view`, and JSON highlighted by heddle-web-files' `render_code(.., "json", gutter: false)`.
+  Through the real door (token handshake, cookie; `401` without it), 27 sessions — the 26 logs above plus one
+  adversarial case (float and exponent arguments, non-JSON arguments, markup in results, a quoted CJK title) —
+  were compared with the same answers built from `src/server/web.ts`: `stats`, the `/log` body,
+  `content-disposition` and `content-length` **identical in 27/27**; `?view=ledger` **identical as text in
+  27/27**, and byte-identical in 22/27. The five that differed did so only in the highlight classes
+  `render_code` emitted for JSON; with heddle-web-files' JSON classifier fix (9b68230) the same probe gives
+  **27/27 identical, inspection HTML included** (re-run 2026-10-22). The refusals answer `400 {"error":"not a session id"}` and
+  `404 {"error":"no session <id>"}` on both routes.
+- **Two divergences this probe found and fixed**: `serde_json` reads a float one ulp off without its
+  `float_roundtrip` feature (a logged `0.9999551342447491` downloaded as `…492`), now carried by the workspace's
+  `serde_json` entry and pinned by a test here; and `serde_json` prints an integral double as `1.0` where
+  `JSON.stringify` prints `1`, so the inspector payload, the schema parameters, an unknown event's body and the
+  `/log` lines now go through [`js_json`](src/js_json.rs), which formats numbers by `Number#toString`.
+
+- **The verifiers' own expectations** ([`tests/verifier_expectations.rs`](tests/verifier_expectations.rs)): the
+  TypeScript build ran `85-trajectory-view`'s scripted turn and `80-web-ui check-trajectory-view`'s two-turn
+  `list_dir` session from source, and the logs it wrote are checked in as [`tests/fixtures/`](tests/fixtures/INDEX.md).
+  Every API assertion those checks and `check-runtime-context` make about `?view=ledger` holds on this crate's
+  projection of those logs, and so do the figures `check-composer`'s statistics dock prints from the chat route's
+  `stats` (turns, steps, the billed total, the cache and context shares, the decode rate), judged on a log
+  recorded against that check's own chat double; and the same logs projected by `src/server/ledger.ts` give identical answers. So
+  when the binary records what the TypeScript build records, the trajectory half of those checks passes; the
+  agent loop's `model/request` record (`heddle-agent`'s `ModelRequestRecord`) already has the same fields in
+  the same order as the recorded one.
+
+- **On logs the Rust harness recorded** (2026-10-22, a scratch probe outside the repository over the binary's
+  branch at ad04b9a): the rows a turn needs were started through the binary's own catalog, `agent_runtime`
+  composed the real heddle-agent loop over the real heddle-session store, and `heddle_agent::run_turn` ran
+  85's scripted bash turn and check-trajectory-view's two `list_dir` turns. The logs it wrote match the
+  TypeScript-recorded fixtures **event for event** — 12 and 22 events, the same types, roles, tool-call ids,
+  fields and field order; the values differ only where the setups do (the probe loaded fewer tool rows, so the
+  tool list and token estimates are smaller, and its paths are longer) — and every one of the 14 trajectory
+  assertions above holds on this crate's projection of them. What separates that from a judged verifier is
+  `heddle web` itself.
 
 ### How to repeat the differential
 

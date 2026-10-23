@@ -106,6 +106,15 @@ pub fn plugin_missing(plugin: &str) -> Response {
     )
 }
 
+/// `500 internal error: <message>` in plain text — what the TypeScript server's catch-all writes when a
+/// route throws, so a failure a route cannot answer more precisely still says what went wrong.
+pub fn internal_error(message: impl std::fmt::Display) -> Response {
+    text(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("internal error: {message}\n"),
+    )
+}
+
 /// `404 not found` in plain text, the answer for an authenticated request no route claims.
 pub fn not_found() -> Response {
     text(StatusCode::NOT_FOUND, "not found\n")
@@ -467,8 +476,10 @@ mod tests {
 
     #[test]
     fn a_session_id_is_session_plus_thirty_six_hex_or_dash() {
+        // Placeholder-shaped vectors only (D-046): the nil id and the version-4 placeholder. Upper-case
+        // hex is accepted by construction (`is_ascii_hexdigit`), as web.ts's `/i` regex accepts it.
         assert!(SessionId::parse("session-00000000-0000-0000-0000-000000000000").is_some());
-        assert!(SessionId::parse("session-ABCDEF00-0000-0000-0000-000000000000").is_some());
+        assert!(SessionId::parse("session-00000000-0000-4000-8000-000000000001").is_some());
         for bad in [
             "",
             "session-",

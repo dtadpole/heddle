@@ -13,6 +13,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | File | What it is |
 |---|---|
 | [`lib.rs`](lib.rs) | the crate root, its documentation and re-exports |
+| [`js_json.rs`](js_json.rs) | `JSON.stringify` with JavaScript's number formatting, for the text a person reads and the bytes `/log` writes |
 | [`ledger.rs`](ledger.rs) | events → the turn-aware ledger (`project_ledger`) |
 | [`rows.rs`](rows.rs) | the ledger → the Trajectory table's rows, previews and lanes |
 | [`timeline.rs`](timeline.rs) | the ledger → the lane strip's domain and spans |

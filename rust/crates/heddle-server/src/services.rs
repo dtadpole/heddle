@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
@@ -347,11 +348,15 @@ pub trait SandboxService: Send + Sync {
 
     /// `permissionTransition(current, requested, confirm)`: the mode to write, or the refusal reason
     /// (an unknown mode, or an escalation to full access without `confirm: "full-access"`).
+    ///
+    /// `requested` and `confirm` are the body's fields as they arrived: `None` when absent, so an
+    /// absent mode is refused as `'undefined' is not one of …`, the sentence JavaScript's `String()`
+    /// writes and `heddle_sandbox::permission_transition` reproduces.
     fn transition(
         &self,
         current: &str,
-        requested: &Value,
-        confirm: &Value,
+        requested: Option<&Value>,
+        confirm: Option<&Value>,
     ) -> Result<String, String>;
 }
 
@@ -375,6 +380,18 @@ pub trait ApprovalService: Send + Sync {
 
     /// Settle one question exactly once; `false` when it is no longer waiting.
     fn answer(&self, id: &str, outcome: ApprovalOutcome) -> bool;
+
+    /// Every question published from now on, as its JSON (`{id, tool, reason, displayReason, session?,
+    /// at}`). While the server runs it relays each one to `/api/events` as an `approval` frame, which is
+    /// how a card appears without a reload.
+    ///
+    /// `heddle-sandbox` publishes questions on a broadcast channel (`ApprovalService::subscribe`), so
+    /// its adapter returns that receiver as a stream here. `None`, the default, means the questions
+    /// reach the server some other way — the binary forwards the bus's `approval/request` with
+    /// [`crate::stream::approval_request_forwarder`] — and the server relays nothing itself.
+    fn subscribe(&self) -> Option<BoxStream<'static, Value>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -440,7 +457,11 @@ pub struct TeamView {
 }
 
 pub trait TeamService: Send + Sync {
-    fn view(&self, session: &str) -> TeamView;
+    /// The session's team as one fold. `Err` when the team log refuses to fold (a member active without
+    /// provisioning, a skipped task revision, a foreign team id, …); the route answers it as the
+    /// TypeScript server's catch-all does, `500 internal error: <message>`, rather than hiding a broken
+    /// team behind an empty panel.
+    fn view(&self, session: &str) -> Result<TeamView, ServiceError>;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -657,8 +678,8 @@ impl SandboxService for UnavailableSandbox {
     fn transition(
         &self,
         _current: &str,
-        _requested: &Value,
-        _confirm: &Value,
+        _requested: Option<&Value>,
+        _confirm: Option<&Value>,
     ) -> Result<String, String> {
         Err(NOT_LOADED.to_owned())
     }
@@ -870,7 +891,7 @@ mod tests {
         assert_eq!(
             harness
                 .sandbox
-                .transition("read-only", &json!("full"), &json!(null)),
+                .transition("read-only", Some(&json!("full")), None),
             Err("this service is not loaded yet".to_owned())
         );
     }
