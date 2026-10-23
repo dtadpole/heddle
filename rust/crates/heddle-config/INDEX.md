@@ -223,6 +223,7 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | lane `b548426` (binary increment: a new `runtime.rs`) | not run: the candidate does not compile — a build of exactly `b548426` fails with 6 errors in `runtime.rs`, which builds `heddle_tools::SessionHandle` with `PathBuf` fields that are `String` on main (a stale-base conflict, not a config change) | not judged; reported to integrator-one, developer-two and the coordinator; main `c4c9292` unaffected |
 | 2026-10-22 | main `5c87849` (the candidate re-made without the failing `runtime.rs`: bus, team, context, LLM, session and workspace merges) | `HEDDLE_BIN=<debug build of exactly 5c87849> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0 |
 | 2026-10-22 | lane `5615f07` (`--turn` starts the stream view; hook ports over the bus; sandbox shell seam) | `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0 |
+| 2026-10-22 | main `29cec5b` (`5615f07` plus status docs and three lockfile lines filling in `heddle-events`' path dependencies, which its manifest already declared; no external version moved) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
 
 ## Decisions the contract makes
 
