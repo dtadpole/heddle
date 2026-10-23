@@ -102,7 +102,9 @@ Steps 1–8 are ported, each with the unit tests the table names: **120 unit tes
 - **The bytes are the oracle's bytes.** [`tests/typescript_bytes.rs`](tests/typescript_bytes.rs) asks the
   same Node to `JSON.stringify` the values the store writes — event lines, pretty meta records, and
   `new Date(ms).toISOString()` for six instants — and compares byte for byte, so an escaping or
-  number-formatting drift is caught rather than copied into a fixture.
+  number-formatting drift is caught rather than copied into a fixture. A deterministic batch of forty
+  generated texts adds the code points two writers most often disagree about: the line separators, C1
+  controls, a byte-order mark, combining marks, Hebrew, CJK and astral ranges.
 
 What remains for `70-workspaces-sessions` is the `heddle` binary composing this crate, which is another
 seat's scope: it is honestly unjudged (exit 3) until then.

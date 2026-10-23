@@ -105,6 +105,13 @@ fn cases() -> Vec<(String, bool)> {
                 .to_string(),
             false,
         ),
+        // The characters two JSON writers are most likely to disagree about: the line separators
+        // (which ES2019 leaves raw), C1 controls, a no-break space, a byte-order mark, and the
+        // shorthand/\u escapes.
+        (
+            "{\"seq\":4,\"at\":\"2026-10-22T18:17:46.000Z\",\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\\u2028b\\u2029c\\u0085d\\u00a0e\\ufefff\\u000bg\\u001fh\"}]}}".to_string(),
+            false,
+        ),
         // A key that needs escaping, and an integer at JavaScript's exact-integer boundary.
         (
             "{\"seq\":9007199254740991,\"at\":\"2026-10-22T18:17:45.000Z\",\"type\":\"turn/retry\",\"round\":2,\"note key\":\"has a space\",\"decimal\":0.5,\"other\":2.25}".to_string(),
@@ -240,4 +247,88 @@ process.stdout.write(JSON.stringify(millis.map((ms) => new Date(ms).toISOString(
         "{} is not here",
         typescript_transcript().display()
     );
+}
+
+/// A small deterministic generator, so a failure is reproducible from the seed in the message.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        // Numerical Recipes' constants, truncated to 32 bits: enough to pick code points.
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) as u32
+    }
+
+    fn pick<'a, T>(&mut self, values: &'a [T]) -> &'a T {
+        &values[(self.next() as usize) % values.len()]
+    }
+}
+
+#[test]
+fn generated_text_matches_the_oracle() {
+    // Ranges chosen for what a conversation actually carries and what an encoder can get wrong: the
+    // C0 controls, the ASCII printable range with its quotes and backslashes, Latin-1, a combining
+    // mark, Hebrew, CJK, the line separators, and two astral ranges (emoji and mathematical letters).
+    let ranges: [(u32, u32); 9] = [
+        (0x00, 0x1f),
+        (0x20, 0x7e),
+        (0xa0, 0xff),
+        (0x0300, 0x036f),
+        (0x0590, 0x05ff),
+        (0x4e00, 0x4e20),
+        (0x2028, 0x2029),
+        (0x1f300, 0x1f64f),
+        (0x1d400, 0x1d7ff),
+    ];
+    let fixed = [
+        '"', '\\', '\n', '\t', '\r', '\u{0}', '\u{1f}', '\u{7f}', '\u{feff}',
+    ];
+    let mut rng = Lcg(0x5eed_1e55_0f8e_0011);
+    let mut cases = Vec::new();
+    for index in 0..40u64 {
+        let mut text = String::new();
+        for _ in 0..12 {
+            if rng.next().is_multiple_of(3) {
+                text.push(*rng.pick(&fixed));
+                continue;
+            }
+            let (low, high) = *rng.pick(&ranges);
+            let mut code = low + rng.next() % (high - low + 1);
+            // Skip the surrogate range: a Rust string cannot hold one, and the encoder only meets
+            // them when a JavaScript writer produced an unpaired escape.
+            if (0xd800..=0xdfff).contains(&code) {
+                code = 0x41;
+            }
+            if let Some(character) = char::from_u32(code) {
+                text.push(character);
+            }
+        }
+        cases.push(format!(
+            r#"{{"seq":{index},"at":"2026-10-22T18:17:47.000Z","type":"message","message":{{"role":"user","content":[{{"type":"text","text":{}}}]}}}}"#,
+            serde_json::to_string(&text).expect("a string is JSON")
+        ));
+    }
+    let oracle_cases: Vec<Case> = cases
+        .iter()
+        .map(|text| Case {
+            text: text.clone(),
+            pretty: false,
+        })
+        .collect();
+    let Some(expected) = oracle(&oracle_cases) else {
+        return;
+    };
+    for ((text, expected), index) in cases.iter().zip(expected).zip(0..) {
+        let event = heddle_session::SessionEvent::from_line(text).unwrap_or_else(|error| {
+            panic!("generated case {index} does not parse ({error}): {text}")
+        });
+        assert_eq!(
+            event.to_line(),
+            expected,
+            "generated case {index} differs from JSON.stringify: {text}"
+        );
+    }
 }
