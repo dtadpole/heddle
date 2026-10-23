@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.5.0
+version: 0.6.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -33,6 +33,7 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | `instructions` | `instructions.ts` | `INSTRUCTIONS_MAX_BYTES`, the file names; `find_project_root`, `find_instruction_files`, `instruction_digest`, `render_instruction_baseline` |
 | `pairing` | `pairing.ts` | `repair_tool_pairing(&[Message]) -> Cow<[Message]>` |
 | `runtime` | `service.ts` | `RUNTIME_CONTEXT_*`, `RuntimeContextSection`, `render_runtime_context` |
+| `command` | `src/cli.ts` (the `context` branch) | the command's entry point under D-043: `Command::Context`, `Args { target, json, endpoint, model }`, `Context { cwd, sessions, context, tools, workspace_root }`, `run(command, args, context, out, err) -> i32` |
 | `service` | `service.ts` | `ContextService<S: ContextStore>::{budget, measure, record_runtime_context, ensure_context, assemble, prepare, recover_overflow}`; `ContextConfig` (the profile row's `config`), `ContextReport` with `summary()` and `view()`, the `ModelAccess` trait |
 | `events` | the log vocabulary | `ContextEvent`: the `context/note` and `compaction/*` events this crate writes, typed |
 | `store` | `PrunableStore` | the `ContextStore` trait this crate needs from the session store; `LogEvent`, `SurfaceState`, `SurfaceOp`, `AppendOptions` |
@@ -47,10 +48,14 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
   writes `report.breakdown`, `estimated_tokens`, `threshold_tokens`, `pruned` and `compacted` on `model/request`,
   and reports `report.summary()` as the turn's `context`. On a refused call it calls `recover_overflow`, and on
   `RecoveryDecision::Retry` re-derives with `assemble` (it does not reduce again) and retries once.
-- **The command line** (`heddle`): `heddle context <session> --json` is `assemble(...)` with the session's folder,
-  every tool's schema, and `--endpoint`/`--model`, printed as `report.view(session_id)`. The boot builds one
-  `ContextService` from the profile's context row (`ContextConfig` deserialises its `config`), `HEDDLE_HOME` and a
-  `ModelAccess` over the model layer, and registers `recover_overflow` on `agent/request-error`.
+- **The command line** (`heddle`): `heddle context [<session>] [--json]` is `command::run` (D-043): the binary
+  dispatches with `command::Args` and a `command::Context` holding the working directory, the session service, the
+  context service, every tool's schema and the sandbox root; the command resolves the session, assembles with the
+  session's own folder, and prints `ContextView` as `JSON.stringify(view, null, 2)` or `ContextView::render_text`.
+  The boot builds one `ContextService` from the profile's context row (`ContextConfig` deserialises its `config`;
+  an absent row is `{}` and takes every default), the session store, `HEDDLE_HOME`, and `heddle_llm::ModelService`
+  itself as the `ModelAccess` (this crate implements it: the endpoint's declared window, one `generate` with
+  `purpose: compaction`), and registers `recover_overflow` on `agent/request-error`.
 - **The composer's context view** (`heddle-web-composer`) reads `assemble`'s report, and the recorded
   `breakdown` on `model/request`.
 - **The store the binary names**: `heddle_session::SessionStore` behind an `Arc`. `ContextService<S:
