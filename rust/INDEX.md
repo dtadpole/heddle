@@ -54,7 +54,7 @@ every other command exits 2 with `heddle: not ported to Rust yet: <command>`. So
 none passed.
 
 The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies — `heddle-config`
-(`c477822`) and `heddle-context` (`8dbdcf8`) on `main`, the rest on the lane's `hd/developer-*` branches at the time
+(`c477822`) and `heddle-context` (`8dbdcf8`) on `main`, the rest on the lane's branches at the time
 of this run. A contract is not a port: what has not happened is a **part** passing its verifier on this binary.
 
 | Part | Verifier | On the binary, 2026-10-22 |
