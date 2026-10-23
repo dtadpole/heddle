@@ -138,6 +138,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     // The goal driver follows the sessions' events for as long as the server runs, so a goal keeps
     // pushing after each turn; then the boot sweep resumes the goals a previous process left active.
     let goal_edges = drive_goals(&boot);
+    // A switch made while a turn runs lands on that turn's next model call.
+    let selection_rule = follow_session_selection(&boot, Arc::clone(&harness.models));
     let notes = runtime.block_on(boot_notes(&boot));
     let shutdown = heddle_tools::CancellationToken::new();
     let context = heddle_server::command::Context {
@@ -174,6 +176,9 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         stderr,
     ));
     drop(goal_edges);
+    if let Some((service, id)) = selection_rule {
+        service.remove_hooks(id);
+    }
     boot.dispose();
     if code == 0 {
         Exit::Success
@@ -720,6 +725,65 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
     notes
 }
 
+/// The `model/request` rule while the server runs (web.ts's waterfall): a running turn's next model call
+/// is answered by the session's current record, so a model switched from the page takes effect on the
+/// turn's next step. What cannot be enforced is left as the turn asked
+/// (`heddle_server::running_turn_selection`).
+struct SessionSelectionRule {
+    sessions: Arc<heddle_session::SessionService>,
+    models: Arc<dyn ServerModels>,
+}
+
+impl heddle_llm::ModelHooks for SessionSelectionRule {
+    fn request(
+        &self,
+        _service: &heddle_llm::ModelService,
+        _request: &heddle_llm::GenerateRequest,
+        next: &mut dyn FnMut() -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError>,
+    ) -> Result<heddle_llm::GenerateRequest, heddle_llm::ModelError> {
+        let mut resolved = next()?;
+        let Some(meta) = resolved
+            .session_id
+            .as_deref()
+            .and_then(|id| self.sessions.meta(id))
+        else {
+            return Ok(resolved);
+        };
+        let recorded = heddle_server::selection::SessionSelection {
+            endpoint: meta.endpoint().map(str::to_owned),
+            model: meta.model().map(str::to_owned),
+            reasoning_effort: meta.reasoning_effort().map(str::to_owned),
+        };
+        let current = heddle_server::selection::RequestSelection {
+            endpoint: resolved.endpoint.clone(),
+            model: resolved.model.clone(),
+            reasoning_effort: resolved.reasoning_effort.clone(),
+        };
+        let chosen =
+            heddle_server::running_turn_selection(&current, &recorded, self.models.as_ref());
+        resolved.endpoint = chosen.endpoint;
+        resolved.model = chosen.model;
+        resolved.reasoning_effort = chosen.reasoning_effort;
+        Ok(resolved)
+    }
+}
+
+/// Register [`SessionSelectionRule`] on the booted model service; the caller removes it when the server
+/// stops. `None` without a model service or a session store.
+fn follow_session_selection(
+    boot: &Boot,
+    models: Arc<dyn ServerModels>,
+) -> Option<(Arc<heddle_llm::ModelService>, heddle_llm::service::HooksId)> {
+    let service = boot
+        .services
+        .get::<Arc<heddle_llm::ModelService>>("model")?;
+    let sessions = boot
+        .services
+        .get::<Arc<heddle_session::SessionService>>("session")?;
+    let id = service.add_hooks(Arc::new(SessionSelectionRule { sessions, models }));
+    Some((service, id))
+}
+
 /// The goal driver's trigger on the run's bus. Dropping it detaches the listener.
 pub struct GoalEdges {
     _listener: heddle_events::Listener,
@@ -1085,6 +1149,80 @@ mod tests {
             .expect("the attachment reader is composed");
         assert_eq!(reader.read(None), Ok(Vec::new()), "no attachments is none");
         assert!(reader.read(Some(&serde_json::json!("not a list"))).is_err());
+    }
+
+    #[test]
+    fn a_running_turn_takes_the_model_its_session_records_now() {
+        use heddle_llm::ModelHooks;
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-selection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sessions = Arc::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(root.to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let mut endpoints = heddle_config::default_endpoints();
+        let mut second = endpoints[0].clone();
+        second.name = "second".into();
+        endpoints.push(second);
+        let service = Arc::new(heddle_llm::ModelService::new(endpoints).unwrap());
+        let rule = SessionSelectionRule {
+            sessions: Arc::clone(&sessions),
+            models: Arc::new(Models {
+                service: Arc::clone(&service),
+            }),
+        };
+        let switched = sessions
+            .start(heddle_session::StartOptions::default())
+            .unwrap()
+            .id;
+        sessions
+            .set_model(
+                &switched,
+                heddle_session::ModelSelection {
+                    endpoint: "second".into(),
+                    model: None,
+                    reasoning_effort: None,
+                },
+            )
+            .unwrap();
+        let untouched = sessions
+            .start(heddle_session::StartOptions::default())
+            .unwrap()
+            .id;
+        let request = |session: &str| -> heddle_llm::GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "endpoint": "scripted",
+                "messages": [],
+                "sessionId": session,
+            }))
+            .unwrap()
+        };
+        let asked = request(&switched);
+        let resolved = rule
+            .request(&service, &asked, &mut || Ok(asked.clone()))
+            .unwrap();
+        assert_eq!(
+            resolved.endpoint, "second",
+            "the switch lands on the next call"
+        );
+        let asked = request(&untouched);
+        let resolved = rule
+            .request(&service, &asked, &mut || Ok(asked.clone()))
+            .unwrap();
+        assert_eq!(
+            resolved.endpoint, "scripted",
+            "a session with no record keeps the request"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
