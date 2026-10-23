@@ -428,6 +428,13 @@ impl ServerBuilder {
             .unwrap_or(requested_port);
         // The state carries the real port, because `/healthz` and the cookie authority judge it.
         let (router, state) = self.into_router(port)?;
+        // While this server runs it is the surface that answers approval questions; attaching is
+        // what turns an `ask` policy from "nobody can answer, so deny" into a card a person answers.
+        let detach_approvals = state
+            .harness()
+            .approvals
+            .as_ref()
+            .map(|approvals| approvals.attach_answerer());
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router)
@@ -445,6 +452,7 @@ impl ServerBuilder {
             state,
             shutdown: Some(shutdown_tx),
             task: Some(task),
+            detach_approvals,
         })
     }
 }
@@ -458,6 +466,8 @@ pub struct WebServer {
     state: AppState,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// The approval service's detach function, held for as long as the server answers questions.
+    detach_approvals: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl WebServer {
@@ -511,6 +521,9 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        if let Some(detach) = self.detach_approvals.take() {
+            detach();
+        }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -1835,6 +1848,25 @@ mod tests {
         }
     }
 
+    struct ApprovalTracker {
+        attached: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ApprovalService for ApprovalTracker {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            self.attached
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let attached = Arc::clone(&self.attached);
+            Box::new(move || attached.store(false, std::sync::atomic::Ordering::SeqCst))
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            false
+        }
+    }
+
     struct Approvals;
 
     impl ApprovalService for Approvals {
@@ -2230,6 +2262,37 @@ mod tests {
         let error = builder.into_router(3082).err().expect("a refusal");
         assert!(
             matches!(error, ServerError::NotLoopback(sentence) if sentence.contains("refusing to bind 0.0.0.0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_running_server_answers_approvals_and_detaches_on_close() {
+        use std::sync::atomic::Ordering;
+        let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut harness = harness();
+        harness.approvals = Some(Arc::new(ApprovalTracker {
+            attached: Arc::clone(&attached),
+        }));
+        let server = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("approval-attach")),
+                ..ServerOptions::default()
+            },
+        )
+        .start()
+        .await
+        .expect("the server starts");
+        assert!(
+            attached.load(Ordering::SeqCst),
+            "a running server is the approval answerer"
+        );
+        server.close().await;
+        assert!(
+            !attached.load(Ordering::SeqCst),
+            "closing detaches the answerer"
         );
     }
 
