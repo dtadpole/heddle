@@ -1,6 +1,8 @@
 ---
 title: The heddle-sandbox crate
-version: 0.4.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:10:31Z
+version: 0.4.1
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
