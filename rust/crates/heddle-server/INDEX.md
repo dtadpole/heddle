@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (114 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (116 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -46,13 +46,18 @@ their checks are judged against the TypeScript build.
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
 | `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
-| `server` | `ServerOptions`, `ServerBuilder` (`mount`, `session_view`, `into_router`, `start`), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
+| `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
 ### How a feature crate mounts its routes
 
 A ui-lane crate depends on `heddle-server`, implements `server::Feature` (`fn routes(&self) ->
 Router<AppState>`), and the binary mounts it with `ServerBuilder::mount`. The fence and the token wrap the
 whole router, fallback included, so a mounted route is authenticated without the feature doing anything.
+
+A crate whose handlers keep their own state applies it itself and returns a plain `Router<()>`
+(`heddle-web-files`'s `FilesRoutes::router` does this); the binary mounts that with
+`ServerBuilder::mount_router`. The server's state is applied before such a router is merged, so both
+sides share one router type, and the same door covers it.
 Handlers read `State<AppState>` for the `Harness`, the `EventHub` and the `RunRegistry`, keep their own
 services inside their `Feature` value, answer through `respond`, and name the session segment `{id}`
 (extract it with `respond::SessionPath`). Two routers claiming one method and path fail at startup with
@@ -133,7 +138,7 @@ to the binary's owner):
 4. `ServerBuilder::new(harness, options)`, take `events()` **before** `start()`, and register
    `stream::session_event_forwarder(hub)` and `stream::approval_request_forwarder(hub)` as the bus's
    `session/event` and `approval/request` listeners; register `running_turn_selection` as the
-   `model/request` waterfall listener. Mount each feature crate with `mount`.
+   `model/request` waterfall listener. Mount each feature crate with `mount`, or a state-applied `Router<()>` with `mount_router`.
 5. `start().await`, then print `announce()[0]` — `heddle web: <url>`, the line the verifiers wait for —
    and, when asked, `announce_json()`. On shutdown call `close()`, which ends the open streams.
 6. The turn runner receives a `TurnRequest` with a `CancellationToken`; it must publish the session's

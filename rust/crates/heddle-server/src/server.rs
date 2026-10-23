@@ -20,7 +20,10 @@
 //!
 //! # Mounting a feature
 //!
-//! A feature crate depends on this one, implements [`Feature`], and the binary mounts it:
+//! A feature crate that answers through the shared [`AppState`] implements [`Feature`]; one that
+//! applies its own state (a `Router<()>`, like `heddle-web-files`'s `FilesRoutes::router`) is handed to
+//! [`ServerBuilder::mount_router`]. Either way the fence and the token wrap it. A crate that implements
+//! [`Feature`] is mounted by the binary:
 //!
 //! ```ignore
 //! let server = ServerBuilder::new(harness, options)
@@ -273,6 +276,7 @@ pub struct ServerBuilder {
     events: EventHub,
     runs: RunRegistry,
     features: Vec<Box<dyn Feature>>,
+    routers: Vec<Router<()>>,
     views: BTreeMap<String, Arc<dyn SessionView>>,
 }
 
@@ -284,6 +288,7 @@ impl ServerBuilder {
             events: EventHub::new(),
             runs: RunRegistry::new(),
             features: Vec::new(),
+            routers: Vec::new(),
             views: BTreeMap::new(),
         }
     }
@@ -301,6 +306,17 @@ impl ServerBuilder {
     /// Mount a feature's routes.
     pub fn mount(mut self, feature: impl Feature) -> Self {
         self.features.push(Box::new(feature));
+        self
+    }
+
+    /// Mount a router whose state is already applied, `Router<()>`.
+    ///
+    /// This is the shape a ui-lane crate produces when it builds its handlers over its own state
+    /// (`FilesRoutes::router()` in `heddle-web-files`); it is merged after the server's state is
+    /// applied, so the two routers share one type. It is behind the same fence and token as a
+    /// [`Feature`], and a route conflict with the core routes is still [`ServerError::Route`].
+    pub fn mount_router(mut self, router: Router<()>) -> Self {
+        self.routers.push(router);
         self
     }
 
@@ -376,32 +392,17 @@ impl ServerBuilder {
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
-            // `Router::merge` panics when two routers claim one method and path. A feature crate is a
-            // whole router, so the duplicate is only discoverable at merge time; it is caught here and
-            // reported as [`ServerError::Route`], which is the startup error the contract promises.
-            let merged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                router.merge(routes)
-            }));
-            router = match merged {
-                Ok(merged) => merged,
-                Err(payload) => {
-                    let detail = payload
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| {
-                            payload
-                                .downcast_ref::<&str>()
-                                .map(|text| (*text).to_owned())
-                        })
-                        .unwrap_or_else(|| "two routers claim the same route".to_owned());
-                    return Err(ServerError::Route(format!("the {name} feature: {detail}")));
-                }
-            };
+            router = merge_mounted(router, routes, &format!("the {name} feature"))?;
+        }
+        // The state is applied first, so a ui-lane crate's state-applied `Router<()>` can be merged
+        // into the same router type. The door layer still carries `AppState` itself.
+        let mut router = router.with_state(state.clone());
+        for routes in self.routers {
+            router = merge_mounted(router, routes, "a mounted router")?;
         }
         let router = router
             .fallback(fallback_route)
-            .layer(middleware::from_fn_with_state(state.clone(), door))
-            .with_state(state.clone());
+            .layer(middleware::from_fn_with_state(state.clone(), door));
         Ok((router, state))
     }
 
@@ -521,6 +522,40 @@ impl WebServer {
             if !task.is_finished() {
                 task.abort();
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Mounting
+
+/// Merge one mounted router, turning `Router::merge`'s route-conflict panic into [`ServerError::Route`].
+///
+/// A router is a whole set of routes, so a duplicate method+path is only discoverable at merge time;
+/// the contract promises a startup error naming the mount rather than a panic or a shadowed route.
+fn merge_mounted<S>(
+    router: Router<S>,
+    routes: Router<S>,
+    name: &str,
+) -> Result<Router<S>, ServerError>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let merged =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || router.merge(routes)));
+    match merged {
+        Ok(merged) => Ok(merged),
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                })
+                .unwrap_or_else(|| "two routers claim the same route".to_owned());
+            Err(ServerError::Route(format!("{name}: {detail}")))
         }
     }
 }
@@ -2530,6 +2565,55 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"that path is not under any workspace root\"}\n"
         );
+    }
+
+    #[tokio::test]
+    async fn a_state_applied_router_mounts_behind_the_door() {
+        let mounted = Router::<()>::new().route("/api/hello", get(|| async { "hi" }));
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("mounted-router")),
+                ..ServerOptions::default()
+            },
+        )
+        .mount_router(mounted);
+        let (router, _) = builder.into_router(3082).expect("the test router");
+
+        let (status, _, _) = call(&router, Method::GET, "/api/hello", None).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a mounted route is behind the token"
+        );
+
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/hello", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(&bytes), "hi");
+    }
+
+    #[test]
+    fn a_state_applied_router_claiming_a_core_route_is_a_startup_error() {
+        let mounted = Router::<()>::new().route("/healthz", get(|| async { "mine" }));
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("mounted-conflict")),
+                ..ServerOptions::default()
+            },
+        )
+        .mount_router(mounted);
+        match builder.into_router(3082).err().expect("a refusal") {
+            ServerError::Route(message) => {
+                assert!(message.contains("mounted router"), "{message}");
+                assert!(message.contains("/healthz"), "{message}");
+            }
+            other => panic!("expected a route conflict, got {other:?}"),
+        }
     }
 
     struct DuplicateFeature;
