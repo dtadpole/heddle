@@ -218,8 +218,8 @@ function startCli(args, options) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const { heddleCommand, repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
+      const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...(options.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],

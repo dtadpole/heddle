@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 
 import { repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { DOCUMENTED_PORT, LABEL, UNIT, installedService, listenerPid, parseUnit, serviceState, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
 
 /**
  * Verifier 9 — the Web UI daemon.
@@ -17,39 +17,31 @@ import { repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
  *
  * Two claims, and the second depends on the host:
  *
- * - **The definition is complete** — a launchd agent with a working directory, a bound restart policy,
- *   logs that are not `/dev/null`, the documented port, and an install script whose every step is
- *   idempotent. This is checked from the repository, so it holds on any machine.
- * - **This machine is running it** — read from launchd and from the port. A host with no agent installed
- *   reports **unjudged**, because "the daemon is not installed here" is not "the daemon is broken".
+ * - **The definition is complete** — a launchd agent on macOS and a systemd user unit on Linux, each with a
+ *   working directory, a bound restart policy, logs that are not `/dev/null`, the documented port, and an
+ *   install script whose every step is idempotent. This is checked from the repository, so both definitions
+ *   are judged on any machine.
+ * - **This machine is running it** — read from the platform's supervisor and from the port. A host with no
+ *   service installed reports **unjudged**, because "the daemon is not installed here" is not "the daemon is
+ *   broken".
+ *
+ * The service is read through `_tools_/web-daemon/service.mjs`, the reader `96-deployment` uses too, so the two
+ * verifiers cannot disagree about which service, port or process they are judging.
  */
 
-const CAPABILITY = 'a launchd agent that keeps the Web UI running at the documented port'
-const LABEL = 'com.dtadpole.heddle-web'
+const CAPABILITY = 'a supervised user service that keeps the Web UI running at the documented port'
 const DAEMON = join(repoRoot, '_tools_', 'web-daemon')
+const SUPERVISOR = supervisorFor()
+const NAME = SUPERVISOR === 'launchd' ? `${LABEL} agent` : `${UNIT} user unit`
 
-/** The port the installed agent was written for, or `null` when nothing is installed. */
-function installedPort() {
-  const plist = join(process.env.HOME ?? '', 'Library', 'LaunchAgents', `${LABEL}.plist`)
-  if (!existsSync(plist)) return null
-  try {
-    const out = execFileSync('plutil', ['-extract', 'ProgramArguments', 'json', '-o', '-', plist], { encoding: 'utf8' })
-    const args = JSON.parse(out)
-    const at = args.indexOf('--port')
-    return { plist, port: Number(args[at + 1]) }
-  } catch {
-    return null
-  }
-}
-
-/** Whether launchd reports the agent loaded. */
-function agentLoaded() {
-  try {
-    execFileSync('launchctl', ['print', `gui/${process.getuid()}/${LABEL}`], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
+/** The installed service and its supervisor's state, or a reason this host cannot be judged. */
+function liveService() {
+  if (SUPERVISOR === null) return { reason: `install.sh has no supervisor for ${process.platform}` }
+  const service = installedService()
+  if (service === null) return { reason: `no ${NAME} is installed on this host; run _tools_/web-daemon/install.sh to judge this part` }
+  const state = serviceState(service)
+  if (!state.loaded) return { reason: `the ${NAME} is installed but not running (${service.path})` }
+  return { service, state }
 }
 
 test('the daemon definition is committed and complete', async (context) => {
@@ -68,7 +60,6 @@ test('the daemon definition is committed and complete', async (context) => {
   }
   assert.match(plist, /<key>KeepAlive<\/key>\s*<true\/>/, 'it is kept alive rather than run once')
   assert.match(plist, /<key>ThrottleInterval<\/key>\s*<integer>\d+<\/integer>/, 'and a crash loop is throttled')
-  assert.match(plist, /127\.0\.0\.1/, 'it binds loopback, as the server itself requires')
   /**
    * The **values** are checked, not the text: the template's own comment explains why `/dev/null` is
    * wrong, so a check that searched the file for that string failed on the sentence saying not to use it.
@@ -79,7 +70,7 @@ test('the daemon definition is committed and complete', async (context) => {
     assert.ok(value !== undefined && value.length > 0, `${key} names a file`)
     assert.notEqual(value, '/dev/null', `${key} is not /dev/null`)
   }
-  assert.match(plist, /@PORT@/, 'the port is a placeholder, so the machine supplies it rather than the repository')
+  assert.match(plist, /@PROGRAM_ARGUMENTS@/, 'the arguments are rendered by the installer, one element per argument')
 
   const script = readFileSync(installer, 'utf8')
   assert.match(script, /set -eu/, 'the installer fails loudly rather than continuing past an error')
@@ -87,94 +78,131 @@ test('the daemon definition is committed and complete', async (context) => {
     assert.ok(script.includes(flag), `it offers ${flag}`)
   }
   /**
+   * The arguments the template no longer spells out are the installer's: it renders the loopback host, the port
+   * the machine supplies and the profile beside the checkout, so the definition is complete only with both files.
+   */
+  for (const argument of ['--host 127.0.0.1', '--port "$port"', '--config "$repo/cordis.yml"']) {
+    assert.ok(script.includes(argument), `the installer renders ${argument}`)
+  }
+  /**
    * Idempotence is the property that makes it safe to run twice, and the script achieves it by unloading
    * before loading. Both halves are asserted because either one alone is a duplicate or a leak.
    */
   assert.match(script, /bootout/, 'installing replaces an existing agent rather than adding a second')
   assert.match(script, /launchctl bootstrap/, 'and it loads through launchd rather than running the process itself')
+  assert.match(script, /launchctl kickstart/, 'and starts it on demand, because this Mac was measured not to spawn a bootstrapped job by itself')
   assert.match(script, /readlink -f|volta/, 'it resolves the real interpreter rather than handing launchd a shell shim')
 })
 
+test('the Linux unit definition is committed and complete', async (context) => {
+  const template = join(DAEMON, 'heddle-web.service.template')
+  const installer = join(DAEMON, 'install.sh')
+  if (!skipUnless(context, existsSync(template) && existsSync(installer), 'a systemd user unit for Linux hosts')) return
+
+  /**
+   * The same properties as the agent's, in systemd's words, read as **values** through a unit parser so a
+   * comment cannot satisfy them. `Restart=always` is `KeepAlive`; a fixed `RestartSec` with no start limit is
+   * `ThrottleInterval` — systemd's default limit would stop restarting after a burst and leave the service dead,
+   * which launchd never does.
+   */
+  const unit = parseUnit(readFileSync(template, 'utf8'))
+  const exec = unitValue(unit, 'Service', 'ExecStart') ?? ''
+  assert.match(exec, /^@PROGRAM@ web /, 'it runs the harness\'s own launcher, whichever build supplies it')
+  assert.match(exec, /--host 127\.0\.0\.1(\s|$)/, 'it binds loopback, as the server itself requires')
+  assert.match(exec, /--port @PORT@(\s|$)/, 'the port is a placeholder, so the machine supplies it')
+  assert.match(exec, /--config @REPO@\/cordis\.yml(\s|$)/, 'and the profile beside the checkout is named explicitly')
+  assert.equal(unitValue(unit, 'Service', 'WorkingDirectory'), '@REPO@', 'the checkout is the working directory')
+  assert.equal(unitValue(unit, 'Service', 'Restart'), 'always', 'it is restarted on every exit, a kill included')
+  assert.match(unitValue(unit, 'Service', 'RestartSec') ?? '', /^\d+$/, 'at a bounded rate')
+  assert.equal(unitValue(unit, 'Unit', 'StartLimitIntervalSec'), '0', 'and the supervisor never gives up on it')
+  for (const key of ['StandardOutput', 'StandardError']) {
+    const value = unitValue(unit, 'Service', key) ?? ''
+    assert.match(value, /^append:\S+/, `${key} appends to a file rather than discarding or truncating`)
+    assert.ok(!value.includes('/dev/null'), `${key} is not /dev/null`)
+  }
+  assert.ok((unit.Service?.Environment ?? []).some((value) => value.startsWith('HEDDLE_HOME=')), 'the store and secret location is explicit')
+  assert.equal(unitValue(unit, 'Install', 'WantedBy'), 'default.target', 'an enabled unit starts with the user manager, at boot when the account lingers')
+
+  const script = readFileSync(installer, 'utf8')
+  assert.match(script, /systemctl --user daemon-reload/, 'the installer makes systemd read the new definition')
+  assert.match(script, /systemctl --user enable/, 'enables it, so it starts without anyone starting it')
+  assert.match(script, /systemctl --user restart/, 'and restarts it, so a running service picks up the new definition')
+  assert.match(script, /systemctl --user disable --now/, 'uninstalling stops it as well as removing it')
+  assert.match(script, /Linger/, 'and it checks lingering, without which a user unit dies at logout')
+})
+
 test('the daemon is loaded, owns the port and answers, or this host has none', async (context) => {
-  const installed = installedPort()
-  const loaded = agentLoaded()
-  if (installed === null || !loaded) {
-    context.skip(
-      `no ${LABEL} agent is installed on this host${installed === null ? '' : ' (installed but not loaded)'}; run _tools_/web-daemon/install.sh to judge this part`,
-    )
+  const live = liveService()
+  if (live.service === undefined) {
+    context.skip(live.reason)
     return
   }
+  const { service } = live
 
   /**
    * **Port ownership is the liveness discriminator**, and the convention is explicit that a process-name
    * search is not: `pgrep -f` matches the searcher's own command line and has been measured concluding a
    * dead service was up. A bound port cannot be satisfied by our own argv and cannot be satisfied twice.
    */
-  assert.equal(installed.port, 3082, `the installed agent is written for the documented port (${installed.port})`)
+  const documented = DOCUMENTED_PORT[process.platform]
+  assert.equal(service.port, documented, `the installed ${NAME} is written for the documented port ${documented} (${service.port})`)
+  assert.equal(service.host, '127.0.0.1', 'and binds loopback')
 
-  const health = await fetch(`http://127.0.0.1:${installed.port}/healthz`)
+  const health = await fetch(`http://127.0.0.1:${service.port}/healthz`, { signal: AbortSignal.timeout(5000) })
   assert.equal(health.status, 200, 'the port answers')
   const body = await health.json()
   assert.equal(body.service, 'heddle-web', 'and the answer names this service rather than merely something listening')
-  assert.equal(body.port, installed.port, 'and reports the port it owns')
+  assert.equal(body.port, service.port, 'and reports the port it owns')
 
-  /**
-   * The server is the daemon's child, so asking the server is asking the daemon. The page is checked too,
-   * because a health endpoint that answers while the UI does not is the shape of a half-started service.
-   */
-  /**
-   * The bare page is refused, and served with a session: the daemon fronts a server that now requires one.
-   * This asserted a public page, which was the behaviour before the correction.
-   */
   /**
    * The bare page is refused, and the refusal is a document rather than a sentence.
    *
-   * The check cannot hand itself a session here — the launch token is minted per process and printed into
-   * the daemon's log, which this check does not read — so it asserts the two things the daemon's own
-   * configuration decides: the refusal, and that the refusal is the page that offers the form. The
-   * authenticated page is judged by `80-web-ui` and `90-web-ui-token`, which start their own server.
+   * The check does not hand itself a session — the launch token is minted per process and printed into the
+   * daemon's log — so it asserts the two things the daemon's own configuration decides: the refusal, and that
+   * the refusal is the page that offers the form. The authenticated page is judged by `80-web-ui` and
+   * `90-web-ui-token`, which start their own server, and by `96-deployment` against this one.
    */
-  const refused = await fetch(`http://127.0.0.1:${installed.port}/`)
+  const refused = await fetch(`http://127.0.0.1:${service.port}/`, { signal: AbortSignal.timeout(5000) })
   assert.equal(refused.status, 401, 'the bare page is refused without a session')
   assert.match(refused.headers.get('content-type') ?? '', /text\/html/, 'and the refusal is a document')
   assert.match(await refused.text(), /<form[^>]*action="\/"/, 'carrying the form that opens it')
 
   // Authentication still applies to data, even though the daemon is trusted: the token protects the API.
-  const api = await fetch(`http://127.0.0.1:${installed.port}/api/sessions`)
+  const api = await fetch(`http://127.0.0.1:${service.port}/api/sessions`, { signal: AbortSignal.timeout(5000) })
   assert.equal(api.status, 401, 'the API behind the daemon still requires the token')
 })
 
 test('the definition keeps the process alive rather than pretending to', async (context) => {
-  const installed = installedPort()
-  if (installed === null || !agentLoaded()) {
-    context.skip(`no ${LABEL} agent is loaded on this host, so its restart behaviour cannot be judged here`)
+  const live = liveService()
+  if (live.service === undefined) {
+    context.skip(`${live.reason}, so its restart behaviour cannot be judged here`)
     return
   }
+  const { service } = live
   /**
-   * The claim is that this is a **daemon**, not a process someone started. Measured: killing the server
-   * leaves launchd with a different pid serving the same port within seconds, which is the difference
-   * between "it is running" and "it will be running".
+   * The claim is that this is a **daemon**, not a process someone started. Measured: killing the process that
+   * owns the port leaves a **different** pid serving it within seconds — systemd on Linux (3 s, 2026-10-22), and
+   * on macOS the supervisor `install.sh` puts in front of the server (measured the same day, because launchd on
+   * this Mac does not restart a job at all). Which process the platform or the supervisor holds is their
+   * business; the process that serves is the one this check kills, which is the one an outage is.
    *
    * A bounded wait, because a supervisor that takes minutes to notice is also a finding.
    */
-  const before = await fetch(`http://127.0.0.1:${installed.port}/healthz`).then((response) => response.json())
-  const pid = execFileSync('launchctl', ['print', `gui/${process.getuid()}/${LABEL}`], { encoding: 'utf8' })
-    .split('\n')
-    .map((line) => /^\s*pid = (\d+)/.exec(line))
-    .find((match) => match !== null)?.[1]
-  if (!skipUnless(context, typeof pid === 'string', 'launchd did not report a pid, so the restart cannot be judged')) return
+  const before = listenerPid(service.port)
+  if (!skipUnless(context, before !== null, `no process is listening on port ${service.port}, so the restart cannot be judged`)) return
 
-  process.kill(Number(pid), 'SIGKILL')
+  process.kill(before, 'SIGKILL')
   const deadline = Date.now() + 20_000
-  let recovered = false
-  while (Date.now() < deadline && !recovered) {
+  let recovered = null
+  while (Date.now() < deadline && recovered === null) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
     try {
-      const health = await fetch(`http://127.0.0.1:${installed.port}/healthz`)
-      if (health.ok) recovered = true
+      const health = await fetch(`http://127.0.0.1:${service.port}/healthz`, { signal: AbortSignal.timeout(1000) })
+      if (health.ok) recovered = listenerPid(service.port)
     } catch {
       // still down
     }
   }
-  assert.ok(recovered, `the service came back within twenty seconds after being killed (was on port ${before.port})`)
+  assert.ok(recovered !== null, `the server came back within twenty seconds after being killed (port ${service.port})`)
+  assert.notEqual(recovered, before, `and it is a new process (${before} -> ${recovered}), not the killed one answering late`)
 })

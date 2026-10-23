@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The runtime-context snapshot as a **trajectory fact**, judged in a browser.
@@ -25,8 +25,7 @@ async function startServer(label) {
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
-      process.execPath,
-      [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(home, 'sessions')],
+      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(home, 'sessions')]),
       { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let output = ''

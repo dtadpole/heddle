@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { evidencePath, chatDouble, fixtureDir, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { evidencePath, chatDouble, fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The composer's submission gestures and the queue buffer, judged in a browser.
@@ -117,7 +117,7 @@ function startCli(args, options) {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...(options.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],

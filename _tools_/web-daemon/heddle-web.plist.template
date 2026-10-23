@@ -16,18 +16,16 @@
   <key>Label</key>
   <string>@LABEL@</string>
 
-  <!-- The harness's own launcher, with the arguments a run needs. -->
+  <!--
+    The harness's own launcher, with the arguments a run needs, rendered by `install.sh` one element per argument.
+
+    One element per argument is why a plist needs no quoting and no shell: a checkout path with a space stays one
+    string, and launchd resolves nothing through a shim. The list either runs the supervisor
+    (`supervisor.mjs --`, on macOS, where launchd was measured not to restart a job) or the program directly.
+  -->
   <key>ProgramArguments</key>
   <array>
-    <string>@NODE@</string>
-    <string>@BIN@</string>
-    <string>web</string>
-    <string>--host</string>
-    <string>127.0.0.1</string>
-    <string>--port</string>
-    <string>@PORT@</string>
-    <string>--config</string>
-    <string>@REPO@/cordis.yml</string>
+@PROGRAM_ARGUMENTS@
   </array>
 
   <!--
@@ -45,9 +43,12 @@
   <true/>
 
   <!--
-    KeepAlive is a one-shot launchd job only if this is false. It is true, so launchd restarts the server
-    when it exits — which is the supervisor half of the convention, and it is enough here because the
-    server is a single process with no children to orphan.
+    KeepAlive is a one-shot launchd job only if this is false. It is true, so the platform restarts the job
+    when it exits — which is the outer supervisor half of the convention. On macOS the inner half is
+    `supervisor.mjs`, because launchd was measured on this Mac (macOS 27.0, 26A428, 2026-10-22) to load an
+    agent and never spawn it again: `RunAtLoad` does not fire after `launchctl bootstrap`, `StartInterval`
+    never fires, and a killed `KeepAlive` job stays not running. Both layers are wanted: `KeepAlive` is what
+    survives a reboot on a healthy host, and the supervisor is what survives a crash on this one.
   -->
   <key>KeepAlive</key>
   <true/>

@@ -27,7 +27,7 @@ function startServer(label, options = {}) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
+      const { heddleCommand, repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const home = isolatedHome(`access-${label}`)
       const work = fixtureDir(`access-${label}-work`)
       /**
@@ -42,12 +42,11 @@ function startServer(label, options = {}) {
         : httpConfig({ home, baseUrl: double.baseUrl, stream: true })
       const endpoint = options.steps !== undefined ? 'scripted' : 'double'
       const child = spawn(
-        process.execPath,
         /**
          * `--sandbox-root` confines the scripted write to this check's fixture: the refusal test runs a real
          * `write_file`, and a check that let it land in the checkout would leave a file behind.
          */
-        [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--endpoint', endpoint, '--session-root', join(home, 'sessions'), '--sandbox-root', work],
+        ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', endpoint, '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
         { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
