@@ -107,6 +107,9 @@ pub(crate) fn highlight_pieces(code: &str, language: Option<&str>) -> Vec<Piece>
         return merge_adjacent(pieces);
     };
     let set = syntax_set();
+    // JSON is classed by its own rules: highlight.js's JSON grammar differs from the general table where a reader
+    // sees it (see `json_class`).
+    let json = language.and_then(grammar_for) == Some("json");
     let mut parse_state = syntect::parsing::ParseState::new(syntax);
     let mut stack = syntect::parsing::ScopeStack::new();
     for line in code.split_inclusive('\n') {
@@ -120,7 +123,12 @@ pub(crate) fn highlight_pieces(code: &str, language: Option<&str>) -> Vec<Piece>
                 // `clear_scopes` reaching below the base: keep the text and start the stack again rather than lose it.
                 stack = syntect::parsing::ScopeStack::new();
             }
-            push_text(text, class_for_stack(&stack), &mut pieces);
+            let class = if json {
+                json_class(&stack)
+            } else {
+                class_for_stack(&stack)
+            };
+            push_text(text, class, &mut pieces);
         }
     }
     merge_adjacent(pieces)
@@ -270,7 +278,48 @@ fn class_for_stack(stack: &syntect::parsing::ScopeStack) -> Option<&'static str>
     None
 }
 
+/// highlight.js's classes for JSON, which differ from the general table in what a reader sees.
+///
+/// Measured against the TypeScript build (highlight.js 11) on `{"command":"ls","nested":{"a":[1,2.5,true,null]}}`:
+/// every `{ } [ ] : ,` is an `hljs-punctuation` token, `true`/`false`/`null` are `hljs-keyword` (not
+/// `hljs-literal`), and a key is `hljs-attr` at **any** depth. A decimal point is part of its number, and a quote is
+/// part of its string, so neither becomes punctuation.
+fn json_class(stack: &syntect::parsing::ScopeStack) -> Option<&'static str> {
+    let names: Vec<String> = stack
+        .scopes
+        .iter()
+        .map(|scope| scope.build_string())
+        .collect();
+    let any = |prefix: &str| names.iter().any(|name| scope_matches(name, prefix));
+    if any("comment") {
+        return Some("hljs-comment");
+    }
+    if any("string") {
+        return Some(if is_json_key(stack) {
+            "hljs-attr"
+        } else {
+            "hljs-string"
+        });
+    }
+    if any("constant.numeric") || any("meta.number") {
+        return Some("hljs-number");
+    }
+    if any("constant.language") {
+        return Some("hljs-keyword");
+    }
+    if names
+        .last()
+        .is_some_and(|innermost| scope_matches(innermost, "punctuation"))
+    {
+        return Some("hljs-punctuation");
+    }
+    None
+}
+
 /// Whether the stack sits on an object's key rather than on a value, in the JSON grammar's own scopes.
+///
+/// The **innermost** key or value scope decides: a key inside an object that is itself a value is still a key.
+/// (Letting an enclosing value win classed every nested key as a string — measured against highlight.js.)
 fn is_json_key(stack: &syntect::parsing::ScopeStack) -> bool {
     let mut in_dictionary = false;
     for scope in stack.scopes.iter().rev() {
@@ -278,10 +327,13 @@ fn is_json_key(stack: &syntect::parsing::ScopeStack) -> bool {
         if name.starts_with("meta.mapping.value")
             || name.starts_with("meta.structure.dictionary.value")
         {
-            // A mapping's value: the string is the value, whatever the enclosing structure.
             return false;
         }
-        if name.starts_with("meta.mapping.key") || name.starts_with("meta.structure.dictionary") {
+        if name.starts_with("meta.mapping.key") || name.starts_with("meta.structure.dictionary.key")
+        {
+            return true;
+        }
+        if name.starts_with("meta.structure.dictionary") {
             in_dictionary = true;
         }
     }
@@ -331,11 +383,18 @@ fn push_text(text: &str, class: Option<&'static str>, pieces: &mut Vec<Piece>) {
 }
 
 /// Join runs that carry the same class, so a token split by the grammar still reaches the page as one span.
+///
+/// Punctuation is never joined: highlight.js writes each `}` or `,` as its own token, so `}}` is two spans.
 fn merge_adjacent(pieces: Vec<Piece>) -> Vec<Piece> {
     let mut merged: Vec<Piece> = Vec::with_capacity(pieces.len());
     for piece in pieces {
         match merged.last_mut() {
-            Some(last) if !last.newline && !piece.newline && last.class == piece.class => {
+            Some(last)
+                if !last.newline
+                    && !piece.newline
+                    && last.class == piece.class
+                    && piece.class != Some("hljs-punctuation") =>
+            {
                 last.text.push_str(&piece.text);
             }
             _ => merged.push(piece),
@@ -556,6 +615,50 @@ mod tests {
         assert!(
             commented.contains(&"/* one") && commented.contains(&"two */"),
             "both lines are comments: {commented:?}"
+        );
+    }
+
+    #[test]
+    fn json_is_classed_as_highlight_js_classes_it() {
+        // The input developer-eleven's real-server probe compared against the TypeScript build: three classes
+        // differed — punctuation was bare, true/null were literals, and a nested key was a string.
+        let html = highlight_code(
+            r#"{"command":"ls","nested":{"a":[1,2.5,true,null]}}"#,
+            Some("json"),
+        );
+        let has = |fragment: &str| html.contains(fragment);
+        assert!(
+            has(r#"<span class="hljs-attr">&quot;command&quot;</span>"#),
+            "a top-level key: {html}"
+        );
+        assert!(
+            has(r#"<span class="hljs-attr">&quot;a&quot;</span>"#),
+            "a nested key is a key too: {html}"
+        );
+        assert!(
+            has(r#"<span class="hljs-string">&quot;ls&quot;</span>"#),
+            "a value is a string: {html}"
+        );
+        assert!(has(r#"<span class="hljs-keyword">true</span>"#), "{html}");
+        assert!(has(r#"<span class="hljs-keyword">null</span>"#), "{html}");
+        assert!(
+            has(r#"<span class="hljs-number">2.5</span>"#),
+            "a decimal point stays inside its number: {html}"
+        );
+        assert!(has(r#"<span class="hljs-punctuation">{</span>"#), "{html}");
+        assert!(
+            has(
+                r#"<span class="hljs-punctuation">}</span><span class="hljs-punctuation">}</span>"#
+            ),
+            "each brace is its own token, as highlight.js writes it: {html}"
+        );
+        assert_eq!(
+            text_of(
+                r#"{"command":"ls","nested":{"a":[1,2.5,true,null]}}"#,
+                Some("json")
+            ),
+            r#"{"command":"ls","nested":{"a":[1,2.5,true,null]}}"#,
+            "and nothing is lost"
         );
     }
 

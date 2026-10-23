@@ -293,6 +293,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_query_names_reach_the_assembly_and_empty_ones_are_absent() {
+        // The TypeScript handler forwards `endpoint` and `model` to `assemble` only when they are non-empty; a
+        // composition asked for a specific pair is the other half of the view's claim, so it is asserted here.
+        let host = Host::with_session(SESSION, vec![]);
+        let router = routes(Arc::new(host.clone()));
+        let response = call(
+            router,
+            Method::GET,
+            &format!("/api/context?session={SESSION}&endpoint=scripted&model=tiny"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        // Copied out, so the guard is dropped before the next request is awaited.
+        let asked = host
+            .assembled
+            .lock()
+            .expect("the log is not poisoned")
+            .clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].endpoint.as_deref(), Some("scripted"));
+        assert_eq!(asked[0].model.as_deref(), Some("tiny"));
+        assert_eq!(asked[0].cwd, "/tmp/workspace", "the host's folder is used");
+
+        let host = Host::with_session(SESSION, vec![]);
+        let router = routes(Arc::new(host.clone()));
+        let response = call(
+            router,
+            Method::GET,
+            &format!("/api/context?session={SESSION}&endpoint=&model="),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        let asked = host
+            .assembled
+            .lock()
+            .expect("the log is not poisoned")
+            .clone();
+        assert_eq!(asked[0].endpoint, None, "an empty name is not a choice");
+        assert_eq!(asked[0].model, None);
+    }
+
+    #[tokio::test]
     async fn the_route_refuses_a_profile_without_the_plugin_and_a_missing_session() {
         let without = Host {
             has_context: false,

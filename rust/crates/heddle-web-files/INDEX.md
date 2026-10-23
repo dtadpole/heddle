@@ -182,13 +182,15 @@ are done; step 10 is blocked on other seats and is named there.
    order. When the session tree's `read_file_text` lands, this crate re-exports that type if its JSON is identical.
 4. **`docs.ts`**: ported, since no one ruled it dead; it still has no caller and can be deleted in one commit if the
    coordinator rules it out.
-5. **The two verifiers** (integrator-two): `88-file-preview` and `80-web-ui check-file-view` spawn `dist/cli.js`
-   directly rather than through `heddleCommand`, and `88-file-preview` registers `/Users/zhenc/heddle` as its
-   workspace, which does not exist on this Mac. Both are in the integrator's write scope; the port is otherwise
-   unjudgeable through `HEDDLE_BIN`.
-6. **The `heddle` binary** (developer-two, planned): `rust/crates/heddle/src/main.rs` exits 2 for every command,
-   and `heddle-server` has no routes, so no file route is reachable from a binary yet. The router is ready to be
-   merged (`routes::ROUTES` lists its paths for the overlap assertion at boot).
+5. **The two verifiers — resolved by integrator-two.** Both `88-file-preview` and `80-web-ui check-file-view` start
+   their server through `heddleCommand` on `main`, so `HEDDLE_BIN` is the server under test. `88-file-preview` used
+   to register a project checkout at a fixed path from another machine as its workspace; on the ui lane it now writes
+   its own fixture workspace and passes 3/3 on the TypeScript build, so it is judgeable on any machine once that
+   change reaches `main` (not yet as of `480d9b8`).
+6. **The `heddle` binary** (developer-two): on `main` `480d9b8` the `web` command word parses, but `heddle web`
+   still answers `not ported to Rust yet: web` with exit 2 (`commands::web` is a `todo!`), so no file route is
+   reachable from a binary yet. The router is ready to be merged (`routes::ROUTES` lists its paths for the overlap
+   assertion at boot).
 
 ## Read next
 
