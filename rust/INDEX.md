@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.3.0
+version: 0.3.1
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend` at `76e1931`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on the merged candidate at `b4f8abf` that became `main`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -53,9 +53,11 @@ probe because the binary's `--help` does not name the option it needs (`--profil
 every other command exits 2 with `heddle: not ported to Rust yet: <command>`. So no part of the goal was judged, and
 none passed.
 
-The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies — `heddle-config`
-(`c477822`) and `heddle-context` (`8dbdcf8`) on `main`, the rest on the lane's branches at the time
-of this run. A contract is not a port: what has not happened is a **part** passing its verifier on this binary.
+The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies. `heddle-config`
+(`c477822`) and `heddle-context` (`8dbdcf8`) were on `main` before this run; the `heddle-team` and `heddle-llm`
+contracts landed with the candidate it ran on (`b4f8abf`). The event, session, workspace, tools, agent, sandbox and
+binary contracts are still on the lane's branches. A contract is not a port: what has not happened is a **part**
+passing its verifier on this binary.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
