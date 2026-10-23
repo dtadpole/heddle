@@ -59,6 +59,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
             sessions,
         }));
     }
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_sandbox::ApprovalService>>("approvals")
+    {
+        harness.approvals = Some(Arc::new(Approvals { service }));
+    }
     if let Some(service) = boot.services.get::<Arc<heddle_todo::TodoService>>("todo") {
         harness.todos = Some(Arc::new(Todos { service }));
     }
@@ -295,6 +301,57 @@ impl heddle_server::services::WorkspaceService for Roots {
 
     fn ensure_owner(&self, folder: &std::path::Path) {
         let _ = self.workspaces.ensure_owner(&folder.to_string_lossy());
+    }
+}
+
+/// The approval service as the page answers it: while the server runs it is the answerer, so an `ask`
+/// becomes a card; the page lists what waits, answers one by id, and is told of each new request.
+struct Approvals {
+    service: Arc<heddle_sandbox::ApprovalService>,
+}
+
+impl heddle_server::services::ApprovalService for Approvals {
+    fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+        let guard = self.service.attach_answerer();
+        Box::new(move || drop(guard))
+    }
+
+    fn pending_requests(&self) -> Vec<Value> {
+        self.service
+            .pending_requests()
+            .iter()
+            .filter_map(|request| serde_json::to_value(request).ok())
+            .collect()
+    }
+
+    fn answer(&self, id: &str, outcome: heddle_server::services::ApprovalOutcome) -> bool {
+        use heddle_server::services::ApprovalOutcome;
+        let answer = match outcome {
+            ApprovalOutcome::AllowedOnce => heddle_sandbox::Answer::AllowedOnce,
+            ApprovalOutcome::Rejected => heddle_sandbox::Answer::Rejected,
+            ApprovalOutcome::Cancelled => heddle_sandbox::Answer::Cancelled,
+        };
+        self.service.answer(id, answer)
+    }
+
+    fn subscribe(&self) -> Option<futures::stream::BoxStream<'static, Value>> {
+        use futures::StreamExt;
+        let receiver = self.service.subscribe();
+        // Each new request as the card's JSON; a slow reader skips what it missed rather than ending.
+        let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(request) => {
+                        if let Ok(value) = serde_json::to_value(&request) {
+                            return Some((value, receiver));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        Some(stream.boxed())
     }
 }
 
