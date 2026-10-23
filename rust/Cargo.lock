@@ -5,3 +5,67 @@ version = 4
 [[package]]
 name = "heddle"
 version = "0.0.1"
+
+[[package]]
+name = "heddle-agent"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-config"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-context"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-events"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-goal"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-llm"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-sandbox"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-server"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-session"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-team"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-todo"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-tools"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-web-composer"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-web-files"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-web-trajectory"
+version = "0.0.1"
+
+[[package]]
+name = "heddle-workspace"
+version = "0.0.1"
