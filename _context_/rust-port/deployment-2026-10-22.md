@@ -1,14 +1,14 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:57:13Z
+modified: 2026-10-23T05:32:35Z
 level: L3
 version: 2.0.0
-description: 'What serves the owner''s page at 127.0.0.1:8082, how it is redeployed, rehearsed and restored, who acts on it, and what is still open.'
+description: What serves the owner's page on loopback port 8082, how it is redeployed, rehearsed and restored, who acts on it, and what is still open.
 status: unverified
 grounded_in:
   - source: D-020 (the team resumed on the owner's Mac; no devservers, no SSH forward)
-  - source: owner statement in the dsh session, 2026-10-22, asking that heddle be served locally at 127.0.0.1:8082
+  - source: owner statement in the dsh session, 2026-10-22, asking that heddle be served locally on loopback port 8082
   - source: D-015, D-030, D-035, D-042, D-045
 ---
 

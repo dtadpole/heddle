@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment''s measurements, 2026-10-22'
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T04:57:13Z
+modified: 2026-10-23T05:31:53Z
 level: L3
 version: 1.0.0
 description: The readings behind the deployment record — the bring-up proof, restart windows, the scratch rehearsals, the Rust branch and the gate.
@@ -39,6 +39,12 @@ token, and 8082 answered 200.
 | 21:34 | 379 ms | 256 ms | no action | 477 ms | 1137 ms | 4/4 |
 
 The first run, before the bootstrap fix, failed the reinstall claim (`5: Input/output error`).
+
+**Recovery paths, 22:0x, scratch agent.** Before the fixes, a SIGKILL or SIGTERM of the supervisor took the server
+down (launchd kills the job's process group) and left the job `not running`; a SIGSTOPped server held its port with
+the job `running`, answering nothing. After them, rehearsal 22:30:25–22:31:36 held all eight claims: the server
+outlived its killed supervisor and was reclaimed in 1,519 ms; a hung one was replaced in 8,172 ms (probes every 2 s;
+the default 5 s gives about 20 s).
 
 **The Rust branch, about 21:20.** The lanes' release binary (sha256 `a355a0aa1fc4…`) through `HEDDLE_BIN`: started
 failed after 20 s — `heddle: not ported to Rust yet: web`, exit 2 after 4 ms — and the other claims were unjudged.
