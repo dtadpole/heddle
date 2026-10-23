@@ -18,9 +18,10 @@
 //! fall inside a surrogate pair, the Rust build keeps the whole character out of the kept part
 //! (a JavaScript string can hold a lone surrogate; a Rust `String` cannot) and counts it as removed.
 
-use crate::store::{ContextStore, StoreError};
+use crate::events::{ContextEvent, ShadowedRange};
+use crate::store::{AppendOptions, ContextStore, SeqRange, StoreError};
 use crate::text::utf16_len;
-use crate::types::Message;
+use crate::types::{ContentPart, Message, Role};
 
 /// A tool result longer than this is pruned, in characters.
 pub const PRUNE_THRESHOLD_CHARS: usize = 8192;
@@ -190,8 +191,83 @@ impl ToolResultPruner {
         store: &S,
         session: &S::Handle,
     ) -> Result<PruneOutcome, StoreError> {
-        let _ = (store, session, self.estimate);
-        todo!("ToolResultPruner::prune_session")
+        let mut outcome = PruneOutcome::default();
+        // Snapshot first: appending during the walk must not extend the walk, or a replacement
+        // could be reconsidered within the same pass.
+        let nodes = store.surface(session)?.nodes;
+        for seq in nodes {
+            let Some(original) = store.derive_node(session, seq)? else {
+                continue;
+            };
+            if original.role != Role::Tool {
+                continue;
+            }
+            let before: usize = original
+                .content
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => utf16_len(text),
+                    _ => 0,
+                })
+                .sum();
+            if before <= self.config.threshold_chars {
+                continue;
+            }
+
+            let mut content: Vec<ContentPart> = Vec::with_capacity(original.content.len());
+            let mut changed = false;
+            let mut removed = 0usize;
+            // Non-text parts are copied across where they are, never reordered or dropped.
+            for part in &original.content {
+                match part {
+                    ContentPart::Text { text } => {
+                        let result = prune_text(text, &self.config);
+                        if result.pruned {
+                            changed = true;
+                            removed += utf16_len(text) - utf16_len(&result.text);
+                        }
+                        content.push(ContentPart::Text { text: result.text });
+                    }
+                    other => content.push(other.clone()),
+                }
+            }
+            if !changed {
+                continue;
+            }
+
+            // Before the replacement, never after: a consumer reading forward can subtract the
+            // shadowed cost before it reaches what replaced it.
+            let prune = ContextEvent::Prune {
+                shadowed_range: ShadowedRange {
+                    start: seq,
+                    end: seq,
+                },
+                shadowed_seqs: vec![seq],
+                shadowed_token_count: (self.estimate)(&original),
+            };
+            store.append(session, prune.to_value(), AppendOptions::default())?;
+
+            let replacement = Message {
+                role: original.role,
+                content,
+                tool_call_id: original.tool_call_id.clone(),
+                source: original.source.clone(),
+            };
+            store.append(
+                session,
+                serde_json::json!({ "type": "message", "message": replacement }),
+                AppendOptions::replace(
+                    SeqRange {
+                        start_seq: seq,
+                        end_seq: seq,
+                    },
+                    vec![seq],
+                ),
+            )?;
+            outcome.pruned += 1;
+            outcome.chars_removed += removed as u64;
+        }
+        Ok(outcome)
     }
 }
 
@@ -206,7 +282,7 @@ impl Default for ToolResultPruner {
 mod tests {
     use super::{
         PRUNE_HEAD_CHARS, PRUNE_MARKER, PRUNE_TAIL_CHARS, PRUNE_THRESHOLD_CHARS, PruneConfig,
-        PruneConfigError, ToolResultPruner, prune_text,
+        PruneConfigError, PruneOutcome, ToolResultPruner, prune_text,
     };
 
     fn counted(text: &str) -> usize {
@@ -339,6 +415,249 @@ mod tests {
         assert_eq!(
             *ToolResultPruner::default().config(),
             PruneConfig::default()
+        );
+    }
+
+    use crate::store::ContextStore;
+    use crate::testing::MemoryStore;
+    use crate::types::{ContentPart, Message, Role};
+    use serde_json::json;
+
+    /// Three times the text length, so a shadow price cannot be mistaken for a character count.
+    fn triple(message: &Message) -> u64 {
+        let characters: u64 = message
+            .content
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => crate::text::utf16_len(text) as u64,
+                _ => 0,
+            })
+            .sum();
+        3 * characters
+    }
+
+    fn text(length: usize, character: &str) -> ContentPart {
+        ContentPart::Text {
+            text: character.repeat(length),
+        }
+    }
+
+    #[test]
+    fn a_result_within_the_threshold_is_untouched_and_nothing_is_appended() {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        let original = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-1".to_string()),
+            content: vec![text(64, "s")],
+            source: None,
+        };
+        let seq = store.message(&session, original.clone());
+
+        let outcome = ToolResultPruner::default()
+            .prune_session(&store, &session)
+            .expect("the walk succeeds");
+        assert_eq!(
+            outcome,
+            PruneOutcome {
+                pruned: 0,
+                chars_removed: 0
+            }
+        );
+        assert_eq!(
+            store.count(&session).expect("the count"),
+            1,
+            "nothing was appended"
+        );
+        assert_eq!(
+            store.surface(&session).expect("the surface").nodes,
+            vec![seq]
+        );
+        assert_eq!(
+            store.derive_node(&session, seq).expect("the node"),
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn an_oversized_result_lands_as_two_appends_the_shadow_price_then_the_replacement() {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        let oversized = "H".repeat(9000);
+        let kept = ContentPart::Reasoning {
+            text: "a block that must keep its place".to_string(),
+        };
+        let small = text(2000, "T");
+        let original = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-7".to_string()),
+            content: vec![
+                ContentPart::Text {
+                    text: oversized.clone(),
+                },
+                kept.clone(),
+                small.clone(),
+            ],
+            source: None,
+        };
+        let seq = store.message(&session, original);
+
+        let outcome = ToolResultPruner::default()
+            .prune_session(&store, &session)
+            .expect("the walk succeeds");
+        let removed = oversized.len() - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS;
+        let pruned_text = format!(
+            "{}{}{}",
+            &oversized[..PRUNE_HEAD_CHARS],
+            PRUNE_MARKER.replacen('N', &removed.to_string(), 1),
+            &oversized[oversized.len() - PRUNE_TAIL_CHARS..]
+        );
+        assert_eq!(outcome.pruned, 1);
+        // The count is UTF-16 units, as it is everywhere in this crate; the marker's ellipsis is
+        // one character but three bytes, so a byte length would not agree.
+        assert_eq!(
+            outcome.chars_removed as usize,
+            oversized.len() - crate::text::utf16_len(&pruned_text)
+        );
+
+        let events = store.read(&session).expect("the log reads");
+        assert_eq!(
+            events.len(),
+            3,
+            "the original, the price and the replacement"
+        );
+        let price = &events[1];
+        assert_eq!(price.kind, "compaction/prune");
+        assert_eq!(
+            price.field("shadowedRange"),
+            Some(&json!({"start": seq, "end": seq}))
+        );
+        assert_eq!(price.field("shadowedSeqs"), Some(&json!([seq])));
+
+        let replacement = &events[2];
+        assert_eq!(replacement.kind, "message");
+        assert_eq!(
+            replacement.message(),
+            Some(Message {
+                role: Role::Tool,
+                tool_call_id: Some("call-7".to_string()),
+                content: vec![
+                    ContentPart::Text {
+                        text: pruned_text.clone()
+                    },
+                    kept,
+                    small,
+                ],
+                source: None,
+            })
+        );
+        assert_eq!(
+            replacement
+                .field("surfaceOp")
+                .and_then(|value| value.get("op"))
+                .and_then(serde_json::Value::as_str),
+            Some("replace")
+        );
+        assert_eq!(replacement.field("sourceEventSeqs"), Some(&json!([seq])));
+        // The surface now holds only the replacement, which is what a second pass reads.
+        assert_eq!(store.surface(&session).expect("the surface").nodes, vec![2]);
+    }
+
+    #[test]
+    fn the_shadow_price_is_the_estimators_price_of_the_original_not_of_the_replacement() {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        let original = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-2".to_string()),
+            content: vec![text(9000, "p")],
+            source: None,
+        };
+        store.message(&session, original);
+        ToolResultPruner::with_estimator(PruneConfig::default(), triple)
+            .expect("the budget fits")
+            .prune_session(&store, &session)
+            .expect("the walk succeeds");
+
+        let events = store.read(&session).expect("the log reads");
+        assert_eq!(
+            events[1].field("shadowedTokenCount"),
+            Some(&json!(3 * 9000)),
+            "the price is of the original, through the injected estimator"
+        );
+        let replacement = events[2].message().expect("the replacement parses");
+        assert_ne!(
+            events[1].field("shadowedTokenCount"),
+            Some(&json!(triple(&replacement)))
+        );
+        assert!(triple(&replacement) < 3 * 9000);
+    }
+
+    #[test]
+    fn a_second_pass_over_the_already_pruned_surface_prunes_nothing() {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        // Two over-threshold parts with one under it: after the first pass each part is under the
+        // threshold individually while their sum is still over it, which is the case where a
+        // replacement must not be appended because nothing would change.
+        let original = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-3".to_string()),
+            content: vec![text(9000, "x"), text(4000, "y")],
+            source: None,
+        };
+        store.message(&session, original);
+        let pruner = ToolResultPruner::default();
+
+        let first = pruner
+            .prune_session(&store, &session)
+            .expect("the first pass");
+        assert_eq!(first.pruned, 1);
+        assert_eq!(store.count(&session).expect("the count"), 3);
+        let after_first = store.surface(&session).expect("the surface").nodes;
+
+        let second = pruner
+            .prune_session(&store, &session)
+            .expect("the second pass");
+        assert_eq!(
+            second,
+            PruneOutcome {
+                pruned: 0,
+                chars_removed: 0
+            }
+        );
+        assert_eq!(
+            store.count(&session).expect("the count"),
+            3,
+            "nothing was appended"
+        );
+        assert_eq!(
+            store.surface(&session).expect("the surface").nodes,
+            after_first
+        );
+    }
+
+    #[test]
+    fn a_non_tool_node_is_never_pruned() {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        let original = Message::text(Role::User, "u".repeat(9000));
+        let seq = store.message(&session, original.clone());
+
+        let outcome = ToolResultPruner::default()
+            .prune_session(&store, &session)
+            .expect("the walk succeeds");
+        assert_eq!(
+            outcome,
+            PruneOutcome {
+                pruned: 0,
+                chars_removed: 0
+            }
+        );
+        assert_eq!(store.count(&session).expect("the count"), 1);
+        assert_eq!(
+            store.derive_node(&session, seq).expect("the node"),
+            Some(original)
         );
     }
 }
