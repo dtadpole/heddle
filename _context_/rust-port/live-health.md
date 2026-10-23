@@ -135,59 +135,29 @@ a move at equal content is the finding that goes to the ui lane. Measured flat (
 heddle 46 interactive / 18 enabled; DSH 139 / 17, with DSH's 1 hit-test miss and 1 clip on its own
 gated surfaces.
 
-## The one action the monitor may take
+## The monitor does not restore (D-045)
 
-The agent now runs a supervisor (`_tools_/web-daemon/supervisor.mjs`) in front of the server, so a
-killed server is put back in about a second and a silent port means the **agent** is gone (booted out,
-or launchd not starting it at login), not that the server crashed. There is no cron guard: the
-installer's cron line is refused by macOS TCC, so after a reboot the agent may need this kickstart.
+For a few hours on 2026-10-22 live-deploy delegated one action to this seat — a `launchctl kickstart`
+when the deployment was down — and the record of that period is kept because it is why the delegation
+ended:
 
-Since 2026-10-22 live-deploy delegates **one** action to this seat: if the pass finds the deployment
-down (the gate's `502` because its upstream is gone, or the server's port silent), it may run
-`launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web` once, wait up to 20 s, re-read the gate,
-process and door, and record *restored by live-monitor, kickstart* with the elapsed time. Nothing else
-is run against the deployment. The delegation exists because launchd on this Mac never starts the
-loaded agent by itself; live-deploy's interval guard holds it up only while their session lives, so a
-silent 3082 after their session stops is otherwise unnoticed. A restore that fails within 20 s is a
-real alert, and a restore on two consecutive passes is a crash loop to report, not a success.
+- **03:42:20** — a pass found 3082 silent inside live-deploy's install window and kickstarted it
+  (507 ms). The same pass then failed the door `401`: it still held the pre-restart launch token. That
+  failure was the instrument's; the entry was removed rather than pinned as a deployment fault, and the
+  pass now re-reads the token after any restart it observes.
+- **03:54:07** — a manual smoke test ran with `--restore` six seconds after the deployment's page was
+  rebuilt; `kickstart -k` SIGKILLed the server live-deploy's install had just started (`web.log`:
+  *"node exited (SIGKILL) after 5380 ms"*).
+- **03:57:36–03:58:47** — about 70 s without a server. live-deploy has since measured the cause: their
+  own deliberate `kickstart -k` of a four-second-old job (to measure launchd's 10 s ThrottleInterval),
+  extended by a reinstall that refused to render because main moved under it (fixed on their branch:
+  render before bootout). The "~15 s to listen" this record first gave was that throttle wait, not the
+  server's start time; a reinstall's measured silence is 288–364 ms. Nothing was run by this seat.
 
-## A restore was used, and the instrument failed once
-
-At 03:42:20 the door found 3082 down after the redeploy window in `~/.heddle/guard.log`
-(`03:36:39Z … the agent is not loaded; bootstrapping`, then `03:39:20Z`, `03:40:35Z`, `03:40:50Z`
-silent). The delegated kickstart brought it back in **507 ms**. The door check then failed `401`,
-and that failure was the instrument's, not the deployment's: the pass still held the launch token it
-read before the restart, and a relaunched server mints a new one. The pass now **re-reads the launch
-URL after a restore** and judges the door with the current token; the next pass is green. The failed
-entry was removed from the record rather than pinned as a deployment failure, because it described
-nothing the deployment did.
-
-## A restore that should not have run (03:54)
-
-At 03:54:07Z a **manual smoke test** of this seat ran with `--restore` while live-deploy was moving the
-deployment to `59fd96f`: `dist/server/page.html` had been rebuilt at 03:54:01Z. The pass read the port
-silent in the gap between their stop and start, and `kickstart -k` then **SIGKILLed the server their
-install had just started** — `web.log`: *"node exited (SIGKILL) after 5380 ms"*. The supervisor put it
-back and the deployment recovered, but the race was real: by the time the kickstart ran, the reading
-that justified it was no longer true. The 03:42 restore was the same shape.
-
-The fix is a rule, not a promise: `restoreDecision` withholds the kickstart inside a 180 s window after
-any change to the deployment's build or agent definition, and requires the port to stay silent through
-a 10 s grace before acting. Fed the 03:54 inputs (6 s since the rebuild) it withholds; four tests hold
-it there. And `--restore` is now for the scheduled pass only — never a manual run.
-
-## The install at 03:58, and why the rule now asks launchd first
-
-At 03:58:29Z the gate answered `502 heddle-proxy: the upstream did not answer` and 3082 refused —
-a real outage reading. Its cause was another install: the agent definition was rewritten at 03:57:36Z,
-and launchd showed a fresh supervisor and server eight seconds old. No kickstart was run; the
-deployment answered again at 03:58:47Z by itself, about 70 s after the rewrite, with the new server
-taking up to ~15 s from process start to listening.
-
-That boot time is longer than the 10 s grace, and a login start changes no deployment file, so the
-install-window check alone could still have let a kickstart kill a booting server. The rule now asks
-launchd first: while the agent is running, its supervisor owns restarts and the kickstart is
-withheld. The delegation covers the agent being **gone**, and only then does `-k` have nothing to kill.
+Three outages that night came from extra restorers and killers, so the coordinator's **D-045** gives the
+live page one restore chain — the supervisor, then live-deploy's job-aware guard — and this seat
+observes, pins and alerts. The restore code was removed from the probe, not disabled. An outage is
+alerted to live-deploy with the agent's state, and to the coordinator if it lasts past one pass.
 
 ## Restarts are recorded, not alerted
 

@@ -25,7 +25,6 @@ import {
   passVerdict,
   processVerdict,
   redactRecord,
-  restoreDecision,
   shellVerdict,
   tildePath,
   tildeText,
@@ -182,36 +181,6 @@ test('a down reading that answers again within the window is a restart, not an o
   assert.equal(classifyOutage({ down: true, recoveredAfterMs: 1_200, windowMs: 20_000 }), 'restart')
   assert.equal(classifyOutage({ down: true, recoveredAfterMs: null, windowMs: 20_000 }), 'outage')
   assert.equal(classifyOutage({ down: true, recoveredAfterMs: 25_000, windowMs: 20_000 }), 'outage')
-})
-
-test('a kickstart never runs on a deployment that is up', () => {
-  assert.equal(restoreDecision({ down: false, secondsSinceDeployChange: 9999, stillDownAfterGrace: true }).allowed, false)
-})
-
-test('a kickstart never runs inside an install window, even when the port is silent', () => {
-  // The 03:54 case: the page was rebuilt six seconds before the pass read the port.
-  const install = restoreDecision({ down: true, secondsSinceDeployChange: 6, stillDownAfterGrace: true })
-  assert.equal(install.allowed, false)
-  assert.match(install.reason, /redeploy is in progress/)
-})
-
-test('a kickstart never runs when the port came back during the grace period', () => {
-  const back = restoreDecision({ down: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: false })
-  assert.equal(back.allowed, false)
-  assert.match(back.reason, /answered again/)
-})
-
-test('a kickstart never runs while launchd reports the agent running, even after the grace', () => {
-  // The 03:58 case: the agent had just started and its server took ~15 s to listen.
-  const booting = restoreDecision({ down: true, agentRunning: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: true })
-  assert.equal(booting.allowed, false)
-  assert.match(booting.reason, /supervisor owns restarts/)
-})
-
-test('a kickstart runs only when down, outside an install window, and still silent after the grace', () => {
-  assert.equal(restoreDecision({ down: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: true }).allowed, true)
-  // An unreadable change time does not block the restore on its own: the grace still has to hold.
-  assert.equal(restoreDecision({ down: true, secondsSinceDeployChange: null, stillDownAfterGrace: true }).allowed, true)
 })
 
 test('the pass fails on any failure or unknown verdict, is unjudged on any unjudged check, and passes only when all pass', () => {

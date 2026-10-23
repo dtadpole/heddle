@@ -76,37 +76,18 @@ With a supervisor in the agent, a killed server is back in about a second, and t
 not pin that instant: it watches the server's health route for 20 s (read-only) and records the reading
 in `outage` — `restart` when it answered again inside the window (the address checks are then re-read
 with the new launch token, and the pass is judged on what is there), `outage` when it stayed down.
-`classifyOutage` in [`rules.mjs`](rules.mjs) decides it, and only an outage can reach the restore rule.
+`classifyOutage` in [`rules.mjs`](rules.mjs) decides it, and only an outage is a failure — alerted with
+the agent's state, never acted on.
 
-## The one action it may take
+## It never restores (D-045)
 
-The deployment's owner delegates exactly one action (live-deploy, 2026-10-22): when the deployment is
-down, `launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`, once. Nothing else is ever run
-against the deployment: no installer, no `bootout`, no edit to the checkout.
-
-**A reading of "down" is not enough**, and the reason was paid for. At 03:54:07Z on 2026-10-22 a pass
-read the port silent six seconds after the deployment's page had been rebuilt — live-deploy's install
-window — and the `-k` kickstart SIGKILLed the server their install had just started (it had run for
-5,380 ms). So `restoreDecision` in [`rules.mjs`](rules.mjs) requires, in this order:
-
-0. the agent is **not running** according to launchd — while it runs, its supervisor owns restarts,
-   and a server that is still booting (up to ~15 s from process start to listening, measured 03:58)
-   outlasts any grace; a login start changes no deployment file, so only this sees it;
-1. the reads say **down** (`deploymentDown`: the gate's own 5xx with no upstream, or a silent port);
-2. **no recent deployment change** — the newest of `dist/server/page.html`, `dist/cli.js` and the
-   agent definition is older than 180 s; inside that window a redeploy is in progress and the restart
-   belongs to the person doing it;
-3. the port is **still silent after a 10 s grace** — the supervisor puts a killed server back in about
-   a second, so a port that stays silent through the grace means the agent itself is gone, which is
-   the one case the delegation covers.
-
-A withheld restore is recorded with its reason (`restore: held`), and if the port came back by itself
-the gate, process and door are re-read. A kickstart that runs is recorded with its elapsed time; one
-that does not bring the port back within 20 s is a real alert. The pass re-reads the launch token after
-a restart, because a relaunched server mints a new one.
-
-**`--restore` belongs to the scheduled pass only.** A smoke test or a debugging run never carries it:
-both incidents above came from manual runs during a redeploy.
+The monitor observes, pins and alerts; it does **not** restart, kickstart or kill anything. On
+2026-10-22 the coordinator gave the live page one restore chain — the supervisor inside the agent, then
+live-deploy's job-aware guard — after three outages that night came from extra restorers, two of them
+this tool's own delegated kickstarts (03:42 and 03:54; at 03:54 a `kickstart -k` SIGKILLed a server
+live-deploy's install had just started). The restore code was removed, not disabled. What remains is
+observation: `launchctl print` for the agent's state, recorded with every outage so the alert tells
+live-deploy whether the agent is running or gone.
 
 ## What the pass leaves alone
 
@@ -126,7 +107,6 @@ both incidents above came from manual runs during a redeploy.
 _tools_/live-health/probe.mjs                 # summary, exit 0/1/3
 _tools_/live-health/probe.mjs --json --pin    # append the pass to _context_/rust-port/live-health.jsonl
 _tools_/live-health/probe.mjs --no-turn       # do not spend a turn; the pass then ends unjudged, so it is not for the record
-_tools_/live-health/probe.mjs --restore       # if the deployment is down, one delegated kickstart
 ```
 
 It drives `_tools_/browser-use` as a **library** in this seat's own headless session

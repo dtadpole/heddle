@@ -249,41 +249,6 @@ export function classifyOutage({ down, recoveredAfterMs, windowMs }) {
   return 'outage'
 }
 
-/**
- * Whether the delegated kickstart may run, given what the pass measured.
- *
- * A reading of "down" is not enough, and the reason was paid for: on 2026-10-22 at 03:54:07Z a pass
- * read the port silent six seconds after the deployment's page was rebuilt - live-deploy's install
- * window - and `kickstart -k` then SIGKILLed the server that install had just started (it had run for
- * 5,380 ms). So the kickstart needs three things, in this order:
- *
- * 1. the reads say **down** (see `deploymentDown`);
- * 2. the deployment was **not changed recently** - a rebuilt `dist/` or a rewritten agent definition
- *    within `installWindowSeconds` means a redeploy is in progress, and a restart belongs to the
- *    person doing it;
- * 3. the port is **still silent after a grace period** - the supervisor puts a killed server back in
- *    about a second, so a port that stays silent through the grace means the agent itself is gone,
- *    which is the one case the delegation covers.
- *
- * Before all three: the agent must **not be running**. Read from launchd, it is the direct form of
- * "the agent is gone"; a login start changes no deployment file, so only this sees it.
- */
-export function restoreDecision({ down, agentRunning = false, secondsSinceDeployChange, stillDownAfterGrace, installWindowSeconds = 180 }) {
-  if (down !== true) return { allowed: false, reason: 'the deployment is not down' }
-  /**
-   * A running agent owns its own restarts: its supervisor puts the server back, and a server that is
-   * still booting (measured at up to ~15 s from process start to listening, 03:58 on 2026-10-22)
-   * outlasts any grace. The delegation covers the agent being gone; while launchd reports it running,
-   * a kickstart -k could only kill something that is coming up.
-   */
-  if (agentRunning === true) return { allowed: false, reason: 'the agent is running; its supervisor owns restarts, so a kickstart could only kill a server that is starting' }
-  if (typeof secondsSinceDeployChange === 'number' && secondsSinceDeployChange < installWindowSeconds) {
-    return { allowed: false, reason: `the deployment changed ${Math.round(secondsSinceDeployChange)} s ago; a redeploy is in progress, so the restart is left to it` }
-  }
-  if (stillDownAfterGrace !== true) return { allowed: false, reason: 'the port answered again within the grace period, so nothing needed restarting' }
-  return { allowed: true, reason: 'down, no recent deployment change, and still silent after the grace period' }
-}
-
 /** The pass: any failure fails it, any unjudged check leaves it unjudged, only all-pass passes. */
 export function passVerdict(checks) {
   const verdicts = Object.values(checks).map((check) => check.verdict)

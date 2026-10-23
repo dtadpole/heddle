@@ -70,7 +70,6 @@ import {
   passVerdict,
   processVerdict,
   redactRecord,
-  restoreDecision,
   shellVerdict,
   tildePath,
   tildeText,
@@ -148,10 +147,10 @@ function portOf(origin) {
 /**
  * Re-read the deployment's launch target.
  *
- * A kickstart restarts the server, which mints a **new** per-process launch token; the one the pass
- * read before the restore is stale the moment the process comes back. Measured 2026-10-22: a restore
+ * A restarted server mints a **new** per-process launch token; the one the pass read before the
+ * restart is stale the moment the process comes back. Measured 2026-10-22: a restart
  * took 507 ms, the gate recovered, and the door check failed `401` because it still held the old
- * token. The target is therefore re-read after every restore.
+ * token. The target is therefore re-read after every restart the pass observes.
  */
 function refreshDeploymentTarget() {
   launchUrl = readLaunchUrl()
@@ -751,44 +750,17 @@ async function judgeDsh() {
   }
 }
 
-// ---- the delegated restore ---------------------------------------------------------------------
+// ---- what the pass may observe about the agent -------------------------------------------------
 
 /**
- * The launchd label the deployment runs under, and the one action the deployment's owner delegates to
- * this seat (live-deploy, 2026-10-22): if the pass finds the deployment down, run exactly this
- * kickstart once, then wait up to 20 s for the port to answer. Anything else against the deployment —
- * install.sh, bootout, edits to the checkout — stays live-deploy's. A restore is recorded in the pass,
- * and a kickstart that does not bring it back is a real alert.
+ * The deployment's launchd label. The monitor **reads** the agent's state and never acts on it:
+ * D-045 (2026-10-22) gives the live page one restore chain - the supervisor inside the agent, then
+ * live-deploy's job-aware guard - after three outages that night came from extra restorers, two of
+ * them this seat's own kickstarts. There is no restart, kickstart or kill anywhere in this file.
  */
 const DEPLOY_LABEL = 'com.dtadpole.heddle-web'
 
-/** How long a silent port must stay silent before it counts as the agent being gone. */
-const GRACE_MS = 10_000
-
-/**
- * Seconds since the deployment last changed: the newest of its built page, its built cli and its
- * agent definition. An install rebuilds `dist/` and rewrites the agent definition, so a recent change
- * means a redeploy is in progress. `null` when none of them can be read.
- */
-function secondsSinceDeployChange() {
-  const candidates = [
-    join(DEPLOY_ROOT, 'dist', 'server', 'page.html'),
-    join(DEPLOY_ROOT, 'dist', 'cli.js'),
-    join(homedir(), 'Library', 'LaunchAgents', `${DEPLOY_LABEL}.plist`),
-  ]
-  let newest = null
-  for (const path of candidates) {
-    try {
-      const modified = statSync(path).mtimeMs
-      if (newest === null || modified > newest) newest = modified
-    } catch {
-      // A file that is missing mid-install is itself a reason the change time is unknown.
-    }
-  }
-  return newest === null ? null : (Date.now() - newest) / 1000
-}
-
-/** Whether launchd reports the deployment's agent as running (its supervisor alive). */
+/** Whether launchd reports the deployment's agent as running (its supervisor alive). Read-only. */
 function agentRunning() {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 501
   try {
@@ -797,7 +769,7 @@ function agentRunning() {
     const match = /^\s*state = (\S+)/m.exec(text)
     return match !== null && match[1] === 'running'
   } catch {
-    // Not loaded at all: the agent is gone, which is the case the delegation covers.
+    // Not loaded at all: an alert for live-deploy, whose guard owns the restore.
     return false
   }
 }
@@ -813,24 +785,6 @@ async function portAnswers() {
   }
 }
 
-/**
- * Decide, then act. The decision is `restoreDecision`; this only gathers its inputs. The grace is
- * taken last and only when the other conditions already allow a restore, so a healthy pass and a
- * pass inside an install window never wait.
- */
-async function guardedRestore({ graceDone = false } = {}) {
-  const sinceChange = secondsSinceDeployChange()
-  const running = agentRunning()
-  const early = restoreDecision({ down: true, agentRunning: running, secondsSinceDeployChange: sinceChange, stillDownAfterGrace: true })
-  if (!early.allowed) return { attempted: false, withheld: true, agentRunning: running, secondsSinceDeployChange: sinceChange, reason: early.reason }
-  // A pass that already watched the port through the restart window has spent the grace.
-  if (!graceDone) await new Promise((done) => setTimeout(done, GRACE_MS))
-  const stillDown = !(await portAnswers())
-  const decision = restoreDecision({ down: true, agentRunning: agentRunning(), secondsSinceDeployChange: secondsSinceDeployChange(), stillDownAfterGrace: stillDown })
-  if (!decision.allowed) return { attempted: false, withheld: true, secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
-  return { ...(await restoreDeployment()), secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
-}
-
 /** How long a down reading is watched before it counts as an outage rather than a restart. */
 const RESTART_WINDOW_MS = 20_000
 
@@ -844,30 +798,6 @@ async function watchForRecovery(windowMs) {
   return null
 }
 
-/** One delegated kickstart, then wait for the port to answer again. */
-async function restoreDeployment() {
-  const started = Date.now()
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 501
-  const command = `launchctl kickstart -k gui/${uid}/${DEPLOY_LABEL}`
-  const target = serverOrigin === null ? 'http://127.0.0.1:3082/healthz' : `${serverOrigin}/healthz`
-  try {
-    execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${DEPLOY_LABEL}`], { encoding: 'utf8', timeout: 10_000 })
-  } catch (error) {
-    return { attempted: true, command, broughtBack: false, waitedMs: Date.now() - started, error: String(error.message).slice(0, 200) }
-  }
-  const deadline = Date.now() + 20_000
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(3_000) })
-      if (response.status === 200) return { attempted: true, command, broughtBack: true, waitedMs: Date.now() - started, note: 'restored by live-monitor, kickstart' }
-    } catch {
-      // Not back yet; the next poll is the honest retry.
-    }
-    await new Promise((done) => setTimeout(done, 500))
-  }
-  return { attempted: true, command, broughtBack: false, waitedMs: Date.now() - started, note: 'the kickstart did not bring the port back within 20s' }
-}
-
 // ---- the pass ---------------------------------------------------------------------------------
 
 try {
@@ -877,8 +807,8 @@ pass.checks.door = await judgeDoor()
 /**
  * A down reading is watched before it is pinned. A supervisor restart (or the lane gate's 95 kill
  * test) clears in about a second and is recorded as a restart, not a failure; only a reading that
- * stays down through the window is an outage. The kickstart is never part of this - it waits behind
- * --restore and the restore rule.
+ * stays down through the window is an outage, which is alerted (with the agent's state) and never
+ * acted on: the restore chain belongs to the supervisor and live-deploy's guard (D-045).
  */
 if (deploymentDown(pass.checks)) {
   const firstReading = { gate: { status: pass.checks.gate.status ?? null, detail: pass.checks.gate.detail }, door: { detail: pass.checks.door.detail } }
@@ -891,14 +821,6 @@ if (deploymentDown(pass.checks)) {
     pass.checks.gate = { ...(await judgeGate()), afterRestart: true }
     pass.checks.process = { ...judgeProcess(), afterRestart: true }
     pass.checks.door = { ...(await judgeDoor()), afterRestart: true }
-  } else if (options.restore === true) {
-    pass.restore = await guardedRestore({ graceDone: true })
-    if (pass.restore.broughtBack === true) {
-      refreshDeploymentTarget()
-      pass.checks.gate = { ...(await judgeGate()), restored: true }
-      pass.checks.process = { ...judgeProcess(), restored: true }
-      pass.checks.door = { ...(await judgeDoor()), restored: true }
-    }
   }
 }
 pass.checks.load = pass.checks.gate.verdict === 'pass' ? await judgeLoad() : { verdict: 'unjudged', detail: 'the gate did not serve the app, so the page was not loaded' }
@@ -954,10 +876,6 @@ if (options.json === true) {
         ? `outage      restart  down at first reading, answered again after ${pass.outage.recoveredAfterMs}ms (agent ${pass.outage.agentRunning ? 'running' : 'not running'})`
         : `outage      OUTAGE  still down after ${pass.outage.windowMs}ms (agent ${pass.outage.agentRunning ? 'running' : 'not running'})`,
     )
-  }
-  if (pass.restore !== undefined) {
-    if (pass.restore.withheld === true) say(`restore     held  ${pass.restore.reason}`)
-    else say(`restore     ${pass.restore.broughtBack ? 'used' : 'FAILED'}  ${pass.restore.note ?? pass.restore.error ?? ''} (${pass.restore.waitedMs}ms)`)
   }
   say(`process     ${mark(pass.checks.process.verdict)}  ${pass.checks.process.detail}`)
   say(`door        ${mark(pass.checks.door.verdict)}  ${pass.checks.door.detail}`)
