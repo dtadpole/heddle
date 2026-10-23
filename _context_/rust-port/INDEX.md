@@ -28,7 +28,8 @@ and what is cited from them is written below.
 |---|---|---|---|---|
 | 2026-10-22 | TypeScript heddle, deployed on the Mac | `http://localhost:8082/` | `meta[name=heddle-page]` = `dd6d45d28567` | title `Heddle`; 53 tree items; composer present; seat shown in the composer |
 | 2026-10-22 | DSH reference | `http://127.0.0.1:8080/` | `window.__DSH_BOOT__` keys `rev`, `entries`, `batches` | title `DeepSeek Harness`; no token wall; 10 workspaces; composer present |
-| — | Rust heddle, served from the build host | `http://localhost:8081/` (SSH forward) | `meta[name=heddle-page]` | not yet served: the binary answers only `--help` |
+| 2026-10-22 | TypeScript build as a stand-in on the build host, through the forward | `http://localhost:8081/` | `meta[name=heddle-page]` = `dd6d45d28567` | 401 without the token; with it title `Heddle`, composer present, no workspaces, seat `scripted` |
+| — | Rust heddle, same address | `http://localhost:8081/` | `meta[name=heddle-page]` | not yet served |
 
 ## Read next
 
