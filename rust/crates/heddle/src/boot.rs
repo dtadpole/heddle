@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use heddle_config::{ComposedRow, Env, LayerOptions, NamedLayer};
 
-use crate::builtins::{Catalog, ComponentRef};
+use crate::builtins::{Catalog, Component, ComponentRef, resolve_component};
 use crate::services::Services;
 
 /// An entry's lifecycle, numbered as Cordis's `FiberState` in `src/fiber.ts`, whose names the tree prints.
@@ -109,17 +109,105 @@ pub struct Boot {
 /// Compose the layers through `heddle-config` (`default_layers`, the overrides, `compose`), then
 /// [`load`] the rows against `anchor_dir` of those layers and announce `heddle/ready`.
 pub fn boot(options: &BootOptions, catalog: &dyn Catalog) -> Result<Boot, BootError> {
-    let _ = (options, catalog);
-    todo!(
-        "port boot() from src/boot.ts over default_layers, compose and anchor_dir of heddle-config"
-    )
+    let mut layers = heddle_config::default_layers(&options.layers, &options.env)
+        .map_err(|error| BootError(error.to_string()))?;
+    // The flags' in-memory layers come after every file layer, as `src/boot.ts` appends them.
+    layers.extend(options.overrides.iter().cloned());
+    let rows = heddle_config::compose(&layers, &options.env)
+        .map_err(|error| BootError(error.to_string()))?;
+    // Relative row names resolve against the base layer's own directory, never the working
+    // directory: measured in the TypeScript build, and the reason a fixture's `./alpha.ts` means the
+    // file beside the layer that wrote it. A tree with no file layer at all has only the working
+    // directory to fall back on, which is what `.` is.
+    let anchor = heddle_config::anchor_dir(&layers).unwrap_or_else(|| PathBuf::from("."));
+    Ok(load(rows, &anchor, catalog))
 }
 
 /// Start the rows: the loader. Disabled rows get no entry; every other row gets one, started as soon as
 /// what it requires is provided, repeatedly, until nothing more can start.
 pub fn load(rows: Vec<ComposedRow>, anchor: &Path, catalog: &dyn Catalog) -> Boot {
-    let _ = (rows, anchor, catalog);
-    todo!("start each ready entry until a fixed point; unready entries stay pending")
+    let mut services = Services::new();
+    let mut entries = Vec::new();
+    // The component each entry starts, in the entries' own order; `None` when the row names nothing
+    // the catalog knows, which leaves that entry failed rather than pending forever.
+    let mut starters: Vec<Option<(Box<dyn Component>, serde_json::Value)>> = Vec::new();
+    for composed in &rows {
+        let row = &composed.row;
+        if row.disabled == Some(true) {
+            continue;
+        }
+        let reference = resolve_component(&row.component(anchor));
+        let component = catalog.component(&reference);
+        let mut requires = component
+            .as_ref()
+            .map(|component| component.requires())
+            .unwrap_or_default();
+        // A row's own `inject` adds to the module's, in the order the row wrote it, without repeats:
+        // the gate is a set of service names, not a sequence.
+        for name in row.inject.iter().flatten() {
+            if !requires.contains(name) {
+                requires.push(name.clone());
+            }
+        }
+        let (state, error) = match &component {
+            Some(_) => (FiberState::Pending, None),
+            None => (
+                FiberState::Failed,
+                Some(format!(
+                    "nothing answers for '{}'; it is neither a built-in nor a component this binary knows",
+                    row.name
+                )),
+            ),
+        };
+        let config = row.config.clone().unwrap_or(serde_json::Value::Null);
+        entries.push(Entry {
+            id: row.id.clone().unwrap_or_else(|| row.name.clone()),
+            name: row.name.clone(),
+            component: reference,
+            requires,
+            state,
+            error,
+        });
+        starters.push(component.map(|component| (component, config)));
+    }
+
+    // Start whatever is ready, repeatedly, until nothing more can start. Row order carries no load
+    // semantics, so an entry later in the tree starts in the same sweep once its service exists.
+    loop {
+        let mut started_any = false;
+        for (index, entry) in entries.iter_mut().enumerate() {
+            if entry.state != FiberState::Pending
+                || !entry.requires.iter().all(|name| services.provides(name))
+            {
+                continue;
+            }
+            entry.state = FiberState::Loading;
+            match starters[index].as_ref() {
+                Some((component, config)) => match component.start(config, &mut services) {
+                    Ok(()) => entry.state = FiberState::Active,
+                    Err(message) => {
+                        entry.state = FiberState::Failed;
+                        entry.error = Some(message);
+                    }
+                },
+                None => {
+                    entry.state = FiberState::Failed;
+                    entry.error = Some(format!("nothing answers for '{}'", entry.name));
+                }
+            }
+            started_any = true;
+        }
+        if !started_any {
+            break;
+        }
+    }
+
+    Boot {
+        rows,
+        entries,
+        services,
+        anchor: anchor.to_path_buf(),
+    }
 }
 
 /// The ids of entries that have not finished loading: port of `settle`.
@@ -145,8 +233,16 @@ pub fn failed_entries(boot: &Boot) -> Vec<(String, String)> {
 
 impl Boot {
     /// Stop every started entry in reverse order and withdraw what it provided: `ctx.fiber.dispose()`.
-    pub fn dispose(self) {
-        todo!("dispose entries in reverse creation order")
+    ///
+    /// The registry is dropped as a whole after the entries are marked: a component's `start` owns
+    /// whatever it provided, and with the tree gone nothing can read it any more.
+    pub fn dispose(mut self) {
+        for entry in self.entries.iter_mut().rev() {
+            if entry.state == FiberState::Active {
+                entry.state = FiberState::Disposed;
+            }
+        }
+        self.services = Services::new();
     }
 }
 
@@ -185,6 +281,210 @@ mod tests {
     }
 
     // The three cases of test/boot.test.ts, which pinned the bug where a loading row did not count.
+    use crate::builtins::Builtin;
+
+    /// A component the loader tests can start, refuse, or leave waiting on a service.
+    #[derive(Clone)]
+    struct Stub {
+        requires: Vec<String>,
+        provides: Option<String>,
+        refuses: bool,
+    }
+
+    impl Stub {
+        fn new(requires: &[&str], provides: Option<&str>) -> Self {
+            Self {
+                requires: requires.iter().map(|name| (*name).to_owned()).collect(),
+                provides: provides.map(str::to_owned),
+                refuses: false,
+            }
+        }
+    }
+
+    impl Component for Stub {
+        fn requires(&self) -> Vec<String> {
+            self.requires.clone()
+        }
+
+        fn schema(&self) -> Option<heddle_config::Schema> {
+            None
+        }
+
+        fn start(
+            &self,
+            _config: &serde_json::Value,
+            services: &mut Services,
+        ) -> Result<(), String> {
+            if self.refuses {
+                return Err("the stub refused to start".to_owned());
+            }
+            if let Some(name) = &self.provides {
+                services.provide(name, ());
+            }
+            Ok(())
+        }
+    }
+
+    /// A catalog with one stub per built-in, so the loader can be judged without a crate.
+    struct Stubs {
+        entries: Vec<(Builtin, Stub)>,
+    }
+
+    impl Stubs {
+        fn new(entries: &[(Builtin, Stub)]) -> Self {
+            Self {
+                entries: entries.to_vec(),
+            }
+        }
+    }
+
+    impl Catalog for Stubs {
+        fn component(&self, reference: &ComponentRef) -> Option<Box<dyn Component>> {
+            match reference {
+                ComponentRef::Builtin(builtin) => self
+                    .entries
+                    .iter()
+                    .find(|(candidate, _)| candidate == builtin)
+                    .map(|(_, stub)| Box::new(stub.clone()) as Box<dyn Component>),
+                _ => None,
+            }
+        }
+    }
+
+    fn row(id: &str, name: &str) -> ComposedRow {
+        ComposedRow {
+            row: heddle_config::EntryRow {
+                id: Some(id.to_owned()),
+                name: name.to_owned(),
+                ..heddle_config::EntryRow::default()
+            },
+            position: 0,
+            fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_entry_starts_only_once_the_services_it_requires_are_provided() {
+        // The requiring row comes first on purpose: row order carries no load semantics.
+        let rows = vec![
+            row("session", "./src/plugins/session.ts"),
+            row("greeting", "./src/plugins/greeting.ts"),
+        ];
+        let catalog = Stubs::new(&[
+            (Builtin::Session, Stub::new(&["greeting"], None)),
+            (Builtin::Greeting, Stub::new(&[], Some("greeting"))),
+        ]);
+        let boot = load(rows, Path::new("/repo"), &catalog);
+        assert_eq!(
+            boot.entries
+                .iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![FiberState::Active, FiberState::Active]
+        );
+        assert!(boot.services.provides("greeting"));
+        assert!(settle(&boot).is_empty());
+    }
+
+    #[test]
+    fn an_entry_that_never_gets_its_service_stays_pending_and_settle_names_it() {
+        let catalog = Stubs::new(&[(Builtin::Announce, Stub::new(&["greeting"], None))]);
+        let boot = load(
+            vec![row("announce", "./src/plugins/announce.ts")],
+            Path::new("/repo"),
+            &catalog,
+        );
+        assert_eq!(boot.entries[0].state, FiberState::Pending);
+        assert_eq!(settle(&boot), vec!["announce".to_owned()]);
+    }
+
+    #[test]
+    fn a_row_inject_adds_to_the_modules_own_requires() {
+        let catalog = Stubs::new(&[(Builtin::Greeting, Stub::new(&[], Some("greeting")))]);
+        let mut composed = row("greeting", "./src/plugins/greeting.ts");
+        composed.row.inject = Some(vec!["extra".to_owned(), "greeting".to_owned()]);
+        let boot = load(vec![composed], Path::new("/repo"), &catalog);
+        assert_eq!(
+            boot.entries[0].requires,
+            vec![
+                "extra".to_owned(),
+                "greeting".to_owned(),
+                // The module's own requires come first, and the row's "greeting" is already there.
+            ]
+        );
+        assert_eq!(boot.entries[0].state, FiberState::Pending);
+    }
+
+    #[test]
+    fn a_refused_start_leaves_the_row_failed_with_its_sentence() {
+        let catalog = Stubs::new(&[(
+            Builtin::Session,
+            Stub {
+                refuses: true,
+                ..Stub::new(&[], Some("session"))
+            },
+        )]);
+        let boot = load(
+            vec![row("session", "./src/plugins/session.ts")],
+            Path::new("/repo"),
+            &catalog,
+        );
+        assert_eq!(boot.entries[0].state, FiberState::Failed);
+        assert_eq!(
+            boot.entries[0].error.as_deref(),
+            Some("the stub refused to start")
+        );
+        assert!(settle(&boot).is_empty(), "failed is settled");
+        assert_eq!(
+            failed_entries(&boot),
+            vec![("session".to_owned(), "./src/plugins/session.ts".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_row_that_names_nothing_the_catalog_knows_fails_naming_it() {
+        let catalog = Stubs::new(&[]);
+        let boot = load(
+            vec![row("alpha", "./alpha.ts")],
+            Path::new("/repo"),
+            &catalog,
+        );
+        assert_eq!(boot.entries[0].component, {
+            ComponentRef::Outside(PathBuf::from("/repo/alpha.ts"))
+        });
+        assert_eq!(boot.entries[0].state, FiberState::Failed);
+        assert!(
+            boot.entries[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("./alpha.ts")),
+            "the failure names the row's own spelling"
+        );
+    }
+
+    #[test]
+    fn a_disabled_row_gets_no_entry_at_all() {
+        let catalog = Stubs::new(&[(Builtin::Greeting, Stub::new(&[], Some("greeting")))]);
+        let mut composed = row("greeting", "./src/plugins/greeting.ts");
+        composed.row.disabled = Some(true);
+        let boot = load(vec![composed], Path::new("/repo"), &catalog);
+        assert!(boot.entries.is_empty());
+        assert_eq!(
+            boot.rows.len(),
+            1,
+            "the row is still visible in the composition"
+        );
+    }
+
+    #[test]
+    fn a_row_without_an_id_is_labelled_by_its_name() {
+        let catalog = Stubs::new(&[(Builtin::Greeting, Stub::new(&[], Some("greeting")))]);
+        let mut composed = row("greeting", "./src/plugins/greeting.ts");
+        composed.row.id = None;
+        let boot = load(vec![composed], Path::new("/repo"), &catalog);
+        assert_eq!(boot.entries[0].id, "./src/plugins/greeting.ts");
+    }
+
     #[test]
     fn settle_counts_a_loading_row_as_unsettled_not_only_a_pending_one() {
         let boot = tree_with(&[FiberState::Active, FiberState::Loading, FiberState::Pending]);
