@@ -1,6 +1,6 @@
 ---
 title: Verifier 15 — Deployment
-version: 1.3.0
+version: 1.4.0
 description: the page the owner actually sees is the deployment checkout's build, served by a process running that checkout, and that checkout contains only committed main — on macOS behind the gate, on a Linux host behind the owner's SSH forward, with the TypeScript build or the binary HEDDLE_BIN names.
 grounded_in:
   - source: owner statement 2026-10-17 that a worktree may carry initial verification but the job is not done until merged to main and the deployment is verified
@@ -82,6 +82,12 @@ third check reads as `detached exactly at origin/main`.
 **Measured on the Linux deployment host on 2026-10-22** — that host's earlier arrangement (TypeScript build,
 `~/heddle-live` detached at `origin/main`, the server owning 127.0.0.1:8082 behind the owner's SSH forward): 3
 checks, 3 passed.
+
+**Measured on the owner's Mac again after the tooling merge reached main** (deployment at `1bcff7e`, the agent
+running `supervisor.mjs`): **3 checks, 3 passed** from `~/heddle-live`, and with the agent booted out the same run
+answers **verdict 3** (`2 of 3 could not be judged`: the checkout check still passes, the live-service and page
+checks skip). That is the third check passing on `main` for the first time — before this merge the check demanded a
+local branch `main` that a deployment worktree cannot hold.
 
 ## Why this exists
 
