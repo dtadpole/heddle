@@ -186,8 +186,14 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
       const rect = gutter.getBoundingClientRect()
       gutter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: rect.left + 1, clientY: rect.top + 120, pointerId: 11 }))
     })()`)
-    // The affordances fade in over 120ms; a computed style read mid-transition would see the old value.
-    await new Promise((resolve) => setTimeout(resolve, 250))
+    // The affordances fade in over 120ms; a computed style read mid-transition would see the old value. A fixed 250ms
+    // wait read the band mid-fade under load (0.9836 and 0.9996 against the Rust binary, on main and on a candidate
+    // alike), so the read waits, bounded, for both to settle. The assertions below still require exactly 1: a band
+    // that never reaches it fails with the value it stopped at.
+    await browser.waitFor(`(() => {
+      const gutter = document.getElementById('gutter-left')
+      return getComputedStyle(gutter, '::before').opacity === '1' && getComputedStyle(gutter, '::after').opacity === '1'
+    })()`, 2_000)
     const draggingAffordance = JSON.parse(
       await browser.evaluate(`(() => {
         const gutter = document.getElementById('gutter-left')
