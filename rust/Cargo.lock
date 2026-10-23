@@ -639,6 +639,7 @@ dependencies = [
  "heddle-agent",
  "heddle-config",
  "heddle-context",
+ "heddle-events",
  "heddle-goal",
  "heddle-llm",
  "heddle-sandbox",
@@ -649,6 +650,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
