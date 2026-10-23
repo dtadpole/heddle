@@ -336,6 +336,12 @@ version = "0.0.1"
 [[package]]
 name = "heddle-web-files"
 version = "0.0.1"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "heddle-web-trajectory"
