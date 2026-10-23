@@ -1,6 +1,8 @@
 ---
 title: The heddle-todo crate
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:06:23Z
+version: 0.3.0
 description: The Rust port crate for a session's todo list — durable todo/write snapshots, the fold, the model's two tools and the route the dock reads — its public API and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
