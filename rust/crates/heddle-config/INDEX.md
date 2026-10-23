@@ -224,6 +224,7 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | main `5c87849` (the candidate re-made without the failing `runtime.rs`: bus, team, context, LLM, session and workspace merges) | `HEDDLE_BIN=<debug build of exactly 5c87849> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0 |
 | 2026-10-22 | lane `5615f07` (`--turn` starts the stream view; hook ports over the bus; sandbox shell seam) | `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0 |
 | 2026-10-22 | main `29cec5b` (`5615f07` plus status docs and three lockfile lines filling in `heddle-events`' path dependencies, which its manifest already declared; no external version moved) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
+| 2026-10-22 | main `c572061` (the tools verifier writes each outside tool as a process; no Rust source, lockfile, 05 verifier or runner changed since `29cec5b`) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
 
 ## Decisions the contract makes
 
