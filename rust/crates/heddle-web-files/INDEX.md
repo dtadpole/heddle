@@ -39,15 +39,32 @@ Three findings are recorded where they were made, because each changes a decisio
   string and the attribute allow-list never runs. The page assigns that answer to `innerHTML`
   (`src/server/page.html:9126` and `:4887`), so the handler reaches the DOM and the browser runs it when `src="x"`
   fails to load: `sanitizeHtml('<img src="x" onerror="alert(1)"/>')` returns its input unchanged. The same branch
-  also corrupts what follows such a tag — `<p>Hello <img …/></p>\n` came back as `<p>Hello <img … />/p>\n`, the
-  `</p>`'s `<` consumed. [`sanitize`](src/sanitize.rs) ends a tag at `/>`, so both are fixed and pinned by
-  `a_self_closed_tag_is_reduced_and_never_passed_through_whole`; on this input the port is stricter than
-  `sanitize.ts`, not different. The TypeScript tree on `main` still carries it (2026-10-22).
+  also corrupts what follows such a tag: `<p/>text` came back as `<p />ext` (the byte after the tag is consumed) and
+  `<span onclick="alert(1)"/>x</span>` as `<span /></span>` (the `x` is lost). [`sanitize`](src/sanitize.rs) ends a
+  tag at `/>`, so both are fixed and pinned by `a_self_closed_tag_is_reduced_and_never_passed_through_whole` and
+  `a_self_closed_tag_does_not_eat_the_text_after_it`; on these inputs the port is stricter than `sanitize.ts`, not
+  different. The TypeScript tree on `main` still carries it (2026-10-22).
 - **`comrak` cannot emit an attribute**, and a link to a workspace file needs `data-heddle-path` while a refused link
   must lose its anchor. Both are done in one pass over the rendered document
   ([`markdown::rewrite_anchors`](src/markdown.rs)), with a marker only this crate can write as the signal.
 - **The highlighter's JSON keys are `meta.mapping.key.*` scopes**, not `meta.structure.dictionary.*`; the mapping was
   measured against the syntax set rather than assumed.
+
+## The port against its oracle
+
+Two differential runs, the oracle being the TypeScript build's own code (its `code.ts`/`markdown.ts`/`highlight.ts`/
+`sanitize.ts` copied to a scratch tree with the installed dependencies, so nothing was written into the repository):
+
+- **Rendering, 24 real files**: 12 markdown documents (tables with alignment, fences, lists, images, code spans,
+  panel links), 9 source files (JSON, YAML, TOML, TypeScript, Rust, shell) and `LICENSE`. Per file the renderer, the
+  language and a feature vector — headings by level, tables, header and body cells, fences, list items, strong, em,
+  code, anchors, panel links, images, blockquotes, rules, strikethrough, surviving `<script>`, inline handlers —
+  are **equal to the TypeScript build's on every file**. No divergence.
+- **The scanner, 41 adversarial inputs**: entities, mixed quoting, unquoted and valueless attributes, numeric
+  attributes, comments, declarations, processing instructions, uppercase tags, unclosed tags, a stray `<`, unicode,
+  a `>` inside a value, and the self-closed shapes. **36 are byte-identical**; the 5 that differ are all the `/>`
+  family above, where the TypeScript scanner is wrong: the raw-input bypass (2 inputs) and the lost byte after a
+  self-closed tag (3 inputs).
 
 ## Evidence for step 10, as far as it can be judged today
 
