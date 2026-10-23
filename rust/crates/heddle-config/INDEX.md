@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:26:08Z
+modified: 2026-10-23T05:27:57Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -278,6 +278,7 @@ it judges.
 | 2026-10-22 | main `43fd346` (`3f8f744`: agent, team and events increments, a real outside component driven through the listeners, and the lockfile; `43fd346` adds a status doc) | `HEDDLE_BIN=<debug build of exactly 3f8f744> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated `3f8f744` and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
 | 2026-10-22 | lane `325cb67` (`ContextReport` has a `Default`; `heddle-context` changed) | `HEDDLE_BIN=<debug build of exactly 325cb67> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, made after the candidate on a clean lane; the lane gate with each | 10/10 passed, verdict 0, both binaries; lane gate green |
 | 2026-10-22 | lane `ee5fa0d` (the LLM crate's adapter-call entry point for the endpoint validator, and the shell's confinement on the real Seatbelt backend; `heddle-llm` and `heddle-tools` changed, no new `heddle-config` calls) | `HEDDLE_BIN=<debug build of exactly ee5fa0d> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `5612131` (the agent's `ContextReport` is `heddle-context`'s own; `heddle-agent`, `heddle-events` and `heddle-team` changed) | `HEDDLE_BIN=<debug build of exactly 5612131> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 
 ## Decisions the contract makes
 
