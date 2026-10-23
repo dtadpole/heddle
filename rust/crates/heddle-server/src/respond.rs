@@ -476,8 +476,10 @@ mod tests {
 
     #[test]
     fn a_session_id_is_session_plus_thirty_six_hex_or_dash() {
+        // Placeholder-shaped vectors only (D-046): the nil id and the version-4 placeholder. Upper-case
+        // hex is accepted by construction (`is_ascii_hexdigit`), as web.ts's `/i` regex accepts it.
         assert!(SessionId::parse("session-00000000-0000-0000-0000-000000000000").is_some());
-        assert!(SessionId::parse("session-ABCDEF00-0000-0000-0000-000000000000").is_some());
+        assert!(SessionId::parse("session-00000000-0000-4000-8000-000000000001").is_some());
         for bad in [
             "",
             "session-",

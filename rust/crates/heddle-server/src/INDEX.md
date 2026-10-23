@@ -9,12 +9,13 @@ grounded_in:
 
 # `rust/crates/heddle-server/src`
 
-The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code. 134 tests pass with
+The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code. 140 tests pass with
 `cargo test --manifest-path rust/Cargo.toml -p heddle-server`.
 
 | File | What it is |
 |---|---|
 | [`lib.rs`](lib.rs) | the crate root, its shape, and the re-exports |
+| [`command.rs`](command.rs) | `heddle web`'s entry point (D-043): dry run, start, announce, serve until shutdown |
 | [`adapters.rs`](adapters.rs) | the service traits over the real crates: the session store adapter and its event listener |
 | [`token.rs`](token.rs) | the launch token, the signing secret, the cookie, `authorize` |
 | [`fence.rs`](fence.rs) | the Host and Origin fence and the cross-site write rule |
