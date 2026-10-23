@@ -176,6 +176,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 20:31 | `eaaa6bb` (Rust status run) | `eaaa6bb`, clean | 8082 200, healthz 200, page identical; a turn answers with the labelled offline fixture (D-030), 0 errors; 96 3/3 with the branch's checks, 2/3 with main's |
 | 20:44 | `51f198b` (the tooling merge landed as `085caaf`) | `51f198b`, clean | installed by the deployment's own `install.sh` with **no override** (it accepts detached-at-`origin/main` now); the agent runs `supervisor.mjs`; **95 4/4 and 96 3/3, both run from `~/heddle-live`**; a SIGKILL of the port's process left a new pid answering within **one second** with no guard running |
 | 20:47 | `c67f5ad` (Rust lockfile chore) | `c67f5ad`, clean | 95 **4/4** (949 ms) and 96 **3/3** (521 ms) from the deployment; page unchanged (533,283 / 533,280, marker `dd6d45d28567`); a turn answers with the fixture, 0 errors |
+| 20:50 | `1bcff7e` (backend merges under the status-docs commits) | `1bcff7e`, clean | 95 **4/4** and 96 **3/3** from the deployment; page unchanged (same marker and byte counts); gate 200, healthz 200 |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
