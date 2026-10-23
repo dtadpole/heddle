@@ -151,12 +151,11 @@ pub fn tool_pairing_balanced_before(nodes: &[SurfaceNode], index: usize) -> bool
     // answered would otherwise make the whole conversation un-compactable.
     let mut answered: HashSet<&str> = HashSet::new();
     for node in nodes {
-        if let Some(message) = &node.message {
-            if message.role == Role::Tool {
-                if let Some(id) = message.tool_call_id.as_deref() {
-                    answered.insert(id);
-                }
-            }
+        if let Some(message) = &node.message
+            && message.role == Role::Tool
+            && let Some(id) = message.tool_call_id.as_deref()
+        {
+            answered.insert(id);
         }
     }
 
@@ -167,16 +166,16 @@ pub fn tool_pairing_balanced_before(nodes: &[SurfaceNode], index: usize) -> bool
         };
         if message.role == Role::Assistant {
             for part in &message.content {
-                if let ContentPart::ToolCall { id, .. } = part {
-                    if answered.contains(id.as_str()) {
-                        open.insert(id.as_str());
-                    }
+                if let ContentPart::ToolCall { id, .. } = part
+                    && answered.contains(id.as_str())
+                {
+                    open.insert(id.as_str());
                 }
             }
-        } else if message.role == Role::Tool {
-            if let Some(id) = message.tool_call_id.as_deref() {
-                open.remove(id);
-            }
+        } else if message.role == Role::Tool
+            && let Some(id) = message.tool_call_id.as_deref()
+        {
+            open.remove(id);
         }
     }
     open.is_empty()
@@ -292,16 +291,16 @@ impl CompactionEngine {
         let mut messages: Vec<Message> = Vec::new();
         // The replayed prefix is what the last request carried: the prompt as it stands, then
         // the span.
-        if let Some(head) = surface.first().and_then(|node| node.message.as_ref()) {
-            if head.role == Role::System {
-                messages.push(head.clone());
-            }
+        if let Some(head) = surface.first().and_then(|node| node.message.as_ref())
+            && head.role == Role::System
+        {
+            messages.push(head.clone());
         }
         for seq in &plan.shadowed_seqs {
-            if let Some(node) = surface.iter().find(|node| node.seq == *seq) {
-                if let Some(message) = &node.message {
-                    messages.push(message.clone());
-                }
+            if let Some(node) = surface.iter().find(|node| node.seq == *seq)
+                && let Some(message) = &node.message
+            {
+                messages.push(message.clone());
             }
         }
         messages.push(Message::text(Role::User, COMPACTION_INSTRUCTION));
@@ -567,7 +566,7 @@ mod tests {
             .surface(session)
             .expect("the surface folds")
             .content_generation;
-        TokenMeter::default().measure(&MeterInput {
+        TokenMeter.measure(&MeterInput {
             nodes: &nodes,
             tools: &[],
             usage: None,

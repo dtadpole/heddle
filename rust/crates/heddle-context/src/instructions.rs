@@ -66,10 +66,10 @@ pub fn find_project_root(cwd: &Path, markers: &[&str]) -> Option<PathBuf> {
                 return Some(current);
             }
             let head = current.join(marker).join("HEAD");
-            if let Ok(bytes) = std::fs::read(&head) {
-                if !bytes.is_empty() {
-                    return Some(current);
-                }
+            if let Ok(bytes) = std::fs::read(&head)
+                && !bytes.is_empty()
+            {
+                return Some(current);
             }
         }
         let parent = current.parent()?;
@@ -183,23 +183,23 @@ pub fn render_instruction_baseline_with_home(
         omitted.push(dropped.path);
     }
 
-    if let Some(last) = included.last().cloned() {
-        if size(&included) + NOTICE_BYTES > max_bytes {
-            let preceding = size(&included[..included.len() - 1]);
-            let allowance = max_bytes.saturating_sub(NOTICE_BYTES + preceding);
-            let index = included.len() - 1;
-            included[index] = InstructionFile {
-                path: last.path,
-                text: format!(
-                    "{}\n… [truncated to fit the instruction budget]",
-                    // A JavaScript byte slice may end inside a character and read back as U+FFFD;
-                    // a Rust `String` cannot, so the cut backs up to the nearest character
-                    // boundary instead.
-                    truncate_utf8(&last.text, allowance)
-                ),
-            };
-            truncated = true;
-        }
+    if let Some(last) = included.last().cloned()
+        && size(&included) + NOTICE_BYTES > max_bytes
+    {
+        let preceding = size(&included[..included.len() - 1]);
+        let allowance = max_bytes.saturating_sub(NOTICE_BYTES + preceding);
+        let index = included.len() - 1;
+        included[index] = InstructionFile {
+            path: last.path,
+            text: format!(
+                "{}\n… [truncated to fit the instruction budget]",
+                // A JavaScript byte slice may end inside a character and read back as U+FFFD;
+                // a Rust `String` cannot, so the cut backs up to the nearest character
+                // boundary instead.
+                truncate_utf8(&last.text, allowance)
+            ),
+        };
+        truncated = true;
     }
 
     let body = included
@@ -268,12 +268,11 @@ fn marker_text(
 
 /// A path a reader recognises: home-relative for a file under it, absolute otherwise.
 fn display_path(path: &Path, os_home: Option<&Path>) -> String {
-    if let Some(home) = os_home {
-        if let Ok(rest) = path.strip_prefix(home) {
-            if !rest.as_os_str().is_empty() {
-                return format!("~/{}", rest.display());
-            }
-        }
+    if let Some(home) = os_home
+        && let Ok(rest) = path.strip_prefix(home)
+        && !rest.as_os_str().is_empty()
+    {
+        return format!("~/{}", rest.display());
     }
     path.display().to_string()
 }

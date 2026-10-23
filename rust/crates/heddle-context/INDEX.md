@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -18,7 +18,7 @@ the routed endpoint's window, reduced by pruning before it is reduced by compact
 | Ported from | `src/context/` (1,726 lines in seven files) |
 | Judged by | `_verifiers_/30-context-management`, through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| State | public API declared, bodies `todo!()`; the port order is below |
+| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each. Step 5 (the real `heddle-llm` types and `heddle-session` store) and step 6 (the verifier through the binary) wait on those crates and the command line |
 
 ## Public API
 
@@ -83,19 +83,20 @@ its own stand-ins:
 Each step lands with its unit tests (`cargo test --manifest-path rust/Cargo.toml -p heddle-context`), ported from
 the TypeScript tests named.
 
-1. **This API.**
+1. **This API.** Landed.
 2. **The pure modules**: `text`, `types`, `meter`, `budget`, `prune_text`, `pairing`, `runtime`, `instructions` —
    from `test/meter.test.ts`, `test/prune.test.ts` (the text half), `test/context-pairing.test.ts`, plus new tests
-   for the instruction budget, the digest and the JavaScript string rules.
+   for the instruction budget, the digest and the JavaScript string rules. Landed.
 3. **`MemoryStore`, the pruner and the engine** — `test/prune.test.ts`, `test/surface.test.ts` (as the double's
    own tests), and the verifier's in-process scenario: a cut aimed inside a tool pair backs off before it, and a
    20,000-character summary is refused with the surface unchanged; a second compaction over out-of-order seqs.
+   Landed.
 4. **The service** — `test/runtime-context.test.ts`, `test/session-folder.test.ts` (the baseline half), the usage
-   anchor, and overflow recovery with a scripted `ModelAccess`.
+   anchor, and overflow recovery with a scripted `ModelAccess`. Landed.
 5. **The real dependencies**: swap `types` for `heddle-llm`'s, implement `ContextStore` for `heddle-session`'s
-   store, and run the same tests against it.
+   store, and run the same tests against it. **Waiting**: neither crate's API is on `main` yet.
 6. **The verifier**: with the loop and the command line composed, `30-context-management` through `HEDDLE_BIN`,
-   reported to the lane integrator with the command and the date.
+   reported to the lane integrator with the command and the date. **Waiting** on the loop and the command line.
 
 ## Deliberate differences from the TypeScript build
 

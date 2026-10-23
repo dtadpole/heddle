@@ -148,17 +148,15 @@ impl MemoryStore {
             .and_then(|value| serde_json::from_value(value.clone()).ok());
         // The surface head holds the system prompt, and only a system message over exactly
         // that node may rewrite it.
-        if start == Some(0) {
-            if let Some(head) = self.derive_node(session, shadowed[0])? {
-                if head.role == Role::System
-                    && (replacement.as_ref().map(|message| message.role) != Some(Role::System)
-                        || shadowed.len() != 1)
-                {
-                    return Err(refusal(
-                        "the surface head holds the system prompt and may be rewritten only by a system message over exactly that node",
-                    ));
-                }
-            }
+        if start == Some(0)
+            && let Some(head) = self.derive_node(session, shadowed[0])?
+            && head.role == Role::System
+            && (replacement.as_ref().map(|message| message.role) != Some(Role::System)
+                || shadowed.len() != 1)
+        {
+            return Err(refusal(
+                "the surface head holds the system prompt and may be rewritten only by a system message over exactly that node",
+            ));
         }
         // A tool result answers one call, and a tool result may rewrite only that one.
         for seq in &shadowed {
@@ -171,12 +169,11 @@ impl MemoryStore {
             if let Some(replacement) = replacement
                 .as_ref()
                 .filter(|message| message.role == Role::Tool)
+                && (shadowed.len() != 1 || replacement.tool_call_id != original.tool_call_id)
             {
-                if shadowed.len() != 1 || replacement.tool_call_id != original.tool_call_id {
-                    return Err(refusal(
-                        "a tool result may be rewritten only by a tool result for the same call",
-                    ));
-                }
+                return Err(refusal(
+                    "a tool result may be rewritten only by a tool result for the same call",
+                ));
             }
         }
         Ok(())

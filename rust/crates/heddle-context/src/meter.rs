@@ -219,23 +219,22 @@ impl TokenMeter {
         // estimate — a provider total below a deterministic lower bound is either a different
         // envelope or a bad report, and adopting it would hide pressure exactly when the surface
         // is over budget.
-        if let Some(usage) = input.usage {
-            if usage.generation == input.generation {
-                let usage_total =
-                    usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
-                if usage_total >= estimated_total {
-                    return Measurement {
-                        total_tokens: usage_total,
-                        baseline: Baseline {
-                            kind: BaselineKind::Usage,
-                            tokens: usage_total,
-                        },
-                        nodes,
-                        system_tokens,
-                        tools_tokens,
-                        message_tokens,
-                    };
-                }
+        if let Some(usage) = input.usage
+            && usage.generation == input.generation
+        {
+            let usage_total = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
+            if usage_total >= estimated_total {
+                return Measurement {
+                    total_tokens: usage_total,
+                    baseline: Baseline {
+                        kind: BaselineKind::Usage,
+                        tokens: usage_total,
+                    },
+                    nodes,
+                    system_tokens,
+                    tools_tokens,
+                    message_tokens,
+                };
             }
         }
 
@@ -430,7 +429,7 @@ mod tests {
 
     #[test]
     fn usage_below_the_estimate_is_ignored_while_usage_at_or_above_it_is_adopted() {
-        let meter = TokenMeter::default();
+        let meter = TokenMeter;
         let message = user_message("hello world");
         // Three tokens of text, one block of framing, one role of framing.
         let estimated = estimate_message(&message);
@@ -489,7 +488,7 @@ mod tests {
     #[test]
     fn usage_from_a_different_surface_generation_is_ignored() {
         let message = user_message("hello world");
-        let measurement = TokenMeter::default().measure(&MeterInput {
+        let measurement = TokenMeter.measure(&MeterInput {
             nodes: &[MeteredMessage {
                 seq: 1,
                 message: &message,
@@ -510,7 +509,7 @@ mod tests {
     fn measure_splits_the_surface_into_system_message_and_tool_prices() {
         let system = Message::text(Role::System, "you are a harness");
         let message = user_message("hello world");
-        let measurement = TokenMeter::default().measure(&MeterInput {
+        let measurement = TokenMeter.measure(&MeterInput {
             nodes: &[
                 MeteredMessage {
                     seq: 1,
@@ -550,7 +549,7 @@ mod tests {
 
     #[test]
     fn a_session_with_no_nodes_no_tools_and_no_usage_reports_nothing_to_measure() {
-        let measurement = TokenMeter::default().measure(&MeterInput {
+        let measurement = TokenMeter.measure(&MeterInput {
             nodes: &[],
             tools: &[],
             usage: None,
@@ -568,7 +567,7 @@ mod tests {
 
     #[test]
     fn tools_alone_are_enough_to_make_the_baseline_an_estimate() {
-        let measurement = TokenMeter::default().measure(&MeterInput {
+        let measurement = TokenMeter.measure(&MeterInput {
             nodes: &[],
             tools: &[tool()],
             usage: None,
