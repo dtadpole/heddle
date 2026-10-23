@@ -45,6 +45,8 @@ pub struct Host {
     pub attachment_error: Option<String>,
     pub recorded: RecordLog,
     pub switched: SwitchLog,
+    /// Every assembly the route asked for, so a test can check what the query named.
+    pub assembled: Arc<Mutex<Vec<AssembleRequest>>>,
 }
 
 impl Default for Host {
@@ -66,6 +68,7 @@ impl Default for Host {
             attachment_error: None,
             recorded: Arc::new(Mutex::new(Vec::new())),
             switched: Arc::new(Mutex::new(Vec::new())),
+            assembled: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -104,7 +107,11 @@ impl ContextHost for Host {
         self.cwd.clone()
     }
 
-    fn assemble_context(&self, _id: &str, _request: &AssembleRequest) -> ContextAssembly {
+    fn assemble_context(&self, _id: &str, request: &AssembleRequest) -> ContextAssembly {
+        self.assembled
+            .lock()
+            .expect("the assembly log is not poisoned")
+            .push(request.clone());
         self.assembly.clone()
     }
 
