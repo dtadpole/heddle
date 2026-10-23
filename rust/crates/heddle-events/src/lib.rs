@@ -75,6 +75,7 @@
 
 pub mod bridge;
 mod bus;
+pub mod command;
 mod error;
 mod event;
 mod mode;

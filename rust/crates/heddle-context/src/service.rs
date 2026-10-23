@@ -312,6 +312,34 @@ pub trait ModelAccess: Send + Sync {
     fn complete(&self, request: SummaryRequest) -> BoxFuture<'_, Result<String, SummarizeError>>;
 }
 
+/// The model layer itself is a [`ModelAccess`], so a composition hands the service its
+/// `heddle_llm::ModelService` and writes no adapter: the window is the endpoint's (or its model's)
+/// declared `contextWindow`, as `contextWindowFor` reads it, and the summary is one `generate` call
+/// whose text is the answer. A failed call is the model error's sentence, which the engine records as
+/// a refusal.
+impl ModelAccess for heddle_llm::ModelService {
+    fn endpoint_window(&self, endpoint: &str, model: Option<&str>) -> Option<u64> {
+        self.endpoint(endpoint)?.context_window_for(model)
+    }
+
+    fn complete(&self, request: SummaryRequest) -> BoxFuture<'_, Result<String, SummarizeError>> {
+        Box::pin(async move {
+            let generated = self
+                .generate(heddle_llm::GenerateRequest {
+                    endpoint: request.endpoint,
+                    model: request.model,
+                    messages: request.messages,
+                    max_output_tokens: request.max_output_tokens,
+                    purpose: request.purpose,
+                    ..heddle_llm::GenerateRequest::default()
+                })
+                .await
+                .map_err(|error| SummarizeError(error.to_string()))?;
+            Ok(generated.text)
+        })
+    }
+}
+
 /// What the service is given besides its store and configuration.
 #[derive(Clone)]
 pub struct ContextDependencies {
@@ -1895,5 +1923,66 @@ mod tests {
             view.render_text(),
             "heddle: 0 message(s), about 42 token(s)\nheddle: budget 800 of 1000; pruned 1; compacted false\n"
         );
+    }
+
+    #[test]
+    fn the_model_service_is_the_model_access_with_its_window_and_its_compaction_step() {
+        let scratch = Scratch::new("model-service");
+        let script = scratch.path().join("script.json");
+        std::fs::write(
+            &script,
+            serde_json::to_string(&json!({"steps": [
+                { "text": "an ordinary turn" },
+                { "purpose": "compaction", "text": "the briefing" },
+            ]}))
+            .expect("the script serialises"),
+        )
+        .expect("the script is written");
+        let endpoint: heddle_llm::EndpointConfig = serde_json::from_value(json!({
+            "name": "scripted",
+            "kind": "scripted",
+            "baseUrl": script.to_string_lossy(),
+            "model": "scripted",
+            "contextWindow": 1000,
+        }))
+        .expect("the endpoint parses");
+        let models =
+            heddle_llm::ModelService::new(vec![endpoint]).expect("the model service builds");
+
+        assert_eq!(models.endpoint_window("scripted", None), Some(1000));
+        assert_eq!(models.endpoint_window("absent", None), None);
+        let summary = block_on(models.complete(SummaryRequest {
+            endpoint: "scripted".to_string(),
+            model: None,
+            messages: vec![text_message(Role::User, "summarise")],
+            max_output_tokens: Some(1024),
+            purpose: Some("compaction".to_string()),
+        }))
+        .expect("the compaction step answers");
+        assert_eq!(
+            summary, "the briefing",
+            "the step tagged compaction, not the turn's"
+        );
+
+        // Through the service: the budget is the endpoint's window, so the trigger is 800.
+        let (_, service) = build_service(
+            ContextConfig {
+                context_window: Some(5000),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(scratch.path(), Some(Arc::new(models))),
+        );
+        let budget = service
+            .budget(Some("scripted"), None)
+            .expect("the budget resolves");
+        assert_eq!(budget.threshold_tokens, 800);
+        assert_eq!(budget.source, BudgetSource::Endpoint);
+    }
+
+    #[test]
+    fn an_absent_config_row_takes_every_default() {
+        let parsed: ContextConfig = serde_json::from_value(json!({})).expect("an empty row parses");
+        assert_eq!(parsed, ContextConfig::default());
     }
 }

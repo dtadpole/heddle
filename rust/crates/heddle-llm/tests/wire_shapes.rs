@@ -693,7 +693,7 @@ async fn the_verifiers_chat_double_streams_even_to_an_endpoint_that_asked_for_js
             Ok(())
         }
     }
-    let mut view = heddle_llm::command::print_stream("s1", Box::new(Timed(sink)));
+    let view = heddle_llm::command::print_stream("s1", Box::new(Timed(sink)));
 
     let started = std::time::Instant::now();
     let mut stream = service
