@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 10 — the Web UI's token.
@@ -87,7 +87,7 @@ function startCli(args, env) {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -545,8 +545,13 @@ test('the bare URL is refused with an explanation, or served when the cookie mat
      * the server's own secret for a **different authority**, which is a cookie a restart's rotation would
      * leave behind: well-formed, correctly signed, and no longer valid.
      */
-    const { cookieName, mintCookie, readCookie } = await import('../../dist/server/token.js')
-    const { readOrCreateSecret } = await import('../../dist/server/token.js')
+    /**
+     * The token implementation is the contract this cookie is minted against — the same secret, the same
+     * signed shape — and it is imported from the source rather than `dist/`, so the check runs when a binary
+     * is under test and there is no TypeScript build. On the TypeScript build the two are the same code.
+     */
+    const { cookieName, mintCookie, readCookie } = await import('../../src/server/token.ts')
+    const { readOrCreateSecret } = await import('../../src/server/token.ts')
     const { join } = await import('node:path')
     const secret = readOrCreateSecret(join(fixture.home, 'web-secret'))
     const authority = `127.0.0.1:${new URL(server.url).port}`
