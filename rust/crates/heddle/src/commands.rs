@@ -707,15 +707,8 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         stream: None,
         goal: None,
     };
-    let runtime_host = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(host) => host,
-        Err(error) => return out.fail(&format!("cannot start the turn's runtime: {error}")),
-    };
     let (stdout, stderr) = out.writers();
-    let code = runtime_host.block_on(heddle_agent::command::run(
+    let code = crate::runtime::tokio().block_on(heddle_agent::command::run(
         heddle_agent::command::Command::Turn,
         &turn_args,
         &context,
