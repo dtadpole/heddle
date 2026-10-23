@@ -1,0 +1,653 @@
+//! OpenAI's Chat Completions shape — the DeepSeek route and every OpenAI-compatible gateway.
+//!
+//! Ported from `openAiChatAdapter`, `toChatMessage` and `finishFromChatMessage` in `src/llm/adapters.ts`.
+//! `POST {base_url_for(model)}/chat/completions`; streams unless the endpoint or request says not to; ends on
+//! `[DONE]` or the frame carrying `finish_reason`. Reasoning arrives as `reasoning_content` and becomes
+//! [`Chunk::ReasoningDelta`]; tool-call fragments are passed on live as [`Chunk::ToolCallDelta`] and assembled
+//! by `index` into one [`Chunk::ToolCall`] each when the round finishes.
+
+use serde_json::Value;
+
+use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
+use crate::error::ModelError;
+use crate::sse::SseEvent;
+use crate::types::{Chunk, ContentPart, GenerateRequest, Message};
+use heddle_config::EndpointConfig;
+
+/// The Chat Completions adapter for one endpoint.
+#[derive(Debug, Clone)]
+pub struct ChatAdapter {
+    endpoint: EndpointConfig,
+}
+
+impl ChatAdapter {
+    pub fn new(endpoint: EndpointConfig) -> Self {
+        Self { endpoint }
+    }
+}
+
+impl Adapter for ChatAdapter {
+    fn endpoint(&self) -> &EndpointConfig {
+        &self.endpoint
+    }
+
+    fn stream(&self, request: GenerateRequest) -> ChunkStream {
+        let _ = request;
+        todo!("port openAiChatAdapter")
+    }
+}
+
+/// The request as this route takes it: `model`, `messages`, `tools` (as `{type:'function', function:{…}}`),
+/// `max_tokens` (request, else endpoint), `temperature`, `reasoning_effort` (the level's wire value), `stream`
+/// (endpoint's force, else request's, else `true`).
+pub fn chat_request(
+    endpoint: &EndpointConfig,
+    request: &GenerateRequest,
+) -> Result<PreparedCall, ModelError> {
+    let _ = (endpoint, request);
+    todo!("port the openAiChatAdapter body builder")
+}
+
+/// One message in this shape (`toChatMessage`): text parts joined by `\n` as a string `content` (`null` when there
+/// is none); a message with images switches to typed parts with `image_url` data URLs; tool calls become
+/// `tool_calls`; a tool result carries `tool_call_id`.
+pub fn to_chat_message(message: &Message) -> Value {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        // Separate text blocks are separate blocks on the wire; a newline keeps them apart in this form.
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls: Vec<&crate::types::ToolCall> = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    let images: Vec<&crate::types::ImagePart> = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Image(image) if image.data.is_some() => Some(image),
+            _ => None,
+        })
+        .collect();
+
+    let content = if images.is_empty() {
+        if text.is_empty() {
+            Value::Null
+        } else {
+            Value::String(text)
+        }
+    } else {
+        // A message carrying images switches to the typed-parts form, the only shape that can carry an
+        // `image_url`.
+        let mut parts: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(serde_json::json!({ "type": "text", "text": text }));
+        }
+        for image in images {
+            let data = image.data.as_deref().unwrap_or_default();
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{data}", image.mime_type.as_str())
+                }
+            }));
+        }
+        Value::Array(parts)
+    };
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "role".into(),
+        serde_json::to_value(message.role).unwrap_or(Value::Null),
+    );
+    object.insert("content".into(), content);
+    if !calls.is_empty() {
+        object.insert(
+            "tool_calls".into(),
+            Value::Array(
+                calls
+                    .iter()
+                    .map(|call| {
+                        serde_json::json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": { "name": call.name, "arguments": call.arguments }
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(tool_call_id) = &message.tool_call_id {
+        object.insert("tool_call_id".into(), Value::String(tool_call_id.clone()));
+    }
+    Value::Object(object)
+}
+
+/// A non-streamed answer reduced to the same chunks (`finishFromChatMessage`).
+pub fn chunks_from_chat_json(answer: &Value) -> Vec<Chunk> {
+    let choice = answer
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first());
+    let message = choice.and_then(|choice| choice.get("message"));
+    let mut chunks = Vec::new();
+    if let Some(reasoning) = message
+        .and_then(|message| message.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        chunks.push(Chunk::ReasoningDelta {
+            text: reasoning.to_string(),
+        });
+    }
+    if let Some(text) = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        chunks.push(Chunk::TextDelta {
+            text: text.to_string(),
+        });
+    }
+    let calls: Vec<&Value> = message
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+        .map(|calls| calls.iter().collect())
+        .unwrap_or_default();
+    for call in &calls {
+        let function = call.get("function");
+        chunks.push(Chunk::ToolCall(crate::types::ToolCall {
+            id: call
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: function
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            arguments: function
+                .and_then(|function| function.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }));
+    }
+    let finish = choice
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str);
+    chunks.push(Chunk::Done {
+        finish_reason: crate::types::canonical_finish_reason(finish, calls.len()),
+        usage: crate::usage::openai_chat_usage(answer.get("usage").unwrap_or(&Value::Null)),
+    });
+    chunks
+}
+
+/// The streamed fold: deltas, live tool-call fragments, assembly by `index`, `done` on `finish_reason` with usage
+/// from the same frame; `[DONE]` with no finish frame is a plain `stop`.
+#[derive(Debug, Default)]
+pub struct ChatFold {
+    calls: Vec<(u32, crate::types::ToolCall)>,
+}
+
+impl ChatFold {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The call the provider's slot names, created on first sight.
+    fn call(&mut self, index: u32) -> &mut crate::types::ToolCall {
+        if let Some(at) = self.calls.iter().position(|(slot, _)| *slot == index) {
+            return &mut self.calls[at].1;
+        }
+        self.calls.push((index, crate::types::ToolCall::default()));
+        &mut self.calls.last_mut().expect("just pushed").1
+    }
+}
+
+impl StreamFold for ChatFold {
+    fn event(&mut self, event: &SseEvent) -> Result<Folded, ModelError> {
+        // `[DONE]` with no finish frame is a plain stop; a finish frame ends the fold before it.
+        if event.data == "[DONE]" {
+            return Ok(Folded {
+                chunks: vec![Chunk::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                }],
+                finished: true,
+            });
+        }
+        let parsed: Value = match serde_json::from_str(&event.data) {
+            Ok(parsed) => parsed,
+            // An unparseable `data:` is skipped, as the TypeScript read loop does.
+            Err(_) => return Ok(Folded::default()),
+        };
+        let mut chunks = Vec::new();
+        let choice = parsed
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first());
+        if let Some(delta) = choice.and_then(|choice| choice.get("delta")) {
+            if let Some(text) = delta
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                chunks.push(Chunk::ReasoningDelta {
+                    text: text.to_string(),
+                });
+            }
+            if let Some(text) = delta
+                .get("content")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                chunks.push(Chunk::TextDelta {
+                    text: text.to_string(),
+                });
+            }
+            for fragment in delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let index = fragment.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let id = fragment
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty());
+                let function = fragment.get("function");
+                let name = function
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty());
+                let arguments = function
+                    .and_then(|function| function.get("arguments"))
+                    .and_then(Value::as_str);
+                let call = self.call(index);
+                if let Some(id) = id {
+                    call.id = id.to_string();
+                }
+                if let Some(name) = name {
+                    call.name = name.to_string();
+                }
+                if let Some(arguments) = arguments {
+                    call.arguments.push_str(arguments);
+                }
+                // Each fragment is passed on as it lands, so a reader can show the call being written; the
+                // assembled `tool-call` still follows when the round finishes.
+                chunks.push(Chunk::ToolCallDelta {
+                    index,
+                    id: id.map(ToString::to_string),
+                    name: name.map(ToString::to_string),
+                    arguments_delta: arguments.unwrap_or_default().to_string(),
+                });
+            }
+        }
+        if let Some(finish) = choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+            .filter(|finish| !finish.is_empty())
+        {
+            for (_, call) in &self.calls {
+                let id = if call.id.is_empty() {
+                    format!("call-{}", call.name)
+                } else {
+                    call.id.clone()
+                };
+                chunks.push(Chunk::ToolCall(crate::types::ToolCall {
+                    id,
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                }));
+            }
+            let usage =
+                crate::usage::openai_chat_usage(parsed.get("usage").unwrap_or(&Value::Null));
+            chunks.push(Chunk::Done {
+                finish_reason: crate::types::canonical_finish_reason(
+                    Some(finish),
+                    self.calls.len(),
+                ),
+                usage,
+            });
+            return Ok(Folded {
+                chunks,
+                finished: true,
+            });
+        }
+        Ok(Folded {
+            chunks,
+            finished: false,
+        })
+    }
+
+    fn end(&mut self) -> Vec<Chunk> {
+        vec![Chunk::Done {
+            finish_reason: "stop".into(),
+            usage: None,
+        }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::TokenUsage;
+
+    fn sse(data: &str) -> SseEvent {
+        SseEvent {
+            event: None,
+            data: data.to_string(),
+        }
+    }
+
+    fn delta(value: serde_json::Value) -> SseEvent {
+        sse(&serde_json::json!({ "choices": [value] }).to_string())
+    }
+
+    #[test]
+    fn reasoning_and_content_arrive_as_their_own_deltas() {
+        let folded = ChatFold::new()
+            .event(&delta(serde_json::json!({
+                "delta": { "reasoning_content": "hm", "content": "an" }
+            })))
+            .expect("folds");
+        assert_eq!(
+            folded.chunks,
+            vec![
+                Chunk::ReasoningDelta { text: "hm".into() },
+                Chunk::TextDelta { text: "an".into() },
+            ]
+        );
+        assert!(!folded.finished);
+        // An empty delta is no delta.
+        assert!(
+            ChatFold::new()
+                .event(&delta(serde_json::json!({ "delta": { "content": "" } })))
+                .expect("folds")
+                .chunks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn each_tool_call_fragment_is_passed_on_and_the_whole_call_is_assembled_at_the_finish() {
+        let mut fold = ChatFold::new();
+        let fragments = [
+            serde_json::json!({ "index": 0, "id": "call_1", "function": { "name": "write_file", "arguments": "{\"path\":\"" } }),
+            serde_json::json!({ "index": 0, "function": { "arguments": "a.txt\"}" } }),
+        ];
+        let mut deltas = Vec::new();
+        for fragment in fragments {
+            let folded = fold
+                .event(&delta(serde_json::json!({
+                    "delta": { "tool_calls": [fragment] },
+                    "finish_reason": serde_json::Value::Null
+                })))
+                .expect("folds");
+            deltas.extend(folded.chunks);
+        }
+        assert_eq!(
+            deltas,
+            vec![
+                Chunk::ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    name: Some("write_file".into()),
+                    arguments_delta: "{\"path\":\"".into(),
+                },
+                Chunk::ToolCallDelta {
+                    index: 0,
+                    id: None,
+                    name: None,
+                    arguments_delta: "a.txt\"}".into(),
+                },
+            ],
+            "each fragment reaches the caller as it lands"
+        );
+
+        let folded = fold
+            .event(&delta(serde_json::json!({
+                "delta": {},
+                "finish_reason": "tool_calls"
+            })))
+            .expect("folds");
+        assert_eq!(
+            folded.chunks,
+            vec![
+                Chunk::ToolCall(crate::types::ToolCall {
+                    id: "call_1".into(),
+                    name: "write_file".into(),
+                    arguments: "{\"path\":\"a.txt\"}".into(),
+                }),
+                Chunk::Done {
+                    finish_reason: "tool_calls".into(),
+                    usage: None,
+                },
+            ]
+        );
+        assert!(folded.finished);
+    }
+
+    #[test]
+    fn the_finish_frame_carries_the_usage_and_the_loop_word_for_the_provider_word() {
+        let folded = ChatFold::new()
+            .event(&delta(serde_json::json!({
+                "delta": {},
+                "finish_reason": "length"
+            })))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            folded.chunks,
+            vec![Chunk::Done {
+                finish_reason: "max_output_tokens".into(),
+                usage: None,
+            }]
+        );
+
+        let with_usage = ChatFold::new()
+            .event(&sse(&serde_json::json!({
+                "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 4 }
+            })
+            .to_string()))
+            .expect("folds");
+        assert_eq!(
+            with_usage.chunks,
+            vec![Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: Some(TokenUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(4),
+                    ..TokenUsage::default()
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_done_sentinel_with_no_finish_frame_is_a_plain_stop() {
+        let folded = ChatFold::new().event(&sse("[DONE]")).expect("folds");
+        assert!(folded.finished);
+        assert_eq!(
+            folded.chunks,
+            vec![Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_body_that_ends_without_a_finish_frame_finishes_stop_and_an_unparseable_frame_is_skipped() {
+        assert_eq!(
+            ChatFold::new().end(),
+            vec![Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: None,
+            }]
+        );
+        let folded = ChatFold::new().event(&sse("not json")).expect("skips");
+        assert!(folded.chunks.is_empty());
+        assert!(!folded.finished);
+    }
+
+    #[test]
+    fn a_text_only_message_keeps_the_string_content_and_joins_its_text_blocks() {
+        use crate::types::Role;
+
+        let message = Message::new(
+            Role::User,
+            vec![ContentPart::text("one"), ContentPart::text("two")],
+        );
+        assert_eq!(
+            to_chat_message(&message),
+            serde_json::json!({ "role": "user", "content": "one\ntwo" })
+        );
+        // A message with nothing to say carries `null`, not an empty string.
+        assert_eq!(
+            to_chat_message(&Message::new(Role::Assistant, Vec::new())),
+            serde_json::json!({ "role": "assistant", "content": null })
+        );
+        // Reasoning contributes no text, because it is not replayed.
+        assert_eq!(
+            to_chat_message(&Message::new(
+                Role::Assistant,
+                vec![ContentPart::reasoning("hm")]
+            )),
+            serde_json::json!({ "role": "assistant", "content": null })
+        );
+    }
+
+    #[test]
+    fn a_message_with_an_image_switches_to_typed_parts_with_a_data_url() {
+        use crate::types::{ImageMediaType, ImagePart, Role};
+
+        let image = ImagePart {
+            name: "shot.png".into(),
+            mime_type: ImageMediaType::Png,
+            path: "/u/shot.png".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            data: Some("AAAA".into()),
+        };
+        let message = Message::new(
+            Role::User,
+            vec![ContentPart::text("look"), ContentPart::Image(image)],
+        );
+        assert_eq!(
+            to_chat_message(&message),
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "look" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            })
+        );
+        // An image that never got its bytes (the recorded reference alone) is not sent as one.
+        let recorded = ImagePart {
+            name: "shot.png".into(),
+            mime_type: ImageMediaType::Png,
+            path: "/u/shot.png".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            data: None,
+        };
+        assert_eq!(
+            to_chat_message(&Message::new(
+                Role::User,
+                vec![ContentPart::Image(recorded)]
+            )),
+            serde_json::json!({ "role": "user", "content": null })
+        );
+    }
+
+    #[test]
+    fn a_tool_call_and_a_tool_result_keep_their_identity() {
+        use crate::types::{Role, ToolCall};
+
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                ContentPart::text("checking"),
+                ContentPart::ToolCall(ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }),
+            ],
+        );
+        assert_eq!(
+            to_chat_message(&assistant),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    { "id": "call-1", "type": "function", "function": { "name": "bash", "arguments": "{}" } }
+                ]
+            })
+        );
+        let result = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-1".into()),
+            content: vec![ContentPart::text("hi")],
+            source: None,
+        };
+        assert_eq!(
+            to_chat_message(&result),
+            serde_json::json!({
+                "role": "tool",
+                "content": "hi",
+                "tool_call_id": "call-1"
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_streamed_answer_reduces_to_the_same_chunks() {
+        let answer = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "reasoning_content": "hm",
+                    "content": "ok",
+                    "tool_calls": [{ "id": "c1", "function": { "name": "bash", "arguments": "{}" } }]
+                },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
+        });
+        assert_eq!(
+            chunks_from_chat_json(&answer),
+            vec![
+                Chunk::ReasoningDelta { text: "hm".into() },
+                Chunk::TextDelta { text: "ok".into() },
+                Chunk::ToolCall(crate::types::ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }),
+                Chunk::Done {
+                    finish_reason: "max_output_tokens".into(),
+                    usage: Some(crate::usage::TokenUsage {
+                        input_tokens: Some(3),
+                        output_tokens: Some(2),
+                        ..crate::usage::TokenUsage::default()
+                    }),
+                },
+            ]
+        );
+    }
+}
