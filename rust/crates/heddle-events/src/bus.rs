@@ -149,10 +149,10 @@ impl Inner {
     /// Create a scope; id `0` means "not active" and is never handed out.
     fn new_scope(&self, name: Arc<str>, parent: Option<u64>) -> u64 {
         let mut state = self.lock();
-        if let Some(parent_id) = parent {
-            if !state.scopes.contains_key(&parent_id) {
-                return 0;
-            }
+        if let Some(parent_id) = parent
+            && !state.scopes.contains_key(&parent_id)
+        {
+            return 0;
         }
         state.next_scope += 1;
         let id = state.next_scope;
@@ -164,10 +164,10 @@ impl Inner {
                 children: Vec::new(),
             },
         );
-        if let Some(parent_id) = parent {
-            if let Some(record) = state.scopes.get_mut(&parent_id) {
-                record.children.push(id);
-            }
+        if let Some(parent_id) = parent
+            && let Some(record) = state.scopes.get_mut(&parent_id)
+        {
+            record.children.push(id);
         }
         id
     }
@@ -231,10 +231,7 @@ impl Inner {
                 .iter()
                 .filter(|entry| entry.mode == Mode::Waterfall && entry.type_id == TypeId::of::<E>())
                 .filter_map(|entry| {
-                    let listener = entry
-                        .listener
-                        .downcast_ref::<WaterfallFn<E>>()
-                        .map(|function| function.clone())?;
+                    let listener = entry.listener.downcast_ref::<WaterfallFn<E>>().cloned()?;
                     Some(WaterfallSlot {
                         name: entry.owner_name.clone(),
                         id: entry.id,
@@ -263,13 +260,10 @@ impl Inner {
         let Some(point) = state.owner.remove(&id) else {
             return false;
         };
-        let removed = match state.listeners.get_mut(point) {
-            Some(bucket) => match bucket.iter().position(|entry| entry.id == id) {
-                Some(position) => Some(bucket.remove(position)),
-                None => None,
-            },
-            None => None,
-        };
+        let removed = state.listeners.get_mut(point).and_then(|bucket| {
+            let position = bucket.iter().position(|entry| entry.id == id)?;
+            Some(bucket.remove(position))
+        });
         if state.listeners.get(point).is_some_and(Vec::is_empty) {
             state.listeners.remove(point);
         }
@@ -416,7 +410,7 @@ impl EventBus {
             let Some(listener) = entry
                 .listener
                 .downcast_ref::<ParallelFn<E::Payload>>()
-                .map(|function| function.clone())
+                .cloned()
             else {
                 continue;
             };
@@ -451,7 +445,7 @@ impl EventBus {
             let Some(listener) = entry
                 .listener
                 .downcast_ref::<SerialFn<E::Payload, E::Output>>()
-                .map(|function| function.clone())
+                .cloned()
             else {
                 continue;
             };
