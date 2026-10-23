@@ -14,8 +14,8 @@
 //!
 //! # Seams
 //!
-//! - [`SessionLog`] is the port this crate needs from `heddle-session`'s store (open, read, append); the boot
-//!   passes the store, and an implementation for it lands here once its API does.
+//! - [`SessionLog`] is the port this crate needs from `heddle-session`'s store (open, read, append); it is
+//!   implemented for `heddle_session::SessionStore`, so the boot passes the store itself.
 //! - [`tool`] holds the two tools as data and functions; they are registered through `heddle-tools`' registry
 //!   once its API lands (until then [`tool::ToolSpec`] and [`tool::ToolAnswer`] mirror its shapes).
 //! - [`http`] answers `GET /api/todo` as status and exact bytes, so `heddle-server` mounts it in one line.
@@ -25,6 +25,7 @@
 pub mod http;
 mod log;
 mod service;
+mod store;
 #[cfg(test)]
 mod test_support;
 pub mod tool;

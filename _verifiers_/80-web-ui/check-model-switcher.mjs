@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { fixtureDir, isolatedHome, removeDir, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
@@ -25,6 +25,28 @@ import { fixtureDir, isolatedHome, removeDir, skipUnless, writeJson } from '../.
  * `_context_/dsh-mechanisms/dsh-model-selector.md`.
  */
 
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
+
 const CAPABILITY = 'the model selector in the Web UI'
 
 /** Two endpoints whose answers are distinguishable, and which record what they were asked. */
@@ -32,9 +54,9 @@ async function startServer(label, options = {}) {
   const home = isolatedHome(`model-switcher-${label}`)
   const work = fixtureDir(`model-switcher-${label}-work`)
   const one = options.toolFirst === true
-    ? await toolThenPlainDouble('answer from one')
-    : await plainDouble('answer from one')
-  const two = await plainDouble('answer from two')
+    ? held(await toolThenPlainDouble('answer from one'))
+    : held(await plainDouble('answer from one'))
+  const two = held(await plainDouble('answer from two'))
   const config = writeJson(join(home, 'heddle.json'), {
     default: 'double-one',
     endpoints: [

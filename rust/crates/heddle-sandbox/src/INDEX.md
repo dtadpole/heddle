@@ -1,6 +1,6 @@
 ---
 title: The heddle-sandbox sources
-version: 0.2.0
+version: 0.3.0
 description: The sources of the heddle-sandbox crate, one module per TypeScript file, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -23,6 +23,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`transition.rs`](transition.rs) | the owner's session-mode change rule | `permissionTransition` in `src/sandbox/service.ts` |
 | [`service.rs`](service.rs) | the sandbox service: the file fence and the shell seam | `SandboxService` in `src/sandbox/service.ts` |
 | [`approvals.rs`](approvals.rs) | the approval policy and the question channel | `src/approvals/service.ts` |
+| [`fixture.rs`](fixture.rs) | the recorded approval question, its SSE frame and its answers, with tests that pin the serialiser to them | `src/approvals/service.ts`, `src/server/page.html` |
 
 ## Read next
 

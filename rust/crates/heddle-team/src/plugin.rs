@@ -117,8 +117,6 @@ pub struct TeamPluginDeps {
 pub struct TeamPlugin {
     pub service: Arc<TeamService>,
     pub tools: TeamTools,
-    /// The store, kept for the boot sweep's list of sessions.
-    store: Arc<dyn TeamStore>,
 }
 
 impl TeamPlugin {
@@ -158,7 +156,7 @@ impl TeamPlugin {
             let _ = ensure_policy(&*spawn_store, &[lead, member]);
         });
         let service = Arc::new(TeamService::new(TeamDeps {
-            store: Arc::clone(&store),
+            store,
             runner,
             live,
             limits: TeamLimits::from(config),
@@ -172,18 +170,14 @@ impl TeamPlugin {
                 on_spawn: Some(on_spawn),
             },
         );
-        Self {
-            service,
-            tools,
-            store,
-        }
+        Self { service, tools }
     }
 
     /// The `web` command's startup edge: recover every team in the store. Print
     /// [`RecoverAllReport::boot_line`] when it is `Some`. A one-shot command must not call this — it would
     /// start turns for teams it is not working on.
     pub async fn recover_at_boot(&self) -> RecoverAllReport {
-        self.service.recover_all(&self.store.list()).await
+        self.service.recover_store().await
     }
 }
 

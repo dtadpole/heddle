@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.4.1
+version: 0.4.3
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `cc09a59`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `4aca3b1`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -57,21 +57,22 @@ TypeScript build at the same revision. Every other backend check skipped at its 
 `profiles` and `config` and nothing else yet: every other command still exits 2 with
 `heddle: not ported to Rust yet: <command>`.
 
-Behind the binary, every backend crate on `main` carries its port, not only its contract — `heddle-config`,
-`heddle-session`, `heddle-workspace`, `heddle-context`, `heddle-tools`, `heddle-agent`, `heddle-events`,
-`heddle-goal`, `heddle-todo` and `heddle-team` have no `todo!()` left, and `heddle-llm` and `heddle-sandbox` have one
-each (their newer tips are on the lane's branches). `heddle-server` is still its contract. What turns a ported crate
-into a passing part is the binary composing it, and that is the next work for parts 1 to 8.
+Behind the binary, every backend library crate on `main` carries its port: `git grep -c 'todo!('` finds none in
+`heddle-config`, `heddle-session`, `heddle-workspace`, `heddle-llm`, `heddle-context`, `heddle-tools`, `heddle-agent`,
+`heddle-sandbox`, `heddle-events`, `heddle-goal`, `heddle-todo` or `heddle-team`. The binary has three, and they are the
+remaining work for parts 1 to 8: the bare boot, the `--turn` branch and `web`. No backend verifier imports `dist/`,
+so a lane with no TypeScript build judges every one of them. The ui-lane crates (`heddle-server`
+and the three `heddle-web-*`) are still 24-line placeholders on `main`; they arrive through the ui lane.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
 | 0 configuration system | `_verifiers_/05-config-system` | **passes** — 10 of 10 |
 | 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged |
 | 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
-| 3 context management | `_verifiers_/30-context-management` | 9 checks — unjudged; one still reads `dist/` for the reader's view (that verifier's INDEX) |
+| 3 context management | `_verifiers_/30-context-management` | 9 checks — unjudged |
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
 | 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
-| 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged |
+| 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged; under `HEDDLE_BIN` each hook is a process (that verifier's INDEX) |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — unjudged |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | 17 checks — unjudged |
 | 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |

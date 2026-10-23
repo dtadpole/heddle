@@ -38,10 +38,21 @@ function startServer(home, work, config) {
       }
     }, 50)
   })
+  /**
+   * The rejection is the check's to report, at `await server.url`. Marked handled here because the test opens a
+   * browser before it awaits the URL: a harness that exits during that launch rejected an unwatched promise, and
+   * node:test then failed the test as an unhandled rejection instead of as a server that did not start.
+   */
+  url.catch(() => {})
   return {
     url,
     logs: () => output,
     close: async () => {
+      /**
+       * A harness that already exited has emitted its `exit` event, and Node does not replay it: waiting for it
+       * again never settled, so a binary whose `web` exits at once hung the run instead of failing it.
+       */
+      if (child.exitCode !== null || child.signalCode !== null) return
       child.kill()
       await new Promise((resolve) => child.once('exit', resolve))
     },

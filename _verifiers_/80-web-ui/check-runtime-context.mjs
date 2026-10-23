@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
@@ -15,13 +15,35 @@ import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, remove
  * the claim: the snapshot is model history and an attributed record, not a chat turn.
  */
 
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
+
 const CAPABILITY = 'a Web UI on localhost with a live stream'
 
 /** Spawn `heddle web` on an ephemeral port with a local chat double, and resolve once it prints its URL. */
 async function startServer(label) {
   const home = isolatedHome(`runtime-context-ui-${label}`)
   const work = fixtureDir(`runtime-context-ui-${label}-work`)
-  const double = await chatDouble({ content: 'ok' })
+  const double = held(await chatDouble({ content: 'ok' }))
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   return new Promise((resolvePromise, reject) => {
     const child = spawn(

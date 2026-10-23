@@ -12,7 +12,7 @@
 //   2  stop    the working model's stop conditions: report to the owner
 //
 // Thresholds are constants below and can be overridden from the environment.
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -392,7 +392,19 @@ function main(argv, env = process.env) {
   return assessment.verdict
 }
 
-if (fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Node runs the main module from its real path, so compare real paths: through a symlink
+// such as macOS /tmp the plain comparison was false and the command silently did nothing,
+// which for the hygiene gate meant exit 0 with no judgement at all.
+function invokedAsScript() {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsScript()) {
   try {
     process.exitCode = main(process.argv)
   } catch (error) {
