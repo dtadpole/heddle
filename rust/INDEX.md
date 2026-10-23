@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.4.9
+version: 0.5.6
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `8ec2a71`, judged with `_tools_/verify-runner/lane.mjs`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `ee5fa0d`, judged with `_tools_/verify-runner/lane.mjs`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -49,22 +49,28 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
     40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**18 check files, 117 checks: 10 passed, 0 failed, 107 unjudged. Part 0 passes.** `05-config-system` exits `0`
+**18 check files, 117 checks: 21 passed, 0 failed, 96 unjudged. Part 0 passes; part 7 has 11 of 45 passing.** `05-config-system` exits `0`
 through the binary: profiles, layers, includes and their cycles, both environment-reference shapes, a missing
 reference, a bad value refused naming the row and the field, a patch against a missing row, provenance and an
 unknown profile. Under `HEDDLE_BIN` its rows name component manifests rather than `.ts` plugins — part 0's Rust shape in
 [`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), stated in that verifier's INDEX — and the same ten checks pass on the
-TypeScript build at the same revision. Every other backend check skipped at its capability probe, because the binary advertises `--profile`,
-`profiles` and `config` and nothing else yet: every other command still exits 2 with
-`heddle: not ported to Rust yet: <command>`.
+TypeScript build at the same revision.
+
+Since `cdea647` the binary also advertises `sessions`, `workspaces`, `workspace`, `session`, `tree`, `file`, `goal` and
+`transcript`, and part 7's checks of those commands pass through it: the folder tree one level at a time, type and
+instance classification and badges, hidden plumbing and declared generated folders, the file reader and its refusals,
+`session new` at a workspace and a new session filed under it. Part 7's other 34 checks drive `--turn` or start `web`,
+which the binary does not advertise yet, so they are unjudged — not failed. Every other backend check skipped at its
+capability probe for the same reason.
 
 Behind the binary, every backend library crate on `main` carries its port: `git grep -c 'todo!('` finds none in
 `heddle-config`, `heddle-session`, `heddle-workspace`, `heddle-llm`, `heddle-context`, `heddle-tools`, `heddle-agent`,
 `heddle-sandbox`, `heddle-events`, `heddle-goal`, `heddle-todo` or `heddle-team`. The ui-lane crates arrived through
 the ui lane at `a2d4ae4` — `heddle-server`, `heddle-web-files`, `heddle-web-composer` and `heddle-web-trajectory` carry
 their implementations (407 unit tests between them; `heddle-web-files` has two `todo!(` left). The binary dispatches
-the owners' entry points and the turn and composes an adapter for every built-in row, but advertises only `--profile`,
-`profiles` and `config` until each command's checks pass, and two `todo!(` remain in it: the bare boot and `web`. No backend verifier imports `dist/`, so a lane
+the owners' entry points and the turn and composes an adapter for every built-in row; it advertises a command once
+that command's checks pass (configuration, sessions, workspaces and goal so far), and two `todo!(` remain in it: the
+bare boot and `web`. No backend verifier imports `dist/`, so a lane
 with no TypeScript build judges every one of them. Each check's capability probe asks for every command the check
 runs, matched as a command line in `--help`, so a binary that advertises one command before another leaves the
 dependent checks unjudged instead of failing them.
@@ -78,7 +84,7 @@ dependent checks unjudged instead of failing them.
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
 | 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
 | 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged; under `HEDDLE_BIN` each hook is a process (that verifier's INDEX) |
-| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — unjudged |
+| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — **11 pass**, 0 fail, 34 unjudged (they need `--turn` or `web`) |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | 17 checks — unjudged |
 | 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |
 | 10 token | `_verifiers_/90-web-ui-token` | not judged in the backend lane; `web` exits 2 |

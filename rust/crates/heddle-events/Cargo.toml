@@ -22,3 +22,7 @@ thiserror.workspace = true
 # The stdio transport of an outside listener: a child process spoken to as line-delimited JSON.
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# A real outside component in the ports tests needs a sandbox gate over the real service.
+heddle-sandbox.workspace = true
