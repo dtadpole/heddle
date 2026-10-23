@@ -87,14 +87,21 @@ is pushed to its owner's branch on its own.
 
 ## Where it stands, 2026-10-22
 
-Steps 1–8 are ported, each with the unit tests the table names: **120 tests pass** with
+Steps 1–8 are ported, each with the unit tests the table names: **120 unit tests pass** with
 `cargo test --manifest-path rust/Cargo.toml -p heddle-session`, and `rustfmt` and
-`clippy -D warnings` are clean on both crates. Step 9 has its first half in the same suite: `store.rs`
-opens a session whose transcript bytes were produced by **Node 24's `zlib.zstdCompressSync`** with a
-content checksum, derives its surface, appends to it without touching the earlier bytes, and prints every
-line back unchanged. The other half — a log written here decoded by `src/session/transcript.ts` — is what
-`70-workspaces-sessions` judges end to end through `HEDDLE_BIN`; it waits on the command line and the
-server composing this crate, not on this crate.
+`clippy -D warnings` are clean on both crates. Step 9 is green in both directions:
+
+- **Their bytes read here.** `store.rs` opens a session whose transcript frames were produced by **Node
+  24's `zlib.zstdCompressSync`** with a content checksum, derives its surface, appends to it without
+  touching the earlier bytes, and prints every line back unchanged.
+- **Our bytes read there.** [`tests/typescript_interop.rs`](tests/typescript_interop.rs) runs the
+  TypeScript build's own `decodeTranscript` — `src/session/transcript.ts`, imported by the Node on this
+  machine with its types stripped — over a transcript this crate just wrote, and asserts it sees the same
+  three events, no tear, and the whole file consumed. It reports skipped rather than failing where Node
+  is absent, so a host without the oracle still runs the suite.
+
+What remains for `70-workspaces-sessions` is the `heddle` binary composing this crate, which is another
+seat's scope: it is honestly unjudged (exit 3) until then.
 
 **Done** when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through `HEDDLE_BIN` with the
 CLI (`heddle`) and server (`heddle-server`) crates composing this one, and the backend lane's integrator has merged it.
