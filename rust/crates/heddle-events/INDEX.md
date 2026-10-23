@@ -33,7 +33,7 @@ contract. `cargo doc -p heddle-events` renders it.
 | `Next<E>` | the continuation a waterfall listener receives; `run()` consumes it, so the rest of the chain runs at most once |
 | `HookError`, `HookErrorKind`, `ParallelError` | a listener's failure: `refuse` (the TypeScript `HookRefusal`) or `fail`, attributed by the bus to the point and the listener's scope |
 | `points` | the name constants of every point, `HOOK_POINTS` and its JSON and text renderings for `heddle hooks`, and the lifecycle events `Ready`, `ConfigProblem`, `TeamChanged` |
-| `outside` | outside listeners: `HookCall`/`HookReply`, the `JsonListener` seam, `EventBus::expose_*` and `Scope::on_json*`, `OutsideListenerConfig`, `StdioListener`, `attach_outside_listener` |
+| `outside` | outside listeners over the part-4 protocol (JSON-RPC 2.0, `hooks/call`): `HookCall`/`HookReply` (`next`, `replace`, `merge`, `refuse`, `fail`), the `JsonListener` seam, `EventBus::expose_*` and `Scope::on_json*`; `ListenerDeclaration`, `parse_listener_declarations` and `attach_declared` for the listeners a component declares in `initialize`; `RpcListener`, which wraps any part-4 client (the boot's `heddle-tools` `OutsideComponent`); `OutsideListenerConfig` (`program` + `args` + `config`, D-031) and `StdioListener`, a stand-alone client; `attach_outside_listener` |
 
 ### Who uses which part
 
@@ -66,7 +66,8 @@ contract. `cargo doc -p heddle-events` renders it.
 | 2 | The bus: table, scopes and children, `once`, snapshot dispatch, the five modes, error attribution; unit tests for each Cordis rule (order, prepend, once, snapshot, release with scope and parent, veto, replace, map, attribution, parallel collection, serial and bail stop) | landed |
 | 3 | The JSON bridges and the `expose_*` registry, tested with an in-memory `JsonListener` | landed |
 | 4 | `StdioListener`: spawn, correlate by `id`, timeouts, child death, stderr to the log; tested against a small script child | landed |
-| 5 | `60-hooks` through `HEDDLE_BIN`: the `outside-listener` row with developer-one and developer-two, the verifier branch that writes a process listener instead of a `.ts` plugin with integrator-one | next, with the binary |
+| 4b | The component shape (D-031): listeners declared in `initialize`, `merge` for a post-execute rewrite that keeps the tool's result, `RpcListener` so one process serves tools and listeners, and a child's own requests answered without id collisions | landed |
+| 5 | `60-hooks` through `HEDDLE_BIN`: the boot attaches a component's declared listeners (developer-two); the verifier branch writes each hook as a `.component.yml` and a process instead of a `.ts` plugin (patch sent to integrator-one) | next, with the binary |
 
 ## Read next
 
