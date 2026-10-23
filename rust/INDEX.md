@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.7.4
+version: 0.7.5
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -60,12 +60,15 @@ this table names each failing check and the code that owns it — below, for bot
 
 - `70-workspaces-sessions` — *a written session moves to the top of its folder, its age follows, and a real pin click
   holds it there*: the follow-up `POST /api/turn` on an existing session answers `400`, not `200` (owned by the served turn route:
-  `rust/crates/heddle/src/web.rs` and `heddle-server`).
-- In the ui lane's parts, measured by its baseline gate on the same tree (`9319116`, release build), three fail in
-  `80-web-ui`: `check-chat-view` #15, the weaving clock — `[data-chat-running]` is still present after 30 s (owned by
-  `heddle-server`); `check-context-view` #1, the composition (owned by `heddle-web-composer`); `check-file-view` #1 —
-  `hostile.js`'s `<script>` is split across highlight spans instead of shown as text (owned by `heddle-web-files`).
-  `web.rs`'s context row turned `check-composer` #13 and `check-context-view` #2 into passes at `9319116`.
+  `rust/crates/heddle/src/web.rs` and `heddle-server`). Cause found: the server's model adapter in `web.rs` answers the
+  service default with the nominated endpoint only, where TypeScript falls back to the first endpoint
+  (`src/llm/service.ts`, as the binary's own CLI adapter already does), so a session with no recorded endpoint gets none.
+- In the ui lane's parts, measured by its baseline gate on `main` `4fc75f1` (release build): 85, 87, 88 and 90 pass in
+  full, and `80-web-ui` passes 73 of 75. Failing: `check-chat-view` #15, the weaving clock — `[data-chat-running]` is
+  still present after 30 s (owned by `heddle-server`); `check-goal` #1, intermittent (about 1 in 12) — after a restart,
+  `POST /api/goal` "complete" answers 404 "no session" for a session `GET /api/goal` still finds (owned by `web.rs`'s goal
+  route). Fixed since `9319116`: `check-context-view` #1 and `check-file-view` #1 (`heddle-web-composer` and
+  `heddle-web-files`, at `77fb012`); `check-goal` #4 and `check-trajectory-view` were the checks' own waits.
 
 **Fixed in the check:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in some full lane runs and never alone.
 Its poll for the teammate parsed each session's metadata while the binary could be writing it — both builds write that
@@ -99,8 +102,8 @@ check's capability probe asks for every command it runs, matched as a command li
 | 6 hooks | `_verifiers_/60-hooks` | **passes** — 6 of 6; hooks are processes under `HEDDLE_BIN` |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 44 pass, **1 fail** (above, with its owner) |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | **passes** — 17 of 17 (two consecutive runs) |
-| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | judged in the ui lane on `9319116`: 78 pass, **3 fail** (listed above with owners); 85, 87 and 88 pass in full |
-| 10 token | `_verifiers_/90-web-ui-token` | **passes** — 9 of 9 (ui lane, on `9319116`) |
+| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | judged in the ui lane on `4fc75f1`: 79 pass, **2 fail** (listed above with owners); 85, 87 and 88 pass in full |
+| 10 token | `_verifiers_/90-web-ui-token` | **passes** — 9 of 9 (ui lane, on `4fc75f1`) |
 | 11 Web UI daemon | `_verifiers_/95-web-daemon` | not run in a lane gate: its stays-up check restarts the live server (D-045); the ui lane reads it |
 | model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged on this machine, on either build: both need a machine-local endpoint configuration |
 
