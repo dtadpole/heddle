@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:33:08Z
+modified: 2026-10-23T04:34:01Z
 level: L3
 version: 1.7.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
@@ -237,6 +237,11 @@ So the fix is the one the server already has, and the supervisor is already on `
 (`~/heddle-live/_tools_/web-daemon/supervisor.mjs`). Changing the gate's installed agent belongs to dsh-web-ops, so it
 is proposed to the coordinator rather than done: the gate's plist would gain the two arguments in front of its program,
 with the same environment, and dsh-web-ops' `install-heddle-gate.sh` restores the original in one command.
+
+**Decided 2026-10-22, 21:33 PDT (coordinator):** this team does not modify, restart or wrap the gate; it is
+dsh-web-ops' installed agent. The finding — the gate has no restarter, so 8082 stays down if its process dies while
+3082 is healthy — is raised with the owner as a decision for the dsh-web-ops team. Until then live-monitor alerts on
+it, and this record keeps the rehearsal above as the evidence.
 
 ## Who acts on the service, and the guard's state (D-045)
 
