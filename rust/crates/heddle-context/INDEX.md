@@ -1,8 +1,8 @@
 ---
 title: The heddle-context crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:14:35Z
-version: 0.8.0
+modified: 2026-10-23T12:49:45Z
+version: 0.9.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -109,10 +109,11 @@ the TypeScript tests named.
    SessionStore` binds the real store, with three tests on a real on-disk session (write and read back, the
    pruner's rewrite, a compaction whose log keeps its span) and one that replays the TypeScript build's record of a
    landed compaction through it, event for event.
-6. **The verifier**: rehearsed through a binary that serves `context` and `--turn` — the binary crate's branch at
-   `3df3cc6` with this crate merged and only the served capabilities widened in a throwaway worktree — **9 of 9
-   checks pass, verdict 0**, on two runs (2026-10-22 22:13 PDT). It passes on `main`'s binary once that serves the
-   `context` and `--turn` capabilities, which is the binary crate's step.
+6. **The verifier**: **passes, 9 of 9, verdict 0, through `main`'s binary**, which serves `context` and `--turn`
+   since `b72cc1a` (the lane integrator's release-build run on that commit, and this seat's debug-build runs on each
+   later `main` that touched this crate, the session crate, the turn or the binary). Keeping it there is standing
+   work: re-run `HEDDLE_BIN=<binary> sh _verifiers_/30-context-management/verify.sh` on any change to those, and
+   report a drop at once.
 
 ## Deliberate differences from the TypeScript build
 
