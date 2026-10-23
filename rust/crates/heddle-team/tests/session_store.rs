@@ -19,6 +19,7 @@ use heddle_session::{
     SessionHandle, SessionOrigin, SessionStore, workspace_key,
 };
 use heddle_team::api::team_view;
+use heddle_team::command::web_start_note;
 use heddle_team::ports::{
     ChildSession, PortError, SessionMetaView, TeamRunner, TeamSource, TeamStore, TurnFuture,
     UuidIds,
@@ -279,9 +280,10 @@ async fn boot_settles_and_delivers_what_a_typescript_process_left_behind() {
     let store = open_store(&root);
     let service = service_over(&store);
 
-    let report = service.recover_all(&store.list()).await;
+    // The call the binary makes at `web` start, whose note heddle-server prints as `heddle web: <note>`.
+    let note = web_start_note(&service).await;
     assert_eq!(
-        report.boot_line().as_deref(),
+        note.map(|note| format!("heddle web: {note}")).as_deref(),
         Some("heddle web: recovered 1 team(s) (2 settled, 1 delivered)"),
         "the line check-teams waits for"
     );
@@ -350,7 +352,7 @@ async fn boot_settles_and_delivers_what_a_typescript_process_left_behind() {
 
     // Booting again on the same store recovers the team with nothing left to do, and a fresh store re-reading
     // the disk still folds the log strictly.
-    let again = service_over(&store).recover_all(&store.list()).await;
+    let again = service_over(&store).recover_store().await;
     assert_eq!(
         again.boot_line().as_deref(),
         Some("heddle web: recovered 1 team(s) (0 settled, 0 delivered)")
