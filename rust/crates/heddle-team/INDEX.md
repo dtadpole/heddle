@@ -1,11 +1,11 @@
 ---
 title: The heddle-team crate
-version: 0.4.0
+version: 0.4.1
 description: The Rust port crate for durable teams, their policy, state and tool — its public API, the seams it needs from other crates, and the port plan.
 grounded_in:
-  - source: rust/ULTIMATE_GOAL.md
-  - source: src/team/ (INDEX.md, state.ts, service.ts, tool.ts, policy.ts), src/plugins/team.ts, the /api/team branch of src/server/web.ts and the team boot edge of src/cli.ts
-  - source: _verifiers_/50-agentic-loop/check-teams.mjs and _verifiers_/80-web-ui/check-team-view.mjs
+  - source: rust/ULTIMATE_GOAL.md@0.1.0
+  - source: src/team/@ed183ea (INDEX.md, state.ts, service.ts, tool.ts, policy.ts), src/plugins/team.ts@fc8d929, the /api/team branch of src/server/web.ts@a8bf162 and the team boot edge of src/cli.ts@a8bf162
+  - source: _verifiers_/50-agentic-loop/check-teams.mjs@d649349 with its fixtures/team-recover@81c5915, and _verifiers_/80-web-ui/check-team-view.mjs@5ed8deb
 ---
 
 # `rust/crates/heddle-team`
@@ -18,7 +18,7 @@ The Rust port of durable teams, their policy, state and tool.
 | Judged by | `_verifiers_/50-agentic-loop` (check-teams), `_verifiers_/80-web-ui` (check-team-view), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-team --all-features` |
-| Integration tests | [`tests/compose.rs`](tests/compose.rs) (feature `compose`): the row started through `start_row` on the runtime the binary builds — model service on a scripted endpoint, session, context, sandbox and approvals gating the real registry — and a real Lead turn through `heddle-agent`'s loop running check-teams' first script: the nine tools registered, the teammate's own turn answering with purpose `team`, the board's three revisions, one message queued and delivered, the meta attribution, the `/api/team` view through `ServerTeam`, and the team surviving a restart. [`tests/session_store.rs`](tests/session_store.rs): the team layer over the real `heddle-session` store (dev-dependency only) — check-teams' recorded store recovered byte for byte; its first check's journal driven through the nine tools and read back from disk, restart included; and check-team-view's fixture served through `team_view` with the panel text derived as `page.html` derives it (roster, `1 teammate(s)`, `task-1 write the thing`, `0 queued`, `1 delivered`, no panel without a team) |
+| Integration tests | [`tests/`](tests/INDEX.md): the team layer over the real crates — the session store, and (feature `compose`) the runtime the binary builds, with a real Lead turn running check-teams' first script |
 | State | **ported and on `main`** (merged as `d5956c5`, 2026-10-22): `state`, `service`, `tool`, `plugin` and `api` behind the declared API; 86 unit and 7 integration tests pass, and `fmt`, `clippy -D warnings` and `rustdoc -D warnings` are clean. M5 — the `team` row composed over the real crates — is `compose::start_row`; what remains is the binary's one-line dispatch and `web`'s boot note |
 
 **A team is the Lead's session**; every teammate is a session of its own; everything the team shares is a
