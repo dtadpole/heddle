@@ -15,7 +15,8 @@ use heddle_llm::{
     StreamPrinter, StreamPrinterOptions, ToolCall, adapter_for, types::user_message,
 };
 
-/// A one-shot HTTP double in a background thread: reads each request's head, answers with `reply`'s bytes.
+/// A one-shot HTTP double in a background thread: reads each whole request (head and body), answers with
+/// `reply`'s bytes, and keeps the request so a test can assert what went on the wire.
 struct Double {
     base_url: String,
     seen: Arc<Mutex<Vec<String>>>,
@@ -34,19 +35,40 @@ impl Double {
                 let recorded = recorded.clone();
                 let reply = reply.clone();
                 std::thread::spawn(move || {
-                    let mut head = Vec::new();
+                    let mut request = Vec::new();
                     let mut buffer = [0u8; 1024];
-                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut head_end = None;
+                    while head_end.is_none() {
                         match socket.read(&mut buffer) {
                             Ok(0) | Err(_) => break,
-                            Ok(count) => head.extend_from_slice(&buffer[..count]),
+                            Ok(count) => {
+                                request.extend_from_slice(&buffer[..count]);
+                                head_end = request
+                                    .windows(4)
+                                    .position(|window| window == b"\r\n\r\n")
+                                    .map(|at| at + 4);
+                            }
                         }
                     }
-                    recorded
-                        .lock()
-                        .expect("records")
-                        .push(String::from_utf8_lossy(&head).into_owned());
-                    let _ = socket.write_all(&reply(&String::from_utf8_lossy(&head)));
+                    if let Some(head_end) = head_end {
+                        // The body follows the head; its length is stated by the client, since reqwest knows it.
+                        let head =
+                            String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        while request.len() < head_end + length {
+                            match socket.read(&mut buffer) {
+                                Ok(0) | Err(_) => break,
+                                Ok(count) => request.extend_from_slice(&buffer[..count]),
+                            }
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    recorded.lock().expect("records").push(request.clone());
+                    let _ = socket.write_all(&reply(&request));
                     let _ = socket.flush();
                 });
             }
@@ -525,4 +547,110 @@ async fn a_json_only_endpoint_still_reaches_the_service_as_deltas() {
     let generated = service.generate(ask("chat", "go")).await.expect("answers");
     assert_eq!(generated.text, "unstreamed answer");
     assert_eq!(generated.finish_reason, "stop");
+}
+
+/// An image on disk, removed with the test.
+struct TempImage {
+    path: std::path::PathBuf,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for TempImage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn image_file(bytes: &[u8]) -> TempImage {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "heddle-wire-image-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("creates the temp dir");
+    let path = dir.join("shot.png");
+    std::fs::write(&path, bytes).expect("writes the image");
+    TempImage { path, dir }
+}
+
+/// Capability discovery, the attachment projection and the Chat wire in one path: an image reaches a route that
+/// declared image input **in the provider's own model list**, and a text turn never pays for the read.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_turn_discovers_the_routes_capability_and_sends_the_image() {
+    let double = Double::start(|request| {
+        if request.starts_with("GET /models") {
+            reply(
+                "application/json",
+                r#"{"data":[{"id":"m","input_modalities":["text","image"]}]}"#,
+            )
+        } else {
+            reply(
+                "text/event-stream",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"described\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+        }
+    });
+    let image = image_file(&[0x89, 0x50, 0x4e, 0x47]);
+    let service = ModelService::new(vec![endpoint(
+        "chat",
+        EndpointKind::OpenaiChat,
+        &double.base_url,
+        "m",
+    )])
+    .expect("registers the endpoint");
+
+    let request = GenerateRequest {
+        endpoint: "chat".into(),
+        messages: vec![Message::new(
+            Role::User,
+            vec![
+                ContentPart::text("look"),
+                ContentPart::Image(heddle_llm::ImagePart {
+                    name: "shot.png".into(),
+                    mime_type: heddle_llm::ImageMediaType::Png,
+                    path: image.path.to_string_lossy().into_owned(),
+                    bytes: 4,
+                    sha256: "ab".repeat(32),
+                    data: None,
+                }),
+            ],
+        )],
+        ..GenerateRequest::default()
+    };
+    let generated = service.generate(request).await.expect("answers");
+    assert_eq!(generated.text, "described");
+
+    let requests = double.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("GET /models"))
+            .count(),
+        1,
+        "the provider's list is read once for the capability"
+    );
+    let chat = requests
+        .iter()
+        .find(|request| request.starts_with("POST /chat/completions"))
+        .expect("the call went out");
+    assert!(
+        chat.contains("data:image/png;base64,"),
+        "the image travels as a data URL: {chat}"
+    );
+
+    // A text-only turn on the same service must not read the model list again.
+    service
+        .generate(ask("chat", "plain"))
+        .await
+        .expect("answers");
+    assert_eq!(
+        double
+            .requests()
+            .iter()
+            .filter(|request| request.starts_with("GET /models"))
+            .count(),
+        1,
+        "a turn without an image never costs a model-list read"
+    );
 }
