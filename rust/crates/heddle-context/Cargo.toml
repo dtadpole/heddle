@@ -9,4 +9,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `testing` exposes `heddle_context::testing::MemoryStore`, an in-memory `ContextStore`, so a dependent
+# crate can test against this one without a session store on disk.
+testing = []
+
 [dependencies]
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
