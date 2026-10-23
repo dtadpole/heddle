@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.7.2
+version: 0.7.4
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `cce4bec`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `6549572`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -67,10 +67,10 @@ this table names each failing check and the code that owns it — below, for bot
   `hostile.js`'s `<script>` is split across highlight spans instead of shown as text (owned by `heddle-web-files`).
   `web.rs`'s context row turned `check-composer` #13 and `check-context-view` #2 into passes at `9319116`.
 
-**No longer intermittent:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in about half of full lane runs at
-`46b727a` and never alone. The cause was the check, not the binary: it read the Lead's log once, before a delivery the
-team service journals asynchronously by design (mail to a member still provisioning waits until it is active). Since
-`8248e5e` it waits, bounded, for the delivery and then asserts exactly as before.
+**Fixed in the check:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in some full lane runs and never alone.
+Its poll for the teammate parsed each session's metadata while the binary could be writing it — both builds write that
+file in place — and a torn read ("Unexpected end of JSON input") escaped the wait. Since the fix the poll treats an
+unreadable file as not yet ready; in the loop that reproduced it, 4 of 22 runs failed before and 14 of 14 passed after.
 
 **Intermittent:** `70-workspaces-sessions` — *the four session shortcuts act on the selected session, and say so when
 there is none* failed once in six full lane runs tonight and passes when its file runs alone; it is a page check

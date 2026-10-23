@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:45:56Z
+modified: 2026-10-23T08:17:17Z
 version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -304,6 +304,8 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `f7b2c5e` (the lane gate judges a candidate against a per-check baseline, D-048; no Rust changed since `b72cc1a`, now main `d171876`) | `HEDDLE_BIN=<debug build of exactly f7b2c5e> sh _verifiers_/05-config-system/verify.sh --json`; the new `lane.mjs 05-config-system`; then `lane.mjs --write-baseline <file> 05-config-system` and `lane.mjs --baseline <file> 05-config-system` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline: 0 newly passing, 0 regressed. The baseline lists part 0's ten checks by name, all `pass` |
 | 2026-10-23 | lane `ffd5f27` (the bare application and the printed tree, the binary's last unported paths; the printed tree boots through `boot_tree`) | `HEDDLE_BIN=<debug build of exactly ffd5f27> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; an unknown `--profile` or a missing `--config` on the bare path gives this crate's sentence and exit 1. A third probe found this crate refusing a `null` layer document that `readLayer` reads as no layers; fixed in `a042777` |
 | 2026-10-23 | lane `46b727a`, now main `c072e63` (this crate's fidelity fixes `a042777` and `e31f096` over lane `9319116`; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 46b727a> sh _verifiers_/05-config-system/verify.sh --json`; the backend lane written as a baseline from a debug build of `9319116`, then `lane.mjs --baseline` with `46b727a` in the same tree (the binary checked to carry the fix: a `null` layer reads as 0 rows) | 10/10 passed, verdict 0; backend lane 108 pass, 5 fail, 4 unjudged, against the baseline 0 newly passing and 0 regressed — this crate's change turns no passing check anywhere into a failure (D-048) |
+| 2026-10-23 | main `77fb012` (UI merges: `heddle-web-composer`'s context view and `heddle-web-files`' highlighter, both in the binary's tree since `web` was wired) | `HEDDLE_BIN=<debug build of exactly 77fb012> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
+| 2026-10-23 | lane `cce4bec` (a baseline regression must reproduce on a re-run to block; no Rust changed since `77fb012`) | `HEDDLE_BIN=<release build of this branch at 77fb012's code> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at `cce4bec`; its `lane.mjs 05-config-system`; then `--write-baseline` and `--baseline` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline 0 newly passing, 0 regressed |
 
 ## Known differences from the TypeScript build
 
@@ -327,6 +329,15 @@ A second measurement the same night, 13 cases, agrees on every one, output and e
 `--json` with no profiles directory, an empty one, and one mixing two real profiles with a directory holding no layer
 and a stray file; `--profile` by name, by absolute directory, and unknown (with other profiles present, and with
 none); `config` text output and `--origins`; and `config --validate` on a checkout's own profile.
+
+A third measurement covers endpoint configuration through `heddle models` and `models --json`, with a profile that
+loads the model row and 16 `heddle.json` shapes (fake values only). Every listing agrees exactly: one endpoint with
+a default, a default naming no listed endpoint, two endpoints and no default, a literal key (shown only as
+`credential: "set"`), a key file (its path only), header names, `contextWindow`, unknown keys, a missing file and no
+file. The ten differences are the refusals — malformed JSON, `endpoints` not a list, an element not an object, an
+unknown kind, an endpoint without a name — where both exit 1 with the same summary but the Rust binary prints this
+crate's reason on the line before it; that line is the binary's boot reporting (`boot::failure_lines`), not this
+crate, and the TypeScript build shows load failures only through a loaded console exporter.
 
 ## Decisions the contract makes
 

@@ -111,6 +111,16 @@ async function api(url, cookie, path, init = {}) {
 }
 
 const metaOf = (root, id) => JSON.parse(readFileSync(join(dirname(transcriptFile(join(root, id))), `${id}.json`), 'utf8'))
+// Both builds write a session's metadata in place (truncate, then write), so a poll can catch the file empty or
+// half-written; measured in lane runs as "Unexpected end of JSON input" thrown out of the wait below. While polling, an
+// unreadable file means "not yet", never a verdict.
+const metaWhenReadable = (root, id) => {
+  try {
+    return metaOf(root, id)
+  } catch {
+    return undefined
+  }
+}
 const isUser = (event, text) => event.type === 'message' && event.message?.role === 'user' && JSON.stringify(event.message?.content ?? '').includes(text)
 
 async function waitFor(read, timeoutMs, what) {
@@ -154,20 +164,12 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
     assert.equal(turn.status, 200, 'the Lead turn ran')
     await turn.text()
 
-    const childId = await waitFor(() => sessionsUnder(root).find((id) => id !== session && metaOf(root, id).teamId === session), 15_000, 'the teammate session')
-    const child = metaOf(root, childId)
+    const childId = await waitFor(() => sessionsUnder(root).find((id) => id !== session && metaWhenReadable(root, id)?.teamId === session), 15_000, 'the teammate session')
+    const child = await waitFor(() => metaWhenReadable(root, childId), 5_000, 'the teammate metadata, readable')
     assert.equal(child.parentSession, session)
     assert.equal(child.origin, 'subagent')
     assert.equal(child.delegationDepth, 1)
 
-    // Delivery is asynchronous by design (src/team/service.ts): mail to a member still being provisioned is queued
-    // until it is active, and the teammate's run is not awaited by the Lead's turn. So the Lead's log is read once
-    // the delivery is journaled — bounded — and the claim stays exact: one delivered message, below.
-    await waitFor(() => (readTranscript(join(root, session)).some((event) => event.type === 'team/message/delivered') ? true : undefined), 15_000, 'the message delivery in the Lead\'s log')
-    await waitFor(() => {
-      const events = readTranscript(join(root, childId))
-      return events.some((event) => isUser(event, 'the board is clear')) && events.some((event) => JSON.stringify(event).includes('alpha reports')) ? true : undefined
-    }, 15_000, 'the mailed message and the teammate\'s answer in its log')
     const leadEvents = readTranscript(join(root, session))
     const teamTypes = leadEvents.filter((event) => event.type.startsWith('team/')).map((event) => event.type)
     assert.ok(teamTypes.filter((type) => type === 'team/member').length >= 2, 'the member is journaled provisioning then active')
