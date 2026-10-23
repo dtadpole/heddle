@@ -381,15 +381,15 @@ impl ComponentCatalog for BuiltinCatalog {
     fn lookup(&self, row: &EntryRow, anchor: Option<&Path>) -> SchemaLookup {
         // A bare row name needs no directory; a relative path is resolved against the layer that wrote
         // it, and only an all-in-memory tree has none, where `.` is the same relative name.
-        let anchor = anchor.unwrap_or(Path::new("."));
-        match resolve_component(&row.component(anchor)) {
+        let resolved_against = anchor.unwrap_or(Path::new("."));
+        match resolve_component(&row.component(resolved_against)) {
             // One adapter per built-in lands with its crate (port plan step 5); until then a built-in
             // takes no declared schema, which validation skips rather than calling it a problem.
             ComponentRef::Builtin(_) => SchemaLookup::NoSchema,
-            ComponentRef::Outside(path) => SchemaLookup::Unresolvable(format!(
-                "the outside component '{}' declares no schema to this binary yet",
-                path.display()
-            )),
+            // An outside component declares itself: the row names a manifest carrying the program and
+            // its configuration schema, read without starting anything. `heddle-config` owns that
+            // reading, including the sentences for a missing or malformed manifest.
+            ComponentRef::Outside(_) => heddle_config::ManifestCatalog::new().lookup(row, anchor),
             ComponentRef::Unresolved(name) => {
                 SchemaLookup::Unresolvable(format!("no built-in or outside path is named '{name}'"))
             }
@@ -578,5 +578,81 @@ mod tests {
             PathBuf::from("/a/c/d.ts")
         );
         assert_eq!(normalize(Path::new("a/../../b")), PathBuf::from("../b"));
+    }
+
+    /// A fresh directory under the system temporary directory, removed by the caller.
+    fn scratch(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "heddle-builtins-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    #[test]
+    fn an_outside_component_declares_its_schema_in_a_manifest_beside_it() {
+        let root = scratch("manifest");
+        let manifest = root.join("alpha.component.yml");
+        std::fs::write(
+            &manifest,
+            "program: ./alpha.ts\nconfig:\n  type: object\n  properties:\n    label:\n      type: string\n    count:\n      type: number\n",
+        )
+        .expect("the manifest");
+        let row = EntryRow {
+            name: "./alpha.component.yml".to_owned(),
+            ..EntryRow::default()
+        };
+        let lookup = BuiltinCatalog.lookup(&row, Some(&root));
+        let SchemaLookup::Schema(schema) = lookup else {
+            panic!("the manifest's schema is read: {lookup:?}");
+        };
+        assert!(
+            schema
+                .check(&serde_json::json!({ "label": "x", "count": 7 }))
+                .is_empty(),
+            "a value that fits the schema is accepted"
+        );
+        assert_eq!(
+            schema
+                .check(&serde_json::json!({ "count": "not-a-number" }))
+                .len(),
+            1,
+            "a bad field is what --validate reports"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_outside_component_without_a_manifest_says_what_is_missing() {
+        let root = scratch("no-manifest");
+        let row = EntryRow {
+            name: "./alpha.component.yml".to_owned(),
+            ..EntryRow::default()
+        };
+        let lookup = BuiltinCatalog.lookup(&row, Some(&root));
+        match lookup {
+            SchemaLookup::Unresolvable(why) => {
+                assert!(why.contains("does not exist"), "{why}");
+            }
+            other => panic!("a missing manifest is unresolvable: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_built_in_takes_no_declared_schema_until_its_adapter_lands() {
+        let row = EntryRow {
+            name: "./src/plugins/session.ts".to_owned(),
+            ..EntryRow::default()
+        };
+        assert_eq!(
+            BuiltinCatalog.lookup(&row, Some(Path::new("/repo"))),
+            SchemaLookup::NoSchema
+        );
     }
 }
