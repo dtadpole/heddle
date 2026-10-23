@@ -10,7 +10,8 @@
 //! 2. the endpoint is `--endpoint` or the model service's default, and must be one it knows;
 //! 3. the session is `--resume <id>`, or this folder's current session (a fresh one with `--new`), titled
 //!    with the prompt's first sixty characters; the folder it is bound to registers as a workspace;
-//! 4. the turn runs, a goal driver joins its chain, the live stream view is disposed;
+//! 4. the live `--stream` view starts for that session, the turn runs, a goal driver joins its chain, and the view
+//!    is disposed;
 //! 5. the result is printed — the answer, one line per tool call and per denial, and the session line; or
 //!    with `--json` the TypeScript record, key for key — and the run exits `1` when any denial is not
 //!    `UNKNOWN_TOOL`.
@@ -20,6 +21,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -60,14 +62,31 @@ pub struct Args {
     pub json: bool,
 }
 
-/// The live `--stream` view, which the binary starts before the turn and feeds every session event as it is
-/// appended (`heddle-llm`'s printer). The turn only ends it and reads its summary.
+/// The live `--stream` view (`heddle-llm`'s printer), fed every session event as it is appended. The turn only
+/// ends it and reads its summary.
 pub trait StreamView: Send + Sync {
     /// Stop printing.
     fn dispose(&self);
     /// What the view saw, for `--json`'s `stream` key.
     fn summary(&self) -> serde_json::Value;
 }
+
+/// `heddle-llm`'s own view is the one the binary passes: it owns `--stream` (D-043), and its methods are `&self`, so
+/// the session store's listener can feed it while the turn holds it.
+impl StreamView for heddle_llm::command::StreamView {
+    fn dispose(&self) {
+        heddle_llm::command::StreamView::dispose(self);
+    }
+
+    fn summary(&self) -> serde_json::Value {
+        heddle_llm::command::StreamView::summary(self)
+    }
+}
+
+/// Starts the live view for the turn's session, once that session is open and before the turn runs — the
+/// TypeScript `printStream(ctx, { session: handle.id })`. The binary's factory also hands the view to the session
+/// store's listener, so the first delta reaches standard error while the turn is still running.
+pub type StreamStarter<'a> = &'a (dyn Fn(&SessionHandle) -> Arc<dyn StreamView> + Send + Sync);
 
 /// What a goal driver's join answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,8 +117,8 @@ pub struct Context<'a> {
     pub failed_rows: Vec<String>,
     /// Register a folder as a workspace (`workspace.ensureOwner`), when the profile has the workspace row.
     pub ensure_workspace: Option<&'a (dyn Fn(&str) + Send + Sync)>,
-    /// The live view, when `--stream` asked for one.
-    pub stream: Option<&'a dyn StreamView>,
+    /// Starts the live view, when `--stream` asked for one.
+    pub stream: Option<StreamStarter<'a>>,
     /// The goal driver, when the profile has one.
     pub goal: Option<&'a dyn GoalAdvance>,
 }
@@ -227,6 +246,9 @@ async fn turn(
         ensure_workspace(&bound);
     }
 
+    // The live view, started before the turn so nothing that arrives is missed.
+    let view = context.stream.map(|start| start(&handle));
+
     let mut options = RunTurnOptions::new(handle.clone(), endpoint.clone(), prompt);
     options.system = args.system.clone();
     options.model = args.model.clone();
@@ -250,7 +272,7 @@ async fn turn(
             .map_err(io)?;
         }
     }
-    let streamed = context.stream.map(|view| {
+    let streamed = view.map(|view| {
         view.dispose();
         view.summary()
     });
@@ -773,5 +795,99 @@ mod tests {
     fn a_new_sessions_title_is_the_prompts_first_sixty_characters() {
         assert_eq!(title_of("short"), "short");
         assert_eq!(title_of(&"é".repeat(70)).chars().count(), 60);
+    }
+
+    /// A writer whose bytes the test can read after the view wrote them.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_starts_the_view_for_the_turns_session_and_reports_it_after_session() {
+        // The binary's wiring: the store's listener forwards each appended event to the view in the slot, and
+        // the starter builds heddle-llm's real view for the session the turn opened.
+        type Slot = Arc<std::sync::Mutex<Option<Arc<heddle_llm::command::StreamView>>>>;
+        let slot: Slot = Arc::default();
+        let feed = Arc::clone(&slot);
+        let listener: heddle_session::EventListener = Arc::new(move |handle, event| {
+            if let Some(view) = feed.lock().unwrap().as_ref() {
+                view.observe_value(&handle.id, &serde_json::to_value(event).unwrap());
+            }
+        });
+        let mut h = harness(
+            "stream",
+            json!([{ "reasoning": "thinking", "text": "streamed answer" }]),
+            &[],
+        );
+        let root = std::env::temp_dir().join(format!(
+            "heddle-agent-command-stream-store-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = heddle_session::SessionConfig {
+            root: Some(root.to_str().unwrap().to_owned()),
+        };
+        let sessions = Arc::new(SessionService::new(
+            &config,
+            &heddle_config::Env::default(),
+            Some(listener),
+        ));
+        h.runtime.session = Arc::new(Sessions::new(Arc::clone(&sessions)));
+        h.runtime.context = Arc::new(SessionMessages {
+            sessions: Arc::clone(&sessions),
+        });
+        h.sessions = sessions;
+
+        let stderr = Captured::default();
+        let written = stderr.clone();
+        let install = Arc::clone(&slot);
+        let start = move |handle: &SessionHandle| -> Arc<dyn StreamView> {
+            let view = Arc::new(heddle_llm::command::print_stream(
+                &handle.id,
+                Box::new(written.clone()),
+            ));
+            *install.lock().unwrap() = Some(Arc::clone(&view));
+            view
+        };
+        let mut context = h.context();
+        context.stream = Some(&start);
+        let (code, out, err) = h
+            .run_with(
+                &Args {
+                    json: true,
+                    ..turn("stream it")
+                },
+                &context,
+            )
+            .await;
+        assert_eq!(code, 0, "{out}{err}");
+        let record: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let keys: Vec<&str> = record
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(&keys[..3], ["session", "stream", "context"], "{keys:?}");
+        assert!(
+            record["stream"]["textDeltas"].as_u64().unwrap() >= 1,
+            "{}",
+            record["stream"]
+        );
+        assert_eq!(record["stream"]["completed"], true);
+        let printed = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            printed.contains("streamed answer"),
+            "the view wrote the delta: {printed:?}"
+        );
     }
 }

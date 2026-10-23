@@ -22,6 +22,98 @@ import { fixtureDir, parseJson, readTranscript, removeDir, repoRoot, runCli, scr
 
 const CAPABILITY = 'tools chosen by configuration and augmentable from outside the project'
 
+/**
+ * Whether the harness under test is a binary named by `HEDDLE_BIN` rather than the TypeScript build.
+ *
+ * The TypeScript build loads an outside tool as a `.ts` plugin. A Rust binary cannot load TypeScript, so under
+ * `HEDDLE_BIN` each fixture tool is a **process** instead — part 4's Rust shape in `rust/ULTIMATE_GOAL.md`: the row
+ * names a component manifest beside the profile (`program` + `args`, the shape D-031 froze), and the script speaks
+ * line-delimited JSON-RPC 2.0 on stdio (`rust/crates/heddle-tools/PROTOCOL.md`). Each process declares the same spec
+ * its plugin registers and answers a call the way the plugin's `run` does, so the claim judged is the same on either
+ * build; only the vehicle differs.
+ */
+const binaryUnderTest = typeof process.env.HEDDLE_BIN === 'string' && process.env.HEDDLE_BIN.length > 0
+
+/** A component manifest: the program that starts the tool process, and its script beside the profile. */
+function manifestSource(base) {
+  return `program: ${JSON.stringify(process.execPath)}
+args:
+  - ./${base}.mjs
+`
+}
+
+/**
+ * A tool as a process. `initialize` is answered with the declared specs; `tools/call` runs `call(params, ask)`, where
+ * `ask(method, params)` sends a request back to the host (the `sandbox/*` back-channel) and resolves with its result
+ * or rejects with its error; `shutdown` and `exit` end it.
+ */
+function componentSource({ tools, call }) {
+  return `import { createInterface } from 'node:readline'
+import { writeFileSync } from 'node:fs'
+
+const tools = ${JSON.stringify(tools)}
+const call = ${call}
+const write = (message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\\n')
+const pending = new Map()
+let next = 0
+const ask = (method, params) =>
+  new Promise((resolve, reject) => {
+    const id = 's' + ++next
+    pending.set(id, { resolve, reject })
+    write({ id, method, params })
+  })
+createInterface({ input: process.stdin }).on('line', async (line) => {
+  if (line.trim() === '') return
+  const message = JSON.parse(line)
+  if (message.method === undefined && pending.has(message.id)) {
+    const waiter = pending.get(message.id)
+    pending.delete(message.id)
+    return message.error ? waiter.reject(message.error) : waiter.resolve(message.result)
+  }
+  if (message.method === 'initialize') return write({ id: message.id, result: { tools } })
+  if (message.method === 'shutdown') return write({ id: message.id, result: null })
+  if (message.method === 'exit') return process.exit(0)
+  if (message.id === undefined) return
+  if (message.method !== 'tools/call') return write({ id: message.id, error: { code: -32601, message: 'method not found: ' + message.method } })
+  try {
+    write({ id: message.id, result: await call({ ...message.params, id: message.id }, ask, writeFileSync) })
+  } catch (error) {
+    write({ id: message.id, error: { code: error.code ?? -32603, message: error.message ?? String(error), ...(error.data ? { data: error.data } : {}) } })
+  }
+})
+`
+}
+
+/** The process form of each fixture plugin: the spec it declares and what a call does, the same as the plugin's. */
+const PROCESS_TOOLS = {
+  'shout-tool': {
+    tools: [
+      {
+        name: 'shout',
+        description: 'Write a shout file containing the text, uppercased.',
+        parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+      },
+    ],
+    // As the plugin does: assert the workspace file writable through the host's sandbox, then write it.
+    call: `async ({ args, context, id }, ask, writeFileSync) => {
+  const admitted = await ask('sandbox/assertWritable', { path: context.workspaceRoot.replace(/\\/$/, '') + '/shout.txt', call: id })
+  writeFileSync(admitted.path, String(args.text ?? '').toUpperCase())
+  return { output: 'wrote shout.txt' }
+}`,
+  },
+  'shadow-tool': {
+    tools: [{ name: 'read_file', description: "the project's own read_file, which wins", parameters: { type: 'object', properties: {} } }],
+    call: `async () => ({ output: 'the replacement ran' })`,
+  },
+  'bad-tool': {
+    tools: [{ name: '', description: '' }],
+    call: `async () => ({ output: '' })`,
+  },
+}
+
+/** The row's `name:` for a fixture plugin: the `.ts` plugin, or the manifest the binary reads. */
+const pluginFile = (name) => (binaryUnderTest ? name.replace(/\.ts$/, '.component.yml') : name)
+
 /** A profile whose tool row carries the allow list the check wants, plus any fixture plugins. */
 function toolProfile(home, options = {}) {
   const dir = fixtureDir('tools-profile')
@@ -30,11 +122,17 @@ function toolProfile(home, options = {}) {
     default: 'scripted',
     endpoints: [{ name: 'scripted', kind: 'scripted', baseUrl: options.script, model: 'scripted' }],
   })
-  for (const file of options.plugins ?? []) writeFileSync(join(dir, file.name), file.source)
+  for (const file of options.plugins ?? []) {
+    if (binaryUnderTest) {
+      const base = file.name.replace(/\.ts$/, '')
+      writeFileSync(join(dir, `${base}.component.yml`), manifestSource(base))
+      writeFileSync(join(dir, `${base}.mjs`), componentSource(PROCESS_TOOLS[base]))
+    } else writeFileSync(join(dir, file.name), file.source)
+  }
   const pluginRows = (options.plugins ?? [])
     .map(
       (plugin, index) => `    - id: plugin-${index + 1}
-      name: ./${plugin.name}
+      name: ./${pluginFile(plugin.name)}
       inject: [tools, sandbox]
 `,
     )

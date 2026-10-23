@@ -699,6 +699,9 @@ name = "heddle-events"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-agent",
+ "heddle-llm",
+ "heddle-tools",
  "serde",
  "serde_json",
  "thiserror",
