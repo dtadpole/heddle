@@ -19,12 +19,13 @@ The Rust port of the backend wire shapes, the HTTP client, streamed content and 
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-llm` — in-process doubles, no network |
 | Sources | [`src/`](src/INDEX.md) |
 
-**State: vocabulary ported.** The public types, traits and signatures are declared, their JSON shapes are final, and
-the pure vocabulary of step 2 — finish reasons, `text_of`, `describe_content`, `request_messages`, usage, the failure
-code and Title-Case headers, the SSE parser and driver, the attachment projection, `reasoning_configured` — is
-implemented and tested in-process (44 unit tests, no network). The request builders, folds, transport and service are
-`todo!()` until the port plan below reaches them; a dependent crate builds against the API and uses a test double where
-it needs a body.
+**State: the stream path is ported, the request path still waits on configuration.** The public types, traits and
+signatures are declared, their JSON shapes are final, and the pure vocabulary of step 2, the scripted adapter, the
+three stream folds and the message/input translations are implemented and tested in-process (91 unit tests, no
+network). The transport (`wire`) is implemented against in-process HTTP doubles. The three request builders,
+`reasoning_value` and the service still need `heddle-config`'s catalogue lookup bodies (`base_url_for`,
+`reasoning_level_for`, `offered_models`), which are developer-one's; until they land a dependent crate builds against
+the declared API and uses a test double where it needs a body.
 
 ## Where it sits
 
@@ -100,7 +101,7 @@ The TypeScript unit tests under `test/` are the oracle: each step ports the ones
 | 1 | The contract: every type, trait, signature and doc; JSON shapes final and tested | — | done |
 | 2 | Pure vocabulary: finish reasons, `text_of`, `describe_content`, `request_messages`, `reasoning_configured`, `accepts_images`, usage, `failure_code`, `title_case_headers`, the SSE parser, attachment texts and projection, base64 | `finish-reasons`, `usage`, `request-messages`, `attachments` | done |
 | 3 | Request builders and folds: chat, responses, anthropic; `reasoning_value`; the scripted adapter | `anthropic-vertex`, `responses-input`, `responses-finish`, `tool-call-delta`, `scripted-purpose`, `model-effort` (wire values), `model-gateways` | partial: the scripted adapter, `adapter_for`, the three stream folds and the message/input translations are done; the request builders and `reasoning_value` wait for `heddle-config`'s catalogue lookups |
-| 4 | Transport: `wire` on reqwest, body sniffing, proxy form, failure codes; `fold_sse` and each adapter's `stream`, against in-process doubles of the three routes | `stream-arrival` | |
+| 4 | Transport: `wire` on reqwest, body sniffing, proxy form, failure codes; `fold_sse` and each adapter's `stream`, against in-process doubles of the three routes | `stream-arrival` | partial: `wire`, `fold_sse` and the folds are done and tested against a local double; each adapter's `stream` waits on its request builder |
 | 5 | `ModelService` (registry, default, hooks, modality discovery, `generate`, `probe`), `ModelListCache`, `StreamPrinter` | `model-info`, `model-info-per-model`, `model-discovery` | |
 | 6 | Through the binary: `10-llm-backends` and `20-streaming` pass under `HEDDLE_BIN` once the CLI composes the service, the loop and the session log (see below) | the verifiers | |
 | 7 | `98-model-endpoints` under `HEDDLE_BIN` (see below) | the verifier | |
