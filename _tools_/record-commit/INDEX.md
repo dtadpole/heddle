@@ -92,6 +92,8 @@ gate reads messages.
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
+Last run 2026-10-22 21:22 PDT, on 203cfff with main 4aca3b1 merged: `node --test _tools_/record-commit/_tests_/record/unit.test.mjs`, 22 passed, 0 failed.
+
 Twenty-two tests against a scratch bare origin and clones: the happy path landing and syncing the live tree, three
 given files with two unchanged refused together, a log whose lines another writer already landed, a staged file
 another writer lands mid-run with the same bytes (exit 2) and with different bytes (exit 1), the read-back counting

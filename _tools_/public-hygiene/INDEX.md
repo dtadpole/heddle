@@ -113,6 +113,8 @@ forked, and read main's own fixes back as lines a behind branch adds.
 node --test _tools_/public-hygiene/_tests_/gate/unit.test.mjs
 ```
 
+Last run 2026-10-22 21:22 PDT, on 203cfff with main 4aca3b1 merged: `node --test _tools_/public-hygiene/_tests_/gate/unit.test.mjs`, 15 passed, 0 failed.
+
 They judge the list format, literal and regex matching, redaction, the diff and log parsers, the identity
 check, the built-in rule, the placeholder rule (integrator-two's six measured shapes exempt, a random v4 and two
 stray digits caught), a branch behind main, a symlinked invocation, and the three exit codes against a throwaway

@@ -29,6 +29,7 @@ team        <the TEAM.yaml given>
 focus       server, token and stream — the server, token and stream first, so every feature crate can mount its routes
 worktree    ~/heddle--developer-ten  branch hd/developer-ten  HEAD 72fdb4fb824d
 tip         24 ahead, 0 behind  origin/main 59fd96f (2026-10-22T20:51:13-07:00)
+pushed      origin/hd/developer-ten 72fdb4f: 24 ahead, 0 behind origin/main; local HEAD is the pushed tip
 scope check clean: 0 committed and 0 uncommitted path(s) outside the write scope
 commits     19 ahead with subjects (5 merge(s) of main not listed; 24 commits total)
   f09a628  2026-10-22T20:48  fix(heddle-server): answer a stale approval with answered:false
@@ -52,6 +53,7 @@ scope       include: rust/crates/heddle-server/
 
 | Section | Where it comes from |
 |---|---|
+| `pushed` | `origin/hd/<seat>` in the reviewer's fetched clone: how far it is from main, and how many local commits are not pushed (or `NOT PUSHED`) |
 | `tip`, `commits` | the seat worktree (`~/heddle--<seat>`, or the path in its `resource_identity_ref`) against the fetched `origin/main`; merges of main are counted, not listed |
 | `scope check`, `files`, `uncommitted` | `git diff` and `git status` in the seat worktree, each path judged against the seat's `write_scopes` in `TEAM.yaml`, files grouped by crate, verifier or top folder |
 | `last report`, `newer msg` | the team inboxes under `$REFLECTION_INBOX_HOME` (default `~/.reflection-inbox`): the seat's newest message to the record's owner gateway, and its newest message to anyone else when that is newer |
@@ -91,8 +93,10 @@ page, `1` when the seat, the team file or the reviewer's checkout is missing. No
 node --test _tools_/review-collect/_tests_/page/unit.test.mjs
 ```
 
-Eighteen tests against a scratch bare origin, a reviewer clone, a fake seat with commits ahead and uncommitted edits,
-a fake inbox, action log and review log: the roster reader, the defaults derived from the record (and the refusal
+Last run 2026-10-22 21:22 PDT, on 203cfff with main 4aca3b1 merged: `node --test _tools_/review-collect/_tests_/page/unit.test.mjs`, 19 passed, 0 failed.
+
+Nineteen tests against a scratch bare origin, a reviewer clone, a fake seat with commits ahead and uncommitted edits,
+a fake inbox, action log and review log: the roster reader, the pushed branch beside local HEAD, the defaults derived from the record (and the refusal
 without one), scope parsing and the four verdicts, porcelain parsing,
 the report-versus-peer-message rule, the ledger cutoff, run detection on one line and across a fenced multi-line
 command, the usage-line and import-line false positives, the candidate rule for broad scopes, the full page, a clean
