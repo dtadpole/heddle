@@ -10,7 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+heddle-llm.workspace = true
 heddle-sandbox.workspace = true
+heddle-session.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,3 +22,6 @@ tracing.workspace = true
 # The cancellation token every crate passes for a Stop (`AbortSignal` in the TypeScript build). Named here
 # until it is a `[workspace.dependencies]` entry, which is the workspace owner's file.
 tokio-util = "0.7"
+
+[dev-dependencies]
+heddle-config.workspace = true

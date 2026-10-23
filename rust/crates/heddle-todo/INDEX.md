@@ -49,7 +49,7 @@ The Rust port of the todo list and its tools.
 | 1 | Public API, docs | landed |
 | 2 | `iso_timestamp`, validation, counts, decode, fold, event body, the service — porting every case of `test/todo.test.ts` | landed |
 | 3 | The tools and the route, with their answers compared byte for byte with the TypeScript build's | landed |
-| 4 | Swap the `SessionLog` double for `heddle-session`'s store and the mirrors for `heddle-tools`' types | when those APIs land |
+| 4 | Swap the `SessionLog` double for `heddle-session`'s store (`SessionLog` is implemented for `SessionStore`) and the mirrors for `heddle-tools`' types | the store: landed; the tool types: when `heddle-tools`' `Tool` stops using its provisional mirrors |
 | 5 | `check-todo` through `HEDDLE_BIN` | with the server and the binary |
 
 ## Read next

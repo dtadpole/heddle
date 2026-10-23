@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.4.1
+version: 0.6.1
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -17,8 +17,8 @@ the routed endpoint's window, reduced by pruning before it is reduced by compact
 |---|---|
 | Ported from | `src/context/` (1,726 lines in seven files) |
 | Judged by | `_verifiers_/30-context-management`, through the `heddle` binary |
-| Sources | [`src/`](src/INDEX.md); integration tests in `tests/` (`typescript-agreement.rs`: values measured from the TypeScript build) |
-| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported. Step 5's remaining half is the `ContextStore` adapter for `heddle-session`'s store, which waits on that store reaching `main`; step 6 waits on the loop and the command line |
+| Sources | [`src/`](src/INDEX.md); integration tests in `tests/`: `typescript-agreement.rs` (prices, budgets, prune text and digests measured from the TypeScript build) and `engine-agreement.rs` (the TypeScript store and engine's own record of four scenarios, `tests/fixtures/engine-oracle.json`, replayed and compared event for event; regenerate it with `node tests/fixtures/generate-engine-oracle.mjs`) |
+| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported, and `ContextStore` is bound to `heddle-session`'s store. Step 6, the verifier through the binary, waits on the loop and the command line |
 
 ## Public API
 
@@ -33,11 +33,13 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | `instructions` | `instructions.ts` | `INSTRUCTIONS_MAX_BYTES`, the file names; `find_project_root`, `find_instruction_files`, `instruction_digest`, `render_instruction_baseline` |
 | `pairing` | `pairing.ts` | `repair_tool_pairing(&[Message]) -> Cow<[Message]>` |
 | `runtime` | `service.ts` | `RUNTIME_CONTEXT_*`, `RuntimeContextSection`, `render_runtime_context` |
+| `command` | `src/cli.ts` (the `context` branch) | the command's entry point under D-043: `Command::Context`, `Args { target, json, endpoint, model }`, `Context { cwd, sessions, context, tools, workspace_root }`, `run(command, args, context, out, err) -> i32` |
 | `service` | `service.ts` | `ContextService<S: ContextStore>::{budget, measure, record_runtime_context, ensure_context, assemble, prepare, recover_overflow}`; `ContextConfig` (the profile row's `config`), `ContextReport` with `summary()` and `view()`, the `ModelAccess` trait |
 | `events` | the log vocabulary | `ContextEvent`: the `context/note` and `compaction/*` events this crate writes, typed |
 | `store` | `PrunableStore` | the `ContextStore` trait this crate needs from the session store; `LogEvent`, `SurfaceState`, `SurfaceOp`, `AppendOptions` |
 | `types` | `src/llm/types.ts` | `heddle-llm`'s `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, re-exported under the same names; plus `text_message` for the single-block notes this crate writes |
 | `testing` | — | `MemoryStore`, an in-memory `ContextStore` with the TypeScript fold rules; behind the `testing` feature |
+| `session_store` | `PrunableStore` | the real store bound to this crate's trait: `impl ContextStore for heddle_session::SessionStore`, a mapping only |
 
 ### How the other crates call it
 
@@ -46,19 +48,27 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
   writes `report.breakdown`, `estimated_tokens`, `threshold_tokens`, `pruned` and `compacted` on `model/request`,
   and reports `report.summary()` as the turn's `context`. On a refused call it calls `recover_overflow`, and on
   `RecoveryDecision::Retry` re-derives with `assemble` (it does not reduce again) and retries once.
-- **The command line** (`heddle`): `heddle context <session> --json` is `assemble(...)` with the session's folder,
-  every tool's schema, and `--endpoint`/`--model`, printed as `report.view(session_id)`. The boot builds one
-  `ContextService` from the profile's context row (`ContextConfig` deserialises its `config`), `HEDDLE_HOME` and a
-  `ModelAccess` over the model layer, and registers `recover_overflow` on `agent/request-error`.
+- **The command line** (`heddle`): `heddle context [<session>] [--json]` is `command::run` (D-043): the binary
+  dispatches with `command::Args` and a `command::Context` holding the working directory, the session service, the
+  context service, every tool's schema and the sandbox root; the command resolves the session, assembles with the
+  session's own folder, and prints `ContextView` as `JSON.stringify(view, null, 2)` or `ContextView::render_text`.
+  The boot builds one `ContextService` from the profile's context row (`ContextConfig` deserialises its `config`;
+  an absent row is `{}` and takes every default), the session store, `HEDDLE_HOME`, and `heddle_llm::ModelService`
+  itself as the `ModelAccess` (this crate implements it: the endpoint's declared window, one `generate` with
+  `purpose: compaction`), and registers `recover_overflow` on `agent/request-error`.
 - **The composer's context view** (`heddle-web-composer`) reads `assemble`'s report, and the recorded
   `breakdown` on `model/request`.
+- **The store the binary names**: `heddle_session::SessionStore` behind an `Arc`. `ContextService<S:
+  ContextStore>` is generic and this crate provides the one `impl` for the real store (`session_store`), so a
+  caller never writes a conversion; `MemoryStore` (behind the `testing` feature) is the double, not a
+  production store.
 
 ## What it builds against
 
 | Needed from | What | State |
 |---|---|---|
 | `heddle-llm` | `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, and the endpoint window behind `ModelAccess` | **taken**: `types` re-exports `heddle_llm`'s under the same names, plus one helper, `text_message`; the dependency is on `main` |
-| `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | the `ContextStore` trait stays here; the adapter `impl` for the real store lands in this crate once the store is on `main`. It is a **straight pass-through** only if `heddle-session` re-exports `heddle-llm`'s message types; while its stand-ins are its own types, the adapter would have to serialise every node to cross the type boundary, which this crate will not hide |
+| `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | **taken**: `impl ContextStore for heddle_session::SessionStore` lives in `session_store`. It is a straight pass-through — the session crate re-exports `heddle-llm`'s message types, so a node's message crosses without a conversion |
 | `heddle-config` | the context row's `config` handed over for deserialising; `heddle_home()` | `ContextConfig: Deserialize`; `ContextDependencies::heddle_home`; the profile row is the boot's to hand over |
 | `heddle-events` | registering `recover_overflow` on the `agent/request-error` waterfall | a plain async method; the boot wires it |
 
@@ -69,7 +79,8 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | a compaction shadows a span; the summary is read once | `compact`, the replacement note | the loop's `--turn --json` `context.compacted`; the `context` command; the scripted endpoint's `purpose: compaction` step |
 | the budget is the endpoint's window | `budget` | the endpoint's `contextWindow` (`context_window_for`); `estimatedTokens` on `model/request` |
 | trimming one result can clear the pressure | `prune_session` before `plan` | `write_file`/`read_file`; `context.pruned` |
-| a cut never splits a pair, never shadows the prompt; a non-shrinking summary is refused | `plan`, `compact` | **imports `dist/` directly** — see the open question below |
+| a cut never splits a pair, and the model keeps its system prompt | `plan` (backs off before an answered call; protects only a head system node, as the TypeScript planner does) | the loop's `--turn` with `write_file`/`read_file`; the `context` command |
+| a summary that does not shrink is refused, the conversation left as it was | `compact` | the scripted endpoint's `purpose: compaction` step; the `context` command |
 | one reduction and one retry on overflow | `recover_overflow` | the chat adapter mapping the 400 to `CONTEXT_WINDOW_EXCEEDED`; the loop's single retry and `turn/retry` event; the waterfall |
 | the baseline comes from the session's folder and follows an edit | `ensure_context` | the session's recorded folder; the loop and the `context` command passing it |
 | repeated compaction; notes are not turns | `plan` over out-of-order seqs | the page's display fold, imported from `dist/server/web.js` |
@@ -90,10 +101,10 @@ the TypeScript tests named.
    Landed.
 4. **The service** — `test/runtime-context.test.ts`, `test/session-folder.test.ts` (the baseline half), the usage
    anchor, and overflow recovery with a scripted `ModelAccess`. Landed.
-5. **The real dependencies**: the `types` half landed (`heddle-llm` is on `main`; `types` now re-exports it and
-   the same 97 tests pass). The `heddle-session` half — `impl ContextStore for SessionStore` — **waits**: the
-   store is not on `main` yet, and the adapter is written once it is and `heddle-session` re-exports the same
-   message types, so no per-node conversion is needed.
+5. **The real dependencies**: landed. `types` re-exports `heddle-llm`'s, and `impl ContextStore for
+   SessionStore` binds the real store, with three tests on a real on-disk session (write and read back, the
+   pruner's rewrite, a compaction whose log keeps its span) and one that replays the TypeScript build's record of a
+   landed compaction through it, event for event.
 6. **The verifier**: with the loop and the command line composed, `30-context-management` through `HEDDLE_BIN`,
    reported to the lane integrator with the command and the date. **Waiting** on the loop and the command line.
 
@@ -109,14 +120,16 @@ the TypeScript tests named.
 
 ## Open questions
 
-- **Check 4 of `30-context-management` cannot be judged through `HEDDLE_BIN` as written.** *A cut never splits a
-  tool call from its result* calls `inProcessOnly()` and imports `dist/`, so under `HEDDLE_BIN` it is skipped, and
-  the runner turns any skip into verdict 3 unless `--allow-skip` is passed. It is the only in-process check in the
-  backend set. A CLI version both builds already support was proposed to integrator-one, who owns the verifier,
-  on 2026-10-22: the refusal half through a scripted `purpose: compaction` step that returns 20,000 characters,
-  and the cut half aimed by sizes (a known-size tool result just over `retainTokens`), judged on the log and on
-  `context --json`. This crate's unit tests cover both properties meanwhile, and
-  `tests/typescript-agreement.rs` pins the prices such an aim depends on to the TypeScript build's.
+- **One check of `30-context-management` still reads `dist/`.** *Compacted more than once, and the reader still
+  sees the conversation* folds the log with `transcriptTurns` from `dist/server/web.js`, so under `HEDDLE_BIN` with
+  no TypeScript build it fails rather than skips once the binary serves `context`. The fold's oracle is the
+  verifier owner's and the coordinator's to settle (raised by integrator-one, 2026-10-22); this crate's side of the
+  claim — notes are `context/note`, never `message` — is tested here.
+- **Settled:** the in-process check of the cut and the refusal is now two command-line checks (main `cc09a59`).
+  `command.rs` replays that exact fixture through this crate (`the_verifiers_cut_pair_scenario_…`,
+  `the_verifiers_cut_refused_scenario_…`). Through the command line the system prompt is a note appended when the
+  round starts, after the first prompt, so it is not the head node and a plan may shadow it; the next round
+  appends it again. That is the TypeScript build's behaviour and this crate keeps it.
 - **For `heddle-session` and the workspace manifest:** the log's field order survives a `serde_json::Value` only with
   `serde_json`'s `preserve_order` feature; `heddle-session` enables it, and `ContextEvent` already declares the
   TypeScript order.

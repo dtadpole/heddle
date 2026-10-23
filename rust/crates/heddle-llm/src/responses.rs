@@ -6,10 +6,12 @@
 //! `response.failed` with no `[DONE]`. A reasoning-configured endpoint asks for `reasoning.summary: "auto"`, without
 //! which the route streams no reasoning at all.
 
+use futures::StreamExt;
 use serde_json::Value;
 
-use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
+use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse};
 use crate::error::ModelError;
+use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
 use crate::types::{Chunk, ContentPart, GenerateRequest, Message, ToolCall};
 use heddle_config::EndpointConfig;
@@ -32,8 +34,42 @@ impl Adapter for ResponsesAdapter {
     }
 
     fn stream(&self, request: GenerateRequest) -> ChunkStream {
-        let _ = request;
-        todo!("port openAiResponsesAdapter")
+        let prepared = match responses_request(&self.endpoint, &request) {
+            Ok(prepared) => prepared,
+            Err(error) => return crate::adapter::error_stream(error),
+        };
+        let endpoint = self.endpoint.clone();
+        let lazy = futures::stream::once(async move {
+            let call = WireRequest {
+                url: prepared.url,
+                method: Method::Post,
+                body: Some(prepared.body),
+                headers: prepared.headers,
+                api_key: endpoint.api_key.clone(),
+                stream: prepared.stream,
+                timeout_ms: endpoint.timeout_ms,
+                endpoint: endpoint.name.clone(),
+                proxy: endpoint.proxy.clone(),
+            };
+            let stream: ChunkStream = match wire(call).await {
+                // This route always streams; a buffered answer is not what it promises.
+                Ok(WireResponse::Json(_)) => crate::adapter::error_stream(ModelError::new(
+                    format!(
+                        "'{}' answered the Responses route without a stream",
+                        endpoint.name
+                    ),
+                    endpoint.name.clone(),
+                    crate::error::code::BAD_BODY,
+                )),
+                Ok(WireResponse::Stream { body, .. }) => {
+                    let fold = ResponsesFold::new().with_endpoint(endpoint.name.clone());
+                    fold_sse(body, Box::new(fold))
+                }
+                Err(error) => crate::adapter::error_stream(error),
+            };
+            stream
+        });
+        Box::pin(lazy.flatten())
     }
 }
 
@@ -51,8 +87,73 @@ pub fn responses_request(
     endpoint: &EndpointConfig,
     request: &GenerateRequest,
 ) -> Result<PreparedCall, ModelError> {
-    let _ = (endpoint, request);
-    todo!("port the openAiResponsesAdapter body builder")
+    let mut body = serde_json::Map::new();
+    if let Some(model) = request.model.as_ref().or(endpoint.model.as_ref()) {
+        body.insert("model".into(), Value::String(model.clone()));
+    }
+    body.insert(
+        "input".into(),
+        Value::Array(to_responses_input(&request.messages)),
+    );
+    body.insert("store".into(), Value::Bool(false));
+    // The route refuses `stream: false`, so this shape always streams.
+    body.insert("stream".into(), Value::Bool(true));
+
+    let effort = crate::adapter::reasoning_value(endpoint, request)?;
+    let mut reasoning = serde_json::Map::new();
+    if let Some(value) = effort {
+        reasoning.insert(
+            "effort".into(),
+            serde_json::to_value(value).unwrap_or(Value::Null),
+        );
+    }
+    // A reasoning model reasons even with no level chosen, but the route only streams its summary when asked.
+    if crate::adapter::reasoning_configured(endpoint) {
+        reasoning.insert("summary".into(), Value::String("auto".into()));
+    }
+    if !reasoning.is_empty() {
+        body.insert("reasoning".into(), Value::Object(reasoning));
+    }
+
+    if !request.tools.is_empty() {
+        body.insert(
+            "tools".into(),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "type": "function",
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(max_output_tokens) = request.max_output_tokens.or(endpoint.max_output_tokens) {
+        body.insert("max_output_tokens".into(), Value::from(max_output_tokens));
+    }
+
+    Ok(PreparedCall {
+        url: format!(
+            "{}/responses",
+            endpoint.base_url_for(request.model.as_deref())
+        ),
+        body: Value::Object(body),
+        headers: crate::http::title_case_headers(
+            &endpoint
+                .headers
+                .iter()
+                .flatten()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>(),
+        ),
+        stream: true,
+    })
 }
 
 /// One message's content (`toResponsesContent`): text as `input_text` (or `output_text` for an assistant), an image
@@ -162,11 +263,20 @@ pub fn responses_finish_reason(
 pub struct ResponsesFold {
     calls: Vec<(String, ToolCall)>,
     usage: Option<crate::usage::TokenUsage>,
+    /// The endpoint name a `REMOTE` error names; empty when the caller did not say.
+    endpoint: String,
 }
 
 impl ResponsesFold {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The same fold, naming its endpoint in a `REMOTE` error a person reads.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
     }
 
     /// The call an `item_id` names, created on first sight when a delta arrives before its item.
@@ -326,9 +436,14 @@ impl StreamFold for ResponsesFold {
             "response.failed" | "error" => {
                 let excerpt = serde_json::to_string(&parsed).unwrap_or_default();
                 let excerpt: String = excerpt.chars().take(300).collect();
+                let who = if self.endpoint.is_empty() {
+                    "the Responses route".to_string()
+                } else {
+                    format!("'{}'", self.endpoint)
+                };
                 return Err(ModelError::new(
-                    format!("the Responses route reported a failed response — {excerpt}"),
-                    String::new(),
+                    format!("{who} reported a failed response — {excerpt}"),
+                    self.endpoint.clone(),
                     crate::error::code::REMOTE,
                 ));
             }
@@ -358,6 +473,7 @@ impl StreamFold for ResponsesFold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::user_message;
     use crate::usage::TokenUsage;
 
     fn sse(event: &str, value: serde_json::Value) -> SseEvent {
@@ -643,5 +759,107 @@ mod tests {
                 "output": "line one\nline two"
             })]
         );
+    }
+
+    fn base_endpoint() -> EndpointConfig {
+        EndpointConfig {
+            name: "codex".into(),
+            kind: heddle_config::EndpointKind::OpenaiResponses,
+            base_url: "http://gateway.example/v1".into(),
+            model: Some("m".into()),
+            models: None,
+            reasoning: None,
+            project: None,
+            region: None,
+            api_key: None,
+            api_key_file: None,
+            headers: None,
+            stream: None,
+            max_output_tokens: None,
+            context_window: None,
+            capabilities: None,
+            input_modalities: None,
+            proxy: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn the_request_has_a_list_input_and_always_streams() {
+        let request = GenerateRequest {
+            endpoint: "codex".into(),
+            messages: vec![user_message("hi")],
+            max_output_tokens: Some(32),
+            ..GenerateRequest::default()
+        };
+        let call = responses_request(&base_endpoint(), &request).expect("builds");
+        assert_eq!(call.url, "http://gateway.example/v1/responses");
+        assert!(call.stream);
+        assert_eq!(call.body["model"], serde_json::json!("m"));
+        assert_eq!(
+            call.body["input"],
+            serde_json::json!([{ "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }])
+        );
+        assert_eq!(call.body["store"], serde_json::json!(false));
+        assert_eq!(call.body["stream"], serde_json::json!(true));
+        assert_eq!(call.body["max_output_tokens"], serde_json::json!(32));
+        // A shape that does not reason sends no `reasoning` field at all.
+        assert!(call.body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn a_reasoning_endpoint_asks_for_a_summary_and_nests_the_effort() {
+        let mut endpoint = base_endpoint();
+        endpoint.capabilities = Some(vec!["reasoning".into()]);
+        endpoint.reasoning = Some(heddle_config::ReasoningLevels {
+            default: None,
+            levels: vec![heddle_config::ReasoningLevel {
+                id: "high".into(),
+                name: "High".into(),
+                value: Some(heddle_config::ReasoningValue::Text("high".into())),
+            }],
+        });
+        let call = responses_request(
+            &endpoint,
+            &GenerateRequest {
+                endpoint: "codex".into(),
+                messages: vec![user_message("hi")],
+                reasoning_effort: Some("high".into()),
+                ..GenerateRequest::default()
+            },
+        )
+        .expect("builds");
+        assert_eq!(
+            call.body["reasoning"],
+            serde_json::json!({ "effort": "high", "summary": "auto" }),
+            "the route only streams a reasoning summary when it is asked for one"
+        );
+    }
+
+    #[test]
+    fn the_declared_tools_are_flat_and_the_endpoints_cap_is_the_default() {
+        let mut endpoint = base_endpoint();
+        endpoint.max_output_tokens = Some(9);
+        let request = GenerateRequest {
+            endpoint: "codex".into(),
+            messages: vec![user_message("hi")],
+            tools: vec![crate::types::ToolSpec {
+                name: "bash".into(),
+                description: "run".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }],
+            ..GenerateRequest::default()
+        };
+        let call = responses_request(&endpoint, &request).expect("builds");
+        assert_eq!(
+            call.body["tools"],
+            serde_json::json!([{
+                "type": "function",
+                "name": "bash",
+                "description": "run",
+                "parameters": { "type": "object" }
+            }])
+        );
+        assert_eq!(call.body["max_output_tokens"], serde_json::json!(9));
     }
 }

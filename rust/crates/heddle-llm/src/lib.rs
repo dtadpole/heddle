@@ -24,6 +24,7 @@
 //! | [`model_info`] | `llm/model-info.ts` | the provider's model list: context window and input modalities |
 //! | [`service`] | `llm/service.ts`, `plugins/model.ts` | [`ModelService`] and the `model/*` hook seam |
 //! | [`printer`] | `stream/printer.ts` | the live stream view on standard error |
+//! | [`command`] | `cli.ts` (the turn's endpoint and `--stream`) | the `--endpoint`/`--stream` entry point the binary dispatches to (D-043), std types only |
 //!
 //! The endpoint vocabulary — [`EndpointConfig`], its model catalogue and the lookups `offered_models`,
 //! `base_url_for`, `context_window_for`, `reasoning_level_for` — is `heddle-config`'s and is re-exported here, so a
@@ -31,13 +32,15 @@
 //!
 //! # Contract status
 //!
-//! The public API is declared; bodies marked `todo!()` are being ported (see `INDEX.md`, "Port plan"). Data types
-//! and their JSON shapes are final and tested, so a dependent crate can build and serialize against them today.
+//! The public API is declared, its JSON shapes are final, and every body is implemented and tested in-process (see
+//! `INDEX.md`, "Port plan"). The verifiers judge the binary that composes this crate; nothing here reads
+//! configuration files, sessions or the event bus.
 
 pub mod adapter;
 pub mod anthropic;
 pub mod attachments;
 pub mod chat;
+pub mod command;
 pub mod error;
 pub mod http;
 pub mod model_info;
