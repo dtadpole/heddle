@@ -109,6 +109,15 @@ ended after the user event without an error event. The deployment cause is fixed
 but the UI gap remains: a turn that fails at the model boundary should become a visible row or notice.
 Reported to integrator-two with the evidence on 2026-10-22; owned by the ui lane, not by this seat.
 
+**Two fields in the early entries are historical.** Passes before 2c8168e record `gate.proxyError:
+true` with `firstLine: "<!doctype html>"`, because the healthy app shell contains the word
+`heddle-proxy` once and the check matched the word rather than the gate's own 5xx sentence; and their
+`turn.samples` describe the previous answer, because the turn had no baseline in the reused session.
+The verdicts were unaffected (the gate still passed on `200` plus the app shell, and the turn's pass
+needed the deployment's own chunk count), but the two fields were wrong. They are not rewritten in
+place — a published record is not edited — and every pass from 2c8168e on carries the corrected
+fields, with the rules and their tests deciding them.
+
 **What the record does not carry.** No session ids and no absolute home paths: the repository is
 public, paths are stated under `~`, and the repository's public-hygiene gate checks both before main.
 
@@ -127,6 +136,11 @@ heddle 46 interactive / 18 enabled; DSH 139 / 17, with DSH's 1 hit-test miss and
 gated surfaces.
 
 ## The one action the monitor may take
+
+The agent now runs a supervisor (`_tools_/web-daemon/supervisor.mjs`) in front of the server, so a
+killed server is put back in about a second and a silent port means the **agent** is gone (booted out,
+or launchd not starting it at login), not that the server crashed. There is no cron guard: the
+installer's cron line is refused by macOS TCC, so after a reboot the agent may need this kickstart.
 
 Since 2026-10-22 live-deploy delegates **one** action to this seat: if the pass finds the deployment
 down (the gate's `502` because its upstream is gone, or the server's port silent), it may run
