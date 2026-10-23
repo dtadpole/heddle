@@ -67,6 +67,19 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     ) {
         harness.workspaces = Some(Arc::new(Workspaces { service, sessions }));
     }
+    // The goal, todo and team rows: the page's goal, todo and team panels read them.
+    if let Some(service) = boot.services.get::<Arc<heddle_goal::GoalService>>("goal") {
+        harness.goals = Some(Arc::new(Goals { service }));
+    }
+    if let Some(service) = boot.services.get::<Arc<heddle_todo::TodoService>>("todo") {
+        harness.todos = Some(Arc::new(Todos { service }));
+    }
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_team::service::TeamService>>("team")
+    {
+        harness.team = Some(Arc::new(Team { service }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -102,6 +115,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         out.err(&format!("heddle web: row '{id}' ({name}) did not load\n"));
     }
     let harness = harness(&boot, invocation.cwd.clone());
+    let runtime = crate::runtime::tokio();
+    let notes = runtime.block_on(boot_notes(&boot));
     let shutdown = heddle_tools::CancellationToken::new();
     let context = heddle_server::command::Context {
         cwd: invocation.cwd.clone(),
@@ -112,7 +127,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
-        notes: Vec::new(),
+        notes,
         shutdown: shutdown.clone(),
     };
     let web_args = heddle_server::command::Args {
@@ -123,7 +138,6 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         dry_run: args.dry_run,
         json: args.json,
     };
-    let runtime = crate::runtime::tokio();
     // The only honest lifetime for a server: until it is interrupted.
     runtime.spawn(async move {
         wait_for_stop().await;
@@ -638,6 +652,125 @@ impl heddle_server::services::WorkspaceService for Workspaces {
     }
 }
 
+/// What the boot reports before the URL, in the TypeScript order: the teams the team row recovered
+/// (`recovered N team(s) (S settled, D delivered[, F failed])`). Each is printed as `heddle web: <note>`.
+async fn boot_notes(boot: &Boot) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(team) = boot
+        .services
+        .get::<Arc<heddle_team::service::TeamService>>("team")
+        && let Some(note) = heddle_team::command::web_start_note(&team).await
+    {
+        notes.push(note);
+    }
+    notes
+}
+
+fn to_json(value: impl serde::Serialize) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// The goal row's service as the server's port.
+struct Goals {
+    service: Arc<heddle_goal::GoalService>,
+}
+
+fn goal_refusal(error: heddle_goal::GoalError) -> ServiceError {
+    match error.code() {
+        Some(code) => ServiceError::with_code(error.to_string(), code.as_str()),
+        None => ServiceError::new(error.to_string()),
+    }
+}
+
+impl heddle_server::services::GoalService for Goals {
+    fn get(&self, session: &str) -> Option<Value> {
+        self.service.get(session).ok().flatten().map(to_json)
+    }
+
+    fn act(
+        &self,
+        session: &str,
+        action: heddle_server::services::GoalAction,
+    ) -> Result<heddle_server::services::GoalAnswer, ServiceError> {
+        use heddle_server::services::{GoalAction, GoalAnswer};
+        let of = |goal: &heddle_server::services::GoalRef| heddle_goal::GoalRef {
+            id: goal.id.clone(),
+            revision: goal.revision,
+        };
+        let rounds = |rounds: Option<u64>| rounds.map(|rounds| rounds as f64);
+        let view = match action {
+            GoalAction::Create {
+                objective,
+                max_goal_rounds,
+            } => self.service.create(
+                session,
+                heddle_goal::CreateGoal {
+                    objective,
+                    max_goal_rounds: rounds(max_goal_rounds),
+                },
+            ),
+            GoalAction::Edit {
+                goal,
+                objective,
+                max_goal_rounds,
+            } => self.service.edit(
+                session,
+                &of(&goal),
+                heddle_goal::EditGoal {
+                    objective,
+                    max_goal_rounds: rounds(max_goal_rounds),
+                },
+            ),
+            GoalAction::Pause(goal) => self.service.pause(session, &of(&goal)),
+            GoalAction::Resume(goal) => self.service.resume(session, &of(&goal)),
+            GoalAction::Complete(goal) => self.service.complete(session, &of(&goal)),
+            GoalAction::Blocked { goal, reason } => {
+                self.service.block(session, &of(&goal), &reason)
+            }
+            GoalAction::Clear(goal) => {
+                return self
+                    .service
+                    .clear(session, &of(&goal))
+                    .map(|cleared| GoalAnswer::Cleared(to_json(cleared)))
+                    .map_err(goal_refusal);
+            }
+        };
+        view.map(|view| GoalAnswer::Goal(to_json(view)))
+            .map_err(goal_refusal)
+    }
+}
+
+/// The todo row's service as the server's port.
+struct Todos {
+    service: Arc<heddle_todo::TodoService>,
+}
+
+impl heddle_server::services::TodoService for Todos {
+    fn get(&self, session: &str) -> Option<Value> {
+        self.service.get(session).ok().flatten().map(to_json)
+    }
+}
+
+/// The team row's service as the server's port: one fold, so roster, board and mailbox describe one
+/// moment; a log the fold refuses is the route's 500.
+struct Team {
+    service: Arc<heddle_team::service::TeamService>,
+}
+
+impl heddle_server::services::TeamService for Team {
+    fn view(&self, session: &str) -> Result<heddle_server::services::TeamView, ServiceError> {
+        let view = heddle_team::api::team_view(&self.service, session)
+            .map_err(|error| ServiceError::new(error.to_string()))?;
+        Ok(heddle_server::services::TeamView {
+            lead: to_json(&view.lead),
+            members: to_json(&view.members),
+            tasks: to_json(&view.tasks),
+            messages: to_json(&view.messages),
+            delivered: to_json(&view.delivered),
+        })
+    }
+}
+
 /// The approval service the sandbox row provides, as the server's port.
 struct Approvals {
     service: Arc<heddle_sandbox::ApprovalService>,
@@ -837,6 +970,16 @@ mod tests {
             .unwrap();
         assert!(tree.to_string().contains("project"), "{tree}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_boot_without_goal_todo_or_team_rows_composes_none_and_notes_nothing() {
+        let boot = empty_boot();
+        let harness = harness(&boot, PathBuf::from("/work"));
+        assert!(harness.goals.is_none());
+        assert!(harness.todos.is_none());
+        assert!(harness.team.is_none());
+        assert!(boot_notes(&boot).await.is_empty());
     }
 
     fn empty_boot() -> Boot {
