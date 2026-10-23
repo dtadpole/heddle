@@ -160,6 +160,14 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
     assert.equal(child.origin, 'subagent')
     assert.equal(child.delegationDepth, 1)
 
+    // Delivery is asynchronous by design (src/team/service.ts): mail to a member still being provisioned is queued
+    // until it is active, and the teammate's run is not awaited by the Lead's turn. So the Lead's log is read once
+    // the delivery is journaled — bounded — and the claim stays exact: one delivered message, below.
+    await waitFor(() => (readTranscript(join(root, session)).some((event) => event.type === 'team/message/delivered') ? true : undefined), 15_000, 'the message delivery in the Lead\'s log')
+    await waitFor(() => {
+      const events = readTranscript(join(root, childId))
+      return events.some((event) => isUser(event, 'the board is clear')) && events.some((event) => JSON.stringify(event).includes('alpha reports')) ? true : undefined
+    }, 15_000, 'the mailed message and the teammate\'s answer in its log')
     const leadEvents = readTranscript(join(root, session))
     const teamTypes = leadEvents.filter((event) => event.type.startsWith('team/')).map((event) => event.type)
     assert.ok(teamTypes.filter((type) => type === 'team/member').length >= 2, 'the member is journaled provisioning then active')
