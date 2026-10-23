@@ -26,6 +26,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots on this Mac, so the team's sessions share its cores and disk |
 | [`load-check/`](load-check/INDEX.md) | one plain report of the Mac's disk, load, swap, build-slot owners and worktree processes, with ok/warn/stop exit codes |
 | [`public-hygiene/`](public-hygiene/INDEX.md) | the gate before `main`: a private identifier list, no internal names in files, paths, messages or identities |
+| [`reflection-sync/`](reflection-sync/INDEX.md) | fast-forwards the team's shared checkout and refuses rather than overwrite another session's work |
 | [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port (not used while the port builds locally) |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
