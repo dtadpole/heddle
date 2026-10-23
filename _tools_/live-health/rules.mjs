@@ -347,6 +347,20 @@ export function turnLanding({ target, before, after }) {
   return { landed: othersChanged > 0 ? 'other' : 'unknown', othersChanged }
 }
 
+/**
+ * A two-message conversation in one session on the preview: both turns completed with the fixture
+ * answer, both landed in the monitor's own session, and the second followed the first in the same
+ * session. The coordinator asked for it once the follow-up-turn fix (4da44cf) is served; before that
+ * it is `pending` and is not part of the preview's verdict.
+ */
+export function conversationVerdict({ gate, first, second, sameSession }) {
+  if (gate?.open !== true) return { verdict: 'pending', detail: gate?.reason ?? 'the preview does not serve the fix yet' }
+  if (first?.verdict !== 'pass') return { verdict: first?.verdict === 'unjudged' ? 'unjudged' : 'fail', detail: `the first message: ${first?.detail ?? 'not sent'}` }
+  if (second?.verdict !== 'pass') return { verdict: second?.verdict === 'unjudged' ? 'unjudged' : 'fail', detail: `the follow-up message: ${second?.detail ?? 'not sent'}` }
+  if (sameSession !== true) return { verdict: 'fail', detail: 'the follow-up did not stay in the same session' }
+  return { verdict: 'pass', detail: 'a two-message conversation completed in one session' }
+}
+
 /** A fixture turn on the Rust preview completed: the prompt and an answer appeared, it settled, and it is the fixture's. */
 export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead }) {
   if (userAppeared !== true) return { verdict: 'fail', detail: 'the prompt never appeared in the log' }
@@ -360,8 +374,10 @@ export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, a
  * The Rust preview on 3097, a second read-only target: the token link answers 303, `/api/endpoints`
  * and `/api/tree` answer 200, and a fixture turn completes. It never changes the deployment's verdict.
  */
-export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn, shared }) {
+export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn, shared, conversation }) {
   const checks = {
+    // Counted only once its gate is open; a pending conversation is recorded, never judged.
+    ...(conversation !== undefined && conversation.verdict !== 'pending' ? { conversation: ['pass', 'fail'].includes(conversation.verdict) ? conversation.verdict : 'unjudged' } : {}),
     store: shared === 0 ? 'pass' : typeof shared === 'number' ? 'fail' : 'unjudged',
     token: tokenStatus === 303 ? 'pass' : 'fail',
     endpoints: endpointsStatus === 200 ? 'pass' : 'fail',

@@ -79,6 +79,7 @@ import {
   tildePath,
   tildeText,
   turnLanding,
+  conversationVerdict,
   turnVerdict,
 } from './rules.mjs'
 
@@ -848,23 +849,58 @@ async function previewFetch(url, cookie) {
 }
 
 /** A fixture turn on the preview, judged in the browser alone. */
-async function previewTurn(launch) {
+/**
+ * The fix the preview's two-message conversation waits for (the coordinator's review 57): a follow-up
+ * turn on an existing session answered 400. The gate opens when the commit the preview was built from
+ * (its `built-from-main` file) contains this commit - read, never assumed.
+ */
+const CONVERSATION_FIX = '4da44cf'
+function conversationGate() {
+  let built = null
+  try {
+    built = (readFileSync(expand('~/.heddle-rust-preview/built-from-main'), 'utf8').match(/[0-9a-f]{7,40}/) ?? [null])[0]
+  } catch {}
+  if (built === null) return { open: false, built: null, reason: 'the preview names no build commit' }
+  try {
+    execFileSync('git', ['--no-optional-locks', '-C', REPO, 'merge-base', '--is-ancestor', CONVERSATION_FIX, built], { stdio: 'ignore', timeout: 10_000 })
+    return { open: true, built: built.slice(0, 7) }
+  } catch {
+    return { open: false, built: built.slice(0, 7), reason: `the preview is built from ${built.slice(0, 7)}, which does not contain ${CONVERSATION_FIX}` }
+  }
+}
+
+/** A preview turn passes only when it landed in the monitor's own session; elsewhere fails it. */
+function judgedPreviewTurn(turn) {
+  const landed = turn.landing?.landed
+  return turn.landing === undefined
+    ? { verdict: turn.verdict, detail: turn.detail }
+    : landed === 'own'
+      ? previewTurnVerdict(turn)
+      : landed === 'other'
+        ? { verdict: 'fail', detail: turn.detail }
+        : { verdict: 'unjudged', detail: turn.detail }
+}
+
+async function previewTurn(launch, gate) {
   let pageId
   try {
     pageId = (await callTool('new_page', { url: launch }, 45_000))?.pageId
     if (!(await waitFor(pageId, '#log', 25_000))) return { verdict: 'fail', detail: "the preview's page never drew its log" }
     const turn = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
-    /** A preview turn passes only when it landed in the monitor's own session; elsewhere fails it. */
-    const landed = turn.landing?.landed
-    const judged =
-      turn.landing === undefined
-        ? { verdict: turn.verdict, detail: turn.detail }
-        : landed === 'own'
-          ? previewTurnVerdict(turn)
-          : landed === 'other'
-            ? { verdict: 'fail', detail: turn.detail }
-            : { verdict: 'unjudged', detail: turn.detail }
+    const judged = judgedPreviewTurn(turn)
+    /**
+     * The two-message conversation: once the fix is served, a follow-up goes into the same session on
+     * the same page, judged like the first. Before that it is pending and nothing more is sent.
+     */
+    let conversation = conversationVerdict({ gate, first: judged })
+    if (gate?.open === true && judged.verdict === 'pass') {
+      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
+      const second = judgedPreviewTurn(followUp)
+      const sameSession = followUp.session?.title !== null && followUp.session?.title === turn.session?.title && followUp.landing?.landed === 'own'
+      conversation = { ...conversationVerdict({ gate, first: judged, second, sameSession }), followUp: { landing: followUp.landing ?? null, answerHead: followUp.answerHead ?? null } }
+    }
     return {
+      conversation: { built: gate?.built ?? null, ...conversation },
       session: turn.session ?? null,
       landing: turn.landing ?? null,
       userAppeared: turn.userAppeared ?? null,
@@ -934,8 +970,8 @@ async function judgePreview() {
         ? { verdict: 'unjudged', detail: `the preview's sessions are not separate from the deployment's (${shared ?? 'unreadable'} shared), so no turn was sent` }
         : !fixtureOnly(kinds)
       ? { verdict: 'unjudged', detail: 'an endpoint other than the offline fixture is configured, so no turn was spent' }
-      : await previewTurn(launch)
-  const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn, shared })
+      : await previewTurn(launch, conversationGate())
+  const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn, shared, conversation: turn.conversation })
   return {
     origin,
     agentRunning: agent,
@@ -1104,6 +1140,8 @@ if (options.json === true) {
   say(`console     ${mark(pass.checks.console.verdict)}  ${pass.checks.console.detail}`)
   say(`dsh         ${mark(pass.dsh.verdict)}  ${pass.dsh.detail}`)
   say(`preview     ${mark(pass.preview.verdict)}  ${pass.preview.detail}${pass.preview.marker ? ` (marker ${pass.preview.marker})` : ''}`)
+  const talk = pass.preview.turn?.conversation
+  if (talk !== undefined && talk !== null) say(`            conversation ${talk.verdict}: ${talk.detail}`)
   const digest = (row) => (row === null ? 'not measured' : `${row.interactive} interactive, ${row.enabled} enabled, ${row.nonPointerCursors} non-pointer cursor(s), ${row.hitTestMisses} hit-test miss(es), ${row.clipped} clipped${row.nonPointer?.length > 0 ? ` [${row.nonPointer.join(', ')}]` : ''}`)
   say(`compare     heddle ${digest(pass.compare.heddle)}`)
   say(`            dsh    ${digest(pass.compare.dsh)}`)

@@ -1,14 +1,14 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.1.0
+version: 1.2.0
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the 96-deployment and 90-web-ui-token verifiers, whose claims the process, marker and door checks reuse
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-23T06:31:08Z
+modified: 2026-10-23T11:31:32Z
 ---
 
 # The checks
@@ -33,6 +33,10 @@ deployment's token; statuses, sizes and counts are pinned, never bodies; its ver
 deployment's. A turn is sent only when `/api/endpoints` lists nothing but the offline fixture
 (`fixtureOnly`), so no pass spends a real model call, and only while the stores are separate, so a Rust write
 never lands in the deployment's sessions.
+
+**A two-message conversation** in the preview's own session - a follow-up after the first answer, both landing
+there - joins the preview's verdict once the preview is built from a commit containing `4da44cf`, the follow-up-turn
+fix (`conversationVerdict`); until then it is recorded as pending.
 
 The deployment block records `head`, `branch`, `dirty`, `behind` and `ahead` against a freshly fetched
 `origin/main`. Staleness is recorded, not failed.

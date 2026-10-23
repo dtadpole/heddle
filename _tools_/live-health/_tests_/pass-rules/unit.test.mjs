@@ -28,6 +28,7 @@ import {
   previewVerdict,
   sharedSessions,
   turnLanding,
+  conversationVerdict,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -274,4 +275,17 @@ test("a turn counts as the monitor's only when its own session changed; landing 
   assert.deepEqual(turnLanding({ target: 'health', before, after: [{ id: 'health', updated: 't2' }, { id: 'theirs', updated: 't2' }] }), { landed: 'own', othersChanged: 1 })
   assert.equal(turnLanding({ target: 'health', before, after: before }).landed, 'unknown')
   assert.equal(turnLanding({ target: null, before, after: before }).landed, 'unknown', 'no target, no claim')
+})
+
+test('a preview conversation is pending until the fix is served, then needs both messages in one session', () => {
+  const pass = { verdict: 'pass', detail: 'a fixture turn completed' }
+  assert.equal(conversationVerdict({ gate: { open: false, reason: 'built from 33407a4, before 4da44cf' }, first: pass, second: pass, sameSession: true }).verdict, 'pending')
+  const open = { open: true }
+  assert.equal(conversationVerdict({ gate: open, first: pass, second: pass, sameSession: true }).verdict, 'pass')
+  assert.match(conversationVerdict({ gate: open, first: pass, second: { verdict: 'fail', detail: 'no answer appeared' }, sameSession: true }).detail, /follow-up/)
+  assert.equal(conversationVerdict({ gate: open, first: pass, second: pass, sameSession: false }).verdict, 'fail')
+  // Pending is recorded, not judged: the preview's verdict is untouched by it.
+  const base = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: pass, shared: 0 }
+  assert.equal(previewVerdict({ ...base, conversation: { verdict: 'pending' } }).verdict, 'pass')
+  assert.equal(previewVerdict({ ...base, conversation: { verdict: 'fail' } }).verdict, 'fail')
 })
