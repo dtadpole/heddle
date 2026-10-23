@@ -81,6 +81,17 @@ pub fn capability_of(command: CommandWord) -> Capability {
 /// Boot the tree the command line names, then answer from it: port of `runCommand`'s
 /// `bootFromArgs` and `settle`.
 fn boot_then(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    let exit = booted_command(args, invocation, &boot, out);
+    boot.dispose();
+    exit
+}
+
+/// The tree the command line names, booted over the built-in catalog: port of `bootFromArgs`.
+fn boot_tree(args: &Args, invocation: &Invocation) -> Result<Boot, String> {
     let options = crate::boot::BootOptions {
         layers: crate::cli::layer_options(args, &invocation.cwd, &invocation.env),
         overrides: crate::cli::root_overrides(args, &invocation.cwd)
@@ -90,13 +101,7 @@ fn boot_then(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit
         env: invocation.env.clone(),
     };
     let catalog = BuiltinCatalog::new(invocation.env.clone(), invocation.cwd.clone());
-    let boot = match crate::boot::boot(&options, &catalog) {
-        Ok(boot) => boot,
-        Err(error) => return out.fail(&error.0),
-    };
-    let exit = booted_command(args, invocation, &boot, out);
-    boot.dispose();
-    exit
+    crate::boot::boot(&options, &catalog).map_err(|error| error.0)
 }
 
 /// A request whose part is not wired yet: the binary says so on stderr and exits 2, so a verifier
@@ -902,8 +907,11 @@ pub fn turn(
 /// recover teams, print `heddle web: <url>` and `heddle web: serving on <host>:<port>; pass --port to
 /// change it` (and the `--json` line), and serve until SIGINT or SIGTERM.
 pub fn web(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    let _ = (args, invocation, out);
-    todo!("port runWeb from src/cli.ts over heddle-server")
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    crate::web::web(args, invocation, boot, out)
 }
 
 /// One hook point this build emits: `hooks` lists them.
@@ -988,7 +996,7 @@ mod tests {
     fn a_command_whose_crate_is_not_wired_says_so_and_exits_two() {
         // `profiles` and `config` are served now and answer through heddle-config; the rest of the
         // command words still say so and exit 2.
-        for word in ["web", "models", "hooks", "workspaces"] {
+        for word in ["models", "hooks", "workspaces"] {
             let mut captured = Captured::default();
             let exit = {
                 let mut out = captured.output();

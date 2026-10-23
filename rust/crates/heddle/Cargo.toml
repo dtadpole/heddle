@@ -21,9 +21,11 @@ futures.workspace = true
 heddle-config.workspace = true
 heddle-llm.workspace = true
 heddle-sandbox.workspace = true
+heddle-server.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

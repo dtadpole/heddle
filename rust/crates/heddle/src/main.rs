@@ -65,7 +65,8 @@ mod tests {
         assert!(stdout.contains(
             "      --profile <name>       boot a named profile from $HEDDLE_HOME/profiles\n"
         ));
-        assert!(!stdout.contains("  web "));
+        assert!(stdout.contains("  web                        serve the Web UI on localhost\n"));
+        assert!(!stdout.contains("--turn"), "the turn is not wired yet");
     }
 
     #[test]
@@ -85,10 +86,10 @@ mod tests {
 
     #[test]
     fn an_unwired_command_says_so_on_stderr_and_exits_two() {
-        let (exit, stdout, stderr) = run_captured(&["web"]);
+        let (exit, stdout, stderr) = run_captured(&["models"]);
         assert_eq!(exit, Exit::Unported);
         assert_eq!(exit.code(), 2);
         assert_eq!(stdout, "");
-        assert_eq!(stderr, "heddle: not ported to Rust yet: web\n");
+        assert_eq!(stderr, "heddle: not ported to Rust yet: models\n");
     }
 }
