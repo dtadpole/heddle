@@ -27,13 +27,15 @@ pub mod upstream;
 
 pub use adapters::LlmModel;
 pub use ports::{
-    ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord, NoTurnHooks, PortError,
-    PreStep, RequestErrorAction, RequestErrorPayload, SessionPort, TurnHooks,
+    ChainedTurnHooks, ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord,
+    NoTurnHooks, PortError, PreStep, RequestErrorAction, RequestErrorPayload, SessionPort,
+    TurnHooks,
 };
 pub use subagent::{
-    ParentFacts, SubagentConfig, SubagentDeps, SubagentError, SubagentErrorCode, SubagentLimits,
-    SubagentResult, SubagentRun, SubagentStore, delegate_subagent, final_assistant_text,
-    parent_facts, subagent_runner, subagent_tools,
+    LateSubagentRunner, ParentFacts, SubagentConfig, SubagentDeps, SubagentError,
+    SubagentErrorCode, SubagentLimits, SubagentResult, SubagentRun, SubagentStore,
+    delegate_subagent, final_assistant_text, parent_facts, register_subagent_row, subagent_runner,
+    subagent_tools,
 };
 pub use turn::{
     AgentRuntime, BegunTurn, ContextSummary, Denial, RoundLimit, RunTurnOptions, ToolCallRecord,

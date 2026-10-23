@@ -420,14 +420,24 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
             }
+            ComponentRef::Builtin(Builtin::SubagentTool) => {
+                Some(Box::new(crate::adapters::SubagentToolComponent))
+            }
+            ComponentRef::Builtin(Builtin::GoalDriver) => {
+                Some(Box::new(crate::adapters::GoalDriverComponent))
+            }
+            ComponentRef::Builtin(Builtin::Team) => Some(Box::new(crate::adapters::TeamComponent)),
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),
-            // The rest land with their crate's API: a built-in with no adapter answers `None`, so its
-            // row fails naming itself rather than starting nothing.
-            ComponentRef::Builtin(_) | ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => {
-                None
+            // An outside component is declared by a manifest; any other outside path names nothing
+            // this binary can start, and its row fails naming itself.
+            ComponentRef::Outside(path) if path.to_string_lossy().ends_with(".component.yml") => {
+                Some(Box::new(crate::adapters::OutsideRow::new(path.clone())))
             }
+            // Every built-in has its adapter; an outside path without a manifest, or a bare name that
+            // is neither, names nothing this binary can start, and its row fails naming itself.
+            ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => None,
         }
     }
 }

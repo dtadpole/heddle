@@ -10,7 +10,8 @@
 //! over its store as that crate is. The hook adapter lands when the binary attaches the event bus; until then
 //! [`NoTurnHooks`](crate::NoTurnHooks) is the composition without listeners.
 //!
-//! The session and context crates keep their own record types; each adapter converts only at the seam, and
+//! The context port speaks the context crate's own summary and sections; only its report is still converted, until
+//! that type derives `Default`. The session crate keeps its own record types and that adapter converts only at the seam, and
 //! the records it writes keep the TypeScript field order (the session crate's `ModelRequestRecord` is built in
 //! the loop's order, so `model/request` reads the same from either binary).
 
@@ -29,13 +30,14 @@ use heddle_session::{
 };
 
 use crate::ports::{
-    ContextPort, ModelError, ModelPort, ModelRequestRecord, PortError, SessionPort,
+    ContextPort, ModelError, ModelPort, ModelRequestRecord, PortError, RequestErrorAction,
+    RequestErrorPayload, SessionPort, TurnHooks,
 };
 use crate::subagent::SubagentStore;
 use crate::upstream::{
-    Chunk, ContentPart, ContextBreakdown, ContextReport, CreateSession, GenerateRequest, Message,
-    PrepareOptions, Role, RuntimeContextSection, SandboxMode, SessionEvent, SessionHandle,
-    SessionMeta, SurfaceView,
+    Chunk, ContentPart, ContextReport, CreateSession, GenerateRequest, Message, PrepareOptions,
+    Role, RuntimeContextSection, SandboxMode, SessionEvent, SessionHandle, SessionMeta,
+    SurfaceView,
 };
 
 /// The [`ModelPort`] over a [`ModelService`].
@@ -333,7 +335,8 @@ where
     }
 }
 
-/// The context service's report, as the loop's record reads it.
+/// The context service's report, as the loop's record reads it. Kept as this crate's record until the context
+/// crate's report derives `Default`, which other crates' tests construct it with.
 fn report_of(report: heddle_context::ContextReport) -> ContextReport {
     ContextReport {
         messages: report.messages,
@@ -347,11 +350,7 @@ fn report_of(report: heddle_context::ContextReport) -> ContextReport {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-        breakdown: ContextBreakdown {
-            system: report.breakdown.system,
-            tools: report.breakdown.tools,
-            messages: report.breakdown.messages,
-        },
+        breakdown: report.breakdown,
     }
 }
 
@@ -361,15 +360,9 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
         session: &SessionHandle,
         sections: &[RuntimeContextSection],
     ) -> Result<(), PortError> {
-        let sections: Vec<heddle_context::RuntimeContextSection> = sections
-            .iter()
-            .map(|section| heddle_context::RuntimeContextSection {
-                name: section.name.clone(),
-                text: section.text.clone(),
-            })
-            .collect();
+        // The section is the context crate's own type: nothing to convert.
         self.service
-            .record_runtime_context(&(self.handle)(session), &sections)
+            .record_runtime_context(&(self.handle)(session), sections)
             .map_err(port_error)
     }
 
@@ -418,6 +411,67 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
     }
 }
 
+/// The context service's listener on `agent/request-error`: overflow recovery, as the TypeScript context plugin
+/// attaches it.
+///
+/// [`ContextService::recover_overflow`] records the decision for any code; for `CONTEXT_WINDOW_EXCEEDED` it runs
+/// one forced reduction and answers [`Retry`](RequestErrorAction::Retry) only when a replacement landed, so the
+/// loop re-derives the request and sends it once more (its own bound: a second refusal fails the turn). Every other
+/// outcome — another code, nothing safe to reduce, a recovery that failed — passes to the next listener (`None`).
+/// The recovery lives here because `heddle-context` cannot name this crate's [`TurnHooks`]; compose it with the
+/// bus's listeners through [`ChainedTurnHooks`](crate::ChainedTurnHooks).
+pub struct ContextRecovery<S: ContextStore> {
+    service: Arc<ContextService<S>>,
+    handle: HandleMap<S::Handle>,
+}
+
+impl<S: ContextStore> ContextRecovery<S> {
+    /// The listener over `service`, naming each session through `handle`.
+    pub fn new(service: Arc<ContextService<S>>, handle: HandleMap<S::Handle>) -> Self {
+        Self { service, handle }
+    }
+}
+
+impl<S> ContextRecovery<S>
+where
+    S: ContextStore<Handle = SessionHandle>,
+{
+    /// The listener over a store whose handle is the session's own (the session store's binding).
+    pub fn over_session_handles(service: Arc<ContextService<S>>) -> Self {
+        Self::new(service, Arc::new(SessionHandle::clone))
+    }
+}
+
+impl<S: ContextStore + 'static> TurnHooks for ContextRecovery<S> {
+    fn request_error<'a>(
+        &'a self,
+        payload: &'a RequestErrorPayload,
+    ) -> BoxFuture<'a, Option<RequestErrorAction>> {
+        Box::pin(async move {
+            let handle = (self.handle)(&payload.session);
+            let request = heddle_context::OverflowRequest {
+                error_code: &payload.code,
+                cwd: &payload.cwd,
+                endpoint: &payload.endpoint,
+                model: payload.model.as_deref(),
+                tools: &payload.tools,
+            };
+            match self.service.recover_overflow(&handle, &request).await {
+                Ok(heddle_context::RecoveryDecision::Retry) => Some(RequestErrorAction::Retry),
+                Ok(heddle_context::RecoveryDecision::PassOn) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "heddle_agent",
+                        session = payload.session.id.as_str(),
+                        "the overflow recovery failed, so the failure is passed on: {error}"
+                    );
+                    None
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::PathBuf;
@@ -426,6 +480,7 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::upstream::ContextBreakdown;
     use crate::upstream::{ContentPart, Message, Role, ToolCall};
 
     /// A scratch folder holding one scripted endpoint's step file.
@@ -795,7 +850,10 @@ pub(crate) mod tests {
                 context_window: 200_000,
                 threshold_tokens: 160_000,
                 messages,
-                ..ContextReport::default()
+                pruned: 0,
+                compacted: false,
+                instructions: Vec::new(),
+                breakdown: Default::default(),
             })
         }
     }
@@ -881,5 +939,103 @@ pub(crate) mod tests {
             .filter(|event| event.kind == "context/note")
             .count();
         assert_eq!(notes, 1, "an unchanged snapshot appends nothing");
+    }
+
+    /// A summariser that always answers, as the context crate's own overflow test uses.
+    struct Briefing;
+
+    impl heddle_context::ModelAccess for Briefing {
+        fn endpoint_window(&self, _: &str, _: Option<&str>) -> Option<u64> {
+            None
+        }
+
+        fn complete(
+            &self,
+            _: heddle_context::SummaryRequest,
+        ) -> BoxFuture<'_, Result<String, heddle_context::SummarizeError>> {
+            Box::pin(async { Ok("the briefing".to_owned()) })
+        }
+    }
+
+    fn overflow_payload(code: &str) -> RequestErrorPayload {
+        RequestErrorPayload {
+            code: code.to_owned(),
+            message: "maximum context length exceeded".into(),
+            session: context_handle(),
+            endpoint: "local".into(),
+            model: None,
+            cwd: std::env::temp_dir(),
+            tools: Vec::new(),
+        }
+    }
+
+    fn recovery(
+        model: Option<Arc<dyn heddle_context::ModelAccess>>,
+    ) -> (
+        Arc<heddle_context::testing::MemoryStore>,
+        ContextRecovery<heddle_context::testing::MemoryStore>,
+    ) {
+        let store = Arc::new(heddle_context::testing::MemoryStore::new());
+        let service = Arc::new(ContextService::new(
+            Arc::clone(&store),
+            heddle_context::ContextConfig {
+                context_window: Some(900),
+                instructions: false,
+                ..heddle_context::ContextConfig::default()
+            },
+            heddle_context::ContextDependencies {
+                model,
+                heddle_home: std::env::temp_dir().join("heddle-agent-no-home"),
+            },
+        ));
+        let opener = Arc::clone(&store);
+        let hooks = ContextRecovery::new(service, Arc::new(move |handle| opener.open(&handle.id)));
+        let session = store.open("ctx");
+        store.message(
+            &session,
+            Message::new(Role::System, vec![ContentPart::text("be brief")]),
+        );
+        store.message(
+            &session,
+            Message::new(Role::User, vec![ContentPart::text("u".repeat(1500))]),
+        );
+        store.message(
+            &session,
+            Message::new(Role::Assistant, vec![ContentPart::text("a".repeat(1500))]),
+        );
+        (store, hooks)
+    }
+
+    #[tokio::test]
+    async fn an_overflow_that_a_forced_reduction_shrinks_grants_one_retry() {
+        let (store, hooks) = recovery(Some(Arc::new(Briefing)));
+        let action = hooks
+            .request_error(&overflow_payload("CONTEXT_WINDOW_EXCEEDED"))
+            .await;
+        assert_eq!(action, Some(RequestErrorAction::Retry));
+        let events = store.read(&store.open("ctx")).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "compaction/recovery"),
+            "the decision was recorded by the context service"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_failure_or_nothing_to_summarise_with_is_passed_on() {
+        let (_, hooks) = recovery(Some(Arc::new(Briefing)));
+        assert_eq!(
+            hooks.request_error(&overflow_payload("RATE_LIMITED")).await,
+            None
+        );
+        let (_, without_summariser) = recovery(None);
+        assert_eq!(
+            without_summariser
+                .request_error(&overflow_payload("CONTEXT_WINDOW_EXCEEDED"))
+                .await,
+            None,
+            "no summariser, no reduction, no retry"
+        );
     }
 }

@@ -1,6 +1,8 @@
 ---
 title: The outside-component protocol
-version: 0.1.0
+created: 2026-10-23T01:42:22Z
+modified: 2026-10-23T05:05:53Z
+version: 0.2.0
 description: How the Rust heddle binary speaks to an outside tool (part 4) and, later, an outside hook listener (part 6) — a process declared in configuration, spoken to as line-delimited JSON-RPC 2.0 on stdio.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md, part 4 (an outside tool is a process declared in configuration, spoken to as line-delimited JSON on stdio) and part 6 (an outside listener uses the part-4 protocol)
@@ -25,7 +27,10 @@ what the module did in process. The types are [`src/protocol.rs`](src/protocol.r
 - Each side numbers its own requests; the two id spaces are independent. A line that is not a JSON-RPC 2.0
   message is a protocol error: the host logs it and fails the call it was waiting on.
 - The child's environment is the host's plus the row's `env`, plus `HEDDLE_COMPONENT_PROTOCOL=heddle-component/1`.
-  Its working directory is the folder of the layer file that declared it.
+  Its working directory is the folder of its **component manifest** (`<name>.component.yml`: `program`, `args`,
+  `config`), so the arguments a manifest writes relative to itself (`args: [./tool.mjs]`) resolve wherever the
+  manifest is referenced from. Every error, log line and `initialize` names the configuration **row's id**, the same
+  name `config --validate` and the boot's failed-row report use — not the manifest's file name.
 
 ## Lifecycle
 

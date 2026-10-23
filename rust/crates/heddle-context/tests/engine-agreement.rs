@@ -96,6 +96,13 @@ fn events(store: &MemoryStore, session: &MemorySession) -> Value {
 
 /// Every recorded fact of a scenario, compared one by one so a failure names the fact.
 fn assert_agrees(expected: &Value, store: &MemoryStore, session: &MemorySession) {
+    // The key-order comparison below means something only while objects keep insertion order.
+    let probe: Value = serde_json::from_str(r#"{"b":1,"a":2}"#).expect("parses");
+    assert_eq!(
+        probe.to_string(),
+        r#"{"b":1,"a":2}"#,
+        "serde_json keeps key order in this build"
+    );
     let actual = events(store, session);
     let expected_events = expected["events"]
         .as_array()
@@ -105,6 +112,14 @@ fn assert_agrees(expected: &Value, store: &MemoryStore, session: &MemorySession)
         assert_eq!(
             got, want,
             "event {index} differs from the TypeScript build's"
+        );
+        // The same facts in the same key order, nested objects included: a log line one build
+        // writes is then the line the other writes (`serde_json` keeps insertion order here,
+        // through heddle-session's `preserve_order`).
+        assert_eq!(
+            serde_json::to_string(got).expect("serialises"),
+            serde_json::to_string(want).expect("serialises"),
+            "event {index}'s keys are not in the TypeScript build's order"
         );
     }
     assert_eq!(

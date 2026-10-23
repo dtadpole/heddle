@@ -21,16 +21,19 @@ futures.workspace = true
 heddle-agent.workspace = true
 heddle-config.workspace = true
 heddle-context.workspace = true
+heddle-events.workspace = true
 heddle-llm.workspace = true
 heddle-goal.workspace = true
 heddle-sandbox.workspace = true
 heddle-session.workspace = true
+heddle-team.workspace = true
 heddle-todo.workspace = true
 heddle-tools.workspace = true
 heddle-workspace.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

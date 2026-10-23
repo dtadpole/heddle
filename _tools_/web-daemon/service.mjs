@@ -33,15 +33,32 @@ export function supervisorFor(platform = process.platform) {
   return null
 }
 
+/**
+ * The service a check judges: the deployment's, unless `HEDDLE_WEB_LABEL` / `HEDDLE_WEB_UNIT` name a **scratch**
+ * service — the ones `rehearse.sh` installs, so `95-web-daemon` can be judged without killing the owner's server.
+ *
+ * Only a scratch service may take its documented port from `HEDDLE_WEB_PORT`: an environment variable alone must
+ * never be able to change what the deployment is held to, so with the deployment's label the port stays 3082 (macOS)
+ * or 8082 (Linux) whatever the environment says.
+ */
+export function serviceTarget(env = process.env, platform = process.platform) {
+  const label = env.HEDDLE_WEB_LABEL || LABEL
+  const unit = env.HEDDLE_WEB_UNIT || UNIT
+  const scratch = label !== LABEL || unit !== UNIT
+  const portText = env.HEDDLE_WEB_PORT ?? ''
+  const documentedPort = scratch && /^\d+$/.test(portText) ? Number(portText) : (DOCUMENTED_PORT[platform] ?? null)
+  return { label, unit, scratch, documentedPort }
+}
+
 /** Where `install.sh` writes the launchd agent. */
 export function plistPath(env = process.env) {
-  return join(env.HOME ?? '', 'Library', 'LaunchAgents', `${LABEL}.plist`)
+  return join(env.HOME ?? '', 'Library', 'LaunchAgents', `${serviceTarget(env).label}.plist`)
 }
 
 /** Where `install.sh` writes the systemd user unit: `$XDG_CONFIG_HOME/systemd/user`, defaulting to `~/.config`. */
 export function unitPath(env = process.env) {
   const config = env.XDG_CONFIG_HOME !== undefined && env.XDG_CONFIG_HOME !== '' ? env.XDG_CONFIG_HOME : join(env.HOME ?? '', '.config')
-  return join(config, 'systemd', 'user', UNIT)
+  return join(config, 'systemd', 'user', serviceTarget(env).unit)
 }
 
 /**
@@ -282,7 +299,7 @@ export function installedService(env = process.env, platform = process.platform)
     }
     const workingDirectory = run('plutil', ['-extract', 'WorkingDirectory', 'raw', '-o', '-', path])?.trim() || null
     const log = run('plutil', ['-extract', 'StandardOutPath', 'raw', '-o', '-', path])?.trim() || null
-    return { supervisor, path, log, workingDirectory, ...describeCommand(argv, workingDirectory) }
+    return { supervisor, path, log, workingDirectory, label: serviceTarget(env, platform).label, ...describeCommand(argv, workingDirectory) }
   }
   if (supervisor === 'systemd') {
     const path = unitPath(env)
@@ -292,7 +309,7 @@ export function installedService(env = process.env, platform = process.platform)
     if (exec === null) return null
     const workingDirectory = unitValue(sections, 'Service', 'WorkingDirectory')
     const log = logPathOf(unitValue(sections, 'Service', 'StandardOutput'))
-    return { supervisor, path, log, workingDirectory, ...describeCommand(splitCommandLine(exec), workingDirectory) }
+    return { supervisor, path, log, workingDirectory, unit: serviceTarget(env, platform).unit, ...describeCommand(splitCommandLine(exec), workingDirectory) }
   }
   return null
 }
@@ -301,10 +318,10 @@ export function installedService(env = process.env, platform = process.platform)
 export function serviceState(service) {
   if (service.supervisor === 'launchd') {
     const uid = typeof process.getuid === 'function' ? process.getuid() : ''
-    const printed = run('launchctl', ['print', `gui/${uid}/${LABEL}`])
+    const printed = run('launchctl', ['print', `gui/${uid}/${service.label ?? LABEL}`])
     return { loaded: printed !== null, pid: printed === null ? null : pidFromLaunchctl(printed) }
   }
-  const shown = run('systemctl', ['--user', 'show', '-p', 'ActiveState', '-p', 'MainPID', '-p', 'NRestarts', UNIT])
+  const shown = run('systemctl', ['--user', 'show', '-p', 'ActiveState', '-p', 'MainPID', '-p', 'NRestarts', service.unit ?? UNIT])
   if (shown === null) return { loaded: false, pid: null }
   const values = parseShow(shown)
   const pid = Number(values.MainPID)

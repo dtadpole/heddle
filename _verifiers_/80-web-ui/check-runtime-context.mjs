@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The runtime-context snapshot as a **trajectory fact**, judged in a browser.
@@ -104,6 +104,7 @@ async function sendMessage(browser, text) {
 }
 
 test('a mode change is named in the Trajectory view and not drawn as a chat turn', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('trajectory')
   const browser = await openBrowser({ width: 1400, height: 900 })

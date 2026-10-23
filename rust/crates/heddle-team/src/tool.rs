@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::error::{TeamError, TeamErrorCode, TeamResult};
 use crate::service::{SendRequest, SpawnRequest, TaskUpdate, TeamService, WaitResult};
@@ -63,14 +63,17 @@ pub struct ToolFailure {
 
 /// One tool call's result, the TypeScript `ToolResult` shape.
 ///
-/// Success: `output` is the compact JSON of the result (or `wait_agent`'s sentence) and `data` the same value.
+/// Success: `output` is the compact JSON of the result (or `wait_agent`'s sentence), and `data` is the same value
+/// when it is a JSON object. A list result (`list_agents`, `team_task_list`) has no `data`: the tool registry's
+/// `ToolResult.data` is an object map, so an array there would not convert, and `data` is never sent to the
+/// model anyway — `output` is what the model reads.
 /// Refusal: `output` is empty and `error` carries the code; a failure that is not a team rule is `TEAM_FAILED`,
 /// a call without a session `TEAM_NO_SESSION`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ToolOutcome {
     pub output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
+    pub data: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ToolFailure>,
 }
@@ -375,10 +378,15 @@ impl TeamTools {
 
 /// A successful result: the compact JSON of the value, also carried as `data`.
 fn success(value: &impl Serialize) -> ToolOutcome {
-    let data = serde_json::to_value(value).expect("a tool result serializes to JSON");
+    let value = serde_json::to_value(value).expect("a tool result serializes to JSON");
+    let output = serde_json::to_string(&value).expect("a tool result serializes compactly");
+    let data = match value {
+        Value::Object(object) => Some(object),
+        _ => None,
+    };
     ToolOutcome {
-        output: serde_json::to_string(&data).expect("a tool result serializes compactly"),
-        data: Some(data),
+        output,
+        data,
         error: None,
     }
 }
@@ -966,6 +974,73 @@ mod tests {
         )
         .await;
         assert_eq!(unknown.error.as_ref().unwrap().code, "TEAM_MEMBER_INVALID");
+    }
+
+    /// The tool registry's `ToolResult` (`heddle-tools`): `data` is an object map. A binary adapter converts a
+    /// `ToolOutcome` into it through serde, so every outcome must deserialize into this shape.
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct RegistryResult {
+        output: String,
+        #[serde(default)]
+        error: Option<ToolFailureShape>,
+        #[serde(default)]
+        data: Option<Map<String, Value>>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct ToolFailureShape {
+        code: String,
+        message: String,
+    }
+
+    #[tokio::test]
+    async fn every_outcome_converts_into_the_registrys_tool_result() {
+        let h = harness();
+        let calls = [
+            (
+                "spawn_teammate",
+                json!({ "name": "alpha", "description": "x", "prompt": "go" }),
+            ),
+            ("list_agents", json!({})),
+            ("team_task_create", json!({ "subject": "write it" })),
+            ("team_task_list", json!({})),
+            ("team_task_get", json!({ "task_id": "task-1" })),
+            (
+                "team_task_update",
+                json!({ "task_id": "task-1", "revision": 1, "action": "claim" }),
+            ),
+            (
+                "send_message",
+                json!({ "target": "alpha", "message": "hello" }),
+            ),
+            ("wait_agent", json!({ "timeout_ms": 10 })),
+            ("interrupt_agent", json!({ "target": "nobody" })),
+        ];
+        for (name, args) in calls {
+            let outcome = call(&h, name, args, Some(&h.lead)).await;
+            let converted: RegistryResult = serde_json::from_value(
+                serde_json::to_value(&outcome).expect("an outcome serializes"),
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(converted.output, outcome.output, "{name}");
+        }
+        // A list result keeps its JSON in output and carries no data; a single result carries both.
+        let listed = call(&h, "list_agents", json!({}), Some(&h.lead)).await;
+        assert!(listed.data.is_none());
+        assert_eq!(json_of(&listed).as_array().map(Vec::len), Some(2));
+        let got = call(
+            &h,
+            "team_task_get",
+            json!({ "task_id": "task-1" }),
+            Some(&h.lead),
+        )
+        .await;
+        assert_eq!(
+            got.data.as_ref().map(|data| data["id"].clone()),
+            Some(json!("task-1"))
+        );
     }
 
     #[tokio::test]
