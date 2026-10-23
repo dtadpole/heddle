@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { laneVerdict, parseArgs, parseVerdictLine } from '../../lane.mjs'
+import { checkMap, compareToBaseline, laneVerdict, parseArgs, parseListOutput, parseVerdictLine } from '../../lane.mjs'
 
 /**
  * The lane gate's decision, judged without running a verifier.
@@ -75,8 +75,8 @@ test('the verdict line is the last line of the runner output, and nothing else i
 
 test('every part named on the command line is judged, with or without --timeout', () => {
   // The first version dropped the first part whenever --timeout was absent.
-  assert.deepEqual(parseArgs(['05-config-system', '10-llm-backends']), { parts: ['05-config-system', '10-llm-backends'], json: false, timeoutSeconds: 400 })
-  assert.deepEqual(parseArgs(['--timeout', '90', '05-config-system', '--json', '60-hooks']), { parts: ['05-config-system', '60-hooks'], json: true, timeoutSeconds: 90 })
+  assert.deepEqual(parseArgs(['05-config-system', '10-llm-backends']), { parts: ['05-config-system', '10-llm-backends'], json: false, timeoutSeconds: 400, baseline: null, writeBaseline: null })
+  assert.deepEqual(parseArgs(['--timeout', '90', '05-config-system', '--json', '60-hooks']), { parts: ['05-config-system', '60-hooks'], json: true, timeoutSeconds: 90, baseline: null, writeBaseline: null })
   assert.deepEqual(parseArgs(['05-config-system', '--timeout', '30']).parts, ['05-config-system'])
 })
 
@@ -86,4 +86,37 @@ test('a command line the gate cannot run is refused rather than guessed at', () 
   assert.equal(parseArgs(['05-config-system', '--timeout', 'soon']), null, 'a timeout that is not a number')
   assert.equal(parseArgs(['05-config-system', '--timeout', '0']), null, 'a timeout that is not positive')
   assert.equal(parseArgs(['05-config-system', '--allow-skip']), null, 'an unknown flag')
+})
+
+test('a --list run is read as named checks, its exit code as the verdict', () => {
+  const out = 'pass   the first claim\nfail   the second claim\nskip   the third claim  [unjudged: a real endpoint]\n'
+  const result = parseListOutput(out, 1)
+  assert.deepEqual([result.verdict, result.tests, result.pass, result.fail, result.skipped], [1, 3, 1, 1, 1])
+  assert.deepEqual(result.checks.map((check) => check.name), ['the first claim', 'the second claim', 'the third claim'])
+  assert.equal(parseListOutput('', 1), null, 'a file that printed no check and did not exit unjudged is broken')
+  assert.equal(parseListOutput('', 3)?.tests, 0, 'nothing collected, exit 3, is an unjudged file, not a broken one')
+  assert.equal(parseListOutput('pass   x\n', null), null, 'a killed run has no verdict')
+})
+
+test('the check map names each check by its part, file and name', () => {
+  const records = [{ part: '05-config-system', check: 'check.mjs', result: parseListOutput('pass   a profile composes\n', 0) }, { part: '10-llm-backends', check: 'check-backends.mjs', result: null }]
+  assert.deepEqual(checkMap(records), { '05-config-system/check.mjs :: a profile composes': 'pass' })
+})
+
+test('against a baseline, only a lost pass regresses; a new failure of an unjudged check is listed, not blocking', () => {
+  const baseline = { 'a :: one': 'pass', 'a :: two': 'skip', 'a :: three': 'skip', 'a :: four': 'pass' }
+  const current = { 'a :: one': 'pass', 'a :: two': 'pass', 'a :: three': 'fail', 'a :: four': 'fail' }
+  assert.deepEqual(compareToBaseline(baseline, current), { regressed: ['a :: four'], newlyPassing: ['a :: two'], failing: ['a :: four', 'a :: three'] })
+})
+
+test('a baseline pass that disappears from the run counts as a regression', () => {
+  // A renamed or deleted check must not hide a lost pass.
+  assert.deepEqual(compareToBaseline({ 'a :: renamed': 'pass' }, { 'a :: renamed later': 'pass' }).regressed, ['a :: renamed'])
+})
+
+test('--baseline and --write-baseline take a file, and a missing value is refused', () => {
+  assert.deepEqual(parseArgs(['--baseline', 'base.json', '05-config-system']), { parts: ['05-config-system'], json: false, timeoutSeconds: 400, baseline: 'base.json', writeBaseline: null })
+  assert.equal(parseArgs(['--write-baseline', 'out.json', '05-config-system']).writeBaseline, 'out.json')
+  assert.equal(parseArgs(['05-config-system', '--baseline']), null)
+  assert.equal(parseArgs(['--baseline', '--json', '05-config-system']), null)
 })
