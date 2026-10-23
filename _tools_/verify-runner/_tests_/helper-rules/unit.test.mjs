@@ -7,6 +7,7 @@ import { zstdCompressSync } from 'node:zlib'
 
 import {
   evidencePath,
+  heddleCommand,
   scratchRoot,
   fingerprint,
   hasDependency,
@@ -169,3 +170,17 @@ test('evidence names cannot introduce directory traversal or absolute paths', ()
     assert.throws(() => evidencePath(name), /filename without directory components/, name)
   }
 })
+
+test('the harness under test is the TypeScript build unless HEDDLE_BIN names another binary', () => {
+  /**
+   * **The verifiers are the contract, for every implementation of it.** The Rust port is judged by the same
+   * checks as the TypeScript build; this seam is the whole difference, so its three cases are pinned.
+   */
+  const [file, argv] = heddleCommand(['--turn', 'hi'], {})
+  assert.equal(file, process.execPath, 'by default the checks run node')
+  assert.match(argv[0], /dist[\\/]cli\.js$/, 'on the built TypeScript CLI')
+  assert.deepEqual(argv.slice(1), ['--turn', 'hi'], 'with the arguments after it')
+  assert.deepEqual(heddleCommand(['web', '--port', '0'], { HEDDLE_BIN: '/opt/heddle-rs/heddle' }), ['/opt/heddle-rs/heddle', ['web', '--port', '0']], 'HEDDLE_BIN replaces the whole command, arguments unchanged')
+  assert.equal(heddleCommand(['x'], { HEDDLE_BIN: '' })[0], process.execPath, 'and an empty value means the default')
+})
+

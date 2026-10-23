@@ -158,6 +158,20 @@ export async function run(command, args, options = {}) {
 }
 
 /**
+ * The command that runs the harness under test, as `[file, argv]`.
+ *
+ * By default it is the TypeScript build, `node dist/cli.js`. `HEDDLE_BIN` names any other build of the same
+ * contract — the Rust port's binary — and the checks then judge **that** binary unchanged: the verifiers
+ * are the contract, and a port is finished when they pass against it (rust/ULTIMATE_GOAL.md). An empty
+ * value is the default, so an unset and a blank variable mean the same thing.
+ */
+export function heddleCommand(args, env = process.env) {
+  const bin = env.HEDDLE_BIN
+  if (typeof bin === 'string' && bin.length > 0) return [bin, [...args]]
+  return [process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args]]
+}
+
+/**
  * Run the built CLI.
  *
  * The built output is judged rather than `src/`, so the check measures what a
@@ -165,7 +179,8 @@ export async function run(command, args, options = {}) {
  * itself would hide a broken build behind a passing test.
  */
 export function runCli(args, options = {}) {
-  return run(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], options)
+  const [file, argv] = heddleCommand(args)
+  return run(file, argv, options)
 }
 
 /** Run the CLI from source, for a check that needs the sources rather than the build. */
@@ -496,7 +511,8 @@ export function readTranscript(target) {
  */
 export function runCliTimed(args, options = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+    const [file, argv] = heddleCommand(args)
+    const child = spawn(file, argv, {
       cwd: options.cwd ?? repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, NO_COLOR: '1', ...(options.env ?? {}) },

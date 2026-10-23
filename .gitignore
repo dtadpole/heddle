@@ -10,3 +10,6 @@ dist/
 # state, not project content. The transcript already lives outside every repository under ~/.heddle/sessions;
 # this line keeps the readable half out of commits too, while leaving both on disk.
 _sessions_/
+
+# The Rust port builds here (rust/ULTIMATE_GOAL.md); cargo writes it, nothing in it is authored.
+rust/target/

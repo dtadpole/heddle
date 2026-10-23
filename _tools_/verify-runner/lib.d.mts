@@ -6,3 +6,7 @@
  * than turning the library into two languages. Add a name when a TypeScript test imports one.
  */
 export const repoRoot: string
+
+/** The harness under test as `[file, argv]`: `node dist/cli.js` by default, or the binary named by `HEDDLE_BIN`. */
+export function heddleCommand(args: readonly string[], env?: NodeJS.ProcessEnv | Record<string, string | undefined>): [string, string[]]
+

@@ -1,0 +1,14 @@
+[package]
+name = "heddle"
+description = "The Rust port of the Heddle harness: one binary judged by the same verifiers as the TypeScript build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "heddle"
+path = "src/main.rs"
+
+[lints]
+workspace = true

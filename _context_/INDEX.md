@@ -34,6 +34,7 @@ Two rules an instance follows:
   management, hooks, its Web UI and its token, and workspaces and sessions.
 - [`streaming-delivery/`](streaming-delivery/INDEX.md) — screenshots taken at the owner's address while judging whether
   a DeepSeek answer reaches the Web UI as it is written, cited by `SESSION_STREAMING.md`.
+- [`rust-port/`](rust-port/INDEX.md) — Rust port baselines.
 
 Material that grounds the UI port but names internal systems is kept out of this public repository: it
 lives in the reflection repository's `_context_`
