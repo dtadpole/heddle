@@ -37,10 +37,15 @@
 //!
 //! # State
 //!
-//! Contract first: every public item is declared and documented. Implemented, with unit tests:
-//! [`Env`], [`ConfigError`], [`heddle_home`], [`profiles_dir`], [`expand_home`], the [`paths`] rules,
-//! [`LayerValue`], the serde shapes of rows, schemas and endpoints. Every other body is `todo!()` and
-//! lands in the order the crate's `INDEX.md` states.
+//! Contract first, then the implementation: every public item is declared, documented and implemented,
+//! with unit tests — [`Env`], [`ConfigError`], home, the [`paths`] rules, [`LayerValue`], the serde
+//! shapes, environment references ([`references_in`], [`resolve_env`]), layers ([`read_layer`]),
+//! composition with provenance ([`compose`], [`origin_of`]), profiles and layer options
+//! ([`list_profiles`], [`LayerOptions`], [`default_layers`]), validation ([`Schema::check`],
+//! [`validate_rows`]), the machine's local file and endpoints ([`read_local_config`],
+//! [`resolve_endpoints`], [`describe_endpoint`]), and the configuration commands
+//! ([`command::run`]). The port plan and what remains (step 9, the verifier) are in the crate's
+//! `INDEX.md`.
 
 pub mod command;
 mod compose;
@@ -77,6 +82,7 @@ pub use profile::{
 pub use references::{parse_scalar, references_in, resolve_env};
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
 pub use validate::{
-    ComponentCatalog, SchemaLookup, StaticCatalog, ValidationResult, validate_rows,
+    ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
+    ValidationResult, read_component_manifest, validate_rows,
 };
 pub use value::{LayerValue, plain_json};

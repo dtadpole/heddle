@@ -104,7 +104,7 @@ function harness(label, options) {
 
 async function supportsSandbox() {
   const help = await runCli(['--help'])
-  return /--profile/.test(help.stdout)
+  return /--turn/.test(help.stdout)
 }
 
 function resultsOf(home) {

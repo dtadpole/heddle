@@ -156,7 +156,7 @@ async function logEvents(server, session) {
 }
 
 test('a switch made while the turn is running reaches that turn’s next request', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const home = isolatedHome('runtime-context-midturn')
   const work = fixtureDir('runtime-context-midturn-work')
   /** The first step asks for a slow command, which is the window the switch lands in. */
@@ -193,7 +193,7 @@ test('a switch made while the turn is running reaches that turn’s next request
 })
 
 test('a restarted process reuses the retained snapshot, and a later change still appends', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const home = isolatedHome('runtime-context-resume')
   const work = fixtureDir('runtime-context-resume-work')
   const double = await sequenceDouble([{ content: 'ok' }])
