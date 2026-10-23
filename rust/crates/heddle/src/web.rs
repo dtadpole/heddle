@@ -65,6 +65,9 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.approvals = Some(Arc::new(Approvals { service }));
     }
+    if let Some(service) = boot.services.get::<Arc<heddle_goal::GoalService>>("goal") {
+        harness.goals = Some(Arc::new(Goals { service }));
+    }
     if let Some(service) = boot.services.get::<Arc<heddle_todo::TodoService>>("todo") {
         harness.todos = Some(Arc::new(Todos { service }));
     }
@@ -150,10 +153,32 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     }
 }
 
-/// The lines web reports once it is up and before the URL: the teams a previous process left mid-way,
-/// settled and their queued mail delivered (`heddle_team::command::web_start_note`).
+/// The lines web reports once it is up and before the URL: the active goals it resumes, then the teams a
+/// previous process left mid-way, settled and their queued mail delivered
+/// (`heddle_team::command::web_start_note`).
 fn start_notes(boot: &Boot) -> Vec<String> {
     let mut notes = Vec::new();
+    // Goals first, as the TypeScript build prints them: every active goal a previous process left is
+    // asked to continue, without inventing an event — the goal's durable phase is the condition.
+    if let (Some(driver), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_goal::GoalDriver>>("goalDriver"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        let ids: Vec<String> = sessions
+            .list()
+            .iter()
+            .map(|meta| meta.id().to_owned())
+            .collect();
+        let resumed = {
+            let _entered = crate::runtime::tokio().enter();
+            driver.resume_at_start(&ids)
+        };
+        if resumed.requested > 0 {
+            notes.push(format!("resuming {} active goal(s)", resumed.requested));
+        }
+    }
     if let Some(team) = boot.services.get::<Arc<heddle_team::TeamService>>("team")
         && let Some(note) =
             crate::runtime::tokio().block_on(heddle_team::command::web_start_note(&team))
@@ -365,6 +390,84 @@ impl heddle_server::services::ApprovalService for Approvals {
             }
         });
         Some(stream.boxed())
+    }
+}
+
+/// The goal a session works toward, as the page's bar reads and drives it, over `heddle-goal`'s service.
+/// An error keeps the crate's stable code, which the route turns into its status (404, 409, 400).
+struct Goals {
+    service: Arc<heddle_goal::GoalService>,
+}
+
+fn goal_error(error: heddle_goal::GoalError) -> ServiceError {
+    ServiceError {
+        message: error.to_string(),
+        code: error.code().map(|code| code.as_str().to_owned()),
+    }
+}
+
+fn goal_ref(goal: &heddle_server::services::GoalRef) -> heddle_goal::GoalRef {
+    heddle_goal::GoalRef {
+        id: goal.id.clone(),
+        revision: goal.revision,
+    }
+}
+
+impl heddle_server::services::GoalService for Goals {
+    fn get(&self, session: &str) -> Option<Value> {
+        let view = self.service.get(session).ok()??;
+        serde_json::to_value(view).ok()
+    }
+
+    fn act(
+        &self,
+        session: &str,
+        action: heddle_server::services::GoalAction,
+    ) -> Result<heddle_server::services::GoalAnswer, ServiceError> {
+        use heddle_server::services::{GoalAction, GoalAnswer};
+        let view = match action {
+            GoalAction::Create {
+                objective,
+                max_goal_rounds,
+            } => self.service.create(
+                session,
+                heddle_goal::CreateGoal {
+                    objective,
+                    max_goal_rounds: max_goal_rounds.map(|rounds| rounds as f64),
+                },
+            ),
+            GoalAction::Edit {
+                goal,
+                objective,
+                max_goal_rounds,
+            } => self.service.edit(
+                session,
+                &goal_ref(&goal),
+                heddle_goal::EditGoal {
+                    objective,
+                    max_goal_rounds: max_goal_rounds.map(|rounds| rounds as f64),
+                },
+            ),
+            GoalAction::Pause(goal) => self.service.pause(session, &goal_ref(&goal)),
+            GoalAction::Resume(goal) => self.service.resume(session, &goal_ref(&goal)),
+            GoalAction::Complete(goal) => self.service.complete(session, &goal_ref(&goal)),
+            GoalAction::Blocked { goal, reason } => {
+                self.service.block(session, &goal_ref(&goal), &reason)
+            }
+            GoalAction::Clear(goal) => {
+                let cleared = self
+                    .service
+                    .clear(session, &goal_ref(&goal))
+                    .map_err(goal_error)?;
+                return Ok(GoalAnswer::Cleared(
+                    serde_json::to_value(cleared).map_err(service_error)?,
+                ));
+            }
+        }
+        .map_err(goal_error)?;
+        Ok(GoalAnswer::Goal(
+            serde_json::to_value(view).map_err(service_error)?,
+        ))
     }
 }
 

@@ -1410,6 +1410,29 @@ impl Component for GoalDriverComponent {
                 sessions,
             }),
         );
+        // DSH drives a goal at quiescence; here that is every `turn/completed` the store appends, which the
+        // bus carries as `session/event` (src/plugins/goal-driver.ts listens the same way).
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let trigger = heddle_goal::DriverTrigger::new(Arc::clone(&driver));
+            let scope = bus.scope("goal-driver");
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    let session = payload.get("session").and_then(Value::as_str);
+                    let kind = payload
+                        .get("event")
+                        .and_then(|event| event.get("type"))
+                        .and_then(Value::as_str);
+                    if let (Some(session), Some(kind)) = (session, kind) {
+                        // The chain runs on the process runtime; the append is not held open by it.
+                        if let Some(run) = trigger.on_session_event(session, kind) {
+                            crate::runtime::tokio().spawn(run);
+                        }
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("goal-driver-listener", Arc::new((scope, listener)));
+        }
         services.provide("goalDriver", driver);
         Ok(())
     }

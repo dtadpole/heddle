@@ -301,6 +301,11 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         .into_iter()
         .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))
         .collect();
+    // The goal driver, when the profile has one: the one-shot process joins the chain its turn started.
+    let goal_advance = boot
+        .services
+        .get::<std::sync::Arc<heddle_goal::GoalDriver>>("goalDriver")
+        .map(|driver| GoalJoin { driver });
     let turn_args = heddle_agent::command::Args {
         turn: args.turn.clone(),
         endpoint: args.endpoint.clone(),
@@ -320,7 +325,9 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         failed_rows,
         ensure_workspace: Some(&ensure),
         stream: None,
-        goal: None,
+        goal: goal_advance
+            .as_ref()
+            .map(|advance| advance as &dyn heddle_agent::command::GoalAdvance),
     };
     let (stdout, stderr) = out.writers();
     let code = crate::runtime::tokio().block_on(heddle_agent::command::run(
@@ -401,6 +408,26 @@ fn owned_workspaces(
         stdout,
         stderr,
     ))
+}
+
+/// The goal driver as the turn joins it: `goalDriver.advance(handle)` in the TypeScript `--turn`.
+struct GoalJoin {
+    driver: std::sync::Arc<heddle_goal::GoalDriver>,
+}
+
+impl heddle_agent::command::GoalAdvance for GoalJoin {
+    fn advance<'a>(
+        &'a self,
+        session: &'a heddle_session::SessionHandle,
+    ) -> futures::future::BoxFuture<'a, heddle_agent::command::GoalAdvanced> {
+        Box::pin(async move {
+            let outcome = self.driver.advance(&session.id).await;
+            heddle_agent::command::GoalAdvanced {
+                rounds: outcome.rounds,
+                stopped: outcome.stopped,
+            }
+        })
+    }
 }
 
 /// `models`: `heddle-llm`'s entry point over the model row's service.
