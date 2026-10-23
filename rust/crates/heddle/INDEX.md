@@ -145,6 +145,61 @@ The library shape is complete and every module below compiles with its unit test
 capability is added only when its command answers through the real crate, so a verifier reports
 unjudged rather than failing on a part that is not wired.
 
+## Command entry points in the owning crate (D-043)
+
+The binary keeps the command line, the gated help, the boot and the dispatch table. **The behaviour of a
+command lives in the crate that owns it**, behind one entry point of this shape, so seven crates can land
+their commands in parallel and the binary adds one dispatch line each. The precedent is
+`heddle_config::command::run`, which answers `profiles` and `config` today.
+
+```rust
+// rust/crates/<crate>/src/command.rs, exported as `pub mod command`
+pub enum Command { /* the command words this crate answers, e.g. Sessions, Transcript */ }
+
+/// Only the flags this crate reads, as plain std types, named after the TypeScript `Args` field.
+#[derive(Clone, Debug, Default)]
+pub struct Args { pub target: Option<String>, pub json: bool /* , name, force, generated, ... */ }
+
+/// What the command runs against: the crate's own composed service(s), as the crate's own types, plus
+/// the process facts the binary resolved (the working directory, a home directory) as values.
+pub struct Context<'a> { pub cwd: std::path::PathBuf /* , pub store: &'a SessionStore, ... */ }
+
+/// Write the answer to `out` and any failure to `err`; return the process exit code.
+pub fn run(command: Command, args: &Args, context: &Context<'_>,
+           out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32
+// a command that awaits (the turn) is `pub async fn run(...) -> i32`; the binary owns the runtime
+```
+
+| Rule | Why |
+|---|---|
+| No dependency on `rust/crates/heddle`; std, serde_json and the crate's existing dependencies only | the binary depends on the crate, never the reverse |
+| No process-global reads or effects: no `std::env`, `current_dir`, `process::exit`, `println!` | the binary passes them in, so a unit test is a `Vec<u8>` and a literal context |
+| Exit `0` done; `1` with `heddle: <sentence>` on `err`, the TypeScript build's `process.exitCode = 1`; never `2` | `2` is the binary's own "not ported yet" |
+| Text output is the TypeScript build's, byte for byte (`src/cli.ts`); `--json` is `JSON.stringify(value, null, 2)` plus a newline, compact one-line where the TypeScript build wrote `JSON.stringify(value)` | verifiers parse the JSON and match the text |
+| The crate's service is built from its row: a `Config: Deserialize` (camelCase, defaults, an absent `config` arrives as `{}`) and a constructor from config and the services it injects | the binary's adapter builds it once at boot and registers the handle under the service name |
+| Unit tests in the crate, built from its verifier's expectations | the owner owns the test with the code |
+
+**How it lands.** The owner pushes `command.rs` with its tests and tells me the commit. I add the
+adapter that builds the service from its row (if not already there), one dispatch line from the binary's
+`Args` to the crate's `Args`, and the capability to `usage::SERVED` only when the command's verifier checks
+pass, so an advertised command never turns a gate red.
+
+| Command words | Crate, owner |
+|---|---|
+| `models` | `heddle-llm`, developer-three |
+| `--turn`, with `--endpoint`, `--model`, `--system`, `--max-rounds`, `--max-output-tokens`, `--resume`, `--new` | `heddle-agent`, developer-five (`--stream`'s printer: `heddle-llm`, developer-three) |
+| `tools`, `commands` | `heddle-tools`, developer-five |
+| `context` | `heddle-context`, developer-four |
+| `hooks`, `goal` | `heddle-events` and `heddle-goal`, developer-six |
+| `sessions`, `transcript`, `session new` | `heddle-session`, developer-eight |
+| `workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file` | `heddle-workspace`, developer-eight |
+| team recovery at `web` start | `heddle-team`, developer-nine |
+| `web` | `heddle-server`, developer-ten (the binary composes its `Harness`) |
+
+The binary already prints every non-turn command above against its `ports` views, tested with doubles
+(`src/commands.rs`). Those implementations are the reference for the text and the sentences: an owner's
+entry point replaces the binary's version for its words, and the binary's copy is then deleted.
+
 ## Port plan
 
 Each step is pushed on this crate's branch with its unit tests, and the integrator is told.
