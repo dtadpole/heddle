@@ -33,22 +33,22 @@ impl LogEvent {
     /// The `origin` of a `context/note`: `system-prompt`, `instructions`, `compaction`,
     /// `runtime-context`, or a legacy `sandbox-policy`.
     pub fn origin(&self) -> Option<&str> {
-        todo!("LogEvent::origin")
+        self.field("origin").and_then(Value::as_str)
     }
 
     /// The `identity` a note was rendered from, when it is a string.
     pub fn identity(&self) -> Option<&str> {
-        todo!("LogEvent::identity")
+        self.field("identity").and_then(Value::as_str)
     }
 
     /// The `message` a `message` or `context/note` event carries, parsed.
     pub fn message(&self) -> Option<Message> {
-        todo!("LogEvent::message")
+        serde_json::from_value(self.field("message")?.clone()).ok()
     }
 
     /// How the event entered the surface; `None` when it carries no marker (an append, in an old log).
     pub fn surface_op(&self) -> Option<SurfaceOp> {
-        todo!("LogEvent::surface_op")
+        self.field("surfaceOp").and_then(SurfaceOp::from_json)
     }
 }
 
@@ -77,13 +77,29 @@ pub enum SurfaceOp {
 impl SurfaceOp {
     /// The JSON the log stores for this operation.
     pub fn to_json(&self) -> Value {
-        todo!("SurfaceOp::to_json")
+        match self {
+            SurfaceOp::Append => Value::String("append".to_string()),
+            SurfaceOp::Replace(range) => serde_json::json!({
+                "op": "replace",
+                "startSeq": range.start_seq,
+                "endSeq": range.end_seq,
+            }),
+        }
     }
 
     /// The operation a log's `surfaceOp` field names, or `None` when it names none.
     pub fn from_json(value: &Value) -> Option<Self> {
-        let _ = value;
-        todo!("SurfaceOp::from_json")
+        if value.as_str() == Some("append") {
+            return Some(SurfaceOp::Append);
+        }
+        let object = value.as_object()?;
+        if object.get("op")?.as_str()? != "replace" {
+            return None;
+        }
+        Some(SurfaceOp::Replace(SeqRange {
+            start_seq: object.get("startSeq")?.as_u64()?,
+            end_seq: object.get("endSeq")?.as_u64()?,
+        }))
     }
 }
 
@@ -119,13 +135,18 @@ pub struct AppendOptions {
 impl AppendOptions {
     /// Write the `"append"` marker.
     pub fn append() -> Self {
-        todo!("AppendOptions::append")
+        Self {
+            surface_op: Some(SurfaceOp::Append),
+            source_event_seqs: None,
+        }
     }
 
     /// Shadow `range`, citing the events the replacement was made from.
     pub fn replace(range: SeqRange, source_event_seqs: Vec<u64>) -> Self {
-        let _ = (range, source_event_seqs);
-        todo!("AppendOptions::replace")
+        Self {
+            surface_op: Some(SurfaceOp::Replace(range)),
+            source_event_seqs: Some(source_event_seqs),
+        }
     }
 }
 
@@ -167,20 +188,32 @@ pub trait ContextStore: Send + Sync {
 
     /// The event at `seq`, when there is one.
     fn event(&self, session: &Self::Handle, seq: u64) -> Result<Option<LogEvent>, StoreError> {
-        let _ = (session, seq);
-        todo!("ContextStore::event")
+        Ok(self
+            .read(session)?
+            .into_iter()
+            .find(|event| event.seq == seq))
     }
 
     /// Every surface node with the message it derives to, in surface order.
     fn derive_surface(&self, session: &Self::Handle) -> Result<Vec<SurfaceNode>, StoreError> {
-        let _ = session;
-        todo!("ContextStore::derive_surface")
+        let nodes = self.surface(session)?.nodes;
+        let mut surface = Vec::with_capacity(nodes.len());
+        for seq in nodes {
+            surface.push(SurfaceNode {
+                seq,
+                message: self.derive_node(session, seq)?,
+            });
+        }
+        Ok(surface)
     }
 
     /// The messages a request carries: every surface node that derives to one, in order
     /// (`deriveMessages`).
     fn derive_messages(&self, session: &Self::Handle) -> Result<Vec<Message>, StoreError> {
-        let _ = session;
-        todo!("ContextStore::derive_messages")
+        Ok(self
+            .derive_surface(session)?
+            .into_iter()
+            .filter_map(|node| node.message)
+            .collect())
     }
 }
