@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:10:57Z
-version: 0.6.6
+modified: 2026-10-23T06:52:23Z
+version: 0.6.7
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -75,8 +75,9 @@ the loop reads), and the session-meta and create-session records, converted at t
   `team/message/delivered`; and the boot still logs no `recovered N team(s)` line. Both are in the team service's
   delivery and web-start recovery, not in this crate: `begin_turn` writes the prompt before it returns, and the
   live-turn registry's clones share one table. `check.mjs` and `check-subagents.mjs` pass in the same runs.
-- **Open, not in this crate:** serving `Capability::Turn` in the binary, and the web composition above for
-  `check-teams.mjs`.
+- **Through the binary owner's own advertising build (2026-10-22, `hd/developer-two` `09a3f14`, unmodified — it serves
+  Tools, Turn and Web itself):** `sh _verifiers_/50-agentic-loop/verify.sh` exits **0** — `check.mjs` 6/6,
+  `check-subagents.mjs` 1/1 and `check-teams.mjs` 2/2. What remains is that build reaching main.
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
   runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
   starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.
