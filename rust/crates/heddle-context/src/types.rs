@@ -109,8 +109,12 @@ pub struct Message {
 impl Message {
     /// A message of one text part.
     pub fn text(role: Role, text: impl Into<String>) -> Self {
-        let _ = (role, text.into());
-        todo!("Message::text")
+        Message {
+            role,
+            content: vec![ContentPart::Text { text: text.into() }],
+            tool_call_id: None,
+            source: None,
+        }
     }
 }
 
@@ -152,6 +156,112 @@ pub struct TokenUsage {
 /// A tool call reads `→ name arguments`; an attachment contributes a bracketed name rather than
 /// disappearing.
 pub fn describe_content(parts: &[ContentPart]) -> String {
-    let _ = parts;
-    todo!("describe_content")
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            ContentPart::ToolCall {
+                name, arguments, ..
+            } => {
+                out.push_str("→ ");
+                out.push_str(name);
+                out.push(' ');
+                out.push_str(arguments);
+            }
+            ContentPart::Text { text } | ContentPart::Reasoning { text } => out.push_str(text),
+            ContentPart::Image(image) => {
+                out.push_str("[image ");
+                out.push_str(&image.name);
+                out.push(']');
+            }
+            ContentPart::File(file) => {
+                out.push_str("[file ");
+                out.push_str(&file.name);
+                out.push(']');
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContentPart, FilePart, ImagePart, Message, Role, describe_content};
+    use serde_json::json;
+
+    fn image(name: &str) -> ContentPart {
+        ContentPart::Image(ImagePart {
+            name: name.to_string(),
+            mime_type: "image/png".to_string(),
+            path: "/tmp/a.png".to_string(),
+            bytes: 1,
+            sha256: "00".to_string(),
+            data: None,
+        })
+    }
+
+    fn file(name: &str) -> ContentPart {
+        ContentPart::File(FilePart {
+            name: name.to_string(),
+            path: "/tmp/a.txt".to_string(),
+            bytes: 1,
+            sha256: "00".to_string(),
+        })
+    }
+
+    #[test]
+    fn a_text_message_carries_one_text_part() {
+        let message = Message::text(Role::User, "hello");
+        assert_eq!(message.role, Role::User);
+        assert_eq!(
+            message.content,
+            vec![ContentPart::Text {
+                text: "hello".to_string()
+            }]
+        );
+        assert_eq!(message.tool_call_id, None);
+        assert_eq!(message.source, None);
+    }
+
+    #[test]
+    fn describe_content_renders_a_tool_call_and_joins_parts_without_a_separator() {
+        let parts = [
+            ContentPart::ToolCall {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                arguments: "{\"path\":\"a\"}".to_string(),
+            },
+            ContentPart::Text {
+                text: " and ".to_string(),
+            },
+            ContentPart::Text {
+                text: "done".to_string(),
+            },
+        ];
+        assert_eq!(describe_content(&parts), "→ read {\"path\":\"a\"} and done");
+    }
+
+    #[test]
+    fn describe_content_names_attachments_and_keeps_reasoning_text() {
+        let parts = [
+            ContentPart::Reasoning {
+                text: "think".to_string(),
+            },
+            image("a.png"),
+            file("b.txt"),
+        ];
+        assert_eq!(describe_content(&parts), "think[image a.png][file b.txt]");
+        assert_eq!(describe_content(&[]), "");
+    }
+
+    #[test]
+    fn a_message_round_trips_the_log_shape_without_optional_fields() {
+        let message = Message::text(Role::User, "hi");
+        let value = serde_json::to_value(&message).expect("a message serialises");
+        assert_eq!(
+            value,
+            json!({ "role": "user", "content": [{ "type": "text", "text": "hi" }] })
+        );
+        let back: Message = serde_json::from_value(value).expect("a message reads back");
+        assert_eq!(back, message);
+    }
 }
