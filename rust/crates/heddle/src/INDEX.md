@@ -17,15 +17,15 @@ verifiers judge the built binary from outside. Run them with
 
 | File | What it is |
 |---|---|
-| [`main.rs`](main.rs) | the entry point: today it classifies the command line, answers `--help` and exits 2 for what is not ported; step 2 of the plan moves it onto `run` |
+| [`main.rs`](main.rs) | the process shell: hands `run` the arguments, environment, working directory and streams, and turns the `Exit` into a process exit code |
 | [`lib.rs`](lib.rs) | the library root: `Invocation`, `Exit`, `run` |
 | [`cli.rs`](cli.rs) | the command line: `Args`, `parse_args`, the layer request (`parseArgs`, `baseLayer`, `hasProfile`) |
 | [`usage.rs`](usage.rs) | the help, line by line, gated by the capabilities the binary serves |
-| [`boot.rs`](boot.rs) | the boot and the loader: entries, fiber states, `settle`, `failed_entries`, the printed tree |
+| [`boot.rs`](boot.rs) | the boot and the loader: composition through `heddle-config`, entries and fiber states started to a fixed point, `settle`, `failed_entries`, `dispose`, the printed tree |
 | [`builtins.rs`](builtins.rs) | the built-in table, how a row's `name` resolves, the `Component` and `Catalog` traits |
 | [`services.rs`](services.rs) | the service registry: a name with typed views, the injection gate |
 | [`ports.rs`](ports.rs) | what the binary asks of each crate, one trait per service |
-| [`commands.rs`](commands.rs) | every command, and the hook points `hooks` lists |
+| [`commands.rs`](commands.rs) | every command and its dispatch, the configuration commands delegating to `heddle-config`, and the hook points `hooks` lists |
 | [`output.rs`](output.rs) | the two streams a run writes to, and `JSON.stringify(value, null, 2)` |
 
 ## Read next

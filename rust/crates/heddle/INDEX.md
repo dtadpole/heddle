@@ -122,6 +122,24 @@ and every gate word in it are served. A half-ported binary is therefore **unjudg
 wired and **judged** where it is; with every capability served the text is the TypeScript build's byte for
 byte, which a unit test checks against `src/cli.ts` itself.
 
+## Where the port stands
+
+The library shape is complete and every module below compiles with its unit tests; which parts
+*answer* is a separate question, because the help only advertises what is wired.
+
+| Piece | State |
+|---|---|
+| `cli::parse_args` and the layer helpers | implemented, tested against `parseArgs`'s quirks and sentences |
+| `usage` (the gated help) and `main` | implemented: `--help` prints `usage(SERVED)`, a usage error exits 1, an unported request exits 2 naming itself |
+| `commands::config_command` | implemented: `profiles` and `config` are `heddle_config::command::run`'s, exit code mapped |
+| `boot::boot`, `load`, `settle`, `failed_entries`, `dispose` | implemented: composition through `heddle-config`, the loader swept to a fixed point, tested with a stub catalog and a profile fixture |
+| `Ports`, `BuiltinCatalog::component`, the built-in adapters | declared; one adapter per built-in lands as its crate's API does (step 5) |
+| `commands::web`, `booted_command`, `turn`, `bare_application` | declared; they answer once the crates they compose exist |
+
+`usage::SERVED` is the one line that says which capabilities answer: today `Always` and `Config`. A
+capability is added only when its command answers through the real crate, so a verifier reports
+unjudged rather than failing on a part that is not wired.
+
 ## Port plan
 
 Each step is pushed on this crate's branch with its unit tests, and the integrator is told.
