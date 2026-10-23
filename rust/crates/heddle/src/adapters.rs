@@ -493,6 +493,12 @@ impl Component for WorkspaceComponent {
         let config: heddle_workspace::WorkspaceConfig = serde_json::from_value(config.clone())
             .map_err(|error| format!("workspace: {error}"))?;
         let service = Arc::new(heddle_workspace::WorkspaceService::new(&config, &self.env));
+        // Every load reconciles the roots with the sessions already recorded, adopting each folder a
+        // session ran in as an `auto` root: src/workspace/service.ts runs `bootstrap` in its constructor.
+        let sessions = session_service(services, "workspace")?;
+        service
+            .bootstrap(&sessions.list())
+            .map_err(|error| format!("workspace: {error}"))?;
         services.provide("workspace", Arc::clone(&service));
         services.provide(
             "workspace",
@@ -790,13 +796,9 @@ impl Component for ToolsComponent {
         let sandbox = services
             .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
             .ok_or_else(|| "tools: the sandbox service is not provided".to_owned())?;
-        let gates = heddle_tools::ToolGates {
-            approvals: Arc::new(heddle_tools::adapters::SandboxApprovals::new(approvals)),
-            sandbox: Arc::new(heddle_tools::adapters::Sandbox::new(sandbox)),
-            // The deployment's mode until the per-session mode resolver over heddle-session lands.
-            modes: Arc::new(heddle_tools::DefaultModes),
-            hooks: Arc::new(heddle_tools::NoToolHooks),
-        };
+        let sessions = session_service(services, "tools")?;
+        // The sandbox, the approval policy and each session's recorded mode, as heddle-tools composes them.
+        let gates = heddle_tools::adapters::gates_over(sandbox, approvals, sessions);
         let registry = Arc::new(heddle_tools::ToolRegistry::from_config(gates, &config));
         services.provide("tools", Arc::clone(&registry));
         services.provide(
@@ -1043,89 +1045,6 @@ fn bridge<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Res
         .map_err(|error| error.to_string())
 }
 
-fn store_error(error: impl std::fmt::Display) -> heddle_context::StoreError {
-    heddle_context::StoreError(error.to_string().into())
-}
-
-/// `heddle-session`'s store as the log `heddle-context` derives a request from.
-pub struct ContextLog {
-    sessions: Arc<heddle_session::SessionService>,
-}
-
-impl heddle_context::ContextStore for ContextLog {
-    type Handle = heddle_session::SessionHandle;
-
-    fn count(&self, session: &Self::Handle) -> Result<u64, heddle_context::StoreError> {
-        Ok(self.sessions.events(session).map_err(store_error)?.len() as u64)
-    }
-
-    fn read(
-        &self,
-        session: &Self::Handle,
-    ) -> Result<Vec<heddle_context::LogEvent>, heddle_context::StoreError> {
-        let events = self.sessions.events(session).map_err(store_error)?;
-        Ok(events
-            .iter()
-            .map(|event| heddle_context::LogEvent {
-                seq: event.seq,
-                kind: event.kind.clone(),
-                fields: event.fields.clone(),
-            })
-            .collect())
-    }
-
-    fn surface(
-        &self,
-        session: &Self::Handle,
-    ) -> Result<heddle_context::SurfaceState, heddle_context::StoreError> {
-        let surface = self.sessions.surface(session).map_err(store_error)?;
-        Ok(heddle_context::SurfaceState {
-            nodes: surface.nodes.clone(),
-            content_generation: surface.content_generation,
-            replace_generation: surface.replace_generation,
-        })
-    }
-
-    fn derive_node(
-        &self,
-        session: &Self::Handle,
-        seq: u64,
-    ) -> Result<Option<heddle_context::Message>, heddle_context::StoreError> {
-        let node = self.sessions.node(session, seq).map_err(store_error)?;
-        node.map(|message| bridge(&message).map_err(store_error))
-            .transpose()
-    }
-
-    fn append(
-        &self,
-        session: &Self::Handle,
-        event: Value,
-        options: heddle_context::AppendOptions,
-    ) -> Result<u64, heddle_context::StoreError> {
-        let event = heddle_session::NewEvent::try_from(event).map_err(store_error)?;
-        let surface_op = options.surface_op.map(|op| match op {
-            heddle_context::SurfaceOp::Append => heddle_session::SurfaceOp::Append,
-            heddle_context::SurfaceOp::Replace(range) => heddle_session::SurfaceOp::Replace {
-                start_seq: range.start_seq,
-                end_seq: range.end_seq,
-            },
-        });
-        let written = self
-            .sessions
-            .store()
-            .append(
-                session,
-                event,
-                heddle_session::AppendOptions {
-                    surface_op,
-                    source_event_seqs: options.source_event_seqs,
-                },
-            )
-            .map_err(store_error)?;
-        Ok(written.seq)
-    }
-}
-
 /// `heddle-llm`'s service as what `heddle-context` asks of the model layer: an endpoint's window and a
 /// summary call.
 struct ContextModels {
@@ -1162,8 +1081,9 @@ impl heddle_context::ModelAccess for ContextModels {
     }
 }
 
-/// The context service the binary composes: over the session store, with the model layer.
-pub type Context = heddle_context::ContextService<ContextLog>;
+/// The context service the binary composes: over the session store (heddle-context binds its store
+/// trait to heddle-session's store itself), with the model layer.
+pub type Context = heddle_context::ContextService<heddle_session::SessionStore>;
 
 /// `src/context/service.ts`: context assembly, the budget and compaction.
 pub struct ContextComponent {
@@ -1195,7 +1115,7 @@ impl Component for ContextComponent {
             .get::<Arc<heddle_llm::ModelService>>("model")
             .ok_or_else(|| "context: the model service is not provided".to_owned())?;
         let service = Arc::new(heddle_context::ContextService::new(
-            Arc::new(ContextLog { sessions }),
+            Arc::clone(sessions.store()),
             config,
             heddle_context::ContextDependencies {
                 model: Some(Arc::new(ContextModels { service: models })),
