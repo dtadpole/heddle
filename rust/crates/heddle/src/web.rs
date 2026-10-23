@@ -509,7 +509,7 @@ impl heddle_web_composer::context_view::ContextHost for Composer {
                 .messages
                 .iter()
                 .map(|message| ContextMessage {
-                    role: to_json(&message.role)
+                    role: to_json(message.role)
                         .as_str()
                         .unwrap_or_default()
                         .to_owned(),
