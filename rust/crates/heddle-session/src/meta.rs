@@ -30,7 +30,11 @@ impl SessionMeta {
     /// Accept a parsed record. `None` unless it is an object whose `id` is a string, which is the one
     /// test the session list applies before it believes a file is metadata.
     pub fn from_value(value: Value) -> Option<SessionMeta> {
-        todo!()
+        let Value::Object(raw) = value else {
+            return None;
+        };
+        raw.get("id")?.as_str()?;
+        Some(SessionMeta { raw })
     }
 
     /// The record as an ordered JSON object.
@@ -45,62 +49,81 @@ impl SessionMeta {
 
     /// `JSON.stringify(meta, null, 2)` plus a newline — the bytes of a meta file.
     pub fn to_file_text(&self) -> String {
-        todo!()
+        let mut text = serde_json::to_string_pretty(&Value::Object(self.raw.clone()))
+            .expect("a meta record is always serializable");
+        text.push('\n');
+        text
+    }
+
+    /// Set one key, keeping an existing key where it was and appending a new one — the TypeScript
+    /// spread's behaviour, which is what the store's edits are made of.
+    pub fn set(&mut self, key: &str, value: Value) {
+        self.raw.insert(key.to_string(), value);
+    }
+
+    /// Delete one key, wherever it was.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        self.raw.shift_remove(key)
+    }
+
+    fn string(&self, key: &str) -> Option<&str> {
+        self.raw.get(key)?.as_str()
     }
 
     pub fn id(&self) -> &str {
-        todo!()
+        self.string("id").unwrap_or("")
     }
     /// When it was created; `""` when the record has none.
     pub fn created(&self) -> &str {
-        todo!()
+        self.string("created").unwrap_or("")
     }
     /// When it was last written to — the age a row shows.
     pub fn updated(&self) -> Option<&str> {
-        todo!()
+        self.string("updated")
     }
     /// The folder the session is bound to; `""` when a legacy record has none.
     pub fn cwd(&self) -> &str {
-        todo!()
+        self.string("cwd").unwrap_or("")
     }
     pub fn endpoint(&self) -> Option<&str> {
-        todo!()
+        self.string("endpoint")
     }
     pub fn model(&self) -> Option<&str> {
-        todo!()
+        self.string("model")
     }
     pub fn reasoning_effort(&self) -> Option<&str> {
-        todo!()
+        self.string("reasoningEffort")
     }
     pub fn title(&self) -> Option<&str> {
-        todo!()
+        self.string("title")
     }
     /// User turns recorded; 0 when absent.
     pub fn turns(&self) -> u64 {
-        todo!()
+        self.raw.get("turns").and_then(Value::as_u64).unwrap_or(0)
     }
     pub fn pinned(&self) -> bool {
-        todo!()
+        matches!(self.raw.get("pinned"), Some(Value::Bool(true)))
     }
     pub fn pinned_at(&self) -> Option<&str> {
-        todo!()
+        self.string("pinnedAt")
     }
     pub fn archived(&self) -> bool {
-        todo!()
+        matches!(self.raw.get("archived"), Some(Value::Bool(true)))
     }
     /// The session that delegated this one, when this is a subagent's.
     pub fn parent_session(&self) -> Option<&str> {
-        todo!()
+        self.string("parentSession")
     }
     pub fn origin(&self) -> Option<SessionOrigin> {
-        todo!()
+        let value = self.raw.get("origin")?.clone();
+        serde_json::from_value(value).ok()
     }
     pub fn delegation_depth(&self) -> Option<u64> {
-        todo!()
+        self.raw.get("delegationDepth").and_then(Value::as_u64)
     }
     /// The Lead's session id, when this session is a teammate's.
     pub fn team_id(&self) -> Option<&str> {
-        todo!()
+        self.string("teamId")
     }
 }
 
@@ -176,4 +199,105 @@ pub struct ModelSelection {
 pub struct FlagPatch {
     pub pinned: Option<bool>,
     pub archived: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn meta(text: &str) -> SessionMeta {
+        SessionMeta::from_value(serde_json::from_str(text).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_record_needs_a_string_id() {
+        assert!(SessionMeta::from_value(json!({"id": "session-1"})).is_some());
+        assert!(SessionMeta::from_value(json!({"id": 7})).is_none());
+        assert!(SessionMeta::from_value(json!({"created": "x"})).is_none());
+        assert!(SessionMeta::from_value(json!([])).is_none());
+    }
+
+    #[test]
+    fn the_typed_getters_read_what_the_record_says() {
+        let record = meta(
+            r#"{"id":"session-1","created":"2026-10-22T18:17:41.123Z","cwd":"/x","endpoint":"e","model":"m","reasoningEffort":"high","title":"T","turns":3,"pinned":true,"pinnedAt":"2026-10-22T18:18:00.000Z","archived":false,"parentSession":"session-0","origin":"subagent","delegationDepth":2,"teamId":"session-9"}"#,
+        );
+        assert_eq!(record.id(), "session-1");
+        assert_eq!(record.created(), "2026-10-22T18:17:41.123Z");
+        assert_eq!(record.updated(), None);
+        assert_eq!(record.cwd(), "/x");
+        assert_eq!(record.endpoint(), Some("e"));
+        assert_eq!(record.model(), Some("m"));
+        assert_eq!(record.reasoning_effort(), Some("high"));
+        assert_eq!(record.title(), Some("T"));
+        assert_eq!(record.turns(), 3);
+        assert!(record.pinned());
+        assert_eq!(record.pinned_at(), Some("2026-10-22T18:18:00.000Z"));
+        assert!(!record.archived());
+        assert_eq!(record.parent_session(), Some("session-0"));
+        assert_eq!(record.origin(), Some(SessionOrigin::Subagent));
+        assert_eq!(record.delegation_depth(), Some(2));
+        assert_eq!(record.team_id(), Some("session-9"));
+    }
+
+    #[test]
+    fn a_record_missing_a_field_reads_the_empty_answer() {
+        let record = meta(r#"{"id":"session-1"}"#);
+        assert_eq!(record.created(), "");
+        assert_eq!(record.cwd(), "");
+        assert_eq!(record.turns(), 0);
+        assert!(!record.pinned());
+        assert!(!record.archived());
+        assert_eq!(record.origin(), None);
+        assert_eq!(record.delegation_depth(), None);
+    }
+
+    #[test]
+    fn the_file_text_is_json_stringify_with_two_spaces_and_a_newline() {
+        let record = meta(r#"{"id":"session-1","created":"2026-10-22T18:17:41.123Z","turns":0}"#);
+        assert_eq!(
+            record.to_file_text(),
+            "{\n  \"id\": \"session-1\",\n  \"created\": \"2026-10-22T18:17:41.123Z\",\n  \"turns\": 0\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_edit_keeps_where_an_untouched_key_was() {
+        // The spread `{ ...current, title }` puts `title` back where it was found, not at the end.
+        let mut record = meta(r#"{"id":"s","title":"old","cwd":"/x"}"#);
+        record.set("title", json!("new"));
+        assert_eq!(
+            record.to_file_text(),
+            "{\n  \"id\": \"s\",\n  \"title\": \"new\",\n  \"cwd\": \"/x\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn an_edit_appends_a_key_that_is_new_and_carries_unknown_ones() {
+        let mut record = meta(r#"{"id":"s","cwd":"/x","custom":{"kept":true}}"#);
+        record.set("updated", json!("2026-10-22T18:18:00.000Z"));
+        assert_eq!(
+            record.to_file_text(),
+            "{\n  \"id\": \"s\",\n  \"cwd\": \"/x\",\n  \"custom\": {\n    \"kept\": true\n  },\n  \"updated\": \"2026-10-22T18:18:00.000Z\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn deleting_a_key_leaves_the_rest_in_order() {
+        let mut record = meta(r#"{"id":"s","title":"old","cwd":"/x"}"#);
+        assert_eq!(record.remove("title"), Some(json!("old")));
+        assert_eq!(
+            record.to_file_text(),
+            "{\n  \"id\": \"s\",\n  \"cwd\": \"/x\"\n}\n"
+        );
+        assert_eq!(record.remove("title"), None);
+    }
+
+    #[test]
+    fn a_record_round_trips_through_serde_in_order() {
+        let text = r#"{"id":"s","created":"t","cwd":"/x","turns":0,"unknown":[1,2]}"#;
+        let record = meta(text);
+        assert_eq!(serde_json::to_string(&record).unwrap(), text);
+    }
 }

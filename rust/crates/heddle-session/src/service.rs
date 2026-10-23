@@ -9,20 +9,27 @@
 //! is the newest one whose `cwd` is that folder), the **title from the first message**, the **fork
 //! name** `<title> (n)`, and the **mode change** that appends nothing when nothing changes.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use heddle_config::Env;
+use heddle_config::{Env, canonical_path};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::definition::CreatedDefinition;
+use crate::clock::iso_now;
+use crate::definition::{
+    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+};
 use crate::error::SessionError;
-use crate::event::{Events, SessionEvent, SessionHandle};
-use crate::message::{ContentPart, Message};
-use crate::meta::{FlagPatch, ModelSelection, SessionMeta};
-use crate::store::{EventListener, SessionStore};
-use crate::surface::SurfaceState;
+use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
+use crate::message::{ContentPart, Message, RecordedMessage, Role, text_of};
+use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
+use crate::mode::{
+    MODE_EVENT, effective_mode as fold_effective_mode, recorded_mode as fold_recorded_mode,
+};
+use crate::store::{EventListener, SessionStore, default_session_root};
+use crate::surface::{SurfaceState, inherits_answer};
 
 /// The session plugin's configuration row: `{ root }`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -86,14 +93,85 @@ pub struct ModeChange<M> {
 /// up to 48 UTF-16 units kept whole, else cut at the last space past the 24th unit (or hard at 48) with
 /// `…` appended; trailing `.,;:!?` removed. `""` for a blank text.
 pub fn title_from(text: &str) -> String {
-    todo!()
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = line.trim();
+    if line.is_empty() {
+        return String::new();
+    }
+    /// `/[.,;:!?]+$/` — the punctuation a sentence leaves at its end is not a name.
+    fn trim_punctuation(text: &str) -> String {
+        text.trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            .to_string()
+    }
+    let limit = 48usize;
+    let units: Vec<u16> = line.encode_utf16().collect();
+    if units.len() <= limit {
+        return trim_punctuation(line);
+    }
+    let cut = &units[..limit];
+    let at = cut.iter().rposition(|unit| *unit == u32::from(' ') as u16);
+    let chosen = match at {
+        Some(at) if at > limit / 2 => &cut[..at],
+        _ => cut,
+    };
+    format!("{}…", trim_punctuation(&String::from_utf16_lossy(chosen)))
 }
 
 /// A fork's name, DSH's `increasedForkTitle`: a title ending in `(n)` or the full-width `（n）` is
 /// incremented in place; any other gains ` (1)`; a blank one is `session (1)`. The ordinal steps past
 /// every name in `taken`.
 pub fn fork_title(base: &str, taken: &[String]) -> String {
-    todo!()
+    let trimmed = if base.trim().is_empty() {
+        "session"
+    } else {
+        base.trim()
+    };
+    #[derive(Clone, Copy)]
+    enum Style {
+        Ascii,
+        FullWidth,
+        Space,
+    }
+    let ascii = split_ordinal_suffix(trimmed, '(', ')');
+    let full_width = split_ordinal_suffix(trimmed, '（', '）');
+    let (prefix, mut ordinal, style) = match (&ascii, &full_width) {
+        (Some((prefix, value)), _) => (prefix.clone(), value + 1, Style::Ascii),
+        (None, Some((prefix, value))) => (prefix.clone(), value + 1, Style::FullWidth),
+        (None, None) => (trimmed.to_string(), 1, Style::Space),
+    };
+    let format = |value: u64| match style {
+        Style::Ascii => format!("{prefix}({value})"),
+        Style::FullWidth => format!("{prefix}（{value}）"),
+        Style::Space => format!("{prefix} ({value})"),
+    };
+    while taken.iter().any(|name| name == &format(ordinal)) {
+        ordinal += 1;
+    }
+    format(ordinal)
+}
+
+/// The `(n)` suffix of a title, as the TypeScript regexes read it: the **first** opening bracket whose
+/// remainder is digits followed by the closing bracket and the end of the string.
+fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, u64)> {
+    let chars: Vec<char> = text.chars().collect();
+    for (index, character) in chars.iter().enumerate() {
+        if *character != open {
+            continue;
+        }
+        let rest = &chars[index + 1..];
+        if rest.len() < 2 || rest.last() != Some(&close) {
+            continue;
+        }
+        let digits = &rest[..rest.len() - 1];
+        if digits.is_empty() || !digits.iter().all(char::is_ascii_digit) {
+            continue;
+        }
+        let number: String = digits.iter().collect();
+        if let Ok(value) = number.parse::<u64>() {
+            return Some((chars[..index].iter().collect(), value));
+        }
+    }
+    None
 }
 
 /// The session service. Cheap to clone; clones share one store.
@@ -106,7 +184,17 @@ impl SessionService {
     /// A service over a store rooted where the configuration says (else
     /// [`crate::default_session_root`]), telling `listener` about every append.
     pub fn new(config: &SessionConfig, env: &Env, listener: Option<EventListener>) -> Self {
-        todo!()
+        let root = config
+            .root
+            .clone()
+            .unwrap_or_else(|| default_session_root(env));
+        let store = match listener {
+            Some(listener) => SessionStore::with_listener(&root, env, listener),
+            None => SessionStore::new(&root, env),
+        };
+        SessionService {
+            store: Arc::new(store),
+        }
     }
 
     /// A service over an existing store.
@@ -122,13 +210,37 @@ impl SessionService {
     /// The folder this session belongs to — its own meta record's non-blank `cwd` — or `None` for a
     /// legacy record with none, so the caller can apply its explicit fallback.
     pub fn folder(&self, handle: &SessionHandle) -> Option<String> {
-        todo!()
+        // Read this handle's own record, so another session in the same store cannot supply the answer.
+        let text = std::fs::read_to_string(&handle.meta).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        let cwd = value.get("cwd")?.as_str()?;
+        if cwd.trim().is_empty() {
+            None
+        } else {
+            Some(cwd.to_string())
+        }
     }
 
     /// Open the session a run continues (`resume`), or create one. A resume that names nothing is
     /// [`SessionError::NoSession`].
     pub fn start(&self, options: StartOptions) -> Result<SessionHandle, SessionError> {
-        todo!()
+        if let Some(resume) = &options.resume {
+            return self
+                .store
+                .open(resume)
+                .ok_or_else(|| SessionError::NoSession {
+                    id: resume.clone(),
+                    root: self.store.root().to_string(),
+                });
+        }
+        self.store.create(CreateOptions {
+            cwd: options.cwd,
+            endpoint: options.endpoint,
+            model: options.model,
+            reasoning_effort: options.reasoning_effort,
+            title: options.title,
+            ..Default::default()
+        })
     }
 
     /// Start a fresh session bound to `branch` **and** write its definition into that folder.
@@ -137,13 +249,99 @@ impl SessionService {
         branch: &str,
         options: CreateAtOptions,
     ) -> Result<CreatedDefinition, SessionError> {
-        todo!()
+        let canonical = canonical_path(Path::new(branch))
+            .to_string_lossy()
+            .into_owned();
+        let taken = existing_session_names(&canonical);
+        let handle = self.open_at(
+            &canonical,
+            OpenAtOptions {
+                fresh: true,
+                endpoint: options.endpoint.clone(),
+                model: options.model.clone(),
+                reasoning_effort: options.reasoning_effort.clone(),
+                title: options.title.clone(),
+            },
+        )?;
+        let created = self
+            .list()
+            .into_iter()
+            .find(|meta| meta.id() == handle.id)
+            .map(|meta| meta.created().to_string())
+            .unwrap_or_else(iso_now);
+        let definition = write_session_definition(
+            &handle,
+            &canonical,
+            &DefinitionOptions {
+                created_at: created,
+                title: options.title,
+                endpoint: options.endpoint,
+                model: options.model,
+                reasoning_effort: options.reasoning_effort,
+                taken,
+            },
+        )?;
+        Ok(CreatedDefinition { handle, definition })
     }
 
     /// Fork a session: a child that continues from its last completed turn, recording `parentSession`,
     /// titled `<title> (n)`, with its own definition in the source's folder.
     pub fn fork(&self, id: &str) -> Result<ForkOutcome, SessionError> {
-        todo!()
+        let Some(source) = self.list().into_iter().find(|meta| meta.id() == id) else {
+            return Ok(ForkOutcome::NotFound);
+        };
+        let Some(source_handle) = self.store.open(id) else {
+            return Ok(ForkOutcome::Unavailable);
+        };
+        // The question is "does the inherited projection contain an assistant message", not "does the
+        // log contain assistant chunks": a fork's own log holds copied messages and no chunks.
+        if !inherits_answer(self.store.read(&source_handle)?.as_slice())? {
+            return Ok(ForkOutcome::Unavailable);
+        }
+        let Some(handle) = self.store.fork(
+            id,
+            ForkAttribution {
+                parent_session: Some(id.to_string()),
+                ..Default::default()
+            },
+        )?
+        else {
+            return Ok(ForkOutcome::Unavailable);
+        };
+        let created = self
+            .list()
+            .into_iter()
+            .find(|meta| meta.id() == handle.id)
+            .map(|meta| meta.created().to_string())
+            .unwrap_or_else(iso_now);
+        let base = source
+            .title()
+            .filter(|title| !title.trim().is_empty())
+            .map(|title| title.trim().to_string())
+            .unwrap_or_else(|| "session".to_string());
+        let titles: Vec<String> = self
+            .list()
+            .iter()
+            .map(|meta| meta.title().unwrap_or("").to_string())
+            .collect();
+        let title = fork_title(&base, &titles);
+        self.store.rename(&handle.id, &title)?;
+        let definition = write_session_definition(
+            &handle,
+            source.cwd(),
+            &DefinitionOptions {
+                created_at: created,
+                title: Some(title),
+                endpoint: source.endpoint().map(str::to_string),
+                model: source.model().map(str::to_string),
+                reasoning_effort: source.reasoning_effort().map(str::to_string),
+                taken: existing_session_names(source.cwd()),
+            },
+        )?;
+        Ok(ForkOutcome::Forked(CreatedDefinition {
+            handle,
+            definition,
+        }))
     }
 
     /// Record a user turn of plain text; see [`SessionService::user_content`].
@@ -153,7 +351,13 @@ impl SessionService {
         text: &str,
         source: Option<Value>,
     ) -> Result<(), SessionError> {
-        todo!()
+        self.user_content(
+            handle,
+            vec![ContentPart::Text {
+                text: text.to_string(),
+            }],
+            source,
+        )
     }
 
     /// Record a user turn whose content may carry attachments. Empty content records nothing. The first
@@ -164,12 +368,40 @@ impl SessionService {
         content: Vec<ContentPart>,
         source: Option<Value>,
     ) -> Result<(), SessionError> {
-        todo!()
+        if content.is_empty() {
+            return Ok(());
+        }
+        let title = title_from(&text_of(&content));
+        self.store.message(
+            handle,
+            RecordedMessage {
+                message: Message {
+                    role: Role::User,
+                    tool_call_id: None,
+                    content,
+                },
+                source,
+            },
+        )?;
+        let meta = self.list().into_iter().find(|meta| meta.id() == handle.id);
+        if let Some(meta) = meta {
+            let unnamed = meta
+                .title()
+                .map(|title| title.trim().is_empty())
+                .unwrap_or(true);
+            if unnamed && !title.is_empty() {
+                self.store.rename(&handle.id, &title)?;
+            }
+        }
+        Ok(())
     }
 
     /// The folder's current session: the newest whose canonical `cwd` is exactly this folder.
     pub fn current(&self, folder: &str) -> Option<SessionMeta> {
-        todo!()
+        let canonical = canonical_path(Path::new(folder));
+        self.list()
+            .into_iter()
+            .find(|meta| canonical_path(Path::new(meta.cwd())) == canonical)
     }
 
     /// Open the session bound to a folder, creating one when it has none or when `fresh`.
@@ -178,42 +410,58 @@ impl SessionService {
         folder: &str,
         options: OpenAtOptions,
     ) -> Result<SessionHandle, SessionError> {
-        todo!()
+        let canonical = canonical_path(Path::new(folder))
+            .to_string_lossy()
+            .into_owned();
+        if !options.fresh
+            && let Some(existing) = self.current(&canonical)
+            && let Some(handle) = self.store.open(existing.id())
+        {
+            return Ok(handle);
+        }
+        self.store.create(CreateOptions {
+            cwd: Some(canonical),
+            endpoint: options.endpoint,
+            model: options.model,
+            reasoning_effort: options.reasoning_effort,
+            title: options.title,
+            ..Default::default()
+        })
     }
 
     /// The messages a resumed session would send.
     pub fn messages(&self, handle: &SessionHandle) -> Result<Vec<Message>, SessionError> {
-        todo!()
+        self.store.messages(handle)
     }
 
     /// The surface a request is derived from.
     pub fn surface(&self, handle: &SessionHandle) -> Result<Arc<SurfaceState>, SessionError> {
-        todo!()
+        self.store.surface(handle)
     }
 
     /// One node's derived message.
     pub fn node(&self, handle: &SessionHandle, seq: u64) -> Result<Option<Message>, SessionError> {
-        todo!()
+        self.store.derive_node(handle, seq)
     }
 
     /// Every event so far.
     pub fn events(&self, handle: &SessionHandle) -> Result<Events, SessionError> {
-        todo!()
+        self.store.read(handle)
     }
 
     /// Every session, newest first.
     pub fn list(&self) -> Vec<SessionMeta> {
-        todo!()
+        self.store.list()
     }
 
     /// Retitle a session; the log is untouched.
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
-        todo!()
+        self.store.rename(id, title)
     }
 
     /// Pin, unpin, archive or unarchive.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
-        todo!()
+        self.store.flags(id, patch)
     }
 
     /// Switch a session onto an endpoint, replacing any model override it carried.
@@ -222,12 +470,12 @@ impl SessionService {
         id: &str,
         selection: ModelSelection,
     ) -> Result<Option<SessionMeta>, SessionError> {
-        todo!()
+        self.store.set_model(id, selection)
     }
 
     /// The last complete answer's text.
     pub fn last_answer(&self, handle: &SessionHandle) -> Result<String, SessionError> {
-        todo!()
+        self.store.last_answer(handle)
     }
 
     /// The access mode this session recorded; see [`crate::recorded_mode`].
@@ -235,7 +483,7 @@ impl SessionService {
         &self,
         handle: &SessionHandle,
     ) -> Result<Option<M>, SessionError> {
-        todo!()
+        fold_recorded_mode(self.store.read(handle)?.as_slice())
     }
 
     /// The mode a call in this session runs under: its own record, else `fallback`.
@@ -244,7 +492,7 @@ impl SessionService {
         handle: &SessionHandle,
         fallback: M,
     ) -> Result<M, SessionError> {
-        todo!()
+        fold_effective_mode(self.store.read(handle)?.as_slice(), fallback)
     }
 
     /// Record a change of access mode before it takes effect. Choosing the mode already in effect
@@ -259,6 +507,426 @@ impl SessionService {
     where
         M: Serialize + DeserializeOwned + PartialEq + Clone,
     {
-        todo!()
+        let current = self.effective_mode(handle, fallback)?;
+        if current == mode {
+            return Ok(ModeChange {
+                mode,
+                changed: false,
+                event: None,
+            });
+        }
+        let event = self.store.append(
+            handle,
+            NewEvent::new(MODE_EVENT).field(
+                "mode",
+                serde_json::to_value(&mode).expect("a mode is serializable"),
+            ),
+            Default::default(),
+        )?;
+        Ok(ModeChange {
+            mode,
+            changed: true,
+            event: Some(event),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::ContentPart;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum Mode {
+        ReadOnly,
+        WorkspaceWrite,
+    }
+
+    fn service() -> (tempfile::TempDir, SessionService) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SessionConfig {
+            root: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let service = SessionService::new(&config, &Env::default(), None);
+        (dir, service)
+    }
+
+    fn branch() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn a_title_is_one_trimmed_line_without_trailing_punctuation() {
+        assert_eq!(
+            title_from("remember the word loom"),
+            "remember the word loom"
+        );
+        assert_eq!(title_from("  spaced \n out \t text  "), "spaced out text");
+        assert_eq!(title_from("a question?"), "a question");
+        assert_eq!(title_from("ends with dots..."), "ends with dots");
+        assert_eq!(title_from("   "), "");
+        assert_eq!(title_from(""), "");
+    }
+
+    #[test]
+    fn a_long_title_is_cut_at_a_word_past_the_half_way_point() {
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        let title = title_from(text);
+        assert!(title.ends_with('…'), "{title}");
+        let kept = title.trim_end_matches('…');
+        assert!(kept.len() <= 48);
+        assert!(text.starts_with(kept), "the cut is at a word, not mid-word");
+        assert!(
+            !kept.ends_with(' '),
+            "the space the cut landed on is not kept"
+        );
+    }
+
+    #[test]
+    fn a_long_single_word_is_cut_hard_at_forty_eight_units() {
+        let text = "a".repeat(60);
+        let title = title_from(&text);
+        assert_eq!(title, format!("{}…", "a".repeat(48)));
+    }
+
+    #[test]
+    fn a_title_is_counted_in_utf16_units() {
+        // Each emoji is two units, so only 24 of them fit.
+        let text = "😀".repeat(30);
+        let title = title_from(&text);
+        assert_eq!(title, format!("{}…", "😀".repeat(24)));
+    }
+
+    #[test]
+    fn a_fork_title_counts_up_in_place() {
+        assert_eq!(fork_title("Source", &[]), "Source (1)");
+        assert_eq!(fork_title("Source (1)", &[]), "Source (2)");
+        assert_eq!(fork_title("Source (2)", &[]), "Source (3)");
+        assert_eq!(fork_title("Source （1）", &[]), "Source （2）");
+        assert_eq!(fork_title("", &[]), "session (1)");
+        assert_eq!(fork_title("   ", &[]), "session (1)");
+        // The reference does not look past the suffix, but a taken name steps past it.
+        let taken = vec!["Source (2)".to_string(), "Source (3)".to_string()];
+        assert_eq!(fork_title("Source (1)", &taken), "Source (4)");
+    }
+
+    #[test]
+    fn a_fork_of_a_fork_is_incremented_rather_than_appended() {
+        let first = fork_title("Source", &[]);
+        let second = fork_title(&first, &[]);
+        assert_eq!(second, "Source (2)");
+        assert!(!second.contains("(1) (1)"));
+    }
+
+    #[test]
+    fn one_folder_holds_one_session_and_fresh_starts_another() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+
+        let first = service
+            .open_at(folder_path, OpenAtOptions::default())
+            .unwrap();
+        service
+            .user(&first, "the first conversation", None)
+            .unwrap();
+        let again = service
+            .open_at(folder_path, OpenAtOptions::default())
+            .unwrap();
+        assert_eq!(again.id, first.id, "asking twice continues one session");
+
+        let second = service
+            .open_at(
+                folder_path,
+                OpenAtOptions {
+                    fresh: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_ne!(second.id, first.id);
+        assert_eq!(
+            service.list().len(),
+            2,
+            "the new one did not replace the old"
+        );
+        assert_eq!(
+            service.current(folder_path).unwrap().id(),
+            second.id.as_str()
+        );
+
+        // The first conversation is still readable.
+        let first_text: String = service
+            .events(&first)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "message")
+            .map(|event| {
+                text_of(
+                    &serde_json::from_value::<Message>(event.get("message").unwrap().clone())
+                        .unwrap()
+                        .content,
+                )
+            })
+            .collect();
+        assert_eq!(first_text, "the first conversation");
+    }
+
+    #[test]
+    fn the_first_message_names_the_session_and_a_later_one_does_not() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        service
+            .user(&handle, "remember the word loom?", None)
+            .unwrap();
+        let titled = service.list()[0].clone();
+        assert_eq!(titled.title(), Some("remember the word loom"));
+
+        service.user(&handle, "what did I ask", None).unwrap();
+        assert_eq!(
+            service.list()[0].title(),
+            Some("remember the word loom"),
+            "the first message keeps the title"
+        );
+    }
+
+    #[test]
+    fn resume_that_names_nothing_says_so() {
+        let (_dir, service) = service();
+        let error = service
+            .start(StartOptions {
+                resume: Some("session-nope".to_string()),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("no session 'session-nope' under {}", service.store().root())
+        );
+    }
+
+    #[test]
+    fn create_at_writes_a_definition_into_the_branch() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let created = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap();
+        assert!(!created.definition.name.is_empty());
+        assert!(Path::new(&created.definition.file).exists());
+        assert!(Path::new(&created.definition.dir).join("INDEX.md").exists());
+        assert!(
+            Path::new(folder_path)
+                .join(crate::definition::SESSIONS_FOLDER)
+                .join("INDEX.md")
+                .exists()
+        );
+        let fields = crate::definition::read_session_definition(&created.definition.dir).unwrap();
+        assert_eq!(fields.id(), created.handle.id.as_str());
+        assert_eq!(
+            fields.cwd(),
+            Some(canonical_path(folder.path()).to_str().unwrap())
+        );
+        // The session is in the store too, so a resume finds it.
+        assert_eq!(service.list().len(), 1);
+    }
+
+    #[test]
+    fn a_fork_needs_an_answer_and_then_copies_the_conversation() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+
+        let unanswered = service
+            .open_at(folder_path, OpenAtOptions::default())
+            .unwrap();
+        service
+            .user(&unanswered, "a question with no answer", None)
+            .unwrap();
+        assert_eq!(
+            service.fork(&unanswered.id).unwrap(),
+            ForkOutcome::Unavailable
+        );
+        assert_eq!(service.fork("session-nope").unwrap(), ForkOutcome::NotFound);
+
+        // Give it a completed answer, then fork.
+        service
+            .store()
+            .message(
+                &unanswered,
+                RecordedMessage::from(Message {
+                    role: Role::Assistant,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: "the answer".to_string(),
+                    }],
+                }),
+            )
+            .unwrap();
+        service
+            .store()
+            .append(
+                &unanswered,
+                NewEvent::new("turn/completed"),
+                Default::default(),
+            )
+            .unwrap();
+        service.rename(&unanswered.id, "Source").unwrap();
+
+        let ForkOutcome::Forked(forked) = service.fork(&unanswered.id).unwrap() else {
+            panic!("the fork should have been made");
+        };
+        assert_ne!(forked.handle.id, unanswered.id);
+        assert_eq!(
+            service
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == forked.handle.id)
+                .unwrap()
+                .title(),
+            Some("Source (1)")
+        );
+        assert_eq!(
+            service
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == forked.handle.id)
+                .unwrap()
+                .parent_session(),
+            Some(unanswered.id.as_str())
+        );
+        // The child carries the conversation and its own definition in the source's folder.
+        let carried: Vec<String> = service
+            .messages(&forked.handle)
+            .unwrap()
+            .iter()
+            .map(|message| text_of(&message.content))
+            .collect();
+        assert_eq!(carried, vec!["a question with no answer", "the answer"]);
+        assert!(Path::new(&forked.definition.file).exists());
+        assert_eq!(
+            crate::definition::read_session_definition(&forked.definition.dir)
+                .unwrap()
+                .title(),
+            Some("Source (1)")
+        );
+    }
+
+    #[test]
+    fn a_mode_change_that_changes_nothing_appends_nothing() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        let before = service.store().count(&handle).unwrap();
+
+        let unchanged = service
+            .set_mode(&handle, Mode::ReadOnly, Mode::ReadOnly)
+            .unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.event, None);
+        assert_eq!(service.store().count(&handle).unwrap(), before);
+
+        let changed = service
+            .set_mode(&handle, Mode::WorkspaceWrite, Mode::ReadOnly)
+            .unwrap();
+        assert!(changed.changed);
+        assert_eq!(service.store().count(&handle).unwrap(), before + 1);
+        assert_eq!(
+            service.recorded_mode::<Mode>(&handle).unwrap(),
+            Some(Mode::WorkspaceWrite)
+        );
+        assert_eq!(
+            service.effective_mode(&handle, Mode::ReadOnly).unwrap(),
+            Mode::WorkspaceWrite
+        );
+
+        // And a recorded mode survives a resumed read.
+        let resumed = service
+            .start(StartOptions {
+                resume: Some(handle.id.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            service.recorded_mode::<Mode>(&resumed).unwrap(),
+            Some(Mode::WorkspaceWrite)
+        );
+    }
+
+    #[test]
+    fn the_folder_is_read_from_this_sessions_own_record() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        assert_eq!(
+            service.folder(&handle),
+            Some(canonical_path(folder.path()).to_str().unwrap().to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_message_records_nothing() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        let before = service.store().count(&handle).unwrap();
+        service.user_content(&handle, vec![], None).unwrap();
+        assert_eq!(service.store().count(&handle).unwrap(), before);
+    }
+
+    #[test]
+    fn a_message_with_only_an_attachment_names_nothing() {
+        use crate::message::{ContentPart as Part, FilePart};
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        service
+            .user_content(
+                &handle,
+                vec![Part::File(FilePart {
+                    name: "notes.txt".to_string(),
+                    path: "/tmp/notes.txt".to_string(),
+                    bytes: 2,
+                    sha256: "abc".to_string(),
+                })],
+                None,
+            )
+            .unwrap();
+        assert_eq!(service.list()[0].title(), None);
+    }
+
+    #[test]
+    fn a_goal_source_is_carried_into_the_log() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        service
+            .user(
+                &handle,
+                "automatic round",
+                Some(json!({"kind": "goal", "goalId": "g", "revision": 1, "round": 2})),
+            )
+            .unwrap();
+        let events = service.events(&handle).unwrap();
+        let message = events.iter().find(|event| event.kind == "message").unwrap();
+        assert_eq!(message.kind, "message");
+        assert!(message.to_line().contains("\"source\":{\"kind\":\"goal\""));
     }
 }

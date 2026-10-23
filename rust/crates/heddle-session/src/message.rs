@@ -144,5 +144,135 @@ pub enum Chunk {
 
 /// The text parts of a message's content, joined with nothing — `textOf` in `src/llm/types.ts`.
 pub fn text_of(parts: &[ContentPart]) -> String {
-    todo!()
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_of_joins_only_the_text_parts() {
+        let parts = vec![
+            ContentPart::Text {
+                text: "remember ".to_string(),
+            },
+            ContentPart::Image(ImagePart {
+                name: "a.png".to_string(),
+                mime_type: "image/png".to_string(),
+                path: "/tmp/a.png".to_string(),
+                bytes: 3,
+                sha256: "abc".to_string(),
+                data: None,
+            }),
+            ContentPart::Text {
+                text: "the word loom".to_string(),
+            },
+        ];
+        assert_eq!(text_of(&parts), "remember the word loom");
+        assert_eq!(text_of(&[]), "");
+    }
+
+    #[test]
+    fn a_message_writes_role_then_tool_call_id_then_content() {
+        let message = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-1".to_string()),
+            content: vec![ContentPart::Text {
+                text: "ok".to_string(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"role":"tool","toolCallId":"call-1","content":[{"type":"text","text":"ok"}]}"#
+        );
+        // An absent option is omitted, never `null`.
+        let plain = Message {
+            role: Role::User,
+            tool_call_id: None,
+            content: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"role":"user","content":[]}"#
+        );
+    }
+
+    #[test]
+    fn the_content_parts_are_tagged_first_and_kebab_cased() {
+        let tool_call = ContentPart::ToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&tool_call).unwrap(),
+            r#"{"type":"tool-call","id":"call-1","name":"read_file","arguments":"{}"}"#
+        );
+        let reasoning = ContentPart::Reasoning {
+            text: "hmm".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&reasoning).unwrap(),
+            r#"{"type":"reasoning","text":"hmm"}"#
+        );
+    }
+
+    #[test]
+    fn a_recorded_message_is_flat() {
+        let recorded = RecordedMessage {
+            message: Message {
+                role: Role::User,
+                tool_call_id: None,
+                content: vec![ContentPart::Text {
+                    text: "hi".to_string(),
+                }],
+            },
+            source: Some(json!({"kind": "goal", "goalId": "g", "revision": 1, "round": 2})),
+        };
+        assert_eq!(
+            serde_json::to_string(&recorded).unwrap(),
+            r#"{"role":"user","content":[{"type":"text","text":"hi"}],"source":{"kind":"goal","goalId":"g","revision":1,"round":2}}"#
+        );
+    }
+
+    #[test]
+    fn a_chunk_is_tagged_and_its_fields_are_camel_cased() {
+        let delta = Chunk::ToolCallDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_delta: "{\"pa".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&delta).unwrap(),
+            r#"{"type":"tool-call-delta","index":0,"argumentsDelta":"{\"pa"}"#
+        );
+        let done = Chunk::Done {
+            finish_reason: "stop".to_string(),
+            usage: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&done).unwrap(),
+            r#"{"type":"done","finishReason":"stop"}"#
+        );
+    }
+
+    #[test]
+    fn a_chunk_parses_back_from_the_logs_bytes() {
+        let line = r#"{"type":"text-delta","text":"loom"}"#;
+        assert_eq!(
+            serde_json::from_str::<Chunk>(line).unwrap(),
+            Chunk::TextDelta {
+                text: "loom".to_string()
+            }
+        );
+    }
 }

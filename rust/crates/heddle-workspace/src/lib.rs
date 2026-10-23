@@ -20,12 +20,9 @@
 //!
 //! # Status
 //!
-//! The public API is declared; bodies are `todo!()` until each module is ported. The port order is in
-//! this crate's `INDEX.md`.
-
-// The declared API names every parameter its body will use; the bodies land module by module, and this
-// allowance goes with the last `todo!()`.
-#![allow(unused_variables, dead_code)]
+//! Every module is ported, with the unit tests the crate's `INDEX.md` port plan names. What is not yet
+//! judged is the command line and the page that call it: `_verifiers_/70-workspaces-sessions` and
+//! `_verifiers_/80-web-ui` (`check-workspaces`) judge this crate through the `heddle` binary.
 
 pub mod collate;
 pub mod error;

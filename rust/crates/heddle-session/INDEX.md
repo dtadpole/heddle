@@ -85,6 +85,17 @@ is pushed to its owner's branch on its own.
 | 8 | `service` | `title_from` (48 UTF-16 units, word cut, punctuation); `fork_title` (ASCII and full-width suffix, taken names); `open_at` one folder one session, `fresh`; `fork` → `Unavailable` without an answer; `set_mode` no-op appends nothing | the CLI and the server |
 | 9 | interop | a log written by the TypeScript build (fixture bytes) reads here; a log written here decodes with `src/session/transcript.ts` on the host | `70-workspaces-sessions` through `HEDDLE_BIN` |
 
+## Where it stands, 2026-10-22
+
+Steps 1–8 are ported, each with the unit tests the table names: **118 tests pass** with
+`cargo test --manifest-path rust/Cargo.toml -p heddle-session`, and `rustfmt` and
+`clippy -D warnings` are clean on both crates. Step 9 has its first half in the same suite: `store.rs`
+opens a session whose transcript bytes were produced by **Node 24's `zlib.zstdCompressSync`** with a
+content checksum, derives its surface, appends to it without touching the earlier bytes, and prints every
+line back unchanged. The other half — a log written here decoded by `src/session/transcript.ts` — is what
+`70-workspaces-sessions` judges end to end through `HEDDLE_BIN`; it waits on the command line and the
+server composing this crate, not on this crate.
+
 **Done** when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through `HEDDLE_BIN` with the
 CLI (`heddle`) and server (`heddle-server`) crates composing this one, and the backend lane's integrator has merged it.
 

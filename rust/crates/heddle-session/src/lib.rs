@@ -26,12 +26,10 @@
 //!
 //! # Status
 //!
-//! The public API is declared; bodies are `todo!()` until each module is ported. The port order and
-//! what each step is judged by is in this crate's `INDEX.md`.
-
-// The declared API names every parameter its body will use; the bodies land module by module, and this
-// allowance goes with the last `todo!()`.
-#![allow(unused_variables, dead_code)]
+//! Every module is ported, with the unit tests the crate's `INDEX.md` port plan names. A log whose bytes
+//! Node's `zlib.zstdCompressSync` produced reads here and prints back byte for byte; a log written here is
+//! read by `src/session/transcript.ts` through the `heddle` binary, which is what
+//! `_verifiers_/70-workspaces-sessions` judges once the command line composes this crate.
 
 pub mod clock;
 pub mod definition;

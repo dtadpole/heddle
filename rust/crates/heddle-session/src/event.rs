@@ -43,44 +43,76 @@ impl SessionEvent {
     /// How this event entered the surface: `None` for an event with no marker (an append, in an older
     /// log as much as a new one).
     pub fn surface_op(&self) -> Option<SurfaceOp> {
-        todo!()
+        match self.fields.get("surfaceOp") {
+            None => None,
+            Some(Value::String(word)) if word == "append" => Some(SurfaceOp::Append),
+            // An object is a replacement when it says `"op": "replace"`; anything else is not one, and
+            // the TypeScript fold treats an unreadable marker the same way.
+            Some(value @ Value::Object(_)) => serde_json::from_value(value.clone()).ok(),
+            Some(_) => None,
+        }
     }
 
     /// Whether this is a live-only event the store published but did not record
     /// (`transient: true`, a tool call's fragment).
     pub fn is_transient(&self) -> bool {
-        todo!()
+        matches!(self.fields.get("transient"), Some(Value::Bool(true)))
     }
 
     /// The whole event as one JSON object, in byte order.
     pub fn to_value(&self) -> Value {
-        todo!()
+        let mut object = Map::with_capacity(self.fields.len() + 3);
+        object.insert("seq".to_string(), Value::from(self.seq));
+        object.insert("at".to_string(), Value::String(self.at.clone()));
+        object.insert("type".to_string(), Value::String(self.kind.clone()));
+        for (key, value) in &self.fields {
+            object.insert(key.clone(), value.clone());
+        }
+        Value::Object(object)
     }
 
     /// The event as one JSONL line, without the newline — exactly what `JSON.stringify` writes.
     pub fn to_line(&self) -> String {
-        todo!()
+        serde_json::to_string(&self.to_value()).expect("an event is always serializable")
     }
 
     /// Parse one transcript line.
     pub fn from_line(line: &str) -> Result<SessionEvent, serde_json::Error> {
-        todo!()
+        serde_json::from_str(line)
     }
 }
 
 impl Serialize for SessionEvent {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        todo!("seq, at, type, then fields in order")
+        // The ordered map is what makes the bytes right: `preserve_order` is a feature of this build,
+        // so none of `seq`, `at`, `type` or a caller's field moves.
+        self.to_value().serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for SessionEvent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let object = Map::<String, Value>::deserialize(deserializer)?;
-        let _ = object;
-        Err(D::Error::custom(
-            "todo: SessionEvent deserialization is not ported yet",
-        ))
+        let mut object = Map::<String, Value>::deserialize(deserializer)?;
+        let seq = match object.shift_remove("seq") {
+            Some(Value::Number(number)) => number
+                .as_u64()
+                .ok_or_else(|| D::Error::custom("session event 'seq' is not a whole number"))?,
+            _ => return Err(D::Error::custom("session event has no numeric 'seq'")),
+        };
+        let at = match object.shift_remove("at") {
+            Some(Value::String(text)) => text,
+            _ => return Err(D::Error::custom("session event has no string 'at'")),
+        };
+        let kind = match object.shift_remove("type") {
+            Some(Value::String(kind)) => kind,
+            _ => return Err(D::Error::custom("session event has no string 'type'")),
+        };
+        Ok(SessionEvent {
+            seq,
+            at,
+            kind,
+            fields: object,
+        })
     }
 }
 
@@ -115,6 +147,11 @@ impl NewEvent {
         self.fields.insert(key.into(), value.into());
         self
     }
+
+    /// One field, by its JSON name.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.fields.get(key)
+    }
 }
 
 impl TryFrom<Value> for NewEvent {
@@ -122,7 +159,25 @@ impl TryFrom<Value> for NewEvent {
 
     /// From a `json!({"type": "…", …})` literal: an object with a string `type`, and no `seq` or `at`.
     fn try_from(value: Value) -> Result<Self, Self::Error> {
-        todo!()
+        let Value::Object(mut object) = value else {
+            return Err(crate::SessionError::MalformedEvent {
+                reason: "the event is not a JSON object".to_string(),
+            });
+        };
+        if object.contains_key("seq") || object.contains_key("at") {
+            return Err(crate::SessionError::MalformedEvent {
+                reason: "'seq' and 'at' are assigned by the store".to_string(),
+            });
+        }
+        let Some(Value::String(kind)) = object.shift_remove("type") else {
+            return Err(crate::SessionError::MalformedEvent {
+                reason: "'type' is not a string".to_string(),
+            });
+        };
+        Ok(NewEvent {
+            kind,
+            fields: object,
+        })
     }
 }
 
@@ -152,17 +207,44 @@ pub enum SurfaceOp {
 
 impl Serialize for SurfaceOp {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        todo!()
+        match self {
+            SurfaceOp::Append => serializer.serialize_str("append"),
+            SurfaceOp::Replace { start_seq, end_seq } => {
+                let mut object = Map::new();
+                object.insert("op".to_string(), Value::String("replace".to_string()));
+                object.insert("startSeq".to_string(), Value::from(*start_seq));
+                object.insert("endSeq".to_string(), Value::from(*end_seq));
+                object.serialize(serializer)
+            }
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for SurfaceOp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        let _ = value;
-        Err(D::Error::custom(
-            "todo: SurfaceOp deserialization is not ported yet",
-        ))
+        match value {
+            Value::String(word) if word == "append" => Ok(SurfaceOp::Append),
+            Value::Object(mut object) => {
+                if object.get("op").and_then(Value::as_str) != Some("replace") {
+                    return Err(D::Error::custom(
+                        "a surface operation is 'append' or a 'replace'",
+                    ));
+                }
+                let start_seq = object
+                    .shift_remove("startSeq")
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| D::Error::custom("a replacement has no numeric 'startSeq'"))?;
+                let end_seq = object
+                    .shift_remove("endSeq")
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| D::Error::custom("a replacement has no numeric 'endSeq'"))?;
+                Ok(SurfaceOp::Replace { start_seq, end_seq })
+            }
+            _ => Err(D::Error::custom(
+                "a surface operation is 'append' or a 'replace'",
+            )),
+        }
     }
 }
 
@@ -174,4 +256,169 @@ pub struct AppendOptions {
     pub surface_op: Option<SurfaceOp>,
     /// The seqs an event was derived from (a compaction summary names what it summarises).
     pub source_event_seqs: Option<Vec<u64>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(kind: &str, fields: &[(&str, Value)]) -> SessionEvent {
+        let mut map = Map::new();
+        for (key, value) in fields {
+            map.insert((*key).to_string(), value.clone());
+        }
+        SessionEvent {
+            seq: 0,
+            at: "2026-10-22T18:17:41.123Z".to_string(),
+            kind: kind.to_string(),
+            fields: map,
+        }
+    }
+
+    #[test]
+    fn the_bytes_are_what_json_stringify_writes() {
+        let created = event("session/created", &[("cwd", json!("/home/me/work"))]);
+        assert_eq!(
+            created.to_line(),
+            r#"{"seq":0,"at":"2026-10-22T18:17:41.123Z","type":"session/created","cwd":"/home/me/work"}"#
+        );
+    }
+
+    #[test]
+    fn the_fields_keep_their_written_order() {
+        // A message is written `{ role, toolCallId?, content }`, and the order is part of the contract.
+        let message = event(
+            "message",
+            &[
+                (
+                    "message",
+                    json!({"role": "tool", "toolCallId": "call-1", "content": [{"type": "text", "text": "ok"}]}),
+                ),
+                ("source", json!({"kind": "goal", "round": 2})),
+            ],
+        );
+        assert_eq!(
+            message.to_line(),
+            r#"{"seq":0,"at":"2026-10-22T18:17:41.123Z","type":"message","message":{"role":"tool","toolCallId":"call-1","content":[{"type":"text","text":"ok"}]},"source":{"kind":"goal","round":2}}"#
+        );
+    }
+
+    #[test]
+    fn a_line_parses_and_prints_back_unchanged() {
+        let line = r#"{"seq":7,"at":"2026-10-22T18:17:41.123Z","type":"assistant/chunk","chunk":{"type":"text-delta","text":"hi"},"surfaceOp":"append"}"#;
+        let parsed = SessionEvent::from_line(line).expect("a written line parses");
+        assert_eq!(parsed.seq, 7);
+        assert_eq!(parsed.kind, "assistant/chunk");
+        assert_eq!(parsed.surface_op(), Some(SurfaceOp::Append));
+        assert_eq!(parsed.to_line(), line);
+    }
+
+    #[test]
+    fn a_line_that_is_not_an_event_is_an_error() {
+        assert!(SessionEvent::from_line("not json").is_err());
+        assert!(
+            SessionEvent::from_line(r#"{"seq":0,"at":"x"}"#).is_err(),
+            "no type"
+        );
+        assert!(
+            SessionEvent::from_line(r#"{"at":"2026-10-22T18:17:41.123Z","type":"x"}"#).is_err(),
+            "no seq"
+        );
+    }
+
+    #[test]
+    fn a_replacement_round_trips_in_the_typescript_shape() {
+        let op = SurfaceOp::Replace {
+            start_seq: 5,
+            end_seq: 9,
+        };
+        let text = serde_json::to_string(&op).unwrap();
+        assert_eq!(text, r#"{"op":"replace","startSeq":5,"endSeq":9}"#);
+        assert_eq!(serde_json::from_str::<SurfaceOp>(&text).unwrap(), op);
+        assert_eq!(
+            serde_json::to_string(&SurfaceOp::Append).unwrap(),
+            r#""append""#
+        );
+        assert_eq!(
+            serde_json::from_str::<SurfaceOp>(r#""append""#).unwrap(),
+            SurfaceOp::Append
+        );
+    }
+
+    #[test]
+    fn an_event_carries_its_replacement_as_a_field() {
+        let mut replacement = event(
+            "message",
+            &[("message", json!({"role": "user", "content": []}))],
+        );
+        replacement.fields.insert(
+            "surfaceOp".to_string(),
+            json!({"op": "replace", "startSeq": 2, "endSeq": 4}),
+        );
+        assert_eq!(
+            replacement.surface_op(),
+            Some(SurfaceOp::Replace {
+                start_seq: 2,
+                end_seq: 4
+            })
+        );
+        assert_eq!(
+            replacement.to_line(),
+            r#"{"seq":0,"at":"2026-10-22T18:17:41.123Z","type":"message","message":{"role":"user","content":[]},"surfaceOp":{"op":"replace","startSeq":2,"endSeq":4}}"#
+        );
+    }
+
+    #[test]
+    fn a_marker_that_is_not_a_replacement_is_not_one() {
+        let plain = event("message", &[("surfaceOp", json!("append"))]);
+        assert_eq!(plain.surface_op(), Some(SurfaceOp::Append));
+        let odd = event("message", &[("surfaceOp", json!({"op": "other"}))]);
+        assert_eq!(odd.surface_op(), None);
+        let absent = event("message", &[]);
+        assert_eq!(absent.surface_op(), None);
+    }
+
+    #[test]
+    fn a_transient_event_says_so() {
+        let transient = event("assistant/chunk", &[("transient", json!(true))]);
+        assert!(transient.is_transient());
+        let recorded = event("assistant/chunk", &[]);
+        assert!(!recorded.is_transient());
+    }
+
+    #[test]
+    fn a_new_event_is_built_from_a_json_object() {
+        let parsed = NewEvent::try_from(json!({"type": "turn/completed", "round": 1}))
+            .expect("a well-formed event");
+        assert_eq!(parsed.kind, "turn/completed");
+        assert_eq!(parsed.get("round"), Some(&json!(1)));
+
+        for bad in [
+            json!(["type"]),
+            json!({"round": 1}),
+            json!({"type": 7}),
+            json!({"type": "x", "seq": 3}),
+            json!({"type": "x", "at": "2026-10-22T18:17:41.123Z"}),
+        ] {
+            assert!(NewEvent::try_from(bad.clone()).is_err(), "refused: {bad}");
+        }
+    }
+
+    #[test]
+    fn the_builder_appends_in_call_order() {
+        let built = NewEvent::new("turn/retry")
+            .field("round", 2)
+            .field("attempt", 1);
+        let event = SessionEvent {
+            seq: 0,
+            at: "2026-10-22T18:17:41.123Z".to_string(),
+            kind: built.kind,
+            fields: built.fields,
+        };
+        assert_eq!(
+            event.to_line(),
+            r#"{"seq":0,"at":"2026-10-22T18:17:41.123Z","type":"turn/retry","round":2,"attempt":1}"#
+        );
+    }
 }

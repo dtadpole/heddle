@@ -57,6 +57,16 @@ Each step lands with its unit tests (`cargo test --manifest-path rust/Cargo.toml
 | 4 | `tree`, `kind_of` | the `70-workspaces-sessions` fixture as a unit test: levels, folders before files, dot/plumbing hidden, generated, instance-only sessions, `_sessions_` hoisted newest/pinned first, captured-session suppression, archived filter, `adHoc`; JSON key order | `heddle tree`, `/api/tree` |
 | 5 | `file` | small file whole; truncated at the limit; NUL refused; invalid UTF-8 refused; directory refused; `lines` with and without a trailing newline | `heddle file`, file preview |
 
+## Where it stands, 2026-10-22
+
+Steps 1–5 are ported, each with the unit tests the table names: **36 tests pass** with
+`cargo test --manifest-path rust/Cargo.toml -p heddle-workspace`, alongside `heddle-session`'s 118, and
+`rustfmt` and `clippy -D warnings` are clean. The tree's fixture is the verifier's own shape: type and
+instance classification, badges, folders before files, plumbing and generated folders, the boundary that
+only an instance carries a session, hoisted `_sessions_` rows (pinned first, then updated), the
+captured-session suppression, the archived filter and the virtual root's `adHoc` group. What is not
+judged yet is the command line and the page that call it.
+
 **Done** with `heddle-session`: when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through
 `HEDDLE_BIN` and the backend lane's integrator has merged the branch.
 

@@ -144,7 +144,11 @@ pub fn frame_end(buffer: &[u8], start: usize) -> Option<usize> {
     if checksum {
         cursor += 4;
     }
-    if cursor > buffer.len() { None } else { Some(cursor) }
+    if cursor > buffer.len() {
+        None
+    } else {
+        Some(cursor)
+    }
 }
 
 /// Every complete frame in a buffer, in order, stopping at the first byte that does not begin one.
@@ -168,8 +172,8 @@ pub fn split_frames(buffer: &[u8]) -> Vec<Frame> {
 ///
 /// `line` is the event's JSON **with** its trailing `\n`, as the store appends it.
 pub fn encode_frame(line: &str) -> Vec<u8> {
-    let mut compressor =
-        zstd::bulk::Compressor::new(3).expect("a zstd compressor at level 3 is always constructible");
+    let mut compressor = zstd::bulk::Compressor::new(3)
+        .expect("a zstd compressor at level 3 is always constructible");
     compressor
         .set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(true))
         .expect("the zstd checksum parameter is always settable");
@@ -247,11 +251,16 @@ mod tests {
 
     #[test]
     fn a_frame_starts_with_the_magic_and_carries_a_checksum() {
-        let frame = one_frame(r#"{"seq":0,"at":"2026-10-22T18:17:41.123Z","type":"session/created"}"#);
+        let frame =
+            one_frame(r#"{"seq":0,"at":"2026-10-22T18:17:41.123Z","type":"session/created"}"#);
         assert!(is_compressed(&frame));
         // The frame header sits after the magic; bit 2 of the descriptor is the checksum flag.
         let descriptor = frame[4];
-        assert_eq!(descriptor & 0x04, 0x04, "the frame declares a content checksum");
+        assert_eq!(
+            descriptor & 0x04,
+            0x04,
+            "the frame declares a content checksum"
+        );
         assert_eq!(frame_end(&frame, 0), Some(frame.len()));
     }
 
@@ -279,7 +288,13 @@ mod tests {
 
         let frames = split_frames(&buffer);
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0], Frame { start: 0, end: first.len() });
+        assert_eq!(
+            frames[0],
+            Frame {
+                start: 0,
+                end: first.len()
+            }
+        );
         assert_eq!(
             frames[1],
             Frame {
@@ -326,14 +341,18 @@ mod tests {
         assert!(looks_compressed(&buffer));
         let decoded = decode_transcript(&buffer);
         assert_eq!(decoded.format, TranscriptFormat::ZstdFrames);
-        assert!(decoded.lines.is_empty(), "no event is invented from the magic");
+        assert!(
+            decoded.lines.is_empty(),
+            "no event is invented from the magic"
+        );
         assert!(decoded.torn);
         assert_eq!(decoded.readable_bytes, 0);
     }
 
     #[test]
     fn a_file_torn_in_the_middle_of_a_block_reads_nothing_from_it() {
-        let frame = one_frame(r#"{"seq":0,"type":"a long enough event that its block is not tiny"}"#);
+        let frame =
+            one_frame(r#"{"seq":0,"type":"a long enough event that its block is not tiny"}"#);
         let buffer = frame[..frame.len() / 2].to_vec();
         assert!(looks_compressed(&buffer));
         assert!(split_frames(&buffer).is_empty());
@@ -349,7 +368,11 @@ mod tests {
         let decoded = decode_transcript(&buffer);
         assert_eq!(decoded.format, TranscriptFormat::PlainText);
         assert_eq!(decoded.frames, 0);
-        assert_eq!(decoded.lines.len(), 2, "the empty line between them is dropped");
+        assert_eq!(
+            decoded.lines.len(),
+            2,
+            "the empty line between them is dropped"
+        );
         assert!(!decoded.torn);
         assert_eq!(decoded.readable_bytes, buffer.len());
         assert_eq!(decoded.format.as_str(), "plain-text");

@@ -32,8 +32,8 @@ pub fn workspace_key(cwd: &str) -> String {
     // what makes the 120-unit limit identical to `String.prototype.slice(0, 120)`; every kept unit is
     // ASCII, so no cut can ever split a surrogate pair.
     let mut readable = String::with_capacity(120);
-    let mut units = 0usize;
-    for unit in joined.encode_utf16() {
+    for (units, unit) in joined.encode_utf16().enumerate() {
+        // The index **is** the unit count, so the cut is exactly `slice(0, 120)`.
         if units == 120 {
             break;
         }
@@ -41,7 +41,6 @@ pub fn workspace_key(cwd: &str) -> String {
             0x41..=0x5A | 0x61..=0x7A | 0x30..=0x39 | 0x2E | 0x5F | 0x2D => char::from(unit as u8),
             _ => '~',
         });
-        units += 1;
     }
 
     if readable.is_empty() {
@@ -93,14 +92,19 @@ mod tests {
         assert_eq!(workspace_key("/café"), "--caf~--");
         assert_eq!(workspace_key("/项目"), "--~~--");
         assert_eq!(workspace_key("/😀"), "--~~--");
-        assert_eq!(workspace_key("/😀a"), "--~~a--", "the emoji's two units come before the letter");
+        assert_eq!(
+            workspace_key("/😀a"),
+            "--~~a--",
+            "the emoji's two units come before the letter"
+        );
     }
 
     #[test]
     fn the_key_is_cut_at_a_hundred_and_twenty_units() {
         let long = format!("/{}", "a".repeat(200));
         let key = workspace_key(&long);
-        assert_eq!(key, format!("--{}--", "a".repeat(120)));
+        let expected = format!("--{}--", "a".repeat(120));
+        assert_eq!(key, expected);
         assert_eq!(key.len(), 124);
     }
 
@@ -109,6 +113,7 @@ mod tests {
         // Four emoji are eight units, so 112 more letters fit; the rest is dropped.
         let long = format!("/😀😀😀😀{}", "b".repeat(200));
         let key = workspace_key(&long);
-        assert_eq!(key, format!("--{}--", format!("{}{}", "~".repeat(8), "b".repeat(112))));
+        let expected = format!("--{}{}--", "~".repeat(8), "b".repeat(112));
+        assert_eq!(key, expected);
     }
 }
