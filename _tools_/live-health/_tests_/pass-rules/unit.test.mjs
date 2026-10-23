@@ -13,6 +13,7 @@ import { test } from 'node:test'
 
 import {
   consoleVerdict,
+  processVerdict,
   doorVerdict,
   gateVerdict,
   launchUrlFromLog,
@@ -21,6 +22,7 @@ import {
   passVerdict,
   shellVerdict,
   tildePath,
+  tildeText,
   turnVerdict,
 } from '../../rules.mjs'
 
@@ -118,6 +120,24 @@ test('a turn fails when the answer never came, the turn never settled, or it was
   assert.equal(running.verdict, 'fail')
   const notSubmitted = turnVerdict({ userAppeared: false, assistantAppeared: false, chunks: 0, samples: [], settledMs: null, notices: [] })
   assert.equal(notSubmitted.verdict, 'fail')
+})
+
+test('a command line states every home path as ~, not only a leading one', () => {
+  assert.equal(tildeText('node /Users/someone/heddle-live/dist/cli.js web', '/Users/someone'), 'node ~/heddle-live/dist/cli.js web')
+})
+
+test('the serving process must run the deployment checkout, and another checkout is a failure', () => {
+  const home = '/Users/someone'
+  const deploy = `${home}/heddle-live`
+  const pass = processVerdict({ command: `node ${deploy}/dist/cli.js web --host 127.0.0.1 --port 3082`, deployRoot: deploy, home })
+  assert.equal(pass.verdict, 'pass')
+  const other = processVerdict({ command: `node ${home}/heddle--other/dist/cli.js web --port 3082`, deployRoot: deploy, home })
+  assert.equal(other.verdict, 'fail')
+  assert.match(other.detail, /another checkout/)
+  assert.doesNotMatch(other.detail, /Users\/someone/)
+  assert.equal(processVerdict({ command: null, deployRoot: deploy, home }).verdict, 'unjudged')
+  const rust = processVerdict({ command: `${home}/heddle--developer-ten/rust/target/release/heddle web --port 3082`, deployRoot: deploy, home })
+  assert.equal(rust.verdict, 'unjudged')
 })
 
 test('the pass fails on any failure, is unjudged on any unjudged check, and passes only when all pass', () => {

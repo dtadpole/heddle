@@ -39,6 +39,7 @@ served with, it needs no file of its own, and it never lands in the deployment c
 | Check | The claim | How it is read |
 |---|---|---|
 | `gate` | `8082/` serves the app shell | HTTP status and body; a proxy error keeps the gate's own sentence |
+| `process` | the process answering 3082 runs **this checkout's** `dist/cli.js` | `lsof` finds the listener, `ps` reads its command line; a `heddle` binary instead is unjudged, another checkout is a failure |
 | `door` | the deployed server refuses a bare request and exchanges the current token | `fetch` with `redirect: 'manual'`, cookie flags read by hand |
 | `load` | the app renders in a real browser through the gate | `#log`, `#prompt textarea`, `#send` must exist |
 | `marker` | the served page is the deployment checkout's build | served `meta[name=heddle-page]` vs the first 12 hex of the sha256 of `~/heddle-live/dist/server/page.html`; HEAD vs `origin/main` is staleness, recorded not failed |

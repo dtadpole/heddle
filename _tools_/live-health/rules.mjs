@@ -43,6 +43,17 @@ export function tildePath(path, home) {
 }
 
 /**
+ * A text with every occurrence of the home directory replaced by `~`.
+ *
+ * A command line carries paths in the middle (`node /home/me/checkout/dist/cli.js`), so the prefix rule
+ * above is not enough: a pinned command must not publish the owner's absolute home path anywhere in it.
+ */
+export function tildeText(text, home) {
+  if (typeof text !== 'string' || typeof home !== 'string' || home.length === 0) return text
+  return text.split(home).join('~')
+}
+
+/**
  * The bare URL's door.
  *
  * `401` with the token form and no app shell is the passed state; an app served without a credential
@@ -140,6 +151,27 @@ export function turnVerdict({ userAppeared, assistantAppeared, chunks, samples, 
               ? 'the answer never settled within the wait'
               : 'the answer arrived whole, not as a stream',
   }
+}
+
+/**
+ * Which checkout is serving the port.
+ *
+ * The build marker binds the **page bytes** to a checkout; it cannot tell whether the process behind
+ * the port runs that checkout — a repointed or half-reloaded service can serve an old build whose
+ * `page.html` is byte-identical to the new one. This reads the listener's own command line, which is
+ * the fact `96-deployment` judges from the installed agent. A process that runs a `heddle` binary
+ * instead of the checkout's `dist/cli.js` is unjudged here (the binary's own identity is the Rust
+ * port's concern), not failed.
+ */
+export function processVerdict({ command, deployRoot, home }) {
+  if (typeof command !== 'string' || command.length === 0) return { verdict: 'unjudged', detail: 'no process owns the deployed port, so the checkout it runs cannot be named' }
+  const shown = tildeText(command, home)
+  const expected = `${deployRoot}/dist/cli.js`
+  if (command.includes(expected)) return { verdict: 'pass', detail: `the process answering the port runs this checkout's cli (${tildePath(expected, home)})` }
+  if (/\bheddle\b/.test(shown) && !shown.includes('/dist/cli.js')) {
+    return { verdict: 'unjudged', detail: `the port is served by a heddle binary rather than the checkout's dist/cli.js: ${shown}` }
+  }
+  return { verdict: 'fail', detail: `the port is served by another checkout or command, not ${tildePath(expected, home)}: ${shown}` }
 }
 
 /** The pass: any failure fails it, any unjudged check leaves it unjudged, only all-pass passes. */

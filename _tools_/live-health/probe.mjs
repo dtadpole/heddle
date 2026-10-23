@@ -63,6 +63,8 @@ import {
   launchUrlFromLog,
   markerVerdict,
   parseArguments,
+  processVerdict,
+  tildeText,
   passVerdict,
   shellVerdict,
   tildePath,
@@ -406,6 +408,29 @@ async function judgeGate() {
   }
 }
 
+/**
+ * 2. Which checkout answers the port.
+ *
+ * The marker binds the page to a build; only the listener's own command line binds the **process** to
+ * the checkout. Read with `lsof` + `ps`, the same facts `96-deployment` reads from the installed
+ * agent, so a half-reloaded or repointed service is caught between two 20-minute passes.
+ */
+function judgeProcess() {
+  try {
+    const pids = execFileSync('lsof', ['-nP', '-iTCP:3082', '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).trim().split('\n').filter((line) => line.length > 0)
+    const pid = pids[0]
+    if (pid === undefined) {
+      const judged = processVerdict({ command: null, deployRoot: DEPLOY_ROOT, home: homedir() })
+      return { port: 3082, verdict: judged.verdict, detail: judged.detail }
+    }
+    const command = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8' }).trim()
+    const judged = processVerdict({ command, deployRoot: DEPLOY_ROOT, home: homedir() })
+    return { port: 3082, command: tildeText(command, homedir()), verdict: judged.verdict, detail: judged.detail }
+  } catch (error) {
+    return { port: 3082, verdict: 'unjudged', detail: `the listener on 3082 could not be read: ${error.message}` }
+  }
+}
+
 /** 2. The deployed server's own door: 401 without a credential, a 303 exchange with the current token. */
 async function judgeDoor() {
   if (serverOrigin === null) {
@@ -641,6 +666,7 @@ async function judgeDsh() {
 // ---- the pass ---------------------------------------------------------------------------------
 
 pass.checks.gate = await judgeGate()
+pass.checks.process = judgeProcess()
 pass.checks.door = await judgeDoor()
 pass.checks.load = pass.checks.gate.verdict === 'pass' ? await judgeLoad() : { verdict: 'unjudged', detail: 'the gate did not serve the app, so the page was not loaded' }
 pass.checks.marker = judgeMarker(pass.checks.load)
@@ -683,6 +709,7 @@ if (options.json === true) {
   say(`live-health ${pass.at}`)
   say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}, behind ${deployment.behind ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
+  say(`process     ${mark(pass.checks.process.verdict)}  ${pass.checks.process.detail}`)
   say(`door        ${mark(pass.checks.door.verdict)}  ${pass.checks.door.detail}`)
   say(`load        ${mark(pass.checks.load.verdict)}  ${pass.checks.load.detail}`)
   say(`marker      ${mark(pass.checks.marker.verdict)}  ${pass.checks.marker.detail}`)

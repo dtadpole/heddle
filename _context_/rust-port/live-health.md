@@ -39,17 +39,21 @@ deployment checkout clean for `96-deployment`.
 ## What a pass decides
 
 1. **gate** — `8082/` answers `200` with the app shell (`#log`, `#prompt textarea`, `#send`).
-2. **door** — `3082/` refuses a bare request with `401` and the token form, and the current launch URL
+2. **process** — the process answering `3082` runs **this checkout's** `dist/cli.js`, read from
+   `lsof` + `ps`. The marker binds the page bytes to a build; only the listener's command line binds
+   the running process to the checkout, so a half-reloaded or repointed service is caught between two
+   20-minute passes. A `heddle` binary instead of the checkout is unjudged here, not failed.
+3. **door** — `3082/` refuses a bare request with `401` and the token form, and the current launch URL
    exchanges for a `303` with an `HttpOnly`, `SameSite=Strict` cookie. That is *load with the token*.
-3. **marker** — the served `meta[name=heddle-page]` equals the first twelve hex of the sha256 of
+4. **marker** — the served `meta[name=heddle-page]` equals the first twelve hex of the sha256 of
    `~/heddle-live/dist/server/page.html`, which is how `markedPage` marks a build. The marker pins the
    **page bytes** to that checkout; the commit is pinned beside it (`HEAD`, `origin/main`, behind) and
    is deliberately not failed on lag — a deployment is allowed to trail main for one pass.
-4. **turn** — one short prompt typed with trusted input, then the assistant row's text lengths as they
+5. **turn** — one short prompt typed with trusted input, then the assistant row's text lengths as they
    grew. Recorded: user row, assistant row, the growth samples, time to first delta, time to settle.
-5. **console** — error-level messages fail; warnings and verbose messages are kept as evidence. Read on
+6. **console** — error-level messages fail; warnings and verbose messages are kept as evidence. Read on
    load and again after the turn.
-6. **DSH** — title, `window.__DSH_BOOT__` keys, composer count, console errors. Numbers only: a
+7. **DSH** — title, `window.__DSH_BOOT__` keys, composer count, console errors. Numbers only: a
    screenshot here would carry the owner's workspaces and session names into a public repository.
 
 ## Pinned passes
