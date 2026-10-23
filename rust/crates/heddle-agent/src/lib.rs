@@ -13,10 +13,12 @@
 //! | [`turns`] | [`TurnRegistry`]: which sessions have a turn in flight, and how to stop one |
 //! | [`subagent`] | delegation to a child agent in its own session, and the `delegate` tool |
 //! | [`ports`] | what a turn asks of the model, session, context and hook services |
+//! | [`command`] | the `--turn` command, in the owning crate (D-043) |
 //! | [`adapters`] | the turn's ports over the real crates: [`LlmModel`] over `heddle-llm`'s `ModelService` |
 //! | [`upstream`] | `heddle-llm`'s own model types, and provisional mirrors of `heddle-session`/`heddle-context` types |
 
 pub mod adapters;
+pub mod command;
 pub mod ports;
 pub mod subagent;
 pub mod turn;

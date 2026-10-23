@@ -763,15 +763,12 @@ pub(crate) mod tests {
         .unwrap();
         let report = port.prepare(&context_handle(), options()).await.unwrap();
         assert!(
-            report
-                .messages
-                .iter()
-                .any(|message| {
-                    message.role == Role::User
+            report.messages.iter().any(|message| {
+                message.role == Role::User
                 && message.content.iter().any(
                     |part| matches!(part, ContentPart::Text { text } if text == "remember a word")
                 )
-                }),
+            }),
             "{:?}",
             report.messages
         );
@@ -785,5 +782,52 @@ pub(crate) mod tests {
             report.messages.len(),
             "assembling derives the same request without reducing it"
         );
+    }
+
+    /// A context double over the real session service: the request is the session's own derived messages.
+    pub(crate) struct SessionMessages {
+        pub(crate) sessions: Arc<heddle_session::SessionService>,
+    }
+
+    impl SessionMessages {
+        fn report(&self, session: &SessionHandle) -> Result<ContextReport, PortError> {
+            let messages = self
+                .sessions
+                .messages(session)
+                .map_err(|error| PortError(error.to_string()))?;
+            Ok(ContextReport {
+                estimated_tokens: messages.len() as u64 * 10,
+                context_window: 200_000,
+                threshold_tokens: 160_000,
+                messages,
+                ..ContextReport::default()
+            })
+        }
+    }
+
+    impl crate::ports::ContextPort for SessionMessages {
+        fn record_runtime_context(
+            &self,
+            _: &SessionHandle,
+            _: &[RuntimeContextSection],
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        fn prepare<'a>(
+            &'a self,
+            session: &'a SessionHandle,
+            _: PrepareOptions,
+        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+            Box::pin(async move { self.report(session) })
+        }
+
+        fn assemble(
+            &self,
+            session: &SessionHandle,
+            _: PrepareOptions,
+        ) -> Result<ContextReport, PortError> {
+            self.report(session)
+        }
     }
 }

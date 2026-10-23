@@ -28,3 +28,5 @@ tokio-util = "0.7"
 heddle-config.workspace = true
 # The in-memory context store, so the context adapter is judged against the real service.
 heddle-context = { workspace = true, features = ["testing"] }
+# The real sandbox, so the turn command's tests run the real built-ins inside a scratch workspace.
+heddle-sandbox.workspace = true

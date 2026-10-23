@@ -2189,53 +2189,6 @@ mod tests {
         assert_eq!(completed.fields["text"], "finished the task");
     }
 
-    /// A context double over the real session service: the request is the session's own derived messages.
-    struct SessionMessages {
-        sessions: Arc<heddle_session::SessionService>,
-    }
-
-    impl SessionMessages {
-        fn report(&self, session: &SessionHandle) -> Result<ContextReport, PortError> {
-            let messages = self
-                .sessions
-                .messages(session)
-                .map_err(|error| PortError(error.to_string()))?;
-            Ok(ContextReport {
-                estimated_tokens: messages.len() as u64 * 10,
-                context_window: 200_000,
-                threshold_tokens: 160_000,
-                messages,
-                ..ContextReport::default()
-            })
-        }
-    }
-
-    impl ContextPort for SessionMessages {
-        fn record_runtime_context(
-            &self,
-            _: &SessionHandle,
-            _: &[RuntimeContextSection],
-        ) -> Result<(), PortError> {
-            Ok(())
-        }
-
-        fn prepare<'a>(
-            &'a self,
-            session: &'a SessionHandle,
-            _: PrepareOptions,
-        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
-            Box::pin(async move { self.report(session) })
-        }
-
-        fn assemble(
-            &self,
-            session: &SessionHandle,
-            _: PrepareOptions,
-        ) -> Result<ContextReport, PortError> {
-            self.report(session)
-        }
-    }
-
     #[tokio::test]
     async fn a_turn_recorded_through_the_real_session_store_writes_what_the_loop_verifier_reads() {
         let sessions = crate::adapters::tests::sessions_at("verifier");
@@ -2254,7 +2207,7 @@ mod tests {
         let runtime = AgentRuntime {
             model: Arc::new(crate::adapters::LlmModel::new(service)),
             session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
-            context: Arc::new(SessionMessages {
+            context: Arc::new(crate::adapters::tests::SessionMessages {
                 sessions: Arc::clone(&sessions),
             }),
             tools: registry_with(vec![
