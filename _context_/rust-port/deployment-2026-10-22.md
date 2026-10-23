@@ -1,6 +1,6 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
-created: 2026-10-23T03:20:00Z
+created: 2026-10-23T03:15:19Z
 modified: 2026-10-23T04:18:27Z
 level: L3
 version: 1.5.0
