@@ -49,6 +49,21 @@ Three findings are recorded where they were made, because each changes a decisio
 - **The highlighter's JSON keys are `meta.mapping.key.*` scopes**, not `meta.structure.dictionary.*`; the mapping was
   measured against the syntax set rather than assumed.
 
+## Evidence for step 10, as far as it can be judged today
+
+`_verifiers_/88-file-preview`'s first check was run **against this crate's router** through a stand-in server (a
+throwaway binary that mounts [`routes::mount`](src/routes.rs) over a `FilesHost` and serves the repository's
+`page.html`, standing in for `heddle web`), with the check copied and only two things changed: the server is started
+through `heddleCommand`/`HEDDLE_BIN` instead of `node dist/cli.js`, and its fixture path names a directory that
+exists. Result: **1 check, 1 pass, 0 fail** — the document (a table, a frontmatter section, no surviving `<script>`,
+no visible backtick), the source file (language, `hljs-` classes, `class="ln"` gutter), YAML as code, `LICENSE` as
+text with no `html`, the SVG served inline as `image/svg+xml`, a markdown file offered as a download, `/etc/passwd`
+refused by both routes, and the served page carrying `data-view="file"` with no Docs surface.
+
+What that leaves to the seats that own it: the real server's `web` command, the check's own `startCli` and fixture,
+and its second and third checks, which judge `/api/html` (the server's route) and the tree (the server's route) in a
+browser.
+
 ## The public API
 
 Paths are `crate::module::item`. Every item that crosses the HTTP or session-log boundary serializes to the exact
