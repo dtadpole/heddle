@@ -1695,4 +1695,59 @@ mod tests {
             "nothing landed, so the generations agree"
         );
     }
+
+    #[test]
+    fn the_view_and_the_summary_serialise_as_the_typescript_documents() {
+        let scratch = Scratch::new("view-json");
+        let home = scratch.path().join("home");
+        std::fs::create_dir_all(&home).expect("the home directory");
+        let (store, service) = build_service(
+            ContextConfig {
+                context_window: Some(10_000),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(&home, None),
+        );
+        let session = store.open("s");
+        store.message(&session, text_message(Role::User, "hi"));
+        let report = service
+            .assemble(
+                &session,
+                &AssembleOptions {
+                    cwd: scratch.path(),
+                    tools: &[],
+                    system: None,
+                    endpoint: Some("local"),
+                    model: None,
+                },
+            )
+            .expect("the assembly succeeds");
+
+        let view = serde_json::to_value(report.view("session-1")).expect("the view serialises");
+        assert_eq!(
+            view,
+            json!({
+                "session": "session-1",
+                "messageCount": 1,
+                "messages": [{"role": "user", "text": "hi"}],
+                "estimatedTokens": report.estimated_tokens,
+                "thresholdTokens": 8000,
+                "contextWindow": 10_000,
+                "pruned": 0,
+                "compacted": false,
+                "instructions": [],
+            }),
+            "the keys are the TypeScript command's, field for field"
+        );
+        assert_eq!(
+            serde_json::to_value(report.summary()).expect("the summary serialises"),
+            json!({
+                "estimatedTokens": report.estimated_tokens,
+                "thresholdTokens": 8000,
+                "pruned": 0,
+                "compacted": false,
+            })
+        );
+    }
 }
