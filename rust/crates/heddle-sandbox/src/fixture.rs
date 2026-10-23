@@ -1,7 +1,7 @@
 //! A recorded approval question and its answers, for the Web UI checks.
 //!
 //! The permission and Web UI checks judge the approval card without having to arrange a live denial first, so the
-//! question they compare against is recorded under [`../fixtures/`](../fixtures/README.md) and pinned here: the
+//! question they compare against is recorded under [`../fixtures/`](../fixtures/INDEX.md) and pinned here: the
 //! files are read at compile time, and the tests below fail if this crate's own serialisation stops producing
 //! them. There is no second contract — a running server must write these bytes, and a check compares.
 //!
@@ -319,7 +319,7 @@ mod tests {
         );
     }
 
-    /// The README's comparison rule, as code: the envelope is text, the payload is parsed JSON.
+    /// The fixtures INDEX's comparison rule, as code: the envelope is text, the payload is parsed JSON.
     ///
     /// A server that forwards the question through `serde_json::Value` without `preserve_order` writes the keys
     /// sorted. That frame is the same question to the page (`JSON.parse`), so a check must accept it, and a text

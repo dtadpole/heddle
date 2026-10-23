@@ -1,7 +1,7 @@
 ---
 title: The heddle-sandbox crate
-version: 0.2.0
-description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API and its port plan.
+version: 0.3.0
+description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
   - source: src/sandbox/*.ts and src/approvals/service.ts, read 2026-10-22
@@ -17,6 +17,7 @@ The Rust port of the permission modes, their enforcement backends, escalation an
 | Ported from | `src/sandbox/` (policy, paths, backend, seatbelt, linux, escalation, service), `src/approvals/service.ts` |
 | Judged by | `_verifiers_/75-permission-sandbox`, `_verifiers_/80-web-ui` (check-approval), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
+| Fixtures | [`fixtures/`](fixtures/INDEX.md), the recorded approval question the Web UI checks compare against |
 | Depends on | no heddle crate; `serde`, `serde_json`, `thiserror`, `tokio` from the workspace |
 
 ## The public API
@@ -39,14 +40,14 @@ heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 | `validate_escalation_args`, `approve_escalation`, `EscalationRequest`, `EscalationRefusal` (code `ESCALATION_REFUSED`), `EscalationApproval`, `ESCALATION_TARGETS`, `wider_modes` | the tool registry's one gate | `escalation.ts` |
 | `permission_transition`, `FULL_ACCESS_CONFIRMATION`, `ModeChange`, `TransitionRefusal` | `POST /api/sessions/<id>/permission` | `permissionTransition` |
 | `ApprovalService::{new, check, attach_answerer, can_answer, pending_requests, subscribe, request, answer, history}`, `ApprovalRequest` (JSON `{id, tool, reason, displayReason, session?, at}`), `Answer`, `ApprovalOutcome`, `is_approval_id` | the registry (`check`, `request`); the server (`attach_answerer`, `subscribe` for the SSE `approval` event, `GET /api/approvals`, `POST /api/approvals/<id>`) | `ApprovalService` |
-| `fixture::{QUESTION_JSON, STREAM_FRAME, ANSWER_ALLOWED_ONCE, ANSWER_REJECTED, question, question_json, stream_frame, recorded_answer}` | the Web UI checks read the data files under [`fixtures/`](fixtures/README.md); the crate's tests pin its serialiser to them | recorded from `ApprovalService::request` and the page's `showApproval`/`answerApproval` |
+| `fixture::{QUESTION_JSON, STREAM_FRAME, ANSWER_ALLOWED_ONCE, ANSWER_REJECTED, question, question_json, stream_frame, recorded_answer}` | the Web UI checks read the data files under [`fixtures/`](fixtures/INDEX.md); the crate's tests pin its serialiser to them | recorded from `ApprovalService::request` and the page's `showApproval`/`answerApproval` |
 
 The recorded approval fixture is a **sample, not a contract**: `fixtures/approval-stream-frame.txt` is the exact
 SSE frame (`event: approval`, one `data:` line, a blank line). A check compares a live frame's envelope byte for
 byte and its payload as parsed JSON, after replacing only the `id`, `session` and `at` of the run it came from.
 Key order is not compared: the page uses `JSON.parse`, and a server forwarding through `serde_json::Value` keeps
 insertion order only with `preserve_order`, which this workspace gets from `heddle-llm` by feature unification.
-[`fixtures/README.md`](fixtures/README.md) states the facts the page depends on and how to consume the files.
+[`fixtures/INDEX.md`](fixtures/INDEX.md) states the facts the page depends on and how to consume the files.
 
 **Three Rust shapes differ from the TypeScript on purpose.** Every check takes the call's mode explicitly (no
 "default to the deployment mode" parameter; pass `service.mode()`); an approval's cancellation is any

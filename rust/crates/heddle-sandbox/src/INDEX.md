@@ -1,6 +1,6 @@
 ---
 title: The heddle-sandbox sources
-version: 0.2.0
+version: 0.3.0
 description: The sources of the heddle-sandbox crate, one module per TypeScript file, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md

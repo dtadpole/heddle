@@ -1,4 +1,13 @@
-# The recorded approval question
+---
+title: The heddle-sandbox fixtures
+version: 0.3.0
+description: A recorded approval question, its exact SSE frame and the two answer bodies, a sample the Web UI checks compare a live server against.
+grounded_in:
+  - source: src/approvals/service.ts and src/server/page.html at origin/main 1bcff7e, read 2026-10-22
+  - source: _verifiers_/80-web-ui/check-approval.mjs, read 2026-10-22
+---
+
+# `rust/crates/heddle-sandbox/fixtures`
 
 A recorded one-question approval exchange, for the Web UI checks that judge the approval card without having to
 arrange a live denial first. The files are a **sample**, not a second contract: a check compares the running
@@ -68,3 +77,8 @@ nibbles are `4` and `8`), and every other digit is `0` apart from the last. That
 repository's public-hygiene gate exempts: no generated UUID looks like this, so a real session id cannot hide
 behind it. The `at` timestamp is likewise fixed text. A check replaces all three with the live values before
 comparing, as described above.
+
+## Read next
+
+[`../INDEX.md`](../INDEX.md) for the crate's public API, including the `fixture` module that pins these files;
+[`../src/fixture.rs`](../src/fixture.rs) for the tests.
