@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { workspaceKey } from '../../src/session/layout.ts'
 
 /**
  * Agent Teams end to end: a Lead's real turn spawns a teammate through the tools, creates and completes a task
@@ -17,6 +19,41 @@ import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, rep
  */
 
 const CAPABILITY = 'a turn with tools'
+
+/**
+ * The store the second test boots on, **recorded as bytes** from the TypeScript build at heddle commit `a5b0c66`
+ * (2026-10-22) by [`fixtures/record-team-recover-store.mjs`](fixtures/record-team-recover-store.mjs) and committed
+ * beside the check.
+ *
+ * Why recorded rather than written through the store API: the claim is that the harness boots on a store **a
+ * previous TypeScript process left behind**, so the input is data, not a module call. It also keeps the backend lane
+ * able to judge the binary through `HEDDLE_BIN` without `dist/` or `npm run build` in the lane, which is the point
+ * of the seam: a fixture that imports the TypeScript build would drag it back in.
+ */
+const recordedStore = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'team-recover')
+
+/**
+ * Write the recorded store under `root`, filed as a process that ran in `work` would have filed it.
+ *
+ * The logs are copied byte for byte, because they are the format under judgement; each meta's `cwd` is the one thing
+ * replaced, because a meta names the folder its process ran in and this fixture runs in a fresh directory each time.
+ */
+function materializeRecordedStore(root, work) {
+  const dir = join(root, workspaceKey(work))
+  mkdirSync(dir, { recursive: true })
+  for (const name of readdirSync(recordedStore)) {
+    // The folder also carries its INDEX.md; the store is only the metas and the logs.
+    if (!name.endsWith('.json') && !name.endsWith('.zstd')) continue
+    const source = join(recordedStore, name)
+    if (name.endsWith('.json')) {
+      const meta = JSON.parse(readFileSync(source, 'utf8'))
+      writeFileSync(join(dir, name), `${JSON.stringify({ ...meta, cwd: work }, null, 2)}\n`)
+    } else {
+      copyFileSync(source, join(dir, name))
+    }
+  }
+  return dir
+}
 
 function startServer(home, work, config) {
   const child = spawn(
@@ -166,34 +203,19 @@ test('boot settles a previous process’s provisioning members and delivers its 
   const work = fixtureDir('team-recover-work')
   const root = join(home, 'sessions')
   const { config } = scriptedConfig({ home, steps: [{ purpose: 'team', text: 'recovered answer' }] })
-  const store = await (await import('../../dist/session/store.js')).SessionStore
+  const teamId = 'session-recover-lead'
+  const resumableId = 'session-recover-active'
+  materializeRecordedStore(root, work)
   try {
-    const sessions = new (store)(root)
-    const lead = sessions.create({ cwd: work, endpoint: 'scripted', model: 'scripted' })
-    const resumable = sessions.create({ id: 'session-recover-active', cwd: work, parentSession: lead.id, origin: 'subagent', delegationDepth: 1, teamId: lead.id })
-    const ghost = sessions.create({ id: 'session-recover-ghost', cwd: work, parentSession: lead.id, origin: 'subagent', delegationDepth: 1, teamId: lead.id })
-    sessions.message(resumable, { role: 'user', content: [{ type: 'text', text: 'the prompt that made it resumable' }] })
-    const version = 2
-    const teamId = lead.id
-    for (const [id, name] of [[resumable.id, 'alpha'], [ghost.id, 'ghost']]) {
-      sessions.append(lead, { type: 'team/member', version, teamId, member: { id, name, description: 'left over', context: 'fresh', phase: 'provisioning' } })
-    }
-    sessions.append(lead, {
-      type: 'team/message/queued',
-      version,
-      teamId,
-      message: { id: 'team-message-left-1', senderId: lead.id, senderName: 'lead', targetId: resumable.id, content: [{ type: 'text', text: 'left over mail' }] },
-    })
-
     const server = startServer(home, work, config)
     try {
       await server.url
       await waitFor(() => (/recovered 1 team\(s\) \(2 settled, 1 delivered\)/.test(server.logs()) ? true : undefined), 15_000, 'the recovery counts')
-      const events = readTranscript(join(root, lead.id))
+      const events = readTranscript(join(root, teamId))
       const phases = events.filter((event) => event.type === 'team/member').map((event) => [event.member.name, event.member.phase])
       assert.deepEqual(phases, [['alpha', 'provisioning'], ['ghost', 'provisioning'], ['alpha', 'active'], ['ghost', 'failed']])
       assert.deepEqual(events.filter((event) => event.type === 'team/message/delivered').map((event) => event.messageId), ['team-message-left-1'])
-      const child = readTranscript(join(root, resumable.id))
+      const child = readTranscript(join(root, resumableId))
       assert.ok(child.some((event) => event.message?.source?.kind === 'team-message' && event.message.source.messageId === 'team-message-left-1'), 'the queued mail reached the member’s own log')
     } finally {
       await server.close()
