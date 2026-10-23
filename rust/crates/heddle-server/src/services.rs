@@ -528,6 +528,142 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// A harness whose plugins have **not loaded yet**: the door answers, and every route that needs a
+    /// service answers that service's own refusal.
+    ///
+    /// This is what lets `heddle web` bind and print its URL while the session, model, turn and sandbox
+    /// adapters are still landing, so `/healthz` and the token handshake have something honest to talk
+    /// to. It is not a fake: the lists are empty, a start or a turn is an error naming the missing
+    /// service, and no route invents a session or an answer. A boot with the real services uses
+    /// [`Harness::new`] or [`Harness::builder`] instead.
+    pub fn unavailable(cwd: PathBuf) -> Self {
+        Harness {
+            sessions: Arc::new(UnavailableSessions),
+            models: Arc::new(UnavailableModels),
+            turns: Arc::new(UnavailableTurns),
+            sandbox: Arc::new(UnavailableSandbox {
+                root: cwd.display().to_string(),
+            }),
+            workspaces: None,
+            approvals: None,
+            goals: None,
+            todos: None,
+            team: None,
+            attachments: None,
+            markdown: None,
+            stats: None,
+            cwd,
+        }
+    }
+}
+
+/// The sentence every unavailable service answers with.
+const NOT_LOADED: &str = "this service is not loaded yet";
+
+struct UnavailableSessions;
+
+impl SessionService for UnavailableSessions {
+    fn list(&self) -> Vec<SessionMeta> {
+        Vec::new()
+    }
+    fn exists(&self, _id: &str) -> bool {
+        false
+    }
+    fn events(&self, _id: &str) -> Option<Vec<Value>> {
+        None
+    }
+    fn start(&self, _options: StartSession) -> Result<String, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn open_at(&self, _folder: &Path, _options: OpenAt) -> Result<String, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn create_at(
+        &self,
+        _branch: &Path,
+        _title: Option<&str>,
+    ) -> Result<CreatedSession, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn fork(&self, _id: &str) -> ForkOutcome {
+        ForkOutcome::NotFound
+    }
+    fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
+        None
+    }
+    fn definition_id(&self, _folder: &Path) -> Option<String> {
+        None
+    }
+    fn update_definition_title(&self, _folder: &Path, _title: &str) -> Result<(), ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn set_model(&self, _id: &str, _selection: &SessionSelection) -> Option<SessionMeta> {
+        None
+    }
+    fn effective_mode(&self, _id: &str, fallback: &str) -> String {
+        fallback.to_owned()
+    }
+    fn set_mode(&self, _id: &str, _mode: &str, _fallback: &str) -> Result<ModeWrite, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn user_content(&self, _id: &str, _content: Vec<Value>) -> Result<(), ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn folder(&self, _id: &str) -> Option<PathBuf> {
+        None
+    }
+}
+
+struct UnavailableModels;
+
+impl ModelService for UnavailableModels {
+    fn names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn default_endpoint(&self) -> Option<String> {
+        None
+    }
+    fn declares_level(&self, _endpoint: &str, _model: Option<&str>, _effort: &str) -> bool {
+        false
+    }
+}
+
+struct UnavailableTurns;
+
+impl TurnRunner for UnavailableTurns {
+    fn run_turn(
+        &self,
+        _request: TurnRequest,
+    ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+        Box::pin(async { Err(ServiceError::new(NOT_LOADED)) })
+    }
+}
+
+struct UnavailableSandbox {
+    root: String,
+}
+
+impl SandboxService for UnavailableSandbox {
+    fn default_mode(&self) -> String {
+        "read-only".to_owned()
+    }
+    fn workspace_root(&self) -> String {
+        self.root.clone()
+    }
+    fn transition(
+        &self,
+        _current: &str,
+        _requested: &Value,
+        _confirm: &Value,
+    ) -> Result<String, String> {
+        Err(NOT_LOADED.to_owned())
+    }
+}
+
 /// Assembles a [`Harness`] service by service.
 ///
 /// The binary knows which plugins a profile loaded; this type is where it says so, once, in the order
@@ -716,6 +852,26 @@ mod tests {
         assert_eq!(
             projector.stats("session-1", &[json!({"type": "message"})]),
             json!({"session": "session-1", "events": 1})
+        );
+    }
+
+    #[test]
+    fn an_unavailable_harness_answers_the_door_and_refuses_the_services() {
+        let harness = Harness::unavailable(PathBuf::from("/work"));
+        assert!(harness.sessions.list().is_empty());
+        assert!(!harness.sessions.exists("session-1"));
+        assert!(harness.models.names().is_empty());
+        assert_eq!(harness.sandbox.default_mode(), "read-only");
+        assert_eq!(harness.sandbox.workspace_root(), "/work");
+        assert_eq!(
+            harness.sessions.start(StartSession::default()),
+            Err(ServiceError::new("this service is not loaded yet"))
+        );
+        assert_eq!(
+            harness
+                .sandbox
+                .transition("read-only", &json!("full"), &json!(null)),
+            Err("this service is not loaded yet".to_owned())
         );
     }
 

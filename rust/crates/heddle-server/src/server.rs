@@ -2269,6 +2269,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unavailable_harness_serves_the_door_and_refuses_a_turn() {
+        let builder = ServerBuilder::new(
+            Harness::unavailable(PathBuf::from("/work")),
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("unavailable")),
+                default_endpoint: Some("double".into()),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (status, _, _) = call(&router, Method::GET, "/healthz", None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(&bytes), "[]\n");
+
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"hi"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"this service is not loaded yet\"}\n"
+        );
+    }
+
+    #[tokio::test]
     async fn the_running_server_answers_approvals_and_detaches_on_close() {
         use std::sync::atomic::Ordering;
         let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));

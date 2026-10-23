@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (119 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (121 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -45,7 +45,7 @@ their checks are judged against the TypeScript build.
 | `runs` | `RunRegistry` and `TurnGuard`: running counts, the per-turn clock, completion times, stop by `CancellationToken` |
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
-| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
+| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
 | `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
 ### How a feature crate mounts its routes
@@ -132,7 +132,9 @@ to the binary's owner):
 2. `--dry-run --json` prints [`DryRunPlan::for_options`] as one JSON object and exits 0 without binding;
    the human form prints [`DryRunPlan::announce`].
 3. Compose the harness with [`Harness::builder`] (or `HarnessBuilder`): the four required services, the
-   optional ones the profile loaded, and the process's working directory. `attachment_reader`,
+   optional ones the profile loaded, and the process's working directory. For an early `web` bring-up
+   before those services exist, [`Harness::unavailable`] serves the door (`/healthz`, the token
+   handshake, the page) and refuses every service route honestly; `--dry-run` needs no harness at all. `attachment_reader`,
    `markdown_renderer` and `stats_projector` wrap a function as the optional file/renderer/statistics
    services when the owner crate offers one.
 4. `ServerBuilder::new(harness, options)`, take `events()` **before** `start()`, and register
