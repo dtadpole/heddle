@@ -21,6 +21,26 @@ a display or a window.
 
 `check.mjs` installs a hook plugin through a layer file and observes its effect on a scripted turn.
 
+## Under `HEDDLE_BIN`
+
+The TypeScript build loads each hook as a `.ts` plugin; the Rust binary cannot load TypeScript, so under
+`HEDDLE_BIN` each hook is written as a **process** instead (`rust/ULTIMATE_GOAL.md`, part 6: an outside listener
+uses the part-4 protocol). The row names a component manifest beside the profile, in the shape D-031 froze:
+
+```yaml
+# retarget.component.yml; the row is `name: ./retarget.component.yml`
+program: "/path/to/node"
+args:
+  - ./retarget.mjs
+```
+
+The script speaks line-delimited JSON-RPC 2.0 on stdio. It answers `initialize` with the points it listens on
+(`{"tools":[],"listeners":[{"point":"model/request"}]}`), the way the plugin calls `ctx.on(...)`, and each
+`hooks/call` with the plugin's own decision as a part-4 reply: `replace` for the retarget and the write refusal,
+`next` to pass, `merge` for the post-execute rewrite (the rest of the chain and the tool run first, as the plugin's
+`next()` does), `refuse` for the pre-step stop, and a JSON-RPC error for the broken hook. The claims, the
+fixtures and their verdicts on the TypeScript build are unchanged.
+
 ## Running it
 
 ```bash

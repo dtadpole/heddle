@@ -159,7 +159,14 @@ pub fn load(rows: Vec<ComposedRow>, anchor: &Path, catalog: &dyn Catalog) -> Boo
                 )),
             ),
         };
-        let config = row.config.clone().unwrap_or(serde_json::Value::Null);
+        // A row that writes no `config` (or `config: null`) hands its component `{}`, as a Cordis plugin
+        // receives `{}` and fills its schema's defaults; `null` would refuse every typed config.
+        let config = match &row.config {
+            None | Some(serde_json::Value::Null) => {
+                serde_json::Value::Object(serde_json::Map::new())
+            }
+            Some(config) => config.clone(),
+        };
         entries.push(Entry {
             id: row.id.clone().unwrap_or_else(|| row.name.clone()),
             name: row.name.clone(),
@@ -459,6 +466,79 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("./alpha.ts")),
             "the failure names the row's own spelling"
+        );
+    }
+
+    /// A component that records the config it was started with.
+    struct Recorder {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl Component for Recorder {
+        fn requires(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn schema(&self) -> Option<heddle_config::Schema> {
+            None
+        }
+
+        fn start(
+            &self,
+            config: &serde_json::Value,
+            _services: &mut Services,
+        ) -> Result<(), String> {
+            self.seen
+                .lock()
+                .expect("the recorder's lock")
+                .push(config.clone());
+            Ok(())
+        }
+    }
+
+    struct Recording {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl Catalog for Recording {
+        fn component(&self, _reference: &ComponentRef) -> Option<Box<dyn Component>> {
+            Some(Box::new(Recorder {
+                seen: std::sync::Arc::clone(&self.seen),
+            }))
+        }
+    }
+
+    #[test]
+    fn a_row_without_config_starts_its_component_with_an_empty_object() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let catalog = Recording {
+            seen: std::sync::Arc::clone(&seen),
+        };
+        let mut explicit_null = row("sandbox", "./src/sandbox/service.ts");
+        explicit_null.row.config = Some(serde_json::Value::Null);
+        let mut configured = row("approvals", "./src/approvals/service.ts");
+        configured.row.config = Some(serde_json::json!({ "mode": "deny" }));
+        let boot = load(
+            vec![
+                row("model", "./src/plugins/model.ts"),
+                explicit_null,
+                configured,
+            ],
+            Path::new("/repo"),
+            &catalog,
+        );
+        assert!(
+            boot.entries
+                .iter()
+                .all(|entry| entry.state == FiberState::Active)
+        );
+        assert_eq!(
+            *seen.lock().expect("the recorder's lock"),
+            vec![
+                serde_json::json!({}),
+                serde_json::json!({}),
+                serde_json::json!({ "mode": "deny" }),
+            ]
         );
     }
 

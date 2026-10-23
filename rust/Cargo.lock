@@ -636,9 +636,16 @@ name = "heddle"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-agent",
  "heddle-config",
+ "heddle-context",
+ "heddle-goal",
  "heddle-llm",
  "heddle-sandbox",
+ "heddle-session",
+ "heddle-todo",
+ "heddle-tools",
+ "heddle-workspace",
  "serde",
  "serde_json",
  "thiserror",
@@ -649,6 +656,11 @@ name = "heddle-agent"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-config",
+ "heddle-context",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-session",
  "heddle-tools",
  "serde",
  "serde_json",
@@ -672,7 +684,10 @@ name = "heddle-context"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-config",
+ "heddle-context",
  "heddle-llm",
+ "heddle-session",
  "serde",
  "serde_json",
  "sha1",
@@ -696,6 +711,8 @@ name = "heddle-goal"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-config",
+ "heddle-session",
  "serde",
  "serde_json",
  "thiserror",
@@ -768,6 +785,8 @@ dependencies = [
 name = "heddle-team"
 version = "0.0.1"
 dependencies = [
+ "heddle-config",
+ "heddle-session",
  "serde",
  "serde_json",
  "thiserror",
@@ -779,6 +798,8 @@ dependencies = [
 name = "heddle-todo"
 version = "0.0.1"
 dependencies = [
+ "heddle-config",
+ "heddle-session",
  "serde",
  "serde_json",
  "thiserror",
@@ -789,7 +810,10 @@ name = "heddle-tools"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-config",
+ "heddle-llm",
  "heddle-sandbox",
+ "heddle-session",
  "serde",
  "serde_json",
  "thiserror",

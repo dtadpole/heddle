@@ -14,6 +14,7 @@
 //! | [`transition`] | [`permission_transition`] | `sandbox/service.ts` |
 //! | [`service`] | [`SandboxService`], [`SandboxConfig`], [`SandboxDenial`] | `sandbox/service.ts` |
 //! | [`approvals`] | [`ApprovalService`], [`ApprovalsConfig`], [`ApprovalRequest`] | `approvals/service.ts` |
+//! | [`fixture`] | the recorded approval question, its SSE frame and its answers, for the Web UI checks | `approvals/service.ts`, `server/page.html` |
 //!
 //! A private `js` module holds the one thing the refusal sentences need from another language: the
 //! `String()` coercion the TypeScript messages interpolate. `testfs` is the test-only scratch directory and
@@ -24,12 +25,13 @@
 //! [`SandboxHost`], and a published approval question is a [`tokio::sync::broadcast`] receiver the server (or
 //! boot, onto the event bus) subscribes to.
 //!
-//! **Contract first:** the signatures and documents here are the API other crates build against; bodies marked
-//! `todo!()` are being ported, with unit tests beside each.
+//! **Every item above is implemented and tested**, with its unit tests beside the code. The crate's `INDEX.md`
+//! records which port-plan tasks have landed and what the judged-through-the-binary row still waits on.
 
 pub mod approvals;
 pub mod backend;
 pub mod escalation;
+pub mod fixture;
 pub mod linux;
 pub mod mode;
 pub mod paths;

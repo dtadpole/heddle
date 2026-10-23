@@ -1,63 +1,30 @@
-//! The owner's types where they have landed, and provisional mirrors where they have not.
+//! The owners' types, re-exported under the names this crate published.
 //!
 //! `heddle-sandbox`'s vocabulary is **the owner's own**: [`SandboxMode`], the denial and unavailable errors,
 //! [`ConfinedArgv`], [`SandboxOutcome`], [`ApprovalDecision`] and the escalation types are re-exported under
 //! the names this crate published, so a caller names one type and the binary implements the gate ports over
 //! `SandboxService`/`ApprovalService` without converting at every call (see [`crate::adapters`]).
 //!
-//! [`ToolSpec`] (`heddle-llm`) and [`SessionHandle`] (`heddle-session`) are still mirrors: each copies the
-//! TypeScript shape field for field and becomes a `pub use` of the owner's type when that crate lands, so a
-//! caller importing it from `heddle_tools` does not change. Nothing here has behaviour beyond construction
-//! and display: the logic stays with its owner and reaches this crate through the ports in [`crate::gates`].
+//! [`ToolSpec`] is `heddle-llm`'s type, so the registry's schemas, the agent loop's `PrepareOptions.tools` and
+//! the model's `GenerateRequest.tools` are one type. [`SessionHandle`] is `heddle-session`'s. No mirror is left:
+//! a caller importing any of these from `heddle_tools` names the owner's type, and the logic stays with its
+//! owner, reaching this crate through the ports in [`crate::gates`].
 
-use std::path::PathBuf;
+// `heddle-llm` has landed, so the tool schema the model is told is the owner's own type: the registry's
+// `describe()`, the agent loop's `PrepareOptions.tools` and the model's `GenerateRequest.tools` are one type
+// with no conversion.
+pub use heddle_llm::ToolSpec;
 
-use serde::{Deserialize, Serialize};
-
-/// One tool the model may ask for, in the provider's shape.
-///
-/// Mirror of `heddle_llm::ToolSpec` (TypeScript `ToolSpec`, `src/llm/types.ts`). `parameters` is a JSON
-/// Schema object, sent to the provider unchanged.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolSpec {
-    /// What the model calls the tool by; unique within a registry.
-    pub name: String,
-    /// What the model is told the tool does; written for a model, not for a person reading the source.
-    pub description: String,
-    /// JSON Schema for the arguments.
-    #[serde(default = "empty_object")]
-    pub parameters: serde_json::Value,
-}
-
-fn empty_object() -> serde_json::Value {
-    serde_json::Value::Object(serde_json::Map::new())
-}
-
-/// What a caller gets back when it opens a session.
-///
-/// Mirror of `heddle_session::SessionHandle` (TypeScript `SessionHandle`, `src/session/store.ts`). A tool is
-/// handed one by the loop, never by the model's arguments, so a call cannot name another session.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionHandle {
-    /// The session id.
-    pub id: String,
-    /// The folder this session's files are in.
-    pub dir: PathBuf,
-    /// Where the transcript is.
-    pub transcript: PathBuf,
-    /// Where the metadata is.
-    pub meta: PathBuf,
-}
-
-// `heddle-sandbox` has landed, so its vocabulary is no longer mirrored: these are the owner's own types,
-// re-exported under the names this crate published. A caller of `heddle_tools` names one type, and the binary
-// implements the gate ports over `SandboxService`/`ApprovalService` without a conversion at every call.
 pub use heddle_sandbox::RefusalCode as EscalationRefusalCode;
 pub use heddle_sandbox::SandboxUnavailableError as SandboxUnavailable;
 pub use heddle_sandbox::{
     ApprovalDecision, ApprovalMode, ConfinedArgv, EscalationRefusal, EscalationSubject,
     RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode, SandboxOutcome,
 };
+
+/// What a caller gets back when it opens a session: `heddle-session`'s own handle. A tool is handed one by the
+/// loop, never by the model's arguments, so a call cannot name another session.
+pub use heddle_session::SessionHandle;
 
 #[cfg(test)]
 mod tests {
@@ -86,8 +53,9 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_spec_without_parameters_reads_as_an_empty_schema() {
-        let spec: ToolSpec = serde_json::from_str(r#"{"name":"x","description":"y"}"#).unwrap();
-        assert_eq!(spec.parameters, serde_json::json!({}));
+    fn a_declared_tool_without_parameters_reads_as_an_empty_schema() {
+        let tool: crate::protocol::DeclaredTool =
+            serde_json::from_str(r#"{"name":"x","description":"y"}"#).unwrap();
+        assert_eq!(tool.parameters, serde_json::json!({}));
     }
 }
