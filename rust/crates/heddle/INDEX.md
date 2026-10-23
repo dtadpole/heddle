@@ -133,8 +133,10 @@ The library shape is complete and every module below compiles with its unit test
 | `usage` (the gated help) and `main` | implemented: `--help` prints `usage(SERVED)`, a usage error exits 1, an unported request exits 2 naming itself |
 | `commands::config_command` | implemented: `profiles` and `config` are `heddle_config::command::run`'s, exit code mapped |
 | `boot::boot`, `load`, `settle`, `failed_entries`, `dispose` | implemented: composition through `heddle-config`, the loader swept to a fixed point, tested with a stub catalog and a profile fixture |
-| `Ports`, `BuiltinCatalog::component`, the built-in adapters | declared; one adapter per built-in lands as its crate's API does (step 5) |
-| `commands::web`, `booted_command`, `turn`, `bare_application` | declared; they answer once the crates they compose exist |
+| `commands::booted_command` and every non-turn command | implemented against the ports, tested with doubles: `models`, `tools`, `commands`, `sessions`, `transcript`, `hooks`, `workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file`, `session new`, `goal`, `context` |
+| `builtins::BuiltinCatalog` | implemented over the built-in table and, for an outside row, `heddle-config`'s component manifest; one adapter per built-in still lands as its crate's API does (step 5) |
+| the adapters, `commands::web`, `turn`, `bare_application` | declared; they answer once the crates they compose exist |
+| `boot.rs`'s `heddle/ready` announcement | waits for `heddle-events`' bus, which every plugin will log through |
 
 `usage::SERVED` is the one line that says which capabilities answer: today `Always` and `Config`. A
 capability is added only when its command answers through the real crate, so a verifier reports
