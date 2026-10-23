@@ -862,3 +862,93 @@ async fn the_verifiers_http_config_sends_each_shape_to_its_route_with_the_body_i
         "and it is streamed: {body}"
     );
 }
+
+/// `10-llm-backends`' publisher-route check (`check-publisher-route.mjs`): its endpoint as the literal JSON it
+/// writes, and its double's exact event frames. It asserts the route for the configured project and region, the
+/// configured header on the wire, the version and `stream` in the body, the conversation translated, the text
+/// delta reaching the caller, and that the provider's thinking is not echoed back.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_verifiers_publisher_route_config_answers_over_the_publisher_route() {
+    let frame =
+        |kind: &str, payload: serde_json::Value| format!("event: {kind}\ndata: {payload}\n\n");
+    let sse = [
+        frame("message_start", serde_json::json!({ "type": "message_start", "message": { "usage": { "input_tokens": 5 } } })),
+        frame("content_block_delta", serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "weighing it" } })),
+        frame("content_block_delta", serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "answered over the publisher route" } })),
+        frame("message_delta", serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 3 } })),
+        frame("message_stop", serde_json::json!({ "type": "message_stop" })),
+    ]
+    .concat();
+    let double = Double::start(move |request| {
+        if request
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains(":streamRawPredict "))
+        {
+            reply("text/event-stream", &sse)
+        } else {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+        }
+    });
+
+    let endpoint: EndpointConfig = serde_json::from_value(serde_json::json!({
+        "name": "publisher",
+        "kind": "anthropic-vertex",
+        "baseUrl": format!("{}/v1", double.base_url),
+        "project": "a-project",
+        "region": "global",
+        "model": "a-model",
+        "maxOutputTokens": 64,
+        "headers": { "x-gateway-inject": "a-descriptor" }
+    }))
+    .expect("the verifier's endpoint deserializes");
+    let service = ModelService::from_configuration(vec![endpoint], Some("publisher"))
+        .expect("registers the endpoint");
+
+    let mut request = ask("publisher", "say something");
+    // A second round replays the first answer; its reasoning must not travel back to the provider.
+    request.messages.push(Message::new(
+        Role::Assistant,
+        vec![
+            ContentPart::reasoning("weighing it"),
+            ContentPart::text("earlier"),
+        ],
+    ));
+    request.messages.push(user_message("again"));
+    let generated = service.generate(request).await.expect("answers");
+    assert_eq!(generated.text, "answered over the publisher route");
+    assert_eq!(generated.reasoning, "weighing it");
+
+    let call = double.requests().pop().expect("the double was called");
+    assert!(
+        call.starts_with(
+            "POST /v1/projects/a-project/locations/global/publishers/anthropic/models/a-model:streamRawPredict HTTP/1.1"
+        ),
+        "at the publisher route for the configured project and region: {call}"
+    );
+    assert!(
+        call.to_ascii_lowercase()
+            .contains("x-gateway-inject: a-descriptor"),
+        "a configured header reaches the gateway: {call}"
+    );
+    let body = body_of(&call);
+    assert_eq!(
+        body["anthropic_version"],
+        serde_json::json!("vertex-2023-10-16")
+    );
+    assert_eq!(body["stream"], serde_json::json!(true));
+    assert_eq!(
+        body["max_tokens"],
+        serde_json::json!(64),
+        "the endpoint's own cap"
+    );
+    assert!(
+        body["messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty())
+    );
+    assert!(
+        !call.contains("weighing it"),
+        "the provider's thinking is not replayed: {call}"
+    );
+}
