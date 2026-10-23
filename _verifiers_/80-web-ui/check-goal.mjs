@@ -409,6 +409,7 @@ test('an armed goal continues by itself, round by round, and blocks at its cap',
 })
 
 test('an active goal is visible in the chat window, live, without a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'browser')) return
   /**
    * The owner's report: a session running a goal showed no indicator. The cause was not a missing element — the
