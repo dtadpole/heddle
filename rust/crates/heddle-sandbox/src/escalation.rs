@@ -598,4 +598,97 @@ mod tests {
         assert_eq!(RefusalCode::Cancelled.as_str(), "CANCELLED");
         assert_eq!(RefusalCode::Unavailable.as_str(), "UNAVAILABLE");
     }
+
+    #[tokio::test]
+    async fn the_ladder_runs_with_the_approval_service_as_its_channel() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::approvals::{Answer, ApprovalService, ApprovalsConfig};
+
+        let service = Arc::new(ApprovalService::new(ApprovalsConfig::default()));
+        let _guard = service.attach_answerer();
+        let channel = Arc::clone(&service);
+        let handle = tokio::spawn(async move {
+            approve_escalation(
+                request(
+                    "write_file",
+                    json!("workspace-write"),
+                    SandboxMode::ReadOnly,
+                ),
+                &*channel,
+                std::future::pending::<()>(),
+            )
+            .await
+        });
+
+        let published = loop {
+            if let Some(published) = service.pending_requests().into_iter().next() {
+                break published;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        assert_eq!(published.tool, "write_file");
+        assert_eq!(
+            published.reason,
+            format!("escalate sandbox to workspace-write: {JUSTIFICATION}")
+        );
+        assert_eq!(
+            published.display_reason,
+            format!("Allow this operation with workspace-write permissions: {JUSTIFICATION}"),
+            "the justification reaches the person verbatim"
+        );
+
+        assert!(service.answer(&published.id, Answer::AllowedOnce));
+        assert_eq!(
+            handle.await.expect("the escalation task"),
+            Ok(SandboxMode::WorkspaceWrite),
+            "one approved wider retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_escalation_through_the_service_names_the_subject_and_modes() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::approvals::{Answer, ApprovalService, ApprovalsConfig};
+
+        let service = Arc::new(ApprovalService::new(ApprovalsConfig::default()));
+        let _guard = service.attach_answerer();
+        let channel = Arc::clone(&service);
+        let handle = tokio::spawn(async move {
+            approve_escalation(
+                request(
+                    "bash",
+                    json!("danger-full-access"),
+                    SandboxMode::WorkspaceWrite,
+                ),
+                &*channel,
+                std::future::pending::<()>(),
+            )
+            .await
+        });
+
+        let published = loop {
+            if let Some(published) = service.pending_requests().into_iter().next() {
+                break published;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        assert_eq!(
+            published.display_reason,
+            format!("Allow this command with danger-full-access permissions: {JUSTIFICATION}")
+        );
+        assert!(service.answer(&published.id, Answer::Rejected));
+        let refusal = handle
+            .await
+            .expect("the escalation task")
+            .expect_err("a rejection refuses the call");
+        assert_eq!(refusal.code, RefusalCode::Rejected);
+        assert_eq!(
+            refusal.message,
+            "the request to run this command with 'danger-full-access' permissions was rejected; the call stays under 'workspace-write'"
+        );
+    }
 }
