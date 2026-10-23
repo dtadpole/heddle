@@ -77,17 +77,21 @@ impl ComponentCatalog for StaticCatalog {
 /// names as `./alpha.component.yml` beside the profile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComponentManifest {
-    /// The command that starts the component. `--validate` reads it and never runs it.
-    pub command: String,
+    /// The program that starts the component (`program:`). `--validate` reads it and never runs it.
+    pub program: String,
+    /// Its arguments (`args:`), empty when the manifest names none.
+    pub args: Vec<String>,
     /// The component's configuration schema, when it declares one.
     pub config: Option<Schema>,
 }
 
 /// Read the manifest at `path`.
 ///
-/// Fails naming the path when the file cannot be read, is empty or is not a mapping, when `command` is
-/// not a non-empty string, or when `config` is not a JSON Schema or holds an environment reference. An
-/// absent `config` is `Ok(None)`: a component may take no configuration.
+/// Fails naming the path when the file cannot be read, is empty or is not a mapping, when `program` is
+/// not a non-empty string, when `args` is not a list of strings, or when `config` is not a JSON Schema
+/// or holds an environment reference. An absent `config` is `Ok(None)`: a component may take no
+/// configuration. It is the shape developer-five's `OutsideComponentSpec` spells, so one manifest can
+/// later serve both `--validate` and the outside-process spec.
 pub fn read_component_manifest(path: &Path) -> Result<ComponentManifest, ConfigError> {
     let Some(value) = crate::layer::read_yaml_value(path)? else {
         return Err(ConfigError::one(format!(
@@ -101,11 +105,31 @@ pub fn read_component_manifest(path: &Path) -> Result<ComponentManifest, ConfigE
             path.display()
         )));
     };
-    let command = match manifest_field(&fields, "command") {
-        Some(LayerValue::String(command)) if !command.is_empty() => command.clone(),
+    let program = match manifest_field(&fields, "program") {
+        Some(LayerValue::String(program)) if !program.is_empty() => program.clone(),
         _ => {
             return Err(ConfigError::one(format!(
-                "{}: a component manifest needs a 'command' string",
+                "{}: a component manifest needs a 'program' string",
+                path.display()
+            )));
+        }
+    };
+    let args = match manifest_field(&fields, "args") {
+        None => Vec::new(),
+        Some(LayerValue::Sequence(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| match item {
+                LayerValue::String(arg) => Ok(arg.clone()),
+                _ => Err(ConfigError::one(format!(
+                    "{}: args[{index}] must be a string",
+                    path.display()
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(ConfigError::one(format!(
+                "{}: 'args' must be a list of strings",
                 path.display()
             )));
         }
@@ -125,7 +149,11 @@ pub fn read_component_manifest(path: &Path) -> Result<ComponentManifest, ConfigE
             )
         }
     };
-    Ok(ComponentManifest { command, config })
+    Ok(ComponentManifest {
+        program,
+        args,
+        config,
+    })
 }
 
 /// The value of `key` in a manifest's mapping.
@@ -415,7 +443,7 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
-    const MANIFEST: &str = "command: ./alpha.ts\nconfig:\n  type: object\n  properties:\n    count:\n      type: number\n";
+    const MANIFEST: &str = "program: ./alpha.ts\nargs:\n  - --serve\nconfig:\n  type: object\n  properties:\n    count:\n      type: number\n";
 
     #[test]
     fn a_manifest_is_read_without_starting_anything() {
@@ -423,7 +451,8 @@ mod tests {
         let path = root.join("alpha.component.yml");
         write_text(&path, MANIFEST);
         let manifest = read_component_manifest(&path).unwrap();
-        assert_eq!(manifest.command, "./alpha.ts");
+        assert_eq!(manifest.program, "./alpha.ts");
+        assert_eq!(manifest.args, ["--serve"]);
         let schema = manifest.config.unwrap();
         assert_eq!(
             schema.check(&json!({ "count": "not-a-number" }))[0].to_string(),
@@ -436,9 +465,10 @@ mod tests {
     fn a_manifest_without_config_is_no_schema() {
         let root = scratch("no-schema");
         let path = root.join("plain.component.yml");
-        write_text(&path, "command: ./plain\n");
+        write_text(&path, "program: ./plain\n");
         let manifest = read_component_manifest(&path).unwrap();
         assert_eq!(manifest.config, None);
+        assert!(manifest.args.is_empty());
         let row = EntryRow {
             name: "./plain.component.yml".into(),
             ..EntryRow::default()
@@ -459,12 +489,29 @@ mod tests {
         assert_eq!(
             error.problems(),
             [format!(
-                "{}: a component manifest needs a 'command' string",
+                "{}: a component manifest needs a 'program' string",
                 path.display()
             )]
         );
 
-        write_text(&path, "command: ./x\nconfig: [not, a, mapping]\n");
+        write_text(&path, "program: ./x\nargs: [1]\n");
+        let error = read_component_manifest(&path).unwrap_err();
+        assert_eq!(
+            error.problems(),
+            [format!("{}: args[0] must be a string", path.display())]
+        );
+
+        write_text(&path, "program: ./x\nargs: 1\n");
+        let error = read_component_manifest(&path).unwrap_err();
+        assert_eq!(
+            error.problems(),
+            [format!(
+                "{}: 'args' must be a list of strings",
+                path.display()
+            )]
+        );
+
+        write_text(&path, "program: ./x\nconfig: [not, a, mapping]\n");
         let error = read_component_manifest(&path).unwrap_err();
         assert!(error.problems()[0].contains("not a configuration schema"));
 

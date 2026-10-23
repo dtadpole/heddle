@@ -105,12 +105,13 @@ because each later step is checked through the earlier ones.
 ### Open questions
 
 1. **The `--validate` check's fixture names `./alpha.ts`**, a TypeScript module with a Schemastery schema. Under
-   `HEDDLE_BIN` no Rust catalog can read it. Agreed with integrator-one, 2026-10-22, and
-   **provisional, open to part-4 revision** with developer-five: an outside component is named by a manifest beside
-   the profile (`./alpha.component.yml`: a `command` string and an inline `config` JSON Schema), `--validate` reads
-   the manifest without starting anything, and the verifier's `HEDDLE_BIN` branch writes manifests instead of `.ts`
-   files. `ManifestCatalog` and `read_component_manifest` implement the heddle-config side; the verifier branch is
-   integrator-one's. If part 4 prefers `program`/`args` to `command`, the manifest changes before 05 is judged.
+   `HEDDLE_BIN` no Rust catalog can read it. Agreed with integrator-one and acked by developer-five, 2026-10-22: an outside component is named by a
+   manifest beside the profile (`./alpha.component.yml`: a `program` string, an optional `args` list, and an inline
+   `config` JSON Schema — the same shape `OutsideComponentSpec` spells, so one manifest can later serve both
+   `--validate` and the spec source). `--validate` reads the manifest without starting anything, and the verifier's
+   `HEDDLE_BIN` branch writes manifests instead of `.ts` files. `ManifestCatalog` and `read_component_manifest`
+   implement the heddle-config side; the verifier branch is integrator-one's, and the process protocol stays
+   heddle-tools's.
 2. **YAML reader.** *Resolved*: `saphyr` 0.0.6 (MIT OR Apache-2.0, YAML 1.2, exposes tagged nodes as
    `Yaml::Tagged(Tag, Box<Yaml>)`), added to `[workspace.dependencies]` by integrator-one (7ea2a3e).
 3. **`serde_json`'s `preserve_order`.** Off here. Features unify across the workspace, so turning it on changes

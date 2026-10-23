@@ -410,7 +410,7 @@ mod tests {
         );
         write_text(
             &home.join("profiles/dev/alpha.component.yml"),
-            "command: ./alpha.ts\nconfig:\n  type: object\n  properties:\n    count:\n      type: number\n",
+            "program: ./alpha.ts\nconfig:\n  type: object\n  properties:\n    count:\n      type: number\n",
         );
         std::fs::create_dir_all(root.join("cwd")).unwrap();
         let env = Env::default().with("HEDDLE_HOME", home.to_string_lossy());
