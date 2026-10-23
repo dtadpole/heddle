@@ -118,3 +118,32 @@ case where launchd never starts the job at login. Both are on `hd/live-deploy`; 
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 ```
+
+## Redeploying, when an integrator moves main
+
+The deployment is one checkout and one agent, so a redeploy is four steps and one reading:
+
+```sh
+cd ~/heddle-live && git fetch origin && git checkout --detach origin/main   # the tip, clean
+npm ci --no-audit --no-fund && npm run build                                # dist/, ignored by git
+sh _tools_/web-daemon/install.sh --restart                                  # writes the definition and restarts
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/            # 200, through the gate
+sh _verifiers_/96-deployment/verify.sh                                      # 3/3, or the reason it is not
+```
+
+The build is read when the process starts, so the restart is not optional: without it the browser keeps the
+previous page and 96 fails on the marker, which is the stale-build shape this verifier exists to catch.
+
+**When a Rust binary can run `web`** (it cannot yet: `rust/crates/heddle` still exits "not ported", and
+`heddle-server` is a crate with no wiring into it), the same checkout can serve it instead:
+
+```sh
+cd ~/heddle--int-ui && cargo build --release --manifest-path rust/Cargo.toml   # in a build slot, D-021
+cd ~/heddle-live && HEDDLE_BIN=~/heddle--int-ui/rust/target/release/heddle sh _tools_/web-daemon/install.sh --restart
+```
+
+One condition comes with it: the binary embeds the page it serves, so the two checkouts must be at the **same
+main** — the lane worktree builds it, and `~/heddle-live` is what `96-deployment` holds to `origin/main` and
+compares the page against (`src/server/page.html` for the binary, `dist/server/page.html` for the TypeScript
+build). A binary built from an older commit serves an older page, and that is exactly the 502-era failure
+`_verifiers_/96-deployment` was written for.
