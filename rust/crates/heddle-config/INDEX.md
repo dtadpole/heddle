@@ -175,15 +175,17 @@ optional `args`, an inline `config` JSON Schema) without starting anything; and 
 
 ### Keeping `05-config-system` judged
 
-Re-run it against every lane candidate, with the lane's release binary:
+Re-run it against every lane candidate. The verifier's entry point runs the same runner, check for check, as
+`node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json`:
 
 ```bash
-HEDDLE_BIN=~/heddle--int-backend/rust/target/release/heddle \
-  node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json
+HEDDLE_BIN=~/heddle--int-backend/rust/target/release/heddle sh _verifiers_/05-config-system/verify.sh --json
 ```
 
-The result must be `"verdict":0` with 10 passing. A drop from 10 is a regression, reported to integrator-one and the
-coordinator before any other work. Each check leans on the steps above:
+The result must be `"verdict":0` with all ten passing. A binary built before the candidate commit does not judge the
+candidate: when the lane's release build predates it, build the candidate itself (a debug build in a throwaway
+worktree is enough) and judge that. A drop from ten is a regression, reported to integrator-one and the coordinator
+before any other work. Each check leans on the steps above:
 
 | Check | Contract step |
 |---|---|
@@ -198,12 +200,16 @@ coordinator before any other work. Each check leans on the steps above:
 | the composition can say which layer supplied a value | 4 (provenance), `config --origins --json` |
 | a profile that does not exist says which ones do | 3 |
 
-| Date | Candidate | Binary | Result |
+One line per run, oldest first: the candidate, the command as run (with the binary it judged), and the result.
+
+| Date | Candidate | Command, and the binary it judged | Result |
 |---|---|---|---|
-| 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | lane release build, and a debug build of exactly `abdf20c` | 10 pass, verdict 0, both |
-| 2026-10-22 | main `0a10ceb` (the binary on main) | a debug build of main, and the lane release build | 10 pass, verdict 0, both |
-| 2026-10-22 | main `480d9b8` (a served command routes through the boot) | a debug build of main, and the lane release build of `480d9b8` | 10 pass, verdict 0, both |
-| 2026-10-22 | main `cc09a59`, lane `a819f5f` (a context-verifier fix and status docs; no Rust source, 05 verifier or runner changed since `480d9b8`) | the `480d9b8` builds above, source-identical | 10 pass, verdict 0, both |
+| 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | `HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json`, with the lane release build and with a debug build of exactly `abdf20c` | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `0a10ceb` (the binary on main) | the same command, with a debug build of main and with the lane release build | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `480d9b8` (a served command routes through the boot) | the same command, with a debug build of main and with the lane release build of `480d9b8` | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `cc09a59`, lane `a819f5f` (a context-verifier fix and status docs; no Rust source, 05 verifier or runner changed since `480d9b8`) | the same command, with the `480d9b8` builds, source-identical | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | lane `a66e662` (eleven merges: the binary's `boot.rs`, `float_roundtrip` workspace-wide, and this crate's null-config tests) | `HEDDLE_BIN=<debug build of exactly a66e662> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; this crate's 118 unit tests passed on the same tree under `float_roundtrip` |
+| 2026-10-22 | main `d28625d` (UI-verifier fixes only; no Rust source, 05 verifier or runner changed since `a819f5f`) | `HEDDLE_BIN=<lane release build of the 480d9b8 sources, identical here> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0 |
 
 ## Decisions the contract makes
 
