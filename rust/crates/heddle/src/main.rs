@@ -60,8 +60,11 @@ mod tests {
         assert_eq!(stderr, "");
         assert!(stdout.starts_with("heddle — a harness and agent framework built on Cordis\n"));
         assert!(stdout.contains("  -h, --help                 show this message\n"));
-        // `usage(SERVED)` while only `Always` is wired: an unported part's gate word stays out.
-        assert!(!stdout.contains("--profile"));
+        // `usage(SERVED)` serves the configuration commands, so `05-config-system`'s gate word is
+        // there; a part whose crate is not wired keeps its word out.
+        assert!(stdout.contains(
+            "      --profile <name>       boot a named profile from $HEDDLE_HOME/profiles\n"
+        ));
         assert!(!stdout.contains("  web "));
     }
 

@@ -5,7 +5,10 @@
 //! [`Services`] and its [`ports`](crate::ports) views, so each one is unit-tested against doubles of
 //! those views; a profile that leaves a service out gets the TypeScript build's sentence for it.
 
+use heddle_config::command::{CommandContext, ConfigCommand};
+
 use crate::boot::Boot;
+use crate::builtins::BuiltinCatalog;
 use crate::cli::{Args, CommandWord};
 use crate::output::Output;
 use crate::services::Services;
@@ -55,8 +58,35 @@ fn unported(what: &str, out: &mut Output<'_>) -> Exit {
 /// passes [`crate::cli::config_args`], the environment, the working directory and its
 /// [`BuiltinCatalog`](crate::builtins::BuiltinCatalog) as the schema catalog, and maps the exit code.
 pub fn config_command(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    let _ = (args, invocation, out);
-    todo!("delegate to heddle_config::command::run")
+    let command = match args.command {
+        Some(CommandWord::Profiles) => ConfigCommand::Profiles,
+        _ => ConfigCommand::Config,
+    };
+    let config_args = crate::cli::config_args(args, &invocation.cwd, &invocation.env);
+    let catalog = BuiltinCatalog;
+    let context = CommandContext {
+        env: &invocation.env,
+        cwd: invocation.cwd.clone(),
+        catalog: &catalog,
+    };
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_config::command::run(
+        command,
+        &config_args,
+        &context,
+        stdout,
+        stderr,
+    ))
+}
+
+/// A crate command's process exit code as this crate's [`Exit`]: `0` done, anything else the
+/// TypeScript build's `process.exitCode = 1`.
+fn exit_code(code: i32) -> Exit {
+    if code == 0 {
+        Exit::Success
+    } else {
+        Exit::Failure
+    }
 }
 
 /// The commands that boot and then answer: `models`, `tools`, `commands`, `sessions`, `transcript`,
@@ -181,7 +211,9 @@ mod tests {
 
     #[test]
     fn a_command_whose_crate_is_not_wired_says_so_and_exits_two() {
-        for word in ["web", "profiles", "config", "models", "hooks", "workspaces"] {
+        // `profiles` and `config` are served now and answer through heddle-config; the rest of the
+        // command words still say so and exit 2.
+        for word in ["web", "models", "hooks", "workspaces"] {
             let mut captured = Captured::default();
             let exit = {
                 let mut out = captured.output();

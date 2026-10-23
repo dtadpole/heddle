@@ -379,8 +379,21 @@ impl Catalog for BuiltinCatalog {
 /// component's from its declaration, and an unresolved name as `SchemaLookup::Unresolvable`.
 impl ComponentCatalog for BuiltinCatalog {
     fn lookup(&self, row: &EntryRow, anchor: Option<&Path>) -> SchemaLookup {
-        let _ = (row, anchor);
-        todo!("resolve_component(row.component(anchor)), then the component's schema()")
+        // A bare row name needs no directory; a relative path is resolved against the layer that wrote
+        // it, and only an all-in-memory tree has none, where `.` is the same relative name.
+        let anchor = anchor.unwrap_or(Path::new("."));
+        match resolve_component(&row.component(anchor)) {
+            // One adapter per built-in lands with its crate (port plan step 5); until then a built-in
+            // takes no declared schema, which validation skips rather than calling it a problem.
+            ComponentRef::Builtin(_) => SchemaLookup::NoSchema,
+            ComponentRef::Outside(path) => SchemaLookup::Unresolvable(format!(
+                "the outside component '{}' declares no schema to this binary yet",
+                path.display()
+            )),
+            ComponentRef::Unresolved(name) => {
+                SchemaLookup::Unresolvable(format!("no built-in or outside path is named '{name}'"))
+            }
+        }
     }
 }
 

@@ -42,6 +42,13 @@ impl<'a> Output<'a> {
         self.out(&text);
     }
 
+    /// Both streams as writers, for a crate that owns a command's output: `heddle-config`'s
+    /// `command::run` writes every sentence of `profiles` and `config` itself, to the same two
+    /// streams this run writes to.
+    pub fn writers(&mut self) -> (&mut dyn Write, &mut dyn Write) {
+        (&mut *self.stdout, &mut *self.stderr)
+    }
+
     /// The TypeScript build's top-level failure: `heddle: <message>` on stderr, and exit 1.
     pub fn fail(&mut self, message: &str) -> Exit {
         self.err(&format!("heddle: {message}\n"));
