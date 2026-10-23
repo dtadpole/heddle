@@ -93,6 +93,13 @@ dependencies = [
 [[package]]
 name = "heddle"
 version = "0.0.1"
+dependencies = [
+ "futures",
+ "heddle-config",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "heddle-agent"
