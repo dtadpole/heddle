@@ -468,7 +468,8 @@ async fn run_command(
                 SandboxOutcome::RunnerFailure { detail } => Ok(kept()
                     .with_error(
                         codes::SANDBOX_UNAVAILABLE,
-                        format!("the sandbox runner failed under '{mode}' mode — the command did not run: {detail}"),
+                        // The sandbox crate's sentence, which 75's shell-confinement checks match.
+                        heddle_sandbox::runner_failure_message(mode, &detail),
                     )
                     .with_data(serde_json::Map::from_iter([(
                         "sandbox".to_owned(),
@@ -477,7 +478,7 @@ async fn run_command(
                 SandboxOutcome::Denied => Ok(kept()
                     .with_error(
                         codes::SANDBOX,
-                        format!("[sandbox: file access denied under {mode} mode]"),
+                        heddle_sandbox::shell_denial_message(mode),
                     )
                     .with_data(serde_json::Map::from_iter([(
                         "sandbox".to_owned(),
