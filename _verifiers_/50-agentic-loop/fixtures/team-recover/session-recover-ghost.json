@@ -1,0 +1,10 @@
+{
+  "id": "session-recover-ghost",
+  "created": "2026-10-23T03:23:32.856Z",
+  "cwd": "/tmp/heddle-recorded-team-recover",
+  "parentSession": "session-recover-lead",
+  "origin": "subagent",
+  "delegationDepth": 1,
+  "teamId": "session-recover-lead",
+  "turns": 0
+}
