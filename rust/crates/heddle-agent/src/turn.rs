@@ -420,12 +420,9 @@ async fn run_turn_body(
                 endpoint: options.endpoint.clone(),
                 model: options.model.clone(),
                 messages: prepared.messages.clone(),
-                tools: if prepared.tools.is_empty() {
-                    None
-                } else {
-                    Some(prepared.tools.clone())
-                },
-                max_output_tokens: options.max_output_tokens,
+                // Empty means none: every adapter then sends no `tools` field, the TypeScript build's rule.
+                tools: prepared.tools.clone(),
+                max_output_tokens: options.max_output_tokens.map(u64::from),
                 reasoning_effort: options.reasoning_effort.clone(),
                 session_id: Some(session.id.clone()),
                 round: Some(round),
@@ -463,11 +460,11 @@ async fn run_turn_body(
                         match &chunk {
                             Chunk::TextDelta { text: delta } => round_text.push_str(delta),
                             Chunk::ReasoningDelta { text: delta } => reasoning.push_str(delta),
-                            Chunk::ToolCall {
-                                id,
-                                name,
-                                arguments,
-                            } => calls.push((id.clone(), name.clone(), arguments.clone())),
+                            Chunk::ToolCall(call) => calls.push((
+                                call.id.clone(),
+                                call.name.clone(),
+                                call.arguments.clone(),
+                            )),
                             Chunk::ToolCallDelta { .. } => {}
                             Chunk::Done {
                                 finish_reason: finished,
@@ -583,7 +580,20 @@ async fn run_turn_body(
                     cancel: cancel.clone(),
                     log: turn_log(),
                 };
-                runtime.tools.call(&name, args, context).await
+                // A call that escapes the registry (a failing `tools/pre-execute` listener) is still answered,
+                // as the TypeScript catch answers it: the stop's sentence when the turn was stopped, else the
+                // failure's own.
+                match runtime.tools.try_call(&name, args, context).await {
+                    Ok(result) => result,
+                    Err(failure) => ToolResult::refused(
+                        codes::INTERRUPTED,
+                        if stopped() {
+                            "the turn was stopped while this call ran".to_owned()
+                        } else {
+                            failure.message
+                        },
+                    ),
+                }
             };
             tool_calls.push(ToolCallRecord {
                 name: name.clone(),
@@ -597,14 +607,12 @@ async fn run_turn_body(
                     message: error.message.clone(),
                 });
             }
-            runtime.session.message(
-                session,
-                Message {
-                    role: Role::Tool,
-                    content: vec![ContentPart::text(tool_message_text(&result))],
-                    tool_call_id: Some(id),
-                },
-            )?;
+            let mut answer = Message::new(
+                Role::Tool,
+                vec![ContentPart::text(tool_message_text(&result))],
+            );
+            answer.tool_call_id = Some(id);
+            runtime.session.message(session, answer)?;
         }
     }
 
@@ -930,11 +938,9 @@ mod tests {
             state.next_seq += 1;
             state.nodes.push(seq);
             state.roles.insert(seq, role);
-            state.messages.push(Message {
-                role,
-                content: vec![ContentPart::text(text)],
-                tool_call_id: None,
-            });
+            state
+                .messages
+                .push(Message::new(role, vec![ContentPart::text(text)]));
             state.content_generation += 1;
             state.events.push(Recorded {
                 kind: "message".into(),
@@ -1365,11 +1371,11 @@ mod tests {
     }
 
     fn call_chunk(id: &str, name: &str, arguments: serde_json::Value) -> Chunk {
-        Chunk::ToolCall {
+        Chunk::ToolCall(crate::upstream::ToolCall {
             id: id.into(),
             name: name.into(),
             arguments: arguments.to_string(),
-        }
+        })
     }
 
     fn done(finish_reason: &str) -> Chunk {
@@ -2142,5 +2148,197 @@ mod tests {
         assert!(turns.is_running("s"));
         drop(begun);
         assert!(!turns.is_running("s"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_through_the_real_model_service_runs_a_scripted_task_to_its_answer() {
+        let service = crate::adapters::tests::scripted_service(
+            "turn",
+            serde_json::json!([
+                { "toolCall": { "name": "read_file", "arguments": { "path": "one.txt" } } },
+                { "text": "finished the task" }
+            ]),
+        );
+        let session = RecordingSession::new();
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(service)),
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(vec![answering_tool("read_file", "first")]),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: None,
+        };
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "write then read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rounds, 2);
+        assert_eq!(result.text, "finished the task");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "read_file");
+        assert_eq!(result.tool_calls[0].result.output, "first");
+        assert_eq!(result.finish_reason, "stop");
+        let tool_answers = session
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect::<Vec<_>>();
+        assert_eq!(tool_answers.len(), 1);
+        assert_eq!(
+            tool_answers[0].tool_call_id.as_deref(),
+            Some("call-read_file")
+        );
+        let requests = session
+            .kinds()
+            .into_iter()
+            .filter(|kind| kind == "model/request")
+            .count();
+        assert_eq!(requests, 2, "one model/request per round");
+        let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
+        assert_eq!(completed.fields["text"], "finished the task");
+    }
+
+    #[tokio::test]
+    async fn a_turn_recorded_through_the_real_session_store_writes_what_the_loop_verifier_reads() {
+        let sessions = crate::adapters::tests::sessions_at("verifier");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let service = crate::adapters::tests::scripted_service(
+            "verifier",
+            serde_json::json!([
+                { "toolCall": { "name": "write_file", "arguments": { "path": "one.txt", "content": "first" } } },
+                { "toolCall": { "name": "read_file", "arguments": { "path": "one.txt" } } },
+                { "text": "finished the task" }
+            ]),
+        );
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(service)),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
+            context: Arc::new(crate::adapters::tests::SessionMessages {
+                sessions: Arc::clone(&sessions),
+            }),
+            tools: registry_with(vec![
+                answering_tool("write_file", "wrote 5 bytes to one.txt"),
+                answering_tool("read_file", "first"),
+            ]),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+        };
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "write a file then read it"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "finished the task");
+        assert_eq!(result.rounds, 3);
+
+        // What `_verifiers_/50-agentic-loop/check.mjs` reads from the transcript.
+        let events = sessions.events(&handle).unwrap();
+        let of = |kind: &str| events.iter().filter(|event| event.kind == kind).count();
+        assert!(of("model/request") >= 3, "one model/request per round");
+        let tool_texts: Vec<String> = events
+            .iter()
+            .filter(|event| event.kind == "message" && event.fields["message"]["role"] == "tool")
+            .map(|event| {
+                event.fields["message"]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(tool_texts.len(), 2, "both tool calls produced a result");
+        assert!(
+            tool_texts.join("\n").contains("first"),
+            "the read came back with what the write wrote"
+        );
+        let last_request = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "model/request")
+            .unwrap();
+        assert!(
+            last_request.fields["messages"].as_u64().unwrap() >= 5,
+            "the later request carried the conversation and the tool results: {}",
+            last_request.fields["messages"]
+        );
+        assert!(last_request.fields["estimatedTokens"].as_u64().is_some());
+        let completed = events
+            .iter()
+            .find(|event| event.kind == "assistant/completed")
+            .expect("the turn was recorded as finished");
+        assert_eq!(completed.fields["text"], "finished the task");
+        assert_eq!(of("turn/completed"), 1);
+        let first_user = events
+            .iter()
+            .find(|event| event.kind == "message" && event.fields["message"]["role"] == "user")
+            .unwrap();
+        assert_eq!(
+            first_user.fields["message"]["content"][0]["text"],
+            "write a file then read it"
+        );
+    }
+
+    struct BrokenToolHook;
+
+    impl heddle_tools::ToolHooks for BrokenToolHook {
+        fn pre_execute(
+            &self,
+            _: &heddle_tools::ToolCall<'_>,
+        ) -> Result<heddle_tools::PreExecute, heddle_tools::ToolHookError> {
+            Err(heddle_tools::ToolHookError::new(
+                "a hook failed at tools/pre-execute (policy) — typo",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_pre_execute_listener_is_answered_as_interrupted_and_the_turn_goes_on() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "read_file", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "carried on".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let tools = ToolRegistry::new(ToolGates {
+            approvals: Arc::new(AllowAll),
+            sandbox: Arc::new(FlatSandbox),
+            modes: Arc::new(DefaultModes),
+            hooks: Arc::new(BrokenToolHook),
+        });
+        tools
+            .register(answering_tool("read_file", "never"))
+            .unwrap();
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            Arc::new(tools),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "carried on");
+        assert_eq!(result.denials.len(), 1);
+        assert_eq!(result.denials[0].code, "INTERRUPTED");
+        assert!(result.denials[0].message.contains("tools/pre-execute"));
     }
 }

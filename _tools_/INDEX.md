@@ -28,6 +28,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`public-hygiene/`](public-hygiene/INDEX.md) | the gate before `main`: a private identifier list, no internal names in files, paths, messages or identities |
 | [`reflection-sync/`](reflection-sync/INDEX.md) | fast-forwards the team's shared checkout and refuses rather than overwrite another session's work |
 | [`record-commit/`](record-commit/INDEX.md) | commits record edits from a temporary worktree at a fresh origin/main, refusing a stale base and unioning append-only logs |
+| [`review-collect/`](review-collect/INDEX.md) | one read-only page of raw evidence for a member review: tip, commits and files against the write scope, uncommitted paths, last report, recorded runs, action-log lines since the last review |
 | [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port (not used while the port builds locally) |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
