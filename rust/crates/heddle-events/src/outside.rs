@@ -279,6 +279,12 @@ impl Scope {
 /// The default time an outside listener has to answer one call.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
+/// One call's answer channel.
+type PendingSender = oneshot::Sender<Result<HookReply, HookError>>;
+
+/// The calls waiting for an answer, by the id the caller was given.
+type PendingCalls = HashMap<u64, PendingSender>;
+
 /// One configured outside listener: the process to start and the points it listens on. Deserialized from a
 /// configuration row's `config`, with the TypeScript build's camel-case keys.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,7 +333,7 @@ pub struct StdioListener {
     /// Lines waiting to be written to the child's stdin; `notify` never blocks on the pipe.
     outbox: mpsc::UnboundedSender<String>,
     /// Calls waiting for an answer, by the id the caller was given.
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<HookReply, HookError>>>>>,
+    pending: Arc<Mutex<PendingCalls>>,
     next_id: AtomicU64,
     timeout: Duration,
 }
@@ -360,10 +366,7 @@ struct ReplyError {
 }
 
 /// Fail every pending call — the child died, or it wrote something that is not a reply.
-fn fail_pending(
-    pending: &Mutex<HashMap<u64, oneshot::Sender<Result<HookReply, HookError>>>>,
-    message: &str,
-) {
+fn fail_pending(pending: &Mutex<PendingCalls>, message: &str) {
     let mut pending = pending
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -410,8 +413,7 @@ impl StdioListener {
             .stderr
             .take()
             .expect("a piped child stderr is always present");
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<HookReply, HookError>>>>> =
-            Arc::default();
+        let pending: Arc<Mutex<PendingCalls>> = Arc::default();
         let (outbox, outbox_rx) = mpsc::unbounded_channel::<String>();
         let listener = Arc::new(StdioListener {
             child: Mutex::new(child),
@@ -1000,11 +1002,11 @@ printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
         });
         let mut recorded = None;
         for _ in 0..100 {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if !text.is_empty() {
-                    recorded = Some(text);
-                    break;
-                }
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && !text.is_empty()
+            {
+                recorded = Some(text);
+                break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
