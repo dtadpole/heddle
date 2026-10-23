@@ -643,6 +643,7 @@ dependencies = [
  "heddle-goal",
  "heddle-llm",
  "heddle-sandbox",
+ "heddle-server",
  "heddle-session",
  "heddle-team",
  "heddle-todo",

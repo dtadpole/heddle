@@ -557,8 +557,11 @@ fn owned_context(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Ou
 /// recover teams, print `heddle web: <url>` and `heddle web: serving on <host>:<port>; pass --port to
 /// change it` (and the `--json` line), and serve until SIGINT or SIGTERM.
 pub fn web(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    let _ = (args, invocation, out);
-    todo!("port runWeb from src/cli.ts over heddle-server")
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    crate::web::web(args, invocation, boot, out)
 }
 
 #[cfg(test)]
@@ -581,21 +584,6 @@ mod tests {
             env: Env::from_pairs(Vec::<(String, String)>::new()),
             cwd: PathBuf::from(cwd),
         }
-    }
-
-    #[test]
-    fn web_says_it_is_not_ported_until_its_crate_is_on_this_branch() {
-        let mut captured = Captured::default();
-        let exit = {
-            let mut out = captured.output();
-            dispatch(&parsed(&["web"]), &invocation("/nonexistent"), &mut out)
-        };
-        assert_eq!(exit, Exit::Unported);
-        assert_eq!(
-            captured.stderr_text(),
-            "heddle: not ported to Rust yet: web\n"
-        );
-        assert!(captured.stdout.is_empty());
     }
 
     #[test]
