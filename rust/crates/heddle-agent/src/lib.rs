@@ -4,8 +4,8 @@
 //! `src/tools/subagent.ts`, `src/plugins/turns.ts`, `src/plugins/subagent-tool.ts`.
 //! Judged through the `heddle` binary (`HEDDLE_BIN`) by `_verifiers_/50-agentic-loop`.
 //!
-//! The public API is the contract other crates build against while the bodies are ported; a body that is
-//! still `todo!()` is named in the port plan in `INDEX.md`.
+//! The public API is the contract other crates build against; every body is ported, with its unit tests
+//! beside it, and the port plan in `INDEX.md` records what each step covers.
 //!
 //! | Module | What it is |
 //! |---|---|
@@ -14,9 +14,6 @@
 //! | [`subagent`] | delegation to a child agent in its own session, and the `delegate` tool |
 //! | [`ports`] | what a turn asks of the model, session, context and hook services |
 //! | [`upstream`] | provisional mirrors of types `heddle-llm`, `heddle-session` and `heddle-context` own |
-
-// Contract first: bodies that are not ported yet are `todo!()`, and their parameters are unused until then.
-#![allow(unused_variables)]
 
 pub mod ports;
 pub mod subagent;

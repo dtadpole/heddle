@@ -21,16 +21,21 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use heddle_tools::{ToolArgs, ToolRegistry, ToolResult};
+use heddle_tools::{LogSink, ToolArgs, ToolContext, ToolRegistry, ToolResult, codes};
 
 use crate::ports::{
-    ContextPort, HookFailure, ModelError, ModelPort, PortError, SessionPort, TurnHooks,
+    ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord, PortError, PreStep,
+    RequestErrorAction, RequestErrorPayload, SessionPort, TurnHooks,
 };
 use crate::turns::TurnRegistry;
-use crate::upstream::{ContentPart, Role, SessionHandle, TokenUsage, merge_token_usage};
+use crate::upstream::{
+    Chunk, ContentPart, GenerateRequest, Message, PrepareOptions, Role, RuntimeContextSection,
+    SessionHandle, TokenUsage, merge_token_usage,
+};
 
 /// The rounds a one-shot turn may take when the caller names no limit.
 pub const DEFAULT_MAX_ROUNDS: u32 = 8;
@@ -224,7 +229,361 @@ pub async fn run_turn(
     runtime: &AgentRuntime,
     options: RunTurnOptions,
 ) -> Result<TurnResult, TurnError> {
-    todo!("port runTurn and runTurnBody from src/agent/loop.ts")
+    let live = runtime
+        .turns
+        .as_ref()
+        .map(|turns| turns.begin(&options.session.id, options.cancel.as_ref()));
+    // The live token is a child of the caller's, so it honours a person's Stop and an interrupt at once,
+    // and an interrupt does not reach the caller.
+    let cancel = match (&live, &options.cancel) {
+        (Some(live), _) => Some(live.token().clone()),
+        (None, Some(caller)) => Some(caller.clone()),
+        (None, None) => None,
+    };
+    let result = run_turn_body(runtime, &options, cancel).await;
+    if let Some(live) = &live {
+        live.settle();
+    }
+    result
+}
+
+/// One turn's body; the exported [`run_turn`] adds the live-turn registration around it.
+async fn run_turn_body(
+    runtime: &AgentRuntime,
+    options: &RunTurnOptions,
+    cancel: Option<CancellationToken>,
+) -> Result<TurnResult, TurnError> {
+    let session = &options.session;
+    let started = runtime.session.count(session);
+    let max_rounds = match options.max_rounds {
+        RoundLimit::Rounds(rounds) => rounds,
+        RoundLimit::Unbounded => u32::MAX,
+    };
+    // Instructions belong to the conversation; tools retain the configured sandbox root.
+    let workspace_root = runtime.tools.sandbox().workspace_root().to_path_buf();
+    let instruction_cwd = runtime
+        .session
+        .folder(session)
+        .unwrap_or_else(|| workspace_root.clone());
+
+    let mut content = vec![ContentPart::text(options.prompt.clone())];
+    content.extend(options.attachments.iter().cloned());
+    runtime
+        .session
+        .user_content(session, content, options.source.clone())?;
+
+    let tools = runtime.tools.describe();
+    let mut denials: Vec<Denial> = Vec::new();
+    let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut finish_reason = "unknown".to_owned();
+    let mut usage: Option<TokenUsage> = None;
+    let mut rounds = 0u32;
+    let mut last_context: Option<ContextSummary> = None;
+    let mut ended: Vec<String> = Vec::new();
+    let stopped = || cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
+
+    for round in 0..max_rounds {
+        // A stopped turn ends at the next boundary: a round between model calls has no connection to break.
+        if stopped() {
+            ended.push("stopped by the caller".to_owned());
+            break;
+        }
+        rounds += 1;
+
+        // Keep the runtime-context snapshot current before the round measures what the person has said, so
+        // the harness's own snapshot is never mistaken for a steered message.
+        let mode = runtime.tools.effective_mode(Some(session));
+        let sections = [RuntimeContextSection {
+            name: "sandbox:policy".to_owned(),
+            text: runtime.tools.sandbox().policy_statement(mode),
+        }];
+        runtime.context.record_runtime_context(session, &sections)?;
+
+        let mut report = runtime
+            .context
+            .prepare(
+                session,
+                PrepareOptions {
+                    cwd: instruction_cwd.clone(),
+                    endpoint: options.endpoint.clone(),
+                    model: options.model.clone(),
+                    tools: tools.clone(),
+                    system: options.system.clone(),
+                },
+            )
+            .await?;
+
+        last_context = Some(ContextSummary {
+            estimated_tokens: report.estimated_tokens,
+            threshold_tokens: report.threshold_tokens,
+            pruned: report.pruned,
+            compacted: report.compacted,
+        });
+
+        // A listener that ends the round takes it down; the sentence says the failure came from a hook.
+        let mut prepared = match runtime.hooks.pre_step(PreStep {
+            messages: report.messages.clone(),
+            tools: tools.clone(),
+            round: rounds,
+        }) {
+            Ok(prepared) => prepared,
+            Err(failure) => return Err(TurnError::Hook(pre_step_failure_message(&failure))),
+        };
+
+        // `(id, name, arguments)` for each complete tool call the round asked for.
+        let mut calls: Vec<(String, String, String)> = Vec::new();
+        let mut round_text = String::new();
+        let mut attempt: u32 = 0;
+        // The steering window is the model call itself: `prepare` appends to the surface, and counting that
+        // would make every turn take an extra round.
+        let mut input_before;
+        loop {
+            input_before = user_input_seqs(runtime.session.as_ref(), session);
+
+            let request = GenerateRequest {
+                endpoint: options.endpoint.clone(),
+                model: options.model.clone(),
+                messages: prepared.messages.clone(),
+                tools: if prepared.tools.is_empty() {
+                    None
+                } else {
+                    Some(prepared.tools.clone())
+                },
+                max_output_tokens: options.max_output_tokens,
+                reasoning_effort: options.reasoning_effort.clone(),
+                session_id: Some(session.id.clone()),
+                round: Some(round),
+                purpose: options.purpose.clone(),
+                ..GenerateRequest::default()
+            };
+            runtime.session.model_request(
+                session,
+                &ModelRequestRecord {
+                    endpoint: options.endpoint.clone(),
+                    model: options.model.clone(),
+                    reasoning_effort: options.reasoning_effort.clone(),
+                    messages: prepared.messages.len(),
+                    tools: prepared
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect(),
+                    estimated_tokens: report.estimated_tokens,
+                    threshold_tokens: report.threshold_tokens,
+                    pruned: report.pruned,
+                    compacted: report.compacted,
+                    breakdown: report.breakdown,
+                    generation: runtime.session.surface(session).content_generation,
+                },
+            )?;
+
+            let mut stream = runtime.model.stream(request, cancel.clone());
+            let mut failure: Option<ModelError> = None;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        // Recorded as it arrives: an interrupted turn shows the half of the answer that came.
+                        runtime.session.assistant_chunk(session, &chunk)?;
+                        match &chunk {
+                            Chunk::TextDelta { text: delta } => round_text.push_str(delta),
+                            Chunk::ReasoningDelta { text: delta } => reasoning.push_str(delta),
+                            Chunk::ToolCall {
+                                id,
+                                name,
+                                arguments,
+                            } => calls.push((id.clone(), name.clone(), arguments.clone())),
+                            Chunk::ToolCallDelta { .. } => {}
+                            Chunk::Done {
+                                finish_reason: finished,
+                                usage: reported,
+                            } => {
+                                finish_reason.clone_from(finished);
+                                usage = merge_usage(usage, *reported);
+                                // Only an abnormal finish is a stop reason worth a notice: `stop` ends the
+                                // answer normally and `tool_calls` asks for the next round by design.
+                                if is_abnormal_finish(finished) {
+                                    ended.push(format!("round {}: {finished}", round + 1));
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+
+            // The recovery path: a provider that refused the call as too long gets one more chance, and
+            // only because something durable changed in between — a compaction landing is what makes a
+            // retry different from a repeat.
+            let Some(error) = failure else { break };
+            let Some(code) = error.code.clone() else {
+                return Err(TurnError::Model(error));
+            };
+            if attempt >= options.max_overflow_retries {
+                return Err(TurnError::Model(error));
+            }
+            let action = runtime
+                .hooks
+                .request_error(&RequestErrorPayload {
+                    code,
+                    message: error.message.clone(),
+                    session: session.clone(),
+                    endpoint: options.endpoint.clone(),
+                    model: options.model.clone(),
+                    cwd: instruction_cwd.clone(),
+                    tools: tools.clone(),
+                })
+                .await;
+            if action != Some(RequestErrorAction::Retry) {
+                return Err(TurnError::Model(error));
+            }
+            let generation_before = runtime.session.surface(session).replace_generation;
+            let retried = runtime.context.assemble(
+                session,
+                PrepareOptions {
+                    cwd: instruction_cwd.clone(),
+                    endpoint: options.endpoint.clone(),
+                    model: options.model.clone(),
+                    tools: tools.clone(),
+                    system: options.system.clone(),
+                },
+            )?;
+            report = retried;
+            prepared = PreStep {
+                messages: report.messages.clone(),
+                tools: tools.clone(),
+                round: rounds,
+            };
+            last_context = Some(ContextSummary {
+                estimated_tokens: report.estimated_tokens,
+                threshold_tokens: report.threshold_tokens,
+                pruned: report.pruned,
+                compacted: runtime.session.surface(session).replace_generation > generation_before,
+            });
+            runtime.session.append(
+                session,
+                events::TURN_RETRY,
+                serde_json::Map::from_iter([
+                    ("round".to_owned(), serde_json::json!(round)),
+                    ("attempt".to_owned(), serde_json::json!(attempt + 1)),
+                    ("code".to_owned(), serde_json::json!(failure_code(&error))),
+                    (
+                        "estimatedTokens".to_owned(),
+                        serde_json::json!(report.estimated_tokens),
+                    ),
+                    ("compacted".to_owned(), serde_json::json!(report.compacted)),
+                ]),
+            )?;
+            attempt += 1;
+        }
+
+        text.push_str(&round_text);
+
+        // A message that arrived while the model was answering is answered by this turn (steering).
+        if calls.is_empty()
+            && !has_new_input(
+                &input_before,
+                &user_input_seqs(runtime.session.as_ref(), session),
+            )
+        {
+            break;
+        }
+
+        // Every call the model asked for is answered in the log, even one that cannot run: a call without an
+        // answer breaks every later request.
+        for (id, name, arguments) in calls {
+            let args = parse_arguments(&arguments);
+            let result = if stopped() {
+                ToolResult::refused(
+                    codes::INTERRUPTED,
+                    "the turn was stopped before this call ran",
+                )
+            } else {
+                let context = ToolContext {
+                    cwd: workspace_root.clone(),
+                    session: Some(session.clone()),
+                    cancel: cancel.clone(),
+                    log: turn_log(),
+                };
+                runtime.tools.call(&name, args, context).await
+            };
+            tool_calls.push(ToolCallRecord {
+                name: name.clone(),
+                arguments,
+                result: result.clone(),
+            });
+            if let Some(error) = &result.error {
+                denials.push(Denial {
+                    tool: name,
+                    code: error.code.clone(),
+                    message: error.message.clone(),
+                });
+            }
+            runtime.session.message(
+                session,
+                Message {
+                    role: Role::Tool,
+                    content: vec![ContentPart::text(tool_message_text(&result))],
+                    tool_call_id: Some(id),
+                },
+            )?;
+        }
+    }
+
+    // The tools ran; if a stop arrived while they did, the next model call would be wasted.
+    if stopped() && !ended.iter().any(|reason| reason == "stopped by the caller") {
+        ended.push("stopped by the caller".to_owned());
+    }
+    if rounds >= max_rounds {
+        ended.push(format!("stopped after the round limit of {max_rounds}"));
+    }
+
+    let mut completed = serde_json::Map::from_iter([
+        ("text".to_owned(), serde_json::json!(text)),
+        ("reasoning".to_owned(), serde_json::json!(reasoning)),
+        ("finishReason".to_owned(), serde_json::json!(finish_reason)),
+        ("rounds".to_owned(), serde_json::json!(rounds)),
+        ("denials".to_owned(), serde_json::json!(denials.len())),
+    ]);
+    if !ended.is_empty() {
+        completed.insert("ended".to_owned(), serde_json::json!(ended));
+    }
+    runtime
+        .session
+        .append(session, events::ASSISTANT_COMPLETED, completed)?;
+    runtime.session.append(
+        session,
+        events::TURN_COMPLETED,
+        serde_json::Map::from_iter([("rounds".to_owned(), serde_json::json!(rounds))]),
+    )?;
+
+    let events = runtime.session.count(session);
+    Ok(TurnResult {
+        text,
+        reasoning,
+        tool_calls,
+        denials,
+        finish_reason,
+        events: events.saturating_sub(started),
+        rounds,
+        context: last_context,
+        ended,
+        usage,
+    })
+}
+
+/// The code a refused round is recorded under; the hook payload already carries it.
+fn failure_code(error: &ModelError) -> String {
+    error.code.clone().unwrap_or_default()
+}
+
+/// The loop's log line for a tool call, through the crate's tracing target.
+fn turn_log() -> LogSink {
+    Arc::new(|message: &str| tracing::info!(target: "heddle_agent", "turn: {message}"))
 }
 
 /// Whether a user message arrived that was not on the surface before — the steering rule.
@@ -433,5 +792,1007 @@ mod tests {
             meta: "/s/m".into(),
         };
         assert_eq!(user_input_seqs(&Surface, &handle), BTreeSet::from([2, 5]));
+    }
+
+    // ---- The loop, judged with doubles: a scripted model, a recording session and a flat context. ----
+
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::upstream::ContextReport;
+    use futures::future::BoxFuture;
+    use futures::stream::{self, BoxStream};
+    use heddle_tools::{
+        ApprovalDecision, ConfinedArgv, DefaultModes, NoToolHooks, SandboxDenial, SandboxGate,
+        SandboxOutcome, SandboxUnavailable, Tool, ToolGates, ToolResult, ToolSpec, tool_fn,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone)]
+    struct Recorded {
+        kind: String,
+        fields: serde_json::Map<String, serde_json::Value>,
+    }
+
+    struct SessionState {
+        events: Vec<Recorded>,
+        messages: Vec<Message>,
+        nodes: Vec<u64>,
+        roles: BTreeMap<u64, Role>,
+        next_seq: u64,
+        content_generation: u64,
+        replace_generation: u64,
+    }
+
+    /// A session double: every write is an event, the surface is the nodes written so far, and the messages
+    /// it recorded are what the context double derives a request from.
+    struct RecordingSession {
+        state: Mutex<SessionState>,
+    }
+
+    impl RecordingSession {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(SessionState {
+                    events: Vec::new(),
+                    messages: Vec::new(),
+                    nodes: Vec::new(),
+                    roles: BTreeMap::new(),
+                    next_seq: 1,
+                    content_generation: 0,
+                    replace_generation: 0,
+                }),
+            })
+        }
+
+        fn push_message(&self, role: Role, text: &str) -> u64 {
+            let mut state = self.state.lock().unwrap();
+            let seq = state.next_seq;
+            state.next_seq += 1;
+            state.nodes.push(seq);
+            state.roles.insert(seq, role);
+            state.messages.push(Message {
+                role,
+                content: vec![ContentPart::text(text)],
+                tool_call_id: None,
+            });
+            state.content_generation += 1;
+            state.events.push(Recorded {
+                kind: "message".into(),
+                fields: serde_json::Map::from_iter([(
+                    "message".to_owned(),
+                    serde_json::json!({ "role": role, "content": [{ "type": "text", "text": text }] }),
+                )]),
+            });
+            seq
+        }
+
+        fn push_user(&self, text: &str) {
+            self.push_message(Role::User, text);
+        }
+
+        fn messages(&self) -> Vec<Message> {
+            self.state.lock().unwrap().messages.clone()
+        }
+
+        fn kinds(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .map(|event| event.kind.clone())
+                .collect()
+        }
+
+        fn event(&self, kind: &str) -> Option<Recorded> {
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .find(|event| event.kind == kind)
+                .cloned()
+        }
+
+        fn bump_replace_generation(&self) {
+            self.state.lock().unwrap().replace_generation += 1;
+        }
+    }
+
+    impl SessionPort for RecordingSession {
+        fn count(&self, _: &SessionHandle) -> usize {
+            self.state.lock().unwrap().events.len()
+        }
+
+        fn user_content(
+            &self,
+            _: &SessionHandle,
+            content: Vec<ContentPart>,
+            _source: Option<serde_json::Value>,
+        ) -> Result<(), PortError> {
+            let text = content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            self.push_message(Role::User, &text);
+            Ok(())
+        }
+
+        fn surface(&self, _: &SessionHandle) -> SurfaceView {
+            let state = self.state.lock().unwrap();
+            SurfaceView {
+                nodes: state.nodes.clone(),
+                content_generation: state.content_generation,
+                replace_generation: state.replace_generation,
+            }
+        }
+
+        fn node_role(&self, _: &SessionHandle, seq: u64) -> Option<Role> {
+            self.state.lock().unwrap().roles.get(&seq).copied()
+        }
+
+        fn folder(&self, _: &SessionHandle) -> Option<PathBuf> {
+            None
+        }
+
+        fn model_request(
+            &self,
+            _: &SessionHandle,
+            record: &ModelRequestRecord,
+        ) -> Result<(), PortError> {
+            let fields = serde_json::to_value(record)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            self.state.lock().unwrap().events.push(Recorded {
+                kind: "model/request".into(),
+                fields,
+            });
+            Ok(())
+        }
+
+        fn assistant_chunk(&self, _: &SessionHandle, chunk: &Chunk) -> Result<(), PortError> {
+            let fields = serde_json::Map::from_iter([(
+                "chunk".to_owned(),
+                serde_json::to_value(chunk).unwrap(),
+            )]);
+            self.state.lock().unwrap().events.push(Recorded {
+                kind: "assistant/chunk".into(),
+                fields,
+            });
+            Ok(())
+        }
+
+        fn message(&self, _: &SessionHandle, message: Message) -> Result<(), PortError> {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let mut state = self.state.lock().unwrap();
+            let seq = state.next_seq;
+            state.next_seq += 1;
+            state.nodes.push(seq);
+            state.roles.insert(seq, message.role);
+            let role = message.role;
+            state.messages.push(message);
+            state.content_generation += 1;
+            state.events.push(Recorded {
+                kind: "message".into(),
+                fields: serde_json::Map::from_iter([(
+                    "message".to_owned(),
+                    serde_json::json!({ "role": role, "content": [{ "type": "text", "text": text }] }),
+                )]),
+            });
+            Ok(())
+        }
+
+        fn append(
+            &self,
+            _: &SessionHandle,
+            kind: &str,
+            fields: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), PortError> {
+            self.state.lock().unwrap().events.push(Recorded {
+                kind: kind.to_owned(),
+                fields,
+            });
+            Ok(())
+        }
+    }
+
+    /// One scripted model answer.
+    enum Step {
+        Chunks(Vec<Chunk>),
+        Fail(ModelError),
+    }
+
+    /// A model double: one scripted step per call, and every request kept for the assertions.
+    struct ScriptedModel {
+        steps: Mutex<VecDeque<Step>>,
+        requests: Mutex<Vec<GenerateRequest>>,
+        on_stream: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    impl ScriptedModel {
+        fn new(steps: Vec<Step>) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(steps.into()),
+                requests: Mutex::new(Vec::new()),
+                on_stream: None,
+            })
+        }
+
+        fn with_stream_hook(self: &Arc<Self>, hook: Arc<dyn Fn() + Send + Sync>) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(std::mem::take(&mut *self.steps.lock().unwrap())),
+                requests: Mutex::new(Vec::new()),
+                on_stream: Some(hook),
+            })
+        }
+
+        fn requests(&self) -> Vec<GenerateRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl ModelPort for ScriptedModel {
+        fn stream(
+            &self,
+            request: GenerateRequest,
+            _cancel: Option<CancellationToken>,
+        ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+            self.requests.lock().unwrap().push(request);
+            if let Some(hook) = &self.on_stream {
+                hook();
+            }
+            let step = self.steps.lock().unwrap().pop_front();
+            let items: Vec<Result<Chunk, ModelError>> = match step {
+                Some(Step::Chunks(chunks)) => chunks.into_iter().map(Ok).collect(),
+                Some(Step::Fail(error)) => vec![Err(error)],
+                None => vec![Ok(Chunk::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                })],
+            };
+            Box::pin(stream::iter(items))
+        }
+
+        fn default_endpoint(&self) -> Option<String> {
+            Some("scripted".into())
+        }
+    }
+
+    /// A context double: the request is the messages the session recorded, so the loop's writes reach it.
+    struct SurfaceContext {
+        session: Arc<RecordingSession>,
+    }
+
+    impl SurfaceContext {
+        fn report(&self) -> ContextReport {
+            let messages = self.session.messages();
+            ContextReport {
+                estimated_tokens: messages.len() as u64 * 10,
+                context_window: 1_000,
+                threshold_tokens: 800,
+                messages,
+                ..ContextReport::default()
+            }
+        }
+    }
+
+    impl ContextPort for SurfaceContext {
+        fn record_runtime_context(
+            &self,
+            _: &SessionHandle,
+            sections: &[RuntimeContextSection],
+        ) -> Result<(), PortError> {
+            self.session.append(
+                &session_handle(),
+                "runtime/context",
+                serde_json::Map::from_iter([(
+                    "sections".to_owned(),
+                    serde_json::to_value(sections).unwrap(),
+                )]),
+            )
+        }
+
+        fn prepare<'a>(
+            &'a self,
+            _: &'a SessionHandle,
+            _: PrepareOptions,
+        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+            let report = self.report();
+            Box::pin(async move { Ok(report) })
+        }
+
+        fn assemble(
+            &self,
+            _: &SessionHandle,
+            _: PrepareOptions,
+        ) -> Result<ContextReport, PortError> {
+            // A retry is granted because a compaction landed: the double records one and says so.
+            self.session.bump_replace_generation();
+            let mut report = self.report();
+            report.compacted = true;
+            Ok(report)
+        }
+    }
+
+    fn session_handle() -> SessionHandle {
+        SessionHandle {
+            id: "s".into(),
+            dir: "/s".into(),
+            transcript: "/s/t".into(),
+            meta: "/s/m".into(),
+        }
+    }
+
+    struct AllowAll;
+
+    impl heddle_tools::ApprovalGate for AllowAll {
+        fn check(&self, _: &str) -> ApprovalDecision {
+            ApprovalDecision {
+                allowed: true,
+                reason: None,
+            }
+        }
+
+        fn escalate<'a>(
+            &'a self,
+            request: heddle_tools::EscalationRequest,
+        ) -> BoxFuture<'a, Result<crate::upstream::SandboxMode, heddle_tools::EscalationError>>
+        {
+            Box::pin(async move { Ok(request.effective_mode) })
+        }
+    }
+
+    struct FlatSandbox;
+
+    impl SandboxGate for FlatSandbox {
+        fn workspace_root(&self) -> &std::path::Path {
+            std::path::Path::new("/w")
+        }
+        fn default_mode(&self) -> crate::upstream::SandboxMode {
+            crate::upstream::SandboxMode::WorkspaceWrite
+        }
+        fn escalation_targets(&self) -> Vec<crate::upstream::SandboxMode> {
+            Vec::new()
+        }
+        fn policy(&self, mode: crate::upstream::SandboxMode) -> serde_json::Value {
+            serde_json::json!({ "mode": mode })
+        }
+        fn policy_statement(&self, mode: crate::upstream::SandboxMode) -> String {
+            format!("sandbox: {mode}")
+        }
+        fn assert_writable(
+            &self,
+            path: &str,
+            _: crate::upstream::SandboxMode,
+        ) -> Result<PathBuf, SandboxDenial> {
+            Ok(PathBuf::from(path))
+        }
+        fn assert_readable(
+            &self,
+            path: &str,
+            _: crate::upstream::SandboxMode,
+        ) -> Result<PathBuf, SandboxDenial> {
+            Ok(PathBuf::from(path))
+        }
+        fn confine(
+            &self,
+            _: &[String],
+            mode: crate::upstream::SandboxMode,
+        ) -> Result<ConfinedArgv, SandboxUnavailable> {
+            Err(SandboxUnavailable {
+                mode,
+                message: "no backend in the double".into(),
+            })
+        }
+        fn classify_outcome(&self, _: i32, _: &str, _: Option<&ConfinedArgv>) -> SandboxOutcome {
+            SandboxOutcome::Exited
+        }
+    }
+
+    fn registry_with(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
+        let registry = ToolRegistry::new(ToolGates {
+            approvals: Arc::new(AllowAll),
+            sandbox: Arc::new(FlatSandbox),
+            modes: Arc::new(DefaultModes),
+            hooks: Arc::new(NoToolHooks),
+        });
+        for tool in tools {
+            registry.register(tool).unwrap();
+        }
+        Arc::new(registry)
+    }
+
+    fn answering_tool(name: &str, answer: &'static str) -> Arc<dyn Tool> {
+        tool_fn(
+            ToolSpec {
+                name: name.into(),
+                description: format!("the {name} tool"),
+                parameters: serde_json::json!({}),
+            },
+            move |_args, _ctx| Box::pin(async move { Ok(ToolResult::ok(answer)) }),
+        )
+    }
+
+    fn failing_tool(name: &str) -> Arc<dyn Tool> {
+        tool_fn(
+            ToolSpec {
+                name: name.into(),
+                description: format!("the {name} tool"),
+                parameters: serde_json::json!({}),
+            },
+            |_args, _ctx| {
+                Box::pin(async move { Err(heddle_tools::ToolFailure::Failed("boom".into())) })
+            },
+        )
+    }
+
+    fn stopping_tool(name: &str, token: CancellationToken) -> Arc<dyn Tool> {
+        tool_fn(
+            ToolSpec {
+                name: name.into(),
+                description: format!("the {name} tool"),
+                parameters: serde_json::json!({}),
+            },
+            move |_args, _ctx| {
+                let token = token.clone();
+                Box::pin(async move {
+                    token.cancel();
+                    Ok(ToolResult::ok("stopped it"))
+                })
+            },
+        )
+    }
+
+    fn runtime(
+        model: Arc<ScriptedModel>,
+        session: Arc<RecordingSession>,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<dyn TurnHooks>,
+    ) -> AgentRuntime {
+        AgentRuntime {
+            model,
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools,
+            hooks,
+            turns: None,
+        }
+    }
+
+    fn call_chunk(id: &str, name: &str, arguments: serde_json::Value) -> Chunk {
+        Chunk::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.to_string(),
+        }
+    }
+
+    fn done(finish_reason: &str) -> Chunk {
+        Chunk::Done {
+            finish_reason: finish_reason.into(),
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_multi_round_task_runs_each_round_and_feeds_the_results_back() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "shout", serde_json::json!({ "text": "hi" })),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                call_chunk(
+                    "c2",
+                    "read_file",
+                    serde_json::json!({ "path": "shout.txt" }),
+                ),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "finished the task".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let tools = registry_with(vec![
+            answering_tool("shout", "wrote shout.txt"),
+            answering_tool("read_file", "the shout"),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            tools,
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "do it"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rounds, 3);
+        assert_eq!(result.text, "finished the task");
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(model.requests().len(), 3);
+        // The last request carried the conversation and both tool results.
+        let last = model.requests().pop().unwrap();
+        assert!(last.messages.len() >= 3, "{}", last.messages.len());
+        assert!(
+            last.messages.iter().any(|message| {
+                message.content.iter().any(
+                    |part| matches!(part, ContentPart::Text { text } if text == "wrote shout.txt"),
+                )
+            }),
+            "the tool result reached the next request"
+        );
+        assert!(result.events > 0);
+        let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
+        assert_eq!(completed.fields["text"], "finished the task");
+        assert_eq!(completed.fields["rounds"], 3);
+    }
+
+    #[tokio::test]
+    async fn the_round_limit_ends_the_turn_and_says_so() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "list_dir", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                call_chunk("c2", "list_dir", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                call_chunk("c3", "list_dir", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+        ]);
+        let tools = registry_with(vec![answering_tool("list_dir", "a")]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            tools,
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "keep going");
+        options.max_rounds = RoundLimit::Rounds(2);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(result.rounds, 2);
+        assert_eq!(model.requests().len(), 2, "the limit was respected");
+        assert!(
+            result
+                .ended
+                .iter()
+                .any(|reason| reason.contains("round limit of 2")),
+            "{:?}",
+            result.ended
+        );
+        let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
+        assert!(completed.fields.contains_key("ended"));
+    }
+
+    #[tokio::test]
+    async fn a_failing_tool_is_answered_and_the_turn_continues() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "fails", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "it was handled".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![failing_tool("fails")]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.denials.len(), 1);
+        assert_eq!(result.denials[0].code, "TOOL_FAILED");
+        assert_eq!(result.text, "it was handled");
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2, "the loop asked again with the answer");
+        assert!(requests[1].messages.iter().any(|message| {
+            message.content.iter().any(|part| matches!(part, ContentPart::Text { text } if text == "error (TOOL_FAILED): boom"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_is_refused_and_the_model_is_told() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "absent", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "understood".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.denials[0].code, "UNKNOWN_TOOL");
+        assert!(result.denials[0].message.contains("absent"));
+    }
+
+    #[tokio::test]
+    async fn a_stop_before_a_round_ends_it_without_a_model_call() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![]);
+        let token = CancellationToken::new();
+        token.cancel();
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "go");
+        options.cancel = Some(token);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(result.rounds, 0);
+        assert!(model.requests().is_empty());
+        assert_eq!(result.ended, ["stopped by the caller"]);
+        let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["stopped by the caller"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_tool_leaves_every_call_answered() {
+        let session = RecordingSession::new();
+        let token = CancellationToken::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![
+            call_chunk("c1", "stop", serde_json::json!({})),
+            call_chunk("c2", "read_file", serde_json::json!({})),
+            done("tool_calls"),
+        ])]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![
+                stopping_tool("stop", token.clone()),
+                answering_tool("read_file", "should not run"),
+            ]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "go");
+        options.cancel = Some(token);
+        let result = run_turn(&runtime, options).await.unwrap();
+        let tool_results = result
+            .tool_calls
+            .iter()
+            .map(|call| call.result.error.as_ref().map(|error| error.code.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results, [None, Some("INTERRUPTED".to_owned())]);
+        assert!(result.ended.contains(&"stopped by the caller".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_message_that_arrives_while_the_model_answers_takes_another_round() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "first".into(),
+                },
+                done("stop"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: " second".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let steered = Arc::clone(&session);
+        let hook: Arc<dyn Fn() + Send + Sync> = {
+            let flag = Arc::new(AtomicBool::new(false));
+            Arc::new(move || {
+                if !flag.swap(true, Ordering::SeqCst) {
+                    steered.push_user("one more thing");
+                }
+            })
+        };
+        let model = model.with_stream_hook(hook);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.rounds, 2,
+            "the steered message was answered by this turn"
+        );
+        assert_eq!(model.requests().len(), 2);
+        assert_eq!(result.text, "first second");
+    }
+
+    /// Hooks that grant one retry after a failure, the way a compaction listener does.
+    struct RetryOnce {
+        granted: AtomicBool,
+    }
+
+    impl RetryOnce {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                granted: AtomicBool::new(false),
+            })
+        }
+    }
+
+    impl TurnHooks for RetryOnce {
+        fn request_error<'a>(
+            &'a self,
+            _payload: &'a RequestErrorPayload,
+        ) -> BoxFuture<'a, Option<RequestErrorAction>> {
+            let grant = !self.granted.swap(true, Ordering::SeqCst);
+            Box::pin(async move { grant.then_some(RequestErrorAction::Retry) })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overflow_is_retried_once_when_a_hook_grants_it_and_is_recorded() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Fail(ModelError {
+                code: Some("CONTEXT_WINDOW_EXCEEDED".into()),
+                message: "too long".into(),
+            }),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "after the retry".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "after the retry");
+        assert_eq!(model.requests().len(), 2);
+        let retry = session.event(events::TURN_RETRY).unwrap();
+        assert_eq!(retry.fields["code"], "CONTEXT_WINDOW_EXCEEDED");
+        assert_eq!(retry.fields["attempt"], 1);
+        assert_eq!(
+            retry.fields["compacted"],
+            serde_json::json!(true),
+            "a compaction landed"
+        );
+        assert!(result.context.unwrap().compacted);
+    }
+
+    #[tokio::test]
+    async fn an_uncoded_model_failure_is_not_retried() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Fail(ModelError {
+            code: None,
+            message: "the provider broke".into(),
+        })]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        let error = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, TurnError::Model(_)));
+        assert_eq!(model.requests().len(), 1);
+        assert!(
+            !session
+                .kinds()
+                .iter()
+                .any(|kind| kind == events::TURN_RETRY)
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_is_summed_over_the_rounds() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "read_file", serde_json::json!({})),
+                Chunk::Done {
+                    finish_reason: "tool_calls".into(),
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(10),
+                        output_tokens: Some(2),
+                        ..TokenUsage::default()
+                    }),
+                },
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                Chunk::Done {
+                    finish_reason: "stop".into(),
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(5),
+                        cache_read_tokens: Some(7),
+                        ..TokenUsage::default()
+                    }),
+                },
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![answering_tool("read_file", "x")]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        let usage = result.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(15));
+        assert_eq!(usage.output_tokens, Some(2));
+        assert_eq!(usage.cache_read_tokens, Some(7));
+        assert_eq!(usage.cache_write_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn the_live_turn_is_registered_while_it_runs_and_settled_after() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![done("stop")])]);
+        let turns = TurnRegistry::new();
+        let seen = Arc::new(AtomicBool::new(false));
+        let probe = Arc::clone(&seen);
+        let registry = turns.clone();
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            probe.store(registry.is_running("s"), Ordering::SeqCst);
+        });
+        let model = model.with_stream_hook(hook);
+        let runtime = AgentRuntime {
+            model,
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(turns.clone()),
+        };
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rounds, 1);
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "the turn was live while the model ran"
+        );
+        assert!(!turns.is_running("s"), "and settled after it ended");
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_stops_the_running_turn() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![done("stop")])]);
+        let turns = TurnRegistry::new();
+        let registry = turns.clone();
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            registry.abort("s", Some("lead asked"));
+        });
+        let model = model.with_stream_hook(hook);
+        let runtime = AgentRuntime {
+            model,
+            session: Arc::clone(&session) as Arc<dyn SessionPort>,
+            context: Arc::new(SurfaceContext {
+                session: Arc::clone(&session),
+            }),
+            tools: registry_with(Vec::new()),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(turns),
+        };
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert!(result.ended.contains(&"stopped by the caller".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_hook_that_refuses_the_pre_step_fails_the_turn_and_says_which_hook() {
+        struct Refusing;
+        impl TurnHooks for Refusing {
+            fn pre_step(&self, _: PreStep) -> Result<PreStep, HookFailure> {
+                Err(HookFailure::Refusal("the policy refused this round".into()))
+            }
+        }
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(Refusing),
+        );
+        let error = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "the policy refused this round");
+        assert!(
+            model.requests().is_empty(),
+            "the round never reached the model"
+        );
     }
 }

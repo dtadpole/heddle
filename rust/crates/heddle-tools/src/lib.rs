@@ -3,8 +3,8 @@
 //! Ported from the TypeScript build: `src/tools/service.ts`, `src/tools/builtin.ts`, `src/plugins/tools.ts`.
 //! Judged through the `heddle` binary (`HEDDLE_BIN`) by `_verifiers_/40-pluggable-tools`.
 //!
-//! The public API is the contract other crates build against while the bodies are ported; a body that is
-//! still `todo!()` is named in the port plan in `INDEX.md`.
+//! The public API is the contract other crates build against; every body is ported, with its unit tests
+//! beside it, and the port plan in `INDEX.md` records what each step covers.
 //!
 //! | Module | What it is |
 //! |---|---|
@@ -19,9 +19,6 @@
 //!
 //! Background jobs are named in this crate's description but have no TypeScript source and no verifier
 //! yet; they are not part of this API until the oracle has them.
-
-// Contract first: bodies that are not ported yet are `todo!()`, and their parameters are unused until then.
-#![allow(unused_variables)]
 
 pub mod builtin;
 pub mod config;

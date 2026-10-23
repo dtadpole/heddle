@@ -22,10 +22,15 @@ use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 
+use crate::builtin::{BuiltinOptions, builtin_tools};
 use crate::config::ToolsConfig;
-use crate::gates::{SandboxGate, ToolGates};
-use crate::tool::{Command, Tool, ToolArgs, ToolContext, ToolResult};
-use crate::upstream::{SandboxMode, SessionHandle, ToolSpec};
+use crate::gates::{
+    EscalationError, EscalationRequest, PreExecute, SandboxGate, ToolCall, ToolGates,
+};
+use crate::tool::{
+    Command, Tool, ToolArgs, ToolContext, ToolFailure, ToolResult, ToolRunContext, codes,
+};
+use crate::upstream::{EscalationSubject, SandboxMode, SessionHandle, ToolSpec};
 
 /// A registration the registry refused, because a model could not be told about the tool.
 ///
@@ -86,7 +91,18 @@ impl ToolRegistry {
     /// [`Self::filter_to`] with [`Self::allow_list`] once the whole tree has loaded and fails the run on
     /// [`Self::missing`].
     pub fn from_config(gates: ToolGates, config: &ToolsConfig) -> Self {
-        todo!("port ToolsPlugin's constructor: builtins per config, allow list kept for the caller")
+        let registry = Self::with_allow_list(gates, config.allow.clone());
+        if config.include_builtins {
+            let options = BuiltinOptions {
+                bash_timeout_ms: config.bash_timeout_ms,
+            };
+            for tool in builtin_tools(Arc::clone(&registry.gates.sandbox), options) {
+                registry
+                    .register(tool)
+                    .expect("a built-in carries a name and a description");
+            }
+        }
+        registry
     }
 
     /// Add or replace a tool.
@@ -207,9 +223,101 @@ impl ToolRegistry {
     /// Never fails: a refusal, a sandbox denial and a tool's own failure all come back as a [`ToolResult`]
     /// with `error` set.
     pub async fn call(&self, name: &str, args: ToolArgs, context: ToolContext) -> ToolResult {
-        todo!(
-            "port ToolRegistry.call: unknown, approval, pre-execute, escalation, mode, run, post-execute"
-        )
+        let Some(tool) = self.get(name) else {
+            let known = self.names();
+            let known = if known.is_empty() {
+                "(none)".to_owned()
+            } else {
+                known.join(", ")
+            };
+            return ToolResult::refused(
+                codes::UNKNOWN_TOOL,
+                format!("no tool named '{name}'; known: {known}"),
+            );
+        };
+
+        let decision = self.gates.approvals.check(name);
+        if !decision.allowed {
+            context.log(&format!(
+                "denied {name}: {}",
+                decision.reason.as_deref().unwrap_or("no reason given")
+            ));
+            return ToolResult::refused(
+                codes::DENIED,
+                decision
+                    .reason
+                    .unwrap_or_else(|| format!("the approval policy refused '{name}'")),
+            );
+        }
+
+        if let PreExecute::Refused { reason } = self
+            .gates
+            .hooks
+            .pre_execute(&ToolCall { name, args: &args })
+        {
+            context.log(&format!(
+                "hooked {name}: {}",
+                reason.as_deref().unwrap_or("refused by a hook")
+            ));
+            return ToolResult::refused(
+                codes::HOOKED,
+                reason.unwrap_or_else(|| format!("a hook refused '{name}'")),
+            );
+        }
+
+        let mut mode = self.effective_mode(context.session.as_ref());
+        let requested_mode = args.get("sandbox_permissions").cloned();
+        let justification = args.get("justification").cloned();
+        if requested_mode.is_some() || justification.is_some() {
+            let request = EscalationRequest {
+                tool: name.to_owned(),
+                requested_mode,
+                justification,
+                effective_mode: mode,
+                subject: if name == "bash" {
+                    EscalationSubject::Command
+                } else {
+                    EscalationSubject::Operation
+                },
+                session: context.session.as_ref().map(|session| session.id.clone()),
+                cancel: context.cancel.clone(),
+            };
+            match self.gates.approvals.escalate(request).await {
+                Ok(granted) => mode = granted,
+                Err(EscalationError::BadArgs(message)) => {
+                    return ToolResult::refused(codes::BAD_ARGS, message);
+                }
+                Err(EscalationError::Refused(refusal)) => {
+                    context.log(&format!(
+                        "refused escalation of {name}: {}",
+                        refusal.message
+                    ));
+                    let data = serde_json::Map::from_iter([(
+                        "sandbox".to_owned(),
+                        serde_json::json!({ "mode": mode, "denied": false }),
+                    )]);
+                    return ToolResult::refused(codes::ESCALATION_REFUSED, refusal.message)
+                        .with_data(data);
+                }
+            }
+        }
+
+        let result = match tool
+            .run(args.clone(), ToolRunContext::new(context.clone(), mode))
+            .await
+        {
+            Ok(result) => result,
+            Err(ToolFailure::Sandbox(denial)) => {
+                context.log(&format!("denied {name}: {}", denial.message));
+                return ToolResult::refused(codes::SANDBOX, denial.message);
+            }
+            Err(ToolFailure::Failed(message)) => {
+                return ToolResult::refused(codes::TOOL_FAILED, message);
+            }
+        };
+        self.gates
+            .hooks
+            .post_execute(&ToolCall { name, args: &args }, result)
     }
 
     /// Run one command, which shares the approval gate (as `command:<name>`) and the result shape.
@@ -219,7 +327,22 @@ impl ToolRegistry {
         args: Vec<String>,
         context: ToolContext,
     ) -> ToolResult {
-        todo!("port ToolRegistry.runCommand")
+        let Some(command) = self.find_command(name) else {
+            return ToolResult::refused(
+                codes::UNKNOWN_COMMAND,
+                format!("no command named '{name}'"),
+            );
+        };
+        let decision = self.gates.approvals.check(&format!("command:{name}"));
+        if !decision.allowed {
+            return ToolResult::refused(
+                codes::DENIED,
+                decision
+                    .reason
+                    .unwrap_or_else(|| format!("the approval policy refused '{name}'")),
+            );
+        }
+        command.run(args, context).await
     }
 
     /// The sandbox this registry gates against, so the loop can resolve the workspace and the policy text.
@@ -257,6 +380,17 @@ impl ToolRegistry {
         self.tools
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn find_command(&self, name: &str) -> Option<Arc<dyn Command>> {
+        let commands = self
+            .commands
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        commands
+            .iter()
+            .find(|command| command.name() == name)
+            .cloned()
     }
 }
 
@@ -482,5 +616,566 @@ pub(crate) mod tests {
             registry.summary_line(),
             "tools: 2 registered, 0 command(s) — a, b"
         );
+    }
+
+    /// A log sink that keeps the lines a call wrote, so a test can assert what a person is told.
+    struct RecordingLog {
+        lines: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingLog {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                lines: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.lines.lock().unwrap().clone()
+        }
+
+        fn sink(&self) -> crate::tool::LogSink {
+            let lines = Arc::clone(&self.lines);
+            Arc::new(move |message: &str| lines.lock().unwrap().push(message.to_owned()))
+        }
+    }
+
+    /// An approval gate that refuses every action with this reason (or the default sentence).
+    struct DenyAll {
+        reason: Option<String>,
+    }
+
+    impl ApprovalGate for DenyAll {
+        fn check(&self, _: &str) -> ApprovalDecision {
+            ApprovalDecision {
+                allowed: false,
+                reason: self.reason.clone(),
+            }
+        }
+
+        fn escalate<'a>(
+            &'a self,
+            request: EscalationRequest,
+        ) -> BoxFuture<'a, Result<SandboxMode, EscalationError>> {
+            Box::pin(async move { Ok(request.effective_mode) })
+        }
+    }
+
+    /// What an escalation double does, and what it was asked.
+    enum Escalate {
+        Grant(SandboxMode),
+        Malformed(String),
+        Refused(crate::upstream::EscalationRefusal),
+    }
+
+    struct Escalation {
+        behavior: Escalate,
+        requests: std::sync::Mutex<Vec<EscalationRequest>>,
+    }
+
+    impl Escalation {
+        fn new(behavior: Escalate) -> Arc<Self> {
+            Arc::new(Self {
+                behavior,
+                requests: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn requests(&self) -> Vec<EscalationRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl ApprovalGate for Escalation {
+        fn check(&self, _: &str) -> ApprovalDecision {
+            ApprovalDecision {
+                allowed: true,
+                reason: None,
+            }
+        }
+
+        fn escalate<'a>(
+            &'a self,
+            request: EscalationRequest,
+        ) -> BoxFuture<'a, Result<SandboxMode, EscalationError>> {
+            self.requests.lock().unwrap().push(request.clone());
+            let answer = match &self.behavior {
+                Escalate::Grant(mode) => Ok(*mode),
+                Escalate::Malformed(message) => Err(EscalationError::BadArgs(message.clone())),
+                Escalate::Refused(refusal) => Err(EscalationError::Refused(refusal.clone())),
+            };
+            Box::pin(async move { answer })
+        }
+    }
+
+    /// Hooks that record every call they saw, refuse when told to and replace results when told to.
+    struct RecordingHooks {
+        pre: PreExecute,
+        replace_with: Option<String>,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingHooks {
+        fn new(pre: PreExecute, replace_with: Option<String>) -> Arc<Self> {
+            Arc::new(Self {
+                pre,
+                replace_with,
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl ToolHooks for RecordingHooks {
+        fn pre_execute(&self, call: &ToolCall<'_>) -> PreExecute {
+            self.seen.lock().unwrap().push(format!("pre:{}", call.name));
+            self.pre.clone()
+        }
+
+        fn post_execute(&self, call: &ToolCall<'_>, result: ToolResult) -> ToolResult {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("post:{}", call.name));
+            match &self.replace_with {
+                Some(output) => ToolResult::ok(output.clone()),
+                None => result,
+            }
+        }
+    }
+
+    /// A tool that records that it ran, and answers with its own output.
+    fn recording_tool(ran: Arc<std::sync::atomic::AtomicBool>) -> Arc<dyn Tool> {
+        let spec = ToolSpec {
+            name: "write_file".into(),
+            description: "writes".into(),
+            parameters: serde_json::json!({}),
+        };
+        tool_fn(spec, move |_args, _ctx: ToolRunContext| {
+            let ran = Arc::clone(&ran);
+            Box::pin(async move {
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolResult::ok("ran"))
+            })
+        })
+    }
+
+    /// A command that answers with its arguments joined by spaces.
+    struct EchoCommand(&'static str);
+
+    impl Command for EchoCommand {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "echoes its arguments"
+        }
+        fn run<'a>(&'a self, args: Vec<String>, _: ToolContext) -> BoxFuture<'a, ToolResult> {
+            Box::pin(async move { ToolResult::ok(args.join(" ")) })
+        }
+    }
+
+    fn with_hooks(hooks: Arc<dyn ToolHooks>) -> ToolGates {
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.hooks = hooks;
+        gates
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_is_refused_by_name_and_lists_the_known_ones() {
+        let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
+        registry.register(named("read_file", "reads")).unwrap();
+        let result = registry
+            .call("shout", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        let error = result.error.unwrap();
+        assert_eq!(error.code, codes::UNKNOWN_TOOL);
+        assert!(error.message.contains("shout"), "{}", error.message);
+        assert!(error.message.contains("read_file"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn a_denied_tool_is_the_denied_refusal_and_never_runs() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.approvals = Arc::new(DenyAll {
+            reason: Some("the policy says no".into()),
+        });
+        let registry = ToolRegistry::new(gates);
+        registry.register(recording_tool(Arc::clone(&ran))).unwrap();
+        let log = RecordingLog::new();
+        let result = registry
+            .call(
+                "write_file",
+                ToolArgs::new(),
+                ToolContext::new("/w").with_log(log.sink()),
+            )
+            .await;
+        assert_eq!(result.error.unwrap().code, codes::DENIED);
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(log.lines(), ["denied write_file: the policy says no"]);
+    }
+
+    #[tokio::test]
+    async fn a_pre_execute_refusal_is_hooked_and_keeps_its_reason() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hooks = RecordingHooks::new(
+            PreExecute::Refused {
+                reason: Some("not this one".into()),
+            },
+            None,
+        );
+        let registry = ToolRegistry::new(with_hooks(hooks));
+        registry.register(recording_tool(Arc::clone(&ran))).unwrap();
+        let result = registry
+            .call("write_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(result.error.as_ref().unwrap().code, codes::HOOKED);
+        assert_eq!(result.error.unwrap().message, "not this one");
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_hook_refusal_with_no_reason_names_the_tool() {
+        let hooks = RecordingHooks::new(PreExecute::Refused { reason: None }, None);
+        let registry = ToolRegistry::new(with_hooks(hooks));
+        registry.register(named("read_file", "reads")).unwrap();
+        let result = registry
+            .call("read_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(result.error.unwrap().message, "a hook refused 'read_file'");
+    }
+
+    #[tokio::test]
+    async fn approval_is_checked_before_the_hook() {
+        let hooks = RecordingHooks::new(PreExecute::Allowed, None);
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.approvals = Arc::new(DenyAll { reason: None });
+        let gates = ToolGates {
+            hooks: Arc::clone(&hooks) as Arc<dyn ToolHooks>,
+            ..gates
+        };
+        let registry = ToolRegistry::new(gates);
+        registry.register(named("read_file", "reads")).unwrap();
+        let result = registry
+            .call("read_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(result.error.unwrap().code, codes::DENIED);
+        assert!(hooks.seen().is_empty(), "the hook never saw the call");
+    }
+
+    #[tokio::test]
+    async fn the_hook_is_checked_before_the_escalation() {
+        let hooks = RecordingHooks::new(
+            PreExecute::Refused {
+                reason: Some("no".into()),
+            },
+            None,
+        );
+        let escalation = Escalation::new(Escalate::Grant(SandboxMode::DangerFullAccess));
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.hooks = Arc::clone(&hooks) as Arc<dyn ToolHooks>;
+        gates.approvals = Arc::clone(&escalation) as Arc<dyn ApprovalGate>;
+        let registry = ToolRegistry::new(gates);
+        registry.register(named("bash", "runs")).unwrap();
+        let result = registry
+            .call(
+                "bash",
+                args_with_escalation("danger-full-access", "needed"),
+                ToolContext::new("/w"),
+            )
+            .await;
+        assert_eq!(result.error.unwrap().code, codes::HOOKED);
+        assert!(escalation.requests().is_empty(), "the escalation never ran");
+    }
+
+    fn args_with_escalation(mode: &str, justification: &str) -> ToolArgs {
+        ToolArgs::from_iter([
+            (
+                "sandbox_permissions".to_owned(),
+                serde_json::Value::String(mode.to_owned()),
+            ),
+            (
+                "justification".to_owned(),
+                serde_json::Value::String(justification.to_owned()),
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_malformed_escalation_is_bad_arguments_and_the_tool_does_not_run() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.approvals = Escalation::new(Escalate::Malformed(
+            "sandbox_permissions must be a string".into(),
+        ));
+        let registry = ToolRegistry::new(gates);
+        registry.register(recording_tool(Arc::clone(&ran))).unwrap();
+        let result = registry
+            .call(
+                "write_file",
+                args_with_escalation("danger-full-access", "needed"),
+                ToolContext::new("/w"),
+            )
+            .await;
+        assert_eq!(result.error.as_ref().unwrap().code, codes::BAD_ARGS);
+        assert!(
+            result
+                .error
+                .unwrap()
+                .message
+                .contains("sandbox_permissions")
+        );
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_refused_escalation_carries_the_sandbox_facts() {
+        let refusal = crate::upstream::EscalationRefusal {
+            code: crate::upstream::EscalationRefusalCode::Rejected,
+            message: "a person said no".into(),
+        };
+        let mut gates = gates(SandboxMode::ReadOnly);
+        gates.approvals = Escalation::new(Escalate::Refused(refusal));
+        let registry = ToolRegistry::new(gates);
+        registry.register(named("write_file", "writes")).unwrap();
+        let result = registry
+            .call(
+                "write_file",
+                args_with_escalation("workspace-write", "needed"),
+                ToolContext::new("/w"),
+            )
+            .await;
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            codes::ESCALATION_REFUSED
+        );
+        let data = result.data.expect("the sandbox facts");
+        assert_eq!(data["sandbox"]["mode"], "read-only");
+        assert_eq!(data["sandbox"]["denied"], false);
+    }
+
+    #[tokio::test]
+    async fn a_granted_escalation_applies_to_that_call_only() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spec = ToolSpec {
+            name: "write_file".into(),
+            description: "writes".into(),
+            parameters: serde_json::json!({}),
+        };
+        let record = Arc::clone(&seen);
+        let tool = tool_fn(spec, move |_args, ctx: ToolRunContext| {
+            let record = Arc::clone(&record);
+            Box::pin(async move {
+                record.lock().unwrap().push(ctx.mode());
+                Ok(ToolResult::ok("ran"))
+            })
+        });
+        let mut gates = gates(SandboxMode::ReadOnly);
+        gates.approvals = Escalation::new(Escalate::Grant(SandboxMode::DangerFullAccess));
+        let registry = ToolRegistry::new(gates);
+        registry.register(tool).unwrap();
+        registry
+            .call(
+                "write_file",
+                args_with_escalation("danger-full-access", "needed"),
+                ToolContext::new("/w"),
+            )
+            .await;
+        registry
+            .call("write_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [SandboxMode::DangerFullAccess, SandboxMode::ReadOnly],
+            "the grant was this call's; the next call is back under the deployment mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_mode_comes_from_the_resolved_escalation_and_never_from_the_arguments() {
+        struct Narrow;
+        impl ModeResolver for Narrow {
+            fn effective_mode(&self, _: &SessionHandle, _: SandboxMode) -> SandboxMode {
+                SandboxMode::ReadOnly
+            }
+        }
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spec = ToolSpec {
+            name: "bash".into(),
+            description: "runs".into(),
+            parameters: serde_json::json!({}),
+        };
+        let record = Arc::clone(&seen);
+        let tool = tool_fn(spec, move |_args, ctx: ToolRunContext| {
+            let record = Arc::clone(&record);
+            Box::pin(async move {
+                record.lock().unwrap().push(ctx.mode());
+                Ok(ToolResult::ok("ran"))
+            })
+        });
+        let escalation = Escalation::new(Escalate::Grant(SandboxMode::ReadOnly));
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.modes = Arc::new(Narrow);
+        gates.approvals = Arc::clone(&escalation) as Arc<dyn ApprovalGate>;
+        let registry = ToolRegistry::new(gates);
+        registry.register(tool).unwrap();
+        let session = SessionHandle {
+            id: "s".into(),
+            dir: "/s".into(),
+            transcript: "/s/t".into(),
+            meta: "/s/m".into(),
+        };
+        registry
+            .call(
+                "bash",
+                args_with_escalation("danger-full-access", "needed"),
+                ToolContext::new("/w").with_session(session),
+            )
+            .await;
+        assert_eq!(*seen.lock().unwrap(), [SandboxMode::ReadOnly]);
+        let requests = escalation.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].requested_mode,
+            Some(serde_json::json!("danger-full-access")),
+            "the raw argument reaches the gate, judged there"
+        );
+        assert_eq!(requests[0].effective_mode, SandboxMode::ReadOnly);
+        assert_eq!(
+            requests[0].subject,
+            crate::upstream::EscalationSubject::Command
+        );
+        assert_eq!(requests[0].session.as_deref(), Some("s"));
+    }
+
+    #[tokio::test]
+    async fn a_tool_failure_is_tool_failed_and_a_sandbox_denial_is_sandbox() {
+        fn exploding(name: &str, denial: bool) -> Arc<dyn Tool> {
+            let spec = ToolSpec {
+                name: name.into(),
+                description: name.into(),
+                parameters: serde_json::json!({}),
+            };
+            tool_fn(spec, move |_args, _ctx| {
+                Box::pin(async move {
+                    if denial {
+                        Err(crate::tool::ToolFailure::Sandbox(SandboxDenial {
+                            message: "outside".into(),
+                            path: "/etc/x".into(),
+                            mode: SandboxMode::WorkspaceWrite,
+                            workspace_root: "/w".into(),
+                        }))
+                    } else {
+                        Err(crate::tool::ToolFailure::Failed("boom".into()))
+                    }
+                })
+            })
+        }
+        let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
+        registry.register(exploding("explode", false)).unwrap();
+        registry.register(exploding("denied", true)).unwrap();
+        let failed = registry
+            .call("explode", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(failed.error.unwrap().code, codes::TOOL_FAILED);
+        let denial = registry
+            .call("denied", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(denial.error.unwrap().code, codes::SANDBOX);
+    }
+
+    #[tokio::test]
+    async fn post_execute_replaces_the_result() {
+        let hooks = RecordingHooks::new(PreExecute::Allowed, Some("redacted".into()));
+        let registry = ToolRegistry::new(with_hooks(Arc::clone(&hooks) as Arc<dyn ToolHooks>));
+        registry.register(named("read_file", "reads")).unwrap();
+        let result = registry
+            .call("read_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(result.output, "redacted");
+        assert_eq!(hooks.seen(), ["pre:read_file", "post:read_file"]);
+    }
+
+    #[test]
+    fn from_config_registers_the_built_ins_and_keeps_the_allow_list_for_the_caller() {
+        let config = ToolsConfig {
+            allow: vec!["read_file".into(), "absent".into()],
+            include_builtins: true,
+            bash_timeout_ms: 5,
+        };
+        let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
+        assert_eq!(
+            registry.names(),
+            ["write_file", "read_file", "list_dir", "bash"]
+        );
+        assert_eq!(registry.allow_list(), ["read_file", "absent"]);
+        assert_eq!(
+            registry.missing(),
+            ["absent"],
+            "the allow list is a check, not a filter"
+        );
+        registry.filter_to(&config.allow);
+        assert_eq!(registry.names(), ["read_file"]);
+    }
+
+    #[test]
+    fn from_config_can_leave_the_built_ins_out() {
+        let config = ToolsConfig {
+            allow: Vec::new(),
+            include_builtins: false,
+            bash_timeout_ms: 0,
+        };
+        let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
+        assert!(registry.names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_command_shares_the_approval_gate_under_the_command_name() {
+        struct CommandDenier;
+        impl ApprovalGate for CommandDenier {
+            fn check(&self, action: &str) -> ApprovalDecision {
+                ApprovalDecision {
+                    allowed: !action.starts_with("command:"),
+                    reason: Some("commands are closed".into()),
+                }
+            }
+            fn escalate<'a>(
+                &'a self,
+                request: EscalationRequest,
+            ) -> BoxFuture<'a, Result<SandboxMode, EscalationError>> {
+                Box::pin(async move { Ok(request.effective_mode) })
+            }
+        }
+        let mut gates = gates(SandboxMode::WorkspaceWrite);
+        gates.approvals = Arc::new(CommandDenier);
+        let registry = ToolRegistry::new(gates);
+        registry.register_command(Arc::new(EchoCommand("echo")));
+        let refused = registry
+            .run_command("echo", vec!["hi".into()], ToolContext::new("/w"))
+            .await;
+        assert_eq!(refused.error.unwrap().code, codes::DENIED);
+        let unknown = registry
+            .run_command("absent", Vec::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(unknown.error.unwrap().code, codes::UNKNOWN_COMMAND);
+    }
+
+    #[tokio::test]
+    async fn an_allowed_command_runs_and_keeps_its_result_shape() {
+        let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
+        registry.register_command(Arc::new(EchoCommand("echo")));
+        let result = registry
+            .run_command(
+                "echo",
+                vec!["hi".into(), "there".into()],
+                ToolContext::new("/w"),
+            )
+            .await;
+        assert_eq!(result.output, "hi there");
+        assert_eq!(result.error, None);
     }
 }

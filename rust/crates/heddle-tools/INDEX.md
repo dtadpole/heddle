@@ -1,6 +1,6 @@
 ---
 title: The heddle-tools crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -48,10 +48,10 @@ Each step lands with its unit tests in the worktree and is pushed to `hd/develop
 
 | # | Step | State | Tests that can fail |
 |---|---|---|---|
-| 1 | Public API, mirrors, protocol framing; registration rule, displacement in place, allow list and `missing`, the config row | **landed** | 22 unit tests: blank name/description refused with the TypeScript sentences; a later registration displaces in place; filter and `missing`; config defaults and a misspelled key refused; protocol round trip and line classification |
-| 2 | `ToolRegistry::call`, `run_command`, `from_config` | next | one test per gate with doubles: each refusal code, the order (approval before sandbox), mode from the session and never from `args`, escalation per call only, `post_execute` replacing a result, a failure as `TOOL_FAILED` |
-| 3 | The four built-ins | then | in a temporary workspace: write/read round trip, a denial reported as `SANDBOX`, `list_dir` sorted with `/` and sizes, `bash` exit/timeout/cancel/truncation, a confined mode with no backend refused as `SANDBOX_UNAVAILABLE` and never run |
-| 4 | Outside components: spawn, `initialize` with timeout, the line reader, pending table, sandbox back-channel, log, cancel, exit, shutdown | then | the test binary re-executes itself as a component: registration, a call, a back-channel denial becoming `SANDBOX`, a blank spec failing the row, a dead process failing calls, cancel |
+| 1 | Public API, mirrors, protocol framing; registration rule, displacement in place, allow list and `missing`, the config row | **landed** | 12 unit tests: blank name/description refused with the TypeScript sentences; a later registration displaces in place; filter and `missing`; config defaults and a misspelled key refused; protocol round trip and line classification |
+| 2 | `ToolRegistry::call`, `run_command`, `from_config` | **landed** | 16 unit tests with doubles: the unknown-tool sentence names the known tools; approval before the hook and the hook before escalation; each refusal code (`DENIED`, `HOOKED`, `BAD_ARGS`, `ESCALATION_REFUSED`); the mode from the session and never from `args`; a grant is that call's only; `post_execute` replaces a result; a failure as `TOOL_FAILED` and a denial as `SANDBOX`; the config row registers the built-ins and keeps the allow list as a check; a command is gated as `command:<name>` |
+| 3 | The four built-ins | **landed** | 12 unit tests in a temporary workspace: write/read round trip, a denial reported as `SANDBOX`, a blank path as `BAD_ARGS`, `list_dir` sorted with `/` and sizes, `bash` exit/timeout/cancel with output kept, the 20 000-character cut, a confined mode with no backend refused as `SANDBOX_UNAVAILABLE` and never run, a denial classified by the sandbox and not by the exit code |
+| 4 | Outside components: spawn, `initialize` with timeout, the line reader, pending table, sandbox back-channel, log, cancel, exit, shutdown | **landed** | 7 unit tests: the test binary re-executes itself as a component — registration and a call, a blank spec failing the row, a back-channel denial becoming `SANDBOX`, a dead process failing calls, cancel reporting `INTERRUPTED`, an unanswered `initialize` failing as `InitTimeout` |
 | 5 | Adapters over the real crates; mirrors become `pub use` | when `heddle-llm`, `heddle-sandbox`, `heddle-session`, `heddle-events` land | the adapters' own tests against the owners' types |
 | 6 | `40-pluggable-tools` through `HEDDLE_BIN` | with `heddle` (boot, `tools --json`, `--turn`) and integrator-one's process branch | the verifier, exit 0 |
 
