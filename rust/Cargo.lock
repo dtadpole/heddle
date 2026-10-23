@@ -351,6 +351,7 @@ version = "0.0.1"
 dependencies = [
  "chrono",
  "heddle-config",
+ "heddle-llm",
  "serde",
  "serde_json",
  "tempfile",

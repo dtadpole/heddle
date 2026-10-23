@@ -176,15 +176,7 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
         match chunk {
             Some(Chunk::TextDelta { text }) => content.push(ContentPart::Text { text }),
             Some(Chunk::ReasoningDelta { text }) => content.push(ContentPart::Reasoning { text }),
-            Some(Chunk::ToolCall {
-                id,
-                name,
-                arguments,
-            }) => content.push(ContentPart::ToolCall {
-                id,
-                name,
-                arguments,
-            }),
+            Some(Chunk::ToolCall(call)) => content.push(ContentPart::ToolCall(call)),
             Some(Chunk::Done { .. }) => break,
             Some(Chunk::ToolCallDelta { .. }) => {}
             // A chunk that does not parse is a chunk this build does not know; the run continues past it,
@@ -200,6 +192,7 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             role: Role::Assistant,
             tool_call_id: None,
             content,
+            source: None,
         })
     }
 }
@@ -255,6 +248,7 @@ pub fn inherits_answer<E: Borrow<SessionEvent> + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::ToolCall;
     use serde_json::{Map, json};
 
     fn event(seq: u64, kind: &str, fields: &[(&str, Value)]) -> SessionEvent {
@@ -476,11 +470,11 @@ mod tests {
                 ContentPart::Text {
                     text: "loom".to_string()
                 },
-                ContentPart::ToolCall {
+                ContentPart::ToolCall(ToolCall {
                     id: "c".to_string(),
                     name: "read".to_string(),
                     arguments: "{}".to_string()
-                },
+                }),
             ]
         );
     }

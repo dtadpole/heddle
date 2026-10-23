@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 heddle-config.workspace = true
+# The message shapes the log records belong to `heddle-llm` (`src/llm/types.ts`), so this crate
+# re-exports them instead of keeping a copy that could drift from the wire vocabulary.
+heddle-llm.workspace = true
 # `preserve_order` keeps a JSON object's keys in insertion order, which is what makes an event, a
 # meta record and a definition byte-identical to what the TypeScript store writes with
 # `JSON.stringify`. Cargo unifies features, so every crate in the build sees an ordered `Map`.

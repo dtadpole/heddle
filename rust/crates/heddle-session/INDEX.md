@@ -52,7 +52,7 @@ Everything is re-exported at the crate root.
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
 | `title_from`, `fork_title` | a session's label from its first message; `<title> (n)` |
 | `SessionError`, `SessionFlagError` | failures, with the TypeScript build's messages word for word |
-| `Message`, `ContentPart`, `Chunk`, `Role`, `RecordedMessage`, `text_of` | **stand-ins** for `heddle-llm`'s types, with the serde shape the log needs; replaced by `pub use heddle_llm::…` when that crate declares them |
+| `Message`, `ContentPart`, `Chunk`, `Role`, `RecordedMessage`, `text_of` | `heddle-llm`'s types, re-exported: `RecordedMessage` is `Message` itself (its `source` names who wrote it), so a caller crossing between the crates needs no conversion; `text_of` stays here until `heddle-llm` re-exports it |
 
 ### Decisions a dependent crate should know
 
@@ -61,9 +61,9 @@ Everything is re-exported at the crate root.
    never the log.
 2. **No dependency on `heddle-sandbox`.** The mode fold is generic and reads and writes the event's `mode`
    through serde, so `SandboxMode` (kebab-case `Serialize + Deserialize`) is used as it is.
-3. **Message types move to `heddle-llm`.** Until then they live in `message.rs`. The shape they must keep:
+3. **Message types are `heddle-llm`'s.** `message.rs` re-exports `Message`, `ContentPart`, `Chunk`, `Role`, `ImagePart`, `FilePart`, `ImageMediaType`, `TokenUsage` and `ToolCall`, so the log and the wire share one declaration and a dependent crate converts nothing. `RecordedMessage` is `Message` (the `source` field is inline, as `src/llm/types.ts` has it). The shape the log still depends on:
    tagged by `"type"` first, kebab-case variants, camelCase fields, `Message` ordered `role`, `toolCallId?`,
-   `content`, absent options omitted.
+   `content`, then `source` when the harness wrote it, absent options omitted.
 4. **`read` returns a snapshot, not a borrow** — appending while holding one is fine.
 5. **Fallible reads.** A transcript line that does not parse fails the load (`SessionError::InvalidLine`),
    so `read`, `count`, `surface` and `append` return `Result`.

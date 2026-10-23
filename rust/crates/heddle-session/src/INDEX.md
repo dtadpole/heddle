@@ -17,7 +17,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`clock.rs`](clock.rs) | timestamps as `toISOString` prints them | `new Date().toISOString()` |
 | [`layout.rs`](layout.rs) | `workspace_key`: the folder a log is filed under | `layout.ts` |
 | [`transcript.rs`](transcript.rs) | one zstd frame per event: the frame walk, encode, decode | `transcript.ts` |
-| [`message.rs`](message.rs) | stand-ins for `heddle-llm`'s `Message`, `ContentPart`, `Chunk` | `src/llm/types.ts` |
+| [`message.rs`](message.rs) | `heddle-llm`'s `Message`, `ContentPart`, `Chunk` and friends, re-exported, plus `text_of` and the `RecordedMessage` alias | `src/llm/types.ts` via `heddle-llm` |
 | [`event.rs`](event.rs) | `SessionEvent`, `NewEvent`, `SessionHandle`, `SurfaceOp`, `AppendOptions` | `store.ts` types |
 | [`meta.rs`](meta.rs) | `SessionMeta` as ordered JSON, and the options that create or edit it | `store.ts` `SessionMeta` |
 | [`surface.rs`](surface.rs) | the surface fold and message derivation | `store.ts` free functions |

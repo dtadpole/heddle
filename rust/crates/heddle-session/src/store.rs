@@ -419,7 +419,7 @@ impl SessionStore {
             if message.role == Role::System {
                 continue;
             }
-            self.message(&handle, RecordedMessage::from(message))?;
+            self.message(&handle, message)?;
         }
         Ok(Some(handle))
     }
@@ -905,7 +905,7 @@ impl SessionStore {
             AppendOptions::default(),
         )?;
         // One write for both facts: the age moved, and a user message is a turn.
-        self.touch(handle, message.message.role == Role::User);
+        self.touch(handle, message.role == Role::User);
         Ok(event)
     }
 
@@ -1042,13 +1042,14 @@ mod tests {
     }
 
     fn user(text: &str) -> RecordedMessage {
-        RecordedMessage::from(Message {
+        Message {
             role: Role::User,
             tool_call_id: None,
             content: vec![crate::message::ContentPart::Text {
                 text: text.to_string(),
             }],
-        })
+            source: None,
+        }
     }
 
     #[test]
@@ -1565,13 +1566,14 @@ mod tests {
         store
             .message(
                 &handle,
-                RecordedMessage::from(Message {
+                Message {
                     role: Role::Assistant,
                     tool_call_id: None,
                     content: vec![crate::message::ContentPart::Text {
                         text: "two".to_string(),
                     }],
-                }),
+                    source: None,
+                },
             )
             .unwrap();
         assert_eq!(store.list()[0].turns(), 1);
@@ -1691,13 +1693,14 @@ mod tests {
         store
             .message(
                 &source,
-                RecordedMessage::from(Message {
+                Message {
                     role: Role::Assistant,
                     tool_call_id: None,
                     content: vec![crate::message::ContentPart::Text {
                         text: "answer".to_string(),
                     }],
-                }),
+                    source: None,
+                },
             )
             .unwrap();
         store

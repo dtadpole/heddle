@@ -23,7 +23,7 @@ use crate::definition::{
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
-use crate::message::{ContentPart, Message, RecordedMessage, Role, text_of};
+use crate::message::{ContentPart, Message, Role, text_of};
 use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
 use crate::mode::{
     MODE_EVENT, effective_mode as fold_effective_mode, recorded_mode as fold_recorded_mode,
@@ -374,12 +374,10 @@ impl SessionService {
         let title = title_from(&text_of(&content));
         self.store.message(
             handle,
-            RecordedMessage {
-                message: Message {
-                    role: Role::User,
-                    tool_call_id: None,
-                    content,
-                },
+            Message {
+                role: Role::User,
+                tool_call_id: None,
+                content,
                 source,
             },
         )?;
@@ -827,13 +825,14 @@ mod tests {
             .store()
             .message(
                 &unanswered,
-                RecordedMessage::from(Message {
+                Message {
                     role: Role::Assistant,
                     tool_call_id: None,
                     content: vec![ContentPart::Text {
                         text: "the answer".to_string(),
                     }],
-                }),
+                    source: None,
+                },
             )
             .unwrap();
         service
