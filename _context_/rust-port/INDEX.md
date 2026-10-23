@@ -1,7 +1,7 @@
 ---
 title: Rust port browser baselines
-version: 0.1.0
-description: The pinned reference pages the Rust port's Web UI is compared against — the TypeScript heddle page and DSH — measured with the browser-use tool, numbers only.
+version: 0.2.0
+description: The pinned reference pages the Rust port's Web UI is compared against — the TypeScript heddle page and DSH — measured with the browser-use tool, numbers only, and the records of the live deployment and its monitor.
 level: L2
 status: unverified
 grounded_in:
@@ -37,6 +37,15 @@ The `8081` forward is gone with the devservers (D-020). The team's live address 
 [`live-health.md`](live-health.md) and [`live-health.jsonl`](live-health.jsonl), and its first record
 is the gate serving the app at 20:15:44 on 2026-10-22 (marker `dd6d45d28567` = the checkout's built
 `dist/server/page.html`) and the gate answering `502` from 20:16:49 while the deployed server was down.
+
+## Records
+
+- [`deployment-2026-10-22.md`](deployment-2026-10-22.md) — the live deployment on this Mac: what runs
+  where, the redeploy log, the outages and their fixes, and the scratch rehearsals (live-deploy's record).
+- [`live-health.md`](live-health.md) — what the monitor's pass judges every 20 minutes, the topology it
+  judges through, and the incidents it found.
+- [`live-health.jsonl`](live-health.jsonl) — every pinned pass, append-only; read it as a table with
+  `node _tools_/live-health/summary.mjs`.
 
 ## Read next
 
