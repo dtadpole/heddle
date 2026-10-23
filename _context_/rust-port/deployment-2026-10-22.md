@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:23:31Z
+modified: 2026-10-23T04:27:13Z
 level: L3
 version: 1.6.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
@@ -305,6 +305,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 21:13 | `d28625d` (a ui check whose harness cannot start fails instead of hanging) | `d28625d`, clean | 95 **4/4**, 96 **3/3** from the deployment; marker `dd6d45d28567` |
 | 21:21 | `b0ef8ab` (Rust status run on `ea1028b`) | `b0ef8ab`, clean | 96 **3/3** from the deployment; 95 judged on the scratch service instead (4/4, rehearsal run 3), so the owner's server was not killed |
 | 21:24 | `b89ad37` (Rust status run on `4aca3b1`; the hygiene gate judges from the merge base) | `b89ad37`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567`; 95 not run against the live agent |
+| 21:27 | `c4c9292` (check-team-view fails instead of hanging) | `c4c9292`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567` |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
@@ -341,6 +342,13 @@ not start it). `guard.log` entries at 03:36:39–03:40:50Z are the same windows:
 tests, not a crash loop.
 
 ## Redeploying, when an integrator moves main
+
+**Since `redeploy.sh` (2026-10-23):** one command, `sh ~/heddle-live/_tools_/web-daemon/redeploy.sh` (or, until
+`main` carries it, `sh <seat worktree>/_tools_/web-daemon/redeploy.sh --repo ~/heddle-live`). It fetches, moves the
+checkout to `origin/main`, builds, runs **the new checkout's** `install.sh --restart`, waits for the port and judges
+with the checkout's own `96-deployment`; `--check` only answers whether the deployment is behind. First run against the
+live deployment, at `c4c9292`: `current at c4c9292`, then `96-deployment 3/3 held`, and the server kept its pid — a
+current deployment is judged, not restarted. The manual steps below are what it does.
 
 The deployment is one checkout and one agent, so a redeploy is four steps and one reading:
 

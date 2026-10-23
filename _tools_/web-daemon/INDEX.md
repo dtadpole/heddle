@@ -1,6 +1,6 @@
 ---
 title: Web Daemon
-version: 1.4.0
+version: 1.5.0
 description: The supervised user service — a launchd agent on macOS, a systemd user unit on Linux — that keeps the heddle Web UI running at the documented port, with either build.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -24,6 +24,7 @@ for the machine it runs on, and the reader both daemon verifiers share.
 | [`supervisor.mjs`](supervisor.mjs) | the inner supervisor: runs the server and puts it back when it exits, with a bounded backoff and a loud give-up. `install.sh` puts it in front of the program on macOS, where launchd was measured not to restart a job; Linux keeps systemd alone |
 | [`guard.sh`](guard.sh) | the outer layer: one probe of the port, and a platform start when nothing answers. Run from cron once a minute on a host whose launchd never starts the agent at login; `install.sh --guard` adds that line, `--guard-uninstall` removes it |
 | [`rehearse.sh`](rehearse.sh) | installs the same definition under a scratch label, port, state directory and log, measures six claims (started, kill, guard, reinstall, agent gone, and `95-web-daemon` itself judging the scratch service), and removes it. **Every experiment on the service runs here, never on the live agent**; it refuses the deployment's label, unit and ports |
+| [`redeploy.sh`](redeploy.sh) | the deployment's redeploy, in its one order: fetch, move the checkout to `origin/main`, build, run **the new checkout's** `install.sh --restart`, wait for the port, judge with its `96-deployment`. `--check` only says whether the deployment is behind; an edited checkout is refused; 95 is not run (it kills the server) |
 | [`_tests_/`](_tests_/INDEX.md) | the component suites: the reader's rules, the supervisor, and the installer run in throwaway checkouts with stand-in supervisors |
 
 ## Either build, either platform
