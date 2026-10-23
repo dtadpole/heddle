@@ -104,8 +104,8 @@ pub struct Context<'a> {
     pub goal: Option<&'a dyn GoalAdvance>,
 }
 
-/// The sentence a turn fails with when nothing names an endpoint.
-pub const NO_ENDPOINT_CONFIGURED: &str = "no endpoint is configured; write ~/.heddle/heddle.json or pass --endpoint after configuring one";
+/// The sentence a turn fails with when nothing names an endpoint (`heddle-llm`'s, which owns `--endpoint`).
+pub use heddle_llm::command::NO_ENDPOINT_CONFIGURED;
 
 /// One tool call as `--json` reports it.
 #[derive(Serialize)]
@@ -151,22 +151,11 @@ pub async fn run(
     }
 }
 
-/// The endpoint a turn runs on: `--endpoint`, else the service's default, and one the service knows.
+/// The endpoint a turn runs on: `--endpoint`, else the configuration's nominated default, else the first
+/// configured endpoint — `heddle-llm`'s [`turn_endpoint`](heddle_llm::command::turn_endpoint), which owns
+/// `--endpoint` (D-043), over this service's names and nomination. One implementation, two sentences.
 pub fn resolve_endpoint(requested: Option<&str>, models: &ModelService) -> Result<String, String> {
-    let names = models.names();
-    let endpoint = match requested {
-        Some(endpoint) => endpoint.to_owned(),
-        None => models
-            .default_endpoint(None)
-            .ok_or_else(|| NO_ENDPOINT_CONFIGURED.to_owned())?,
-    };
-    if !names.contains(&endpoint) {
-        return Err(format!(
-            "no endpoint named '{endpoint}'; configured: {}",
-            names.join(", ")
-        ));
-    }
-    Ok(endpoint)
+    heddle_llm::command::turn_endpoint(requested, &models.names(), models.nominated().as_deref())
 }
 
 /// The prompt's first sixty characters, the title a new session is given.

@@ -44,6 +44,24 @@ resolved once from the session's record or the deployment default and never from
 `tools/post-execute`; a sandbox denial thrown by a tool is `SANDBOX`, any other failure `TOOL_FAILED`. `call`
 never fails: every refusal is a result the model reads.
 
+## Where the port stands
+
+As of 2026-10-22, branch `hd/developer-five`. Every body is ported; no `todo!()` and no mirror type is left (the
+sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76, green, with the workspace gate
+(`fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `test --workspace`).
+
+- **Done:** the registry and its gate order, the four built-ins, outside components over JSON-RPC 2.0 on stdio
+  (including `notify`), the gate ports over the real `heddle-sandbox` and `heddle-session` services
+  (`adapters::{Sandbox, SandboxApprovals, SessionModes, gates_over}`), and the D-043 `tools`/`commands` entry point
+  (`command::run`).
+- **Open, not in this crate:** `40-pluggable-tools` answers through `HEDDLE_BIN` once the binary dispatches
+  `tools`/`--turn` to the entry points and composes the tools row with `gates_over`; its malformed-spec check also
+  needs the boot to print an outside component's `OutsideError::Registration` with the failed row.
+- **Next in this crate:** a `ToolHooks` adapter over `heddle-events`' bridge (`bridge::pre_execute`/`post_execute`)
+  once `bridge.rs` is on main; the mapping is in the `ToolHooks` docs.
+- **Verify:** `_tools_/local-build/run test -p heddle-tools` from `rust/`; the verifier from the lane worktree,
+  `HEDDLE_BIN="$PWD/rust/target/release/heddle" sh _verifiers_/40-pluggable-tools/verify.sh`.
+
 ## Port plan
 
 Each step lands with its unit tests in the worktree and is pushed to `hd/developer-five` for integrator-one.
