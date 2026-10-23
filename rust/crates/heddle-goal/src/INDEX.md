@@ -16,8 +16,10 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`service.rs`](service.rs) | the shapes, the strict fold, the `goal/change` body and `GoalService` |
 | [`driver.rs`](driver.rs) | the round decision and prompt, `GoalDriver`, `DriverTrigger` |
 | [`log.rs`](log.rs) | the `SessionLog` and `Clock` ports and `iso_timestamp` |
+| [`store.rs`](store.rs) | `SessionLog` for `heddle-session`'s `SessionStore`, tested against a real store on disk |
 | [`tool.rs`](tool.rs) | `create_goal`, `get_goal`, `update_goal` as specs and functions |
 | [`http.rs`](http.rs) | `GET` and `POST /api/goal` |
+| [`command.rs`](command.rs) | `heddle goal [session] [--json]`, behind the binary's entry-point convention (D-043) |
 | [`cli.rs`](cli.rs) | `heddle goal`'s two renderings |
 | [`test_support.rs`](test_support.rs) | the in-memory log, fixed clock and fixed ids the tests use (tests only) |
 
