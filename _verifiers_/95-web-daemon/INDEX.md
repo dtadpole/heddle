@@ -1,6 +1,6 @@
 ---
 title: Verifier 11 — Web Daemon
-version: 1.2.0
+version: 1.3.0
 description: a supervised user service — a launchd agent on macOS, a systemd user unit on Linux — keeps the Web UI running at the documented port, survives a kill, and does not weaken the token.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -74,6 +74,11 @@ service installed is the `3` case, and it says how to install it.
 
 **Measured** on the Linux deployment host on 2026-10-22, against the hand-written unit `install.sh` now renders
 (TypeScript build, `~/heddle-live`, 127.0.0.1:8082): 4 checks, 4 passed.
+
+**Measured on the owner's Mac, 2026-10-22** — the deployment at `1bcff7e` with the agent running
+[`supervisor.mjs`](../../_tools_/web-daemon/INDEX.md) in front of it: **4 checks, 4 passed**. Then with the agent
+booted out, the same run answers **verdict 3** (`2 of 4 check(s) could not be judged`: the two definition checks
+still judge the repository, and the live and stays-up checks skip) — an absent service is unjudged, never a pass.
 
 ## What it deliberately does not judge
 
