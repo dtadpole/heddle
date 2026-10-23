@@ -233,6 +233,26 @@ export function redactRecord(value, home) {
 }
 
 /**
+ * Which hop of the owner's address failed.
+ *
+ * `8082` is the gate (its own launchd agent), `3082` the server behind it. They fail differently and
+ * are restored by different owners, so an alert must say which:
+ *
+ * - `gate`   - the gate refuses connections (no status at all) while the server answers: the gate
+ *   process is gone, and on this Mac launchd does not restart it (live-deploy, 2026-10-22);
+ * - `server` - the server does not answer; the gate's own 502 is the same fact seen from 8082;
+ * - `both`   - neither answers;
+ * - `none`   - both answer.
+ */
+export function outageHop({ gateStatus, serverAnswers }) {
+  const gateRefused = gateStatus === null || gateStatus === undefined
+  if (!gateRefused && serverAnswers === true) return 'none'
+  if (gateRefused && serverAnswers === true) return 'gate'
+  if (gateRefused && serverAnswers !== true) return 'both'
+  return 'server'
+}
+
+/**
  * What a "down" reading was, once the pass has watched it.
  *
  * With a supervisor in the agent, a killed server is back in about a second, and the lane gate's

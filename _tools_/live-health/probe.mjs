@@ -66,6 +66,7 @@ import {
   launchUrlFromLog,
   looksLikeProxyError,
   markerVerdict,
+  outageHop,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -759,18 +760,31 @@ async function judgeDsh() {
  * them this seat's own kickstarts. There is no restart, kickstart or kill anywhere in this file.
  */
 const DEPLOY_LABEL = 'com.dtadpole.heddle-web'
+/** The gate on 8082 is its own launchd agent (dsh-web-ops'), restored by nobody on this Mac if it dies. */
+const GATE_LABEL = 'ai.reflection.heddle-web-gate'
 
-/** Whether launchd reports the deployment's agent as running (its supervisor alive). Read-only. */
-function agentRunning() {
+/** Whether launchd reports an agent as running. Read-only; defaults to the deployment's own agent. */
+function agentRunning(label = DEPLOY_LABEL) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 501
   try {
-    const text = execFileSync('launchctl', ['print', `gui/${uid}/${DEPLOY_LABEL}`], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] })
+    const text = execFileSync('launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] })
     // The job's own state is the first `state =` line; nested sections carry their own.
     const match = /^\s*state = (\S+)/m.exec(text)
     return match !== null && match[1] === 'running'
   } catch {
     // Not loaded at all: an alert for live-deploy, whose guard owns the restore.
     return false
+  }
+}
+
+/** Does the gate answer the owner's address with a page right now? A refused connection is null. */
+async function gateStatusNow() {
+  try {
+    const response = await fetch(URL_GATE, { redirect: 'manual', signal: AbortSignal.timeout(3_000) })
+    await response.arrayBuffer()
+    return response.status
+  } catch {
+    return null
   }
 }
 
@@ -788,11 +802,14 @@ async function portAnswers() {
 /** How long a down reading is watched before it counts as an outage rather than a restart. */
 const RESTART_WINDOW_MS = 20_000
 
-/** Poll the server's health route until it answers or the window closes. Read-only. */
+/**
+ * Poll until the owner's address works again - the server's health route AND the gate's page - or the
+ * window closes. Read-only. Watching the server alone called a dead gate a 0 ms "restart".
+ */
 async function watchForRecovery(windowMs) {
   const started = Date.now()
   while (Date.now() - started <= windowMs) {
-    if (await portAnswers()) return Date.now() - started
+    if ((await portAnswers()) && (await gateStatusNow()) === 200) return Date.now() - started
     await new Promise((done) => setTimeout(done, 500))
   }
   return null
@@ -812,9 +829,19 @@ pass.checks.door = await judgeDoor()
  */
 if (deploymentDown(pass.checks)) {
   const firstReading = { gate: { status: pass.checks.gate.status ?? null, detail: pass.checks.gate.detail }, door: { detail: pass.checks.door.detail } }
+  // Which hop failed, read at the moment of the first reading: the alert must name its owner.
+  const hop = outageHop({ gateStatus: pass.checks.gate.status ?? null, serverAnswers: await portAnswers() })
   const recoveredAfterMs = await watchForRecovery(RESTART_WINDOW_MS)
   const kind = classifyOutage({ down: true, recoveredAfterMs, windowMs: RESTART_WINDOW_MS })
-  pass.outage = { kind, recoveredAfterMs, windowMs: RESTART_WINDOW_MS, agentRunning: agentRunning(), firstReading }
+  pass.outage = {
+    kind,
+    hop,
+    recoveredAfterMs,
+    windowMs: RESTART_WINDOW_MS,
+    agentRunning: agentRunning(DEPLOY_LABEL),
+    gateAgentRunning: agentRunning(GATE_LABEL),
+    firstReading,
+  }
   if (kind === 'restart') {
     // A restarted server minted a new launch token: judge the door with the current one.
     refreshDeploymentTarget()
@@ -873,8 +900,8 @@ if (options.json === true) {
   if (pass.outage !== undefined) {
     say(
       pass.outage.kind === 'restart'
-        ? `outage      restart  down at first reading, answered again after ${pass.outage.recoveredAfterMs}ms (agent ${pass.outage.agentRunning ? 'running' : 'not running'})`
-        : `outage      OUTAGE  still down after ${pass.outage.windowMs}ms (agent ${pass.outage.agentRunning ? 'running' : 'not running'})`,
+        ? `outage      restart  ${pass.outage.hop} down at first reading, answered again after ${pass.outage.recoveredAfterMs}ms (server agent ${pass.outage.agentRunning ? 'running' : 'not running'}, gate agent ${pass.outage.gateAgentRunning ? 'running' : 'not running'})`
+        : `outage      OUTAGE  ${pass.outage.hop} still down after ${pass.outage.windowMs}ms (server agent ${pass.outage.agentRunning ? 'running' : 'not running'}, gate agent ${pass.outage.gateAgentRunning ? 'running' : 'not running'})`,
     )
   }
   say(`process     ${mark(pass.checks.process.verdict)}  ${pass.checks.process.detail}`)

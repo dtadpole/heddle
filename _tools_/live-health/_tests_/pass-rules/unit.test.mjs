@@ -21,6 +21,7 @@ import {
   launchUrlFromLog,
   looksLikeProxyError,
   markerVerdict,
+  outageHop,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -174,6 +175,14 @@ test('only a gate with no upstream or a silent port counts as down enough to kic
   assert.equal(deploymentDown({ gate: { verdict: 'fail', status: 500, proxyError: false }, door: { verdict: 'pass' } }), false)
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'fail', detail: 'the deployed server answered 200 without a credential' } }), false)
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'pass' } }), false)
+})
+
+test('a refused gate with a healthy server is the gate, not the server', () => {
+  // live-deploy's rehearsal: a killed gate stays down while 3082 answers; launchd does not restart it.
+  assert.equal(outageHop({ gateStatus: null, serverAnswers: true }), 'gate')
+  assert.equal(outageHop({ gateStatus: 502, serverAnswers: false }), 'server')
+  assert.equal(outageHop({ gateStatus: null, serverAnswers: false }), 'both')
+  assert.equal(outageHop({ gateStatus: 200, serverAnswers: true }), 'none')
 })
 
 test('a down reading that answers again within the window is a restart, not an outage', () => {

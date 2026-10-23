@@ -79,6 +79,13 @@ with the new launch token, and the pass is judged on what is there), `outage` wh
 `classifyOutage` in [`rules.mjs`](rules.mjs) decides it, and only an outage is a failure — alerted with
 the agent's state, never acted on.
 
+Recovery means **the owner's address works again**: the server's health route *and* the gate's page.
+Watching the server alone would call a dead gate a 0 ms restart. Each outage records its **hop**
+(`outageHop`): `gate` when 8082 refuses connections while 3082 answers — the gate process is gone, and on
+this Mac launchd does not restart it — `server` when 3082 is silent (the gate's 502 is the same fact),
+`both` when neither answers. Both agents' launchd states are recorded with it (`launchctl print`,
+read-only), because the server and the gate have different owners.
+
 ## It never restores (D-045)
 
 The monitor observes, pins and alerts; it does **not** restart, kickstart or kill anything. On
