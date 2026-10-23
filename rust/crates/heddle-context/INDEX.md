@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.4.0
+version: 0.4.1
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -17,7 +17,7 @@ the routed endpoint's window, reduced by pruning before it is reduced by compact
 |---|---|
 | Ported from | `src/context/` (1,726 lines in seven files) |
 | Judged by | `_verifiers_/30-context-management`, through the `heddle` binary |
-| Sources | [`src/`](src/INDEX.md) |
+| Sources | [`src/`](src/INDEX.md); integration tests in `tests/` (`typescript-agreement.rs`: values measured from the TypeScript build) |
 | State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported. Step 5's remaining half is the `ContextStore` adapter for `heddle-session`'s store, which waits on that store reaching `main`; step 6 waits on the loop and the command line |
 
 ## Public API
@@ -109,14 +109,17 @@ the TypeScript tests named.
 
 ## Open questions
 
-- **For moving the verifiers onto `HEDDLE_BIN`:** the check *a cut never splits a tool call from its result* imports
-  `dist/session/store.js` and `dist/context/{compaction,meter,budget}.js`, so under `HEDDLE_BIN` it still judges the
-  TypeScript build, or is unjudged without one. The refusal half could go through the command line — a scripted
-  `purpose: compaction` step returning 20,000 characters is a non-shrinking summary — but the cut half needs a seam
-  both builds offer. This crate's unit tests cover both properties meanwhile.
+- **Check 4 of `30-context-management` cannot be judged through `HEDDLE_BIN` as written.** *A cut never splits a
+  tool call from its result* calls `inProcessOnly()` and imports `dist/`, so under `HEDDLE_BIN` it is skipped, and
+  the runner turns any skip into verdict 3 unless `--allow-skip` is passed. It is the only in-process check in the
+  backend set. A CLI version both builds already support was proposed to integrator-one, who owns the verifier,
+  on 2026-10-22: the refusal half through a scripted `purpose: compaction` step that returns 20,000 characters,
+  and the cut half aimed by sizes (a known-size tool result just over `retainTokens`), judged on the log and on
+  `context --json`. This crate's unit tests cover both properties meanwhile, and
+  `tests/typescript-agreement.rs` pins the prices such an aim depends on to the TypeScript build's.
 - **For `heddle-session` and the workspace manifest:** the log's field order survives a `serde_json::Value` only with
-  `serde_json`'s `preserve_order` feature; `ContextEvent` already declares the TypeScript order.
-- `instruction_digest` needs a SHA-1 implementation; step 2 adds the `sha1` crate to this crate's manifest.
+  `serde_json`'s `preserve_order` feature; `heddle-session` enables it, and `ContextEvent` already declares the
+  TypeScript order.
 
 ## Read next
 
