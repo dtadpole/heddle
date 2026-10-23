@@ -77,11 +77,38 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     }));
     // The composer's figures (tokens, context, cost) projected from the session's events, as the
     // trajectory crate draws them for the dock.
+    // When no model request recorded a breakdown yet, the dock's context figure is measured now from
+    // the session's surface, the tools and the baseline, as the trajectory crate asks.
+    let measuring = (
+        boot.services
+            .get::<Arc<heddle_context::ContextService<heddle_session::SessionStore>>>("context"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+        boot.services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools"),
+    );
     harness.stats = Some(heddle_server::services::stats_projector(
-        |_session: &str, events: &[Value]| {
+        move |session: &str, events: &[Value]| {
+            let measure = || {
+                let (Some(context), Some(sessions)) = (measuring.0.as_ref(), measuring.1.as_ref())
+                else {
+                    return None;
+                };
+                let tools = measuring
+                    .2
+                    .as_ref()
+                    .map(|tools| tools.describe())
+                    .unwrap_or_default();
+                let handle = sessions.open(session)?;
+                let measured = context.measure(&handle, &tools).ok()?;
+                Some(heddle_web_trajectory::stats::MeasuredSurface {
+                    system_tokens: measured.system_tokens,
+                    tools_tokens: measured.tools_tokens,
+                    message_tokens: measured.message_tokens,
+                })
+            };
             to_json(heddle_web_trajectory::stats::session_stats_view(
-                events,
-                || None,
+                events, measure,
             ))
         },
     ));
@@ -306,6 +333,10 @@ struct Composer {
     sandbox: Option<Arc<heddle_sandbox::SandboxService>>,
     /// `--endpoint`, the endpoint the page offers as the default.
     nominated: Option<String>,
+    /// The context row's service: what a request would carry, for `/api/context`.
+    context: Option<Arc<heddle_context::ContextService<heddle_session::SessionStore>>>,
+    /// The tools a request would describe, measured as part of the context.
+    tools: Option<Arc<heddle_tools::ToolRegistry>>,
 }
 
 fn composer_host(boot: &Boot, host: &PageHost, nominated: Option<&str>) -> Option<Arc<Composer>> {
@@ -318,6 +349,10 @@ fn composer_host(boot: &Boot, host: &PageHost, nominated: Option<&str>) -> Optio
             .services
             .get::<Arc<heddle_sandbox::SandboxService>>("sandbox"),
         nominated: nominated.map(str::to_owned),
+        context: boot
+            .services
+            .get::<Arc<heddle_context::ContextService<heddle_session::SessionStore>>>("context"),
+        tools: host.tools.clone(),
     }))
 }
 
@@ -358,12 +393,24 @@ impl heddle_web_composer::model_switcher::ModelHost for Composer {
         }
     }
 
-    /// No window is discovered over the network here; the page shows the configured window, if any.
+    /// The window the provider's model list reports for an endpoint that declares none, read once and
+    /// cached by the model service (`contextWindowFromModelList`); the page's context gauge needs it.
     fn discover_context_window(
         &self,
-        _endpoint: &str,
+        endpoint: &str,
     ) -> impl std::future::Future<Output = Option<u64>> + Send {
-        std::future::ready(None)
+        let models = Arc::clone(&self.models);
+        let endpoint = endpoint.to_owned();
+        async move {
+            let config = models.endpoint(&endpoint)?;
+            models
+                .model_lists()
+                .context_window(
+                    &config,
+                    &heddle_llm::model_info::ModelInfoOptions::default(),
+                )
+                .await
+        }
     }
 
     fn endpoint_names(&self) -> Vec<String> {
@@ -403,29 +450,99 @@ impl heddle_web_composer::model_switcher::ModelHost for Composer {
 }
 
 impl heddle_web_composer::context_view::ContextHost for Composer {
-    /// The context row is not composed into the page yet, so `/api/context` says the plugin is missing
-    /// rather than inventing an assembly.
+    /// `/api/context` answers only when the profile loads the context row.
     fn has_context(&self) -> bool {
-        false
+        self.context.is_some()
     }
 
+    /// web.ts: the session's own folder, else the sandbox's workspace root.
     fn session_cwd(&self, id: &str) -> String {
         self.sessions
-            .meta(id)
-            .map(|meta| meta.cwd().to_owned())
+            .open(id)
+            .and_then(|handle| self.sessions.folder(&handle))
+            .or_else(|| {
+                self.sandbox
+                    .as_ref()
+                    .map(|sandbox| sandbox.workspace_root().to_string_lossy().into_owned())
+            })
             .unwrap_or_default()
     }
 
+    /// What a request would carry right now (`context.assemble`): the instructions, the measured
+    /// surface against the endpoint's window, and the messages, with the tools described.
     fn assemble_context(
         &self,
-        _id: &str,
-        _request: &heddle_web_composer::context_view::AssembleRequest,
+        id: &str,
+        request: &heddle_web_composer::context_view::AssembleRequest,
     ) -> heddle_web_composer::context_view::ContextAssembly {
-        heddle_web_composer::context_view::ContextAssembly::default()
+        use heddle_web_composer::context_view::{ContextAssembly, ContextMessage};
+        let (Some(context), Some(handle)) = (self.context.as_ref(), self.sessions.open(id)) else {
+            return ContextAssembly::default();
+        };
+        let tools = self
+            .tools
+            .as_ref()
+            .map(|tools| tools.describe())
+            .unwrap_or_default();
+        let options = heddle_context::service::AssembleOptions {
+            cwd: std::path::Path::new(&request.cwd),
+            tools: &tools,
+            system: None,
+            endpoint: request.endpoint.as_deref(),
+            model: request.model.as_deref(),
+        };
+        let Ok(report) = context.assemble(&handle, &options) else {
+            return ContextAssembly::default();
+        };
+        ContextAssembly {
+            instructions: report
+                .instructions
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            estimated_tokens: report.estimated_tokens,
+            context_window: report.context_window,
+            threshold_tokens: report.threshold_tokens,
+            pruned: report.pruned,
+            compacted: report.compacted,
+            messages: report
+                .messages
+                .iter()
+                .map(|message| ContextMessage {
+                    role: to_json(&message.role)
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    tool_call_id: message.tool_call_id.clone(),
+                    text: heddle_session::text_of(&message.content),
+                })
+                .collect(),
+        }
     }
 
-    fn surface(&self, _id: &str) -> heddle_web_composer::context_view::Surface {
-        heddle_web_composer::context_view::Surface::default()
+    /// The session's surface: which events a request is built from, and the spans a summary stands in for.
+    fn surface(&self, id: &str) -> heddle_web_composer::context_view::Surface {
+        use heddle_web_composer::context_view::{Surface, SurfaceReplacement};
+        let Some(state) = self
+            .sessions
+            .open(id)
+            .and_then(|handle| self.sessions.surface(&handle).ok())
+        else {
+            return Surface::default();
+        };
+        Surface {
+            nodes: state.nodes.clone(),
+            replacements: state
+                .replacements
+                .iter()
+                .map(|replacement| SurfaceReplacement {
+                    seq: replacement.seq,
+                    start_seq: replacement.start_seq,
+                    end_seq: replacement.end_seq,
+                    shadowed_seqs: replacement.shadowed_seqs.clone(),
+                })
+                .collect(),
+        }
     }
 }
 
