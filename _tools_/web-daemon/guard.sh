@@ -25,11 +25,14 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-label="com.dtadpole.heddle-web"
-unit="heddle-web.service"
-log="$HOME/.heddle/guard.log"
-running_log="$HOME/.heddle/web.log"
-stamp="$HOME/.heddle/guard.last"
+# The same overrides install.sh takes, so a scratch service (rehearse.sh) is guarded with its own label, state and
+# logs, and an experiment's guard never reads or writes the deployment's.
+label="${HEDDLE_WEB_LABEL:-com.dtadpole.heddle-web}"
+unit="${HEDDLE_WEB_UNIT:-heddle-web.service}"
+heddle_home="${HEDDLE_WEB_HOME:-$HOME/.heddle}"
+log="$heddle_home/guard.log"
+running_log="${HEDDLE_WEB_LOG:-$heddle_home/web.log}"
+stamp="$heddle_home/guard.last"
 cooldown="${HEDDLE_GUARD_COOLDOWN:-20}"
 wait_seconds="${HEDDLE_GUARD_WAIT:-10}"
 
@@ -77,7 +80,7 @@ within_cooldown() {
 }
 
 say() {
-  mkdir -p "$HOME/.heddle"
+  mkdir -p "$heddle_home"
   printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$log"
 }
 
@@ -118,7 +121,7 @@ else
   say "port $port silent and $unit is not active; starting it"
   systemctl --user start "$unit" >> "$log" 2>&1 || true
 fi
-mkdir -p "$HOME/.heddle"
+mkdir -p "$heddle_home"
 date +%s > "$stamp"
 
 # Say what the start achieved, so the log distinguishes "it came back" from "it was asked to".

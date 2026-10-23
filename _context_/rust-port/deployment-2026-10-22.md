@@ -170,6 +170,38 @@ Two smaller readings from the same measurement, for whoever next restarts this b
 So a restorer that kicks a freshly started job does not shorten an outage, it lengthens one — another reason the
 guard acts on the job state rather than on a silent port.
 
+## Rehearsals: experiments on a scratch agent, never on the live one
+
+After the 03:57Z outage the coordinator made it a rule: measurements and experiments run on a scratch agent on a
+scratch port, and the live agent is touched only by a real redeploy to a new `main`. `_tools_/web-daemon/rehearse.sh`
+makes that the easy way. It installs the same definition `install.sh` writes, under the label
+`com.dtadpole.heddle-web.rehearsal`, port 3096, and its own state directory and log (the 8082 gate reads the
+newest launch token from the deployment's log, so a scratch server must never write there). Then it measures five
+claims and removes everything. It refuses the deployment's label, unit and ports before it calls anything.
+
+**The first run found a real installer bug.** The reinstall claim failed: `install.sh --restart` booted the scratch
+agent out and the `bootstrap` that followed answered `Bootstrap failed: 5: Input/output error`. `bootout` returns
+before launchd has finished removing the job, and a bootstrap in that window is refused, so the installer exited with
+nothing loaded. That is the outage shape again, and the deployment's redeploys had only been surviving it by timing.
+The installer now waits for the old job to disappear and retries a refused bootstrap, then exits 1 with a sentence if
+the agent is still not loaded. Two tests drive a stand-in launchd that keeps the old job visible after bootout and
+refuses the first bootstraps; both fail against the previous installer.
+
+Rehearsals with the fixed installer, 21:09 and 21:11 PDT, from the seat worktree (`npm run build` there; no cargo):
+
+| Claim | Run 1 | Run 2 |
+|---|---|---|
+| started | 463 ms after install | 339 ms |
+| kill → new pid answering | 443 ms (56643 → 56860) | 260 ms (60474 → 60775) |
+| guard run during that restart | no action | no action |
+| reinstall, longest silence | 635 ms | 349 ms |
+| agent booted out → one guard run | restored, 1251 ms | restored, 1163 ms |
+| verdict | 5 held | 5 held |
+
+During both runs the live deployment kept the same server pid (92313) and the same launch token in its log, and 8082
+answered 200: the rehearsal did not touch it. No scratch agent is left loaded (`launchctl print` on the rehearsal
+label fails), and the scratch state directory was removed.
+
 ## Who acts on the service, and the guard's state (D-045)
 
 **No guard is scheduled or running.** The crontab has no guard line (it is TCC-blocked anyway), no LaunchAgent runs
@@ -254,6 +286,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 20:54 | `59fd96f` (component manifest) | `59fd96f`, clean | 95 **4/4**, 96 **3/3** from the deployment |
 | 20:59 | `0a10ceb` (part 0 passes through the binary) | `0a10ceb`, clean | after the 20:57–20:58 outage below; redeploy silence 288 ms; 95 **4/4**, 96 **3/3**; marker `dd6d45d28567` |
 | 21:02 | `480d9b8` (a served command routes through the boot) | `480d9b8`, clean | 95 **4/4**, 96 **3/3** from the deployment; marker `dd6d45d28567`; the binary's `web` still exits 2, so the page is still the TypeScript oracle |
+| 21:13 | `d28625d` (a ui check whose harness cannot start fails instead of hanging) | `d28625d`, clean | 95 **4/4**, 96 **3/3** from the deployment; marker `dd6d45d28567` |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when

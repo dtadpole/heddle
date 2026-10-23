@@ -1,6 +1,6 @@
 ---
 title: Web Daemon
-version: 1.3.0
+version: 1.4.0
 description: The supervised user service — a launchd agent on macOS, a systemd user unit on Linux — that keeps the heddle Web UI running at the documented port, with either build.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -23,6 +23,7 @@ for the machine it runs on, and the reader both daemon verifiers share.
 | [`service.mjs`](service.mjs) | reads the installed service on either platform — its program, checkout, port, log, pid and the process owning its port — and decides whether a checkout is committed main; [`95-web-daemon`](../../_verifiers_/95-web-daemon/INDEX.md) and [`96-deployment`](../../_verifiers_/96-deployment/INDEX.md) both read through it |
 | [`supervisor.mjs`](supervisor.mjs) | the inner supervisor: runs the server and puts it back when it exits, with a bounded backoff and a loud give-up. `install.sh` puts it in front of the program on macOS, where launchd was measured not to restart a job; Linux keeps systemd alone |
 | [`guard.sh`](guard.sh) | the outer layer: one probe of the port, and a platform start when nothing answers. Run from cron once a minute on a host whose launchd never starts the agent at login; `install.sh --guard` adds that line, `--guard-uninstall` removes it |
+| [`rehearse.sh`](rehearse.sh) | installs the same definition under a scratch label, port, state directory and log, measures the five claims the deployment depends on (started, kill, guard, reinstall, agent gone), and removes it. **Every experiment on the service runs here, never on the live agent**; it refuses the deployment's label, unit and ports |
 | [`_tests_/`](_tests_/INDEX.md) | the component suites: the reader's rules, the supervisor, and the installer run in throwaway checkouts with stand-in supervisors |
 
 ## Either build, either platform
@@ -96,6 +97,12 @@ So, and each is a rule in this folder:
   after a 502;
 - `95-web-daemon`'s stays-up check kills the process that **owns the port** and requires a new one within twenty
   seconds, because that is the process whose death is an outage, whichever layer is charged with replacing it.
+
+**Two launchd behaviours the installer now waits out**, both found by `rehearse.sh` on a scratch agent rather than on
+the owner's page: `bootout` returns before the job is gone, and a `bootstrap` of the same label in that window fails
+with `5: Input/output error` — so `install.sh` waits (up to 10 s) for the old job to disappear and retries a refused
+bootstrap (up to ten times, half a second apart), then exits 1 with a sentence if the agent is still not loaded; and
+the render happens before anything is stopped, so a refused reinstall leaves the running agent alone.
 
 **Liveness is port ownership**, never a process-name search. The convention is blunt about why: `pgrep -f`
 matches the searching command's own line and has been measured concluding a dead service was up. A bound

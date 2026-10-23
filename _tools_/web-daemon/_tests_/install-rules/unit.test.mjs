@@ -62,8 +62,30 @@ function fixture({ name = 'repo' } = {}) {
   }
   // Not running, so an install never takes the replace path by accident; `print` fails as for an absent job.
   record('systemctl', 'case "$*" in *is-active*) exit 3;; esac\n')
-  // FAKE_LOADED=1 makes the job look loaded, so the replace path (bootout, then bootstrap) can be judged too.
-  record('launchctl', 'case "$1" in print) [ "${FAKE_LOADED:-0}" = 1 ] && exit 0; exit 113;; esac\n')
+  // A stateful launchd stand-in. FAKE_LOADED=1 makes the job loaded on first sight, so the replace path can be judged;
+  // FAKE_BOOTOUT_LINGER=N keeps `print` answering N more times after a bootout (launchd removes a job asynchronously);
+  // FAKE_BOOTSTRAP_FAILS=N refuses the first N bootstraps with launchd's `5: Input/output error`.
+  const launchd = join(base, 'launchd')
+  mkdirSync(launchd, { recursive: true })
+  record(
+    'launchctl',
+    [
+      `state="${launchd}"`,
+      'if [ "${FAKE_LOADED:-0}" = 1 ] && [ ! -f "$state/seen" ]; then touch "$state/seen" "$state/loaded"; fi',
+      'case "$1" in',
+      '  print)',
+      '    if [ -f "$state/linger" ]; then n=$(cat "$state/linger"); if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$state/linger"; exit 0; fi; rm -f "$state/linger"; fi',
+      '    [ -f "$state/loaded" ] && exit 0',
+      '    exit 113 ;;',
+      '  bootout) rm -f "$state/loaded"; [ -n "${FAKE_BOOTOUT_LINGER:-}" ] && echo "$FAKE_BOOTOUT_LINGER" > "$state/linger"; exit 0 ;;',
+      '  bootstrap)',
+      '    done=$(cat "$state/refused" 2>/dev/null || echo 0)',
+      '    if [ "$done" -lt "${FAKE_BOOTSTRAP_FAILS:-0}" ]; then echo $((done + 1)) > "$state/refused"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi',
+      '    touch "$state/loaded"; exit 0 ;;',
+      'esac',
+      '',
+    ].join('\n'),
+  )
   record('loginctl', 'echo "${FAKE_LINGER:-yes}"\n')
   // The account's crontab, kept in a file so the --guard edits can be read back like a real one.
   record(
@@ -290,9 +312,54 @@ test('a refused macOS reinstall leaves the running agent loaded: the render happ
   assert.deepEqual(calls(f), [
     `launchctl print gui/${uid}/com.dtadpole.heddle-web`,
     `launchctl bootout gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl print gui/${uid}/com.dtadpole.heddle-web`,
     `launchctl bootstrap gui/${uid} ${target}`,
     `launchctl kickstart -k gui/${uid}/com.dtadpole.heddle-web`,
-  ], 'an accepted reinstall replaces the loaded agent: bootout only after the render succeeded')
+  ], 'an accepted reinstall replaces the loaded agent: bootout only after the render succeeded, bootstrap once it is gone')
+})
+
+test('a reinstall waits for launchd to finish the bootout and retries a refused bootstrap, ending loaded', () => {
+  // Measured 2026-10-23 on a rehearsal agent: bootstrap right after bootout failed with `5: Input/output error`, and
+  // the installer exited with nothing loaded. Here launchd keeps reporting the old job for three reads after the
+  // bootout and then refuses the first two bootstraps.
+  const f = fixture()
+  const env = { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_LOADED: '1', FAKE_BOOTOUT_LINGER: '3', FAKE_BOOTSTRAP_FAILS: '2' }
+  const result = install(f, ['--restart'], env)
+  assert.equal(result.status, 0, result.stderr)
+  const verbs = calls(f).map((line) => line.split(' ')[1])
+  assert.deepEqual(verbs, ['print', 'bootout', 'print', 'print', 'print', 'print', 'bootstrap', 'bootstrap', 'bootstrap', 'kickstart'],
+    'it reads until the old job is gone, then loads, retrying the two refusals, then starts')
+})
+
+test('a bootstrap that never succeeds exits 1 and says the agent is not loaded', () => {
+  const f = fixture()
+  const result = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_BOOTSTRAP_FAILS: '99', HEDDLE_BOOTSTRAP_ATTEMPTS: '3' })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /bootstrap failed 3 times; com\.dtadpole\.heddle-web is NOT loaded/)
+  assert.match(result.stderr, /Load it by hand/, 'and it says how to recover')
+  assert.ok(calls(f).every((line) => !line.includes('kickstart')), 'nothing is started on top of a failed load')
+})
+
+test('the scratch-service overrides name another agent, state directory and log, and the deployment is untouched', () => {
+  const f = fixture()
+  const scratch = join(f.base, 'scratch')
+  const env = {
+    HEDDLE_WEB_PLATFORM: 'darwin',
+    HEDDLE_WEB_LABEL: 'com.dtadpole.heddle-web.rehearsal',
+    HEDDLE_WEB_PORT: '3096',
+    HEDDLE_WEB_HOME: scratch,
+    HEDDLE_WEB_LOG: join(scratch, 'web.log'),
+  }
+  const result = install(f, [], env)
+  assert.equal(result.status, 0, result.stderr)
+  const target = join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.rehearsal.plist')
+  const plist = readFileSync(target, 'utf8')
+  assert.match(plist, /<string>com\.dtadpole\.heddle-web\.rehearsal<\/string>/)
+  assert.match(plist, new RegExp(`<key>StandardOutPath</key>\\s*<string>${scratch}/web\\.log</string>`), 'its own log, so the gate never reads its token')
+  assert.match(plist, new RegExp(`<key>HEDDLE_HOME</key>\\s*<string>${scratch}</string>`), 'its own state directory')
+  assert.match(plist, /<string>3096<\/string>/)
+  assert.ok(!existsSync(join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.plist')), 'the deployment agent file was not written')
+  assert.ok(calls(f).every((line) => !line.endsWith('/com.dtadpole.heddle-web')), 'and no launchctl call named the deployment label')
 })
 
 test('Linux uninstall disables and stops the unit, removes it and reloads', () => {
