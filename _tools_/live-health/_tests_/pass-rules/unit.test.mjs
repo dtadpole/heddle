@@ -14,13 +14,15 @@ import { test } from 'node:test'
 import {
   consoleVerdict,
   deploymentDown,
-  processVerdict,
   doorVerdict,
   gateVerdict,
   launchUrlFromLog,
+  looksLikeProxyError,
   markerVerdict,
   parseArguments,
   passVerdict,
+  processVerdict,
+  redactRecord,
   shellVerdict,
   tildePath,
   tildeText,
@@ -53,11 +55,23 @@ test('a pinned path is stated under the home directory, never as the absolute ho
   assert.equal(tildePath('/tmp/elsewhere', '/Users/someone'), '/tmp/elsewhere')
 })
 
-test('the bare URL passes only as 401 with the token form and no app shell', () => {
-  assert.equal(doorVerdict({ reachable: true, status: 401, form: true, app: false }).verdict, 'pass')
-  assert.equal(doorVerdict({ reachable: true, status: 401, form: false, app: false }).verdict, 'partial')
-  assert.equal(doorVerdict({ reachable: true, status: 200, form: false, app: true }).verdict, 'fail')
+test('the door passes only with the 401 wall AND the 303 cookie', () => {
+  const goodCookie = { httpOnly: true, sameSite: true }
+  assert.equal(
+    doorVerdict({ reachable: true, bareStatus: 401, form: true, app: false, exchangeStatus: 303, cookie: goodCookie }).verdict,
+    'pass',
+  )
+  // A wall with no way in, or a way in with no wall, is a failure; there is no 'partial' pass.
+  assert.equal(doorVerdict({ reachable: true, bareStatus: 401, form: true, app: false, exchangeStatus: 401, cookie: null }).verdict, 'fail')
+  assert.equal(doorVerdict({ reachable: true, bareStatus: 200, form: false, app: true, exchangeStatus: 303, cookie: goodCookie }).verdict, 'fail')
+  assert.equal(doorVerdict({ reachable: true, bareStatus: 401, form: true, app: false, exchangeStatus: 303, cookie: { httpOnly: false, sameSite: true } }).verdict, 'fail')
   assert.equal(doorVerdict({ reachable: false }).verdict, 'unjudged')
+})
+
+test('the proxy error is the gate\'s own 5xx sentence, not a word in a healthy page', () => {
+  assert.equal(looksLikeProxyError(502, 'heddle-proxy: the upstream did not answer (ECONNREFUSED 127.0.0.1:3082)\n'), true)
+  assert.equal(looksLikeProxyError(200, '<!doctype html>\n<!-- the heddle-proxy gate -->'), false)
+  assert.equal(looksLikeProxyError(500, 'heddle-proxy: something else'), false)
 })
 
 test('the gate passes only when it served the app, and keeps its own sentence when it did not', () => {
@@ -68,12 +82,13 @@ test('the gate passes only when it served the app, and keeps its own sentence wh
   assert.equal(gateVerdict({ status: 500, app: false, proxyError: false }).verdict, 'fail')
 })
 
-test('the shell passes after a 303 exchange or when the gate served it, with the log and the composer', () => {
-  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: true }).verdict, 'pass')
-  assert.equal(shellVerdict({ exchangeStatus: null, loaded: true, log: true, composer: true }).verdict, 'pass')
-  assert.equal(shellVerdict({ exchangeStatus: 401, loaded: true, log: false, composer: false, tokenForm: true }).verdict, 'fail')
-  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: false }).verdict, 'fail')
-  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: false, composer: false }).verdict, 'fail')
+test('the shell passes after a 303 exchange or when the gate served it, with the log, the composer and Send', () => {
+  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: true, send: true }).verdict, 'pass')
+  assert.equal(shellVerdict({ exchangeStatus: null, loaded: true, log: true, composer: true, send: true }).verdict, 'pass')
+  assert.equal(shellVerdict({ exchangeStatus: 401, loaded: true, log: false, composer: false, send: false, tokenForm: true }).verdict, 'fail')
+  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: false, send: true }).verdict, 'fail')
+  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: true, send: false }).verdict, 'fail')
+  assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: false, composer: false, send: false }).verdict, 'fail')
 })
 
 test('the marker passes on a match, fails on a mismatch, and is unjudged when no page loaded', () => {
@@ -137,7 +152,7 @@ test('the serving process must run the deployment checkout, and another checkout
   assert.match(other.detail, /another checkout/)
   assert.doesNotMatch(other.detail, /Users\/someone/)
   assert.equal(processVerdict({ command: null, deployRoot: deploy, home }).verdict, 'unjudged')
-  const rust = processVerdict({ command: `${home}/heddle--developer-ten/rust/target/release/heddle web --port 3082`, deployRoot: deploy, home })
+  const rust = processVerdict({ command: '/opt/tools/heddle web --port 3082', deployRoot: deploy, home })
   assert.equal(rust.verdict, 'unjudged')
 })
 
@@ -151,9 +166,19 @@ test('only a gate with no upstream or a silent port counts as down enough to kic
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'pass' } }), false)
 })
 
-test('the pass fails on any failure, is unjudged on any unjudged check, and passes only when all pass', () => {
+test('the pass fails on any failure or unknown verdict, is unjudged on any unjudged check, and passes only when all pass', () => {
   assert.equal(passVerdict({ a: { verdict: 'pass' }, b: { verdict: 'pass' } }), 'pass')
   assert.equal(passVerdict({ a: { verdict: 'pass' }, b: { verdict: 'fail' } }), 'fail')
   assert.equal(passVerdict({ a: { verdict: 'pass' }, b: { verdict: 'unjudged' } }), 'unjudged')
   assert.equal(passVerdict({ a: { verdict: 'fail' }, b: { verdict: 'unjudged' } }), 'fail')
+  // An unknown verdict is never a pass: this is the hole a 'partial' door used to fall through.
+  assert.equal(passVerdict({ a: { verdict: 'pass' }, b: { verdict: 'partial' } }), 'fail')
+})
+
+test('the pinned record redacts home paths and launch tokens at the boundary', () => {
+  const record = { at: 'x', detail: 'read /Users/someone/.heddle/web.log', url: 'http://127.0.0.1:3082/?token=abcdef123', nested: [{ note: 'session at /Users/someone/x' }] }
+  const out = redactRecord(record, '/Users/someone')
+  assert.equal(out.detail, 'read ~/.heddle/web.log')
+  assert.equal(out.url, 'http://127.0.0.1:3082/?token=<redacted>')
+  assert.equal(out.nested[0].note, 'session at ~/x')
 })

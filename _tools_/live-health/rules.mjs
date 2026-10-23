@@ -54,17 +54,32 @@ export function tildeText(text, home) {
 }
 
 /**
- * The bare URL's door.
+ * The server's own door, both halves.
  *
- * `401` with the token form and no app shell is the passed state; an app served without a credential
- * is a failure (a page that lost its data looks like this); any other status is a failure too. A
- * deployment that does not answer is unjudged, never passing.
+ * A bare request must be refused with `401` and the token form (and never served the app), and the
+ * current launch URL must exchange for a `303` carrying an `HttpOnly`, `SameSite=Strict` cookie. One
+ * without the other is a failure: a wall with no way in, or a way in with no wall. There is no
+ * "partial" verdict, because a partial door is not a pass and a reader must not be able to mistake it
+ * for one.
  */
-export function doorVerdict({ reachable, status, form, app }) {
+export function doorVerdict({ reachable, bareStatus, form, app, exchangeStatus, cookie }) {
   if (reachable === false) return { verdict: 'unjudged', detail: 'not reachable' }
-  if (status === 401 && form === true && app !== true) return { verdict: 'pass', detail: 'refused with the token form' }
-  if (status === 401) return { verdict: 'partial', detail: 'refused without the token form' }
-  return { verdict: 'fail', detail: `answered ${status} without a credential` }
+  const wall = bareStatus === 401 && form === true && app !== true
+  const admitted = exchangeStatus === 303 && cookie !== null && cookie !== undefined && cookie.httpOnly === true && cookie.sameSite === true
+  if (wall && admitted) return { verdict: 'pass', detail: '401 without a credential, 303 with the current token, HttpOnly SameSite=Strict cookie' }
+  if (!wall) return { verdict: 'fail', detail: `the deployed server answered ${bareStatus} without a credential${app === true ? ' with the app shell' : ''}` }
+  return { verdict: 'fail', detail: `the current launch URL did not exchange for a valid cookie (${exchangeStatus})` }
+}
+
+/**
+ * Whether an answer is the gate's own "upstream is gone" sentence.
+ *
+ * The app shell itself contains the word `heddle-proxy` once (a comment about the gate), so matching
+ * the word on any status pinned a healthy pass as a proxy error with `firstLine: "<!doctype html>"`.
+ * The gate's error is a plain-text `5xx` whose body starts with its own prefix; only that counts.
+ */
+export function looksLikeProxyError(status, body) {
+  return (status === 502 || status === 503 || status === 504) && /^heddle-proxy\b/m.test(String(body))
 }
 
 /** The gate's answer: the app shell, or its own sentence saying the upstream is gone. */
@@ -81,11 +96,10 @@ export function gateVerdict({ status, app, proxyError, firstLine }) {
  * `null` when the shell was served through the gate, which does the exchange itself — passing `200`
  * here would pretend the gate answered a token exchange it does not have.
  */
-export function shellVerdict({ exchangeStatus = null, loaded, log, composer, tokenForm }) {
+export function shellVerdict({ exchangeStatus = null, loaded, log, composer, send, tokenForm }) {
   if (exchangeStatus !== null && exchangeStatus !== 303) return { verdict: 'fail', detail: `the launch URL did not exchange a token (${exchangeStatus})` }
-  if (loaded === true && log === true && composer === true) return { verdict: 'pass', detail: 'the app shell loaded with a token' }
-  if (loaded === true && log === true && composer === true) return { verdict: 'pass', detail: 'the app shell loaded with a token' }
-  if (loaded === true && log === true) return { verdict: 'fail', detail: 'the log loaded but the composer is missing' }
+  if (loaded === true && log === true && composer === true && send === true) return { verdict: 'pass', detail: 'the app shell loaded with a token' }
+  if (loaded === true && log === true) return { verdict: 'fail', detail: 'the log loaded but the composer or its send control is missing' }
   if (tokenForm === true) return { verdict: 'fail', detail: 'a token form instead of the app: the launch token is stale' }
   return { verdict: 'fail', detail: 'the app shell did not load' }
 }
@@ -187,10 +201,30 @@ export function deploymentDown({ gate, door }) {
   return gateDown === true || doorDown === true
 }
 
+/**
+ * A record safe to publish: home paths under `~`, and a launch token redacted wherever it appears.
+ *
+ * A runtime error message can carry `~/.heddle/...` or an absolute home path, and the answer head is
+ * model output. The record is pinned in a public repository, so both are redacted at the boundary
+ * rather than trusted to stay clean.
+ */
+export function redactRecord(value, home) {
+  if (typeof value === 'string') return tildeText(value, home).replace(/token=[A-Za-z0-9_-]+/g, 'token=<redacted>')
+  if (Array.isArray(value)) return value.map((entry) => redactRecord(entry, home))
+  if (value !== null && typeof value === 'object') {
+    const out = {}
+    for (const [key, entry] of Object.entries(value)) out[key] = redactRecord(entry, home)
+    return out
+  }
+  return value
+}
+
 /** The pass: any failure fails it, any unjudged check leaves it unjudged, only all-pass passes. */
 export function passVerdict(checks) {
   const verdicts = Object.values(checks).map((check) => check.verdict)
-  if (verdicts.includes('fail')) return 'fail'
+  // Anything that is not a pass or an explicit unjudged is a failure: an unknown verdict must never
+  // be read as healthy, which is how a 'partial' door would have slipped through.
+  if (verdicts.some((verdict) => verdict !== 'pass' && verdict !== 'unjudged')) return 'fail'
   if (verdicts.includes('unjudged')) return 'unjudged'
   return 'pass'
 }

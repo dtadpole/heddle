@@ -43,8 +43,8 @@ served with, it needs no file of its own, and it never lands in the deployment c
 | `door` | the deployed server refuses a bare request and exchanges the current token | `fetch` with `redirect: 'manual'`, cookie flags read by hand |
 | `load` | the app renders in a real browser through the gate | `#log`, `#prompt textarea`, `#send` must exist |
 | `marker` | the served page is the deployment checkout's build | served `meta[name=heddle-page]` vs the first 12 hex of the sha256 of `~/heddle-live/dist/server/page.html`; HEAD vs `origin/main` is staleness, recorded not failed |
-| `turn` | one short turn streams | trusted `click_at` + `type_text` into the composer, then the deployment's own `assistant/chunk` count for that prompt and the page's assistant-row lengths as they grow; a scripted answer that lands between two DOM polls is judged by the chunk count, not by what a poll happened to see |
-| `console` | the console is clean | error-level messages fail; warnings and verbose kept; read on load **and** after the turn |
+| `turn` | one short turn streams | trusted `click_at` + `type_text` into the composer. A **baseline is taken before the prompt** (new user row, new assistant row, lengths past the old last one, only notices added since), because the reused session already holds earlier answers; a turn with no baseline is unjudged. The deployment's own `assistant/chunk` count for that prompt decides whether a fast answer streamed. |
+| `console` | the console is clean | error-level messages fail, warnings and verbose are kept, and an unjudged reading stays unjudged (never clean); read on load **and** after the turn |
 | `dsh` | the reference is the reference | `127.0.0.1:8080/`: title, `window.__DSH_BOOT__` keys, composer, console errors |
 
 Exit `0` pass, `1` fail, `3` unjudged. A **dead address is a failure**, not an unknown: a live
@@ -54,9 +54,11 @@ a console that cannot be read. A pass that could not be judged is never pinned a
 
 ## The rules, and their tests
 
-The judgments are pure functions in [`rules.mjs`](rules.mjs): the door (`doorVerdict`), the gate
-(`gateVerdict`), the shell (`shellVerdict`), the marker (`markerVerdict`), the console
-(`consoleVerdict`), the turn (`turnVerdict`), the pass (`passVerdict`), the launch-URL reader and the
+The judgments are pure functions in [`rules.mjs`](rules.mjs): the door (`doorVerdict`, both the 401 wall and the 303 cookie), the gate (`gateVerdict`, with
+`looksLikeProxyError` reading only the gate's own 5xx sentence), the shell (`shellVerdict`, log,
+composer and Send), the marker (`markerVerdict`), the console (`consoleVerdict`), the turn
+(`turnVerdict`), the pass (`passVerdict`, where any verdict that is not pass or unjudged fails), the
+launch-URL reader, the down-detection (`deploymentDown`), the record redaction (`redactRecord`) and the
 argument parser. They take numbers and strings and decide what the reading means, which is why they can
 be tested without a browser:
 

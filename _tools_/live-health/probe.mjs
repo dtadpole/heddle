@@ -62,13 +62,15 @@ import {
   doorVerdict,
   gateVerdict,
   launchUrlFromLog,
+  looksLikeProxyError,
   markerVerdict,
   parseArguments,
-  processVerdict,
-  tildeText,
   passVerdict,
+  processVerdict,
+  redactRecord,
   shellVerdict,
   tildePath,
+  tildeText,
   turnVerdict,
 } from './rules.mjs'
 
@@ -97,7 +99,7 @@ const stopBrowser = () => browser.stopHost()
 /** A git answer from a checkout, or null when it is not one. Never throws into the pass. */
 function gitAt(root, ...args) {
   try {
-    return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execFileSync('git', ['--no-optional-locks', '-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
   } catch {
     return null
   }
@@ -196,7 +198,7 @@ const PAGE_FACTS = `() => ({
   notices: [...document.querySelectorAll('#log .turn-notice, #log [role="alert"]')].map((node) => node.innerText.trim()).slice(0, 3),
   assistantLengths: [...document.querySelectorAll('#log .turn.assistant')].map((node) => (node.textContent ?? '').length),
   assistantRunning: [...document.querySelectorAll('#log .turn.assistant')].some((node) => node.dataset.state === 'running'),
-  answerHead: (() => { const rows = [...document.querySelectorAll('#log .turn.assistant')]; const last = rows[rows.length - 1]; return last === undefined ? null : (last.textContent ?? '').trim().slice(0, 120) })(),
+  assistantHeads: [...document.querySelectorAll('#log .turn.assistant')].map((node) => (node.textContent ?? '').trim().slice(0, 120)),
 })`
 
 /**
@@ -289,15 +291,6 @@ async function consoleMessages(pageId) {
 }
 
 /**
- * The deployment's own trace for a turn that produced nothing.
- *
- * A failed model call is not always visible in the page: a ModelError ends the stream after the user
- * row, and the client has no row to draw. The server records the code in the session log
- * (compaction/recovery for a request error, with retry and its reason), so the pass reads the newest
- * session log and keeps codes and shapes only: the log carries the owner's conversation and this
- * repository is public.
- */
-/**
  * Decompress a session log's frames.
  *
  * The store appends one zstd **frame per event**, and both `zlib.zstdDecompressSync` and its stream
@@ -376,6 +369,15 @@ async function streamTrace(prompt) {
   }
 }
 
+/**
+ * The deployment's own trace for a turn that produced nothing.
+ *
+ * A failed model call is not always visible in the page: a ModelError ends the stream after the user
+ * row, and the client has no row to draw. The server records the code in the session log
+ * (compaction/recovery for a request error, with retry and its reason), so the pass reads the newest
+ * session log and keeps codes and shapes only: the log carries the owner's conversation and this
+ * repository is public.
+ */
 async function serverTrace() {
   try {
     const files = sessionFiles()
@@ -417,9 +419,14 @@ async function judgeGate() {
   try {
     const response = await fetch(URL_GATE, { redirect: 'manual', signal: AbortSignal.timeout(8_000) })
     const body = await response.text()
-    const firstLine = body.split('\n').find((line) => line.trim().length > 0)?.trim().slice(0, 200) ?? ''
     const app = /id="log"/.test(body)
-    const proxyError = /heddle-proxy/i.test(body)
+    /**
+     * The app shell contains the word `heddle-proxy` once (a note about the gate), so matching the
+     * word on a healthy `200` pinned every pass as a proxy error with firstLine "<!doctype html>".
+     * Only the gate's own plain-text 5xx counts, and only there is its sentence kept.
+     */
+    const proxyError = looksLikeProxyError(response.status, body)
+    const firstLine = proxyError ? (body.split('\n').find((line) => line.trim().length > 0) ?? '').trim().slice(0, 200) : undefined
     const judged = gateVerdict({ status: response.status, app, proxyError, firstLine })
     return {
       status: response.status,
@@ -469,19 +476,14 @@ async function judgeDoor() {
     const app = /id="log"/.test(bareBody)
     const exchange = await fetch(launchUrl, { redirect: 'manual', signal: AbortSignal.timeout(8_000) })
     const cookie = exchange.headers.get('set-cookie')
-    const wall = bare.status === 401 && form && !app
-    const admitted = exchange.status === 303 && cookie !== null && /HttpOnly/i.test(cookie) && /SameSite=Strict/i.test(cookie)
+    const flags = cookie === null ? null : { httpOnly: /HttpOnly/i.test(cookie), sameSite: /SameSite=Strict/i.test(cookie) }
+    const judged = doorVerdict({ reachable: true, bareStatus: bare.status, form, app, exchangeStatus: exchange.status, cookie: flags })
     return {
       origin: serverOrigin,
       bare: { status: bare.status, form, app },
-      exchange: { status: exchange.status, cookie: cookie === null ? null : { httpOnly: /HttpOnly/i.test(cookie), sameSite: /SameSite=Strict/i.test(cookie) } },
-      verdict: wall && admitted ? 'pass' : 'fail',
-      detail:
-        !wall
-          ? `the deployed server answered ${bare.status} without a credential${app ? ' with the app shell' : ''}`
-          : !admitted
-            ? `the current launch URL did not exchange for a cookie (${exchange.status})`
-            : '401 without a credential, 303 with the current token, HttpOnly SameSite=Strict cookie',
+      exchange: { status: exchange.status, cookie: flags },
+      verdict: judged.verdict,
+      detail: judged.detail,
     }
   } catch (error) {
     return { verdict: 'fail', detail: `the deployed server on ${serverOrigin} does not answer: ${error.message}` }
@@ -495,7 +497,7 @@ async function judgeLoad() {
     const pageId = opened?.pageId
     const up = await waitFor(pageId, '#log', 25_000)
     const facts = (await factsOf(pageId)) ?? {}
-    const judged = shellVerdict({ exchangeStatus: null, loaded: up, log: facts.log, composer: facts.composer, tokenForm: facts.tokenForm })
+    const judged = shellVerdict({ exchangeStatus: null, loaded: up, log: facts.log, composer: facts.composer, send: facts.send, tokenForm: facts.tokenForm })
     return {
       pageId,
       page: facts,
@@ -546,7 +548,9 @@ async function judgeTurn(pageId, beforeSession) {
         pageId,
         function: `(async () => {
           const list = await (await fetch('/api/sessions')).json()
-          const hit = (Array.isArray(list) ? list : []).find((item) => String(item.title ?? '').startsWith('live health check')) ?? null
+          const hit = (Array.isArray(list) ? list : [])
+            .filter((item) => String(item.title ?? '').startsWith('live health check'))
+            .sort((left, right) => String(right.created ?? '').localeCompare(String(left.created ?? '')))[0] ?? null
           if (hit === null) return null
           const rows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
           const row = rows.find((item) => (item.querySelector('.label')?.textContent ?? '') === hit.title) ?? null
@@ -567,8 +571,20 @@ async function judgeTurn(pageId, beforeSession) {
       reused = 'selection'
     }
     if (reused !== 'new') await new Promise((done) => setTimeout(done, 400))
-    // Re-read the page after selecting, so the turn's before-count is the selected session's own.
+    // Re-read the page after selecting, so the turn's baseline is the selected session's own.
     const before = (await factsOf(pageId)) ?? beforeSession
+    if (before === null || typeof before.assistantTurns !== 'number' || typeof before.userTurns !== 'number') {
+      return { verdict: 'unjudged', detail: 'the log could not be read before the turn, so this turn has no baseline' }
+    }
+    /**
+     * The reused session already holds earlier answers, so "there is an assistant row" would describe
+     * the previous turn - and could pass a turn the page never rendered. Everything below is measured
+     * against this baseline: a new user row, a new assistant row, samples that grow past the old last
+     * length, and only the notices that appeared since.
+     */
+    const baseUser = before.userTurns
+    const baseTurns = before.assistantTurns
+    const baseNotices = (before.notices ?? []).length
     const box = (await callTool(
       'evaluate_script',
       { pageId, function: `() => { const r = document.querySelector('#prompt textarea').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } }` },
@@ -586,22 +602,23 @@ async function judgeTurn(pageId, beforeSession) {
     let facts = before
     while (Date.now() < deadline) {
       facts = (await factsOf(pageId)) ?? facts
-      const assistant = facts.assistantLengths ?? []
-      const last = assistant.length > 0 ? assistant[assistant.length - 1] : 0
-      if (last > 0 && (samples.length === 0 || samples[samples.length - 1] !== last)) {
+      const rows = (facts.assistantLengths ?? []).slice(baseTurns)
+      const last = rows.length > 0 ? rows[rows.length - 1] : 0
+      if (rows.length > 0 && last > 0 && (samples.length === 0 || samples[samples.length - 1] !== last)) {
         samples.push(last)
         if (firstDeltaMs === null) firstDeltaMs = Date.now() - startedAt
       }
-      const userAppeared = (facts.userTurns ?? 0) > (before.userTurns ?? 0)
-      if (userAppeared && assistant.length > 0 && facts.assistantRunning === false && last > 0) {
+      const userAppeared = (facts.userTurns ?? 0) > baseUser
+      if (userAppeared && rows.length > 0 && facts.assistantRunning === false && last > 0) {
         settledMs = Date.now() - startedAt
         break
       }
       await new Promise((done) => setTimeout(done, 200))
     }
-    const userAppeared = (facts.userTurns ?? 0) > (before.userTurns ?? 0)
-    const assistantAppeared = (facts.assistantTurns ?? 0) > (before.assistantTurns ?? 0) || (facts.assistantLengths ?? []).some((length) => length > 0)
-    const notices = facts.notices ?? []
+    const userAppeared = (facts.userTurns ?? 0) > baseUser
+    const assistantAppeared = (facts.assistantTurns ?? 0) > baseTurns
+    const notices = (facts.notices ?? []).slice(baseNotices)
+    const answerHead = assistantAppeared ? ((facts.assistantHeads ?? [])[baseTurns] ?? null) : null
     /**
      * A turn that produced no answer is a failure of the deployment, not of the pass; the server's own
      * trace is what turns "nothing appeared" into a code someone can act on.
@@ -629,7 +646,7 @@ async function judgeTurn(pageId, beforeSession) {
       notices,
       serverTrace: trace,
       silent: notices.length === 0 && !assistantAppeared,
-      answerHead: facts.answerHead ?? null,
+      answerHead,
       verdict: judged.verdict,
       detail:
         code === null
@@ -726,6 +743,7 @@ async function restoreDeployment() {
 
 // ---- the pass ---------------------------------------------------------------------------------
 
+try {
 pass.checks.gate = await judgeGate()
 pass.checks.process = judgeProcess()
 pass.checks.door = await judgeDoor()
@@ -747,10 +765,14 @@ if (pass.checks.load.verdict === 'pass') {
   pass.checks.consoleOnLoad = await judgeConsole(pageId, 'load')
   pass.checks.turn = await judgeTurn(pageId, pass.checks.load.page)
   const after = await judgeConsole(pageId, 'after the turn')
+  /**
+   * One clean console is the claim. An error at either reading fails it; a reading that could not be
+   * taken leaves the claim unjudged - it must never be read as clean. Both readings are kept.
+   */
+  const consoleVerdicts = [after.verdict, pass.checks.consoleOnLoad.verdict]
   pass.checks.console = {
     ...after,
-    // One clean console is the claim: an error at either reading fails it, and both readings are kept.
-    verdict: after.verdict === 'fail' || pass.checks.consoleOnLoad.verdict === 'fail' ? 'fail' : 'pass',
+    verdict: consoleVerdicts.includes('fail') ? 'fail' : consoleVerdicts.includes('unjudged') ? 'unjudged' : 'pass',
     detail: `${after.detail}; on load: ${pass.checks.consoleOnLoad.detail}`,
   }
   await callTool('close_page', { pageId }, 15_000).catch(() => {})
@@ -768,13 +790,15 @@ pass.compare = {
 
 pass.verdict = passVerdict(pass.checks)
 
+/** The pinned and printed record is redacted at the boundary: home paths under ~, tokens gone. */
+const record = redactRecord(pass, homedir())
 if (options.pin === true) {
   mkdirSync(dirname(JSONL), { recursive: true })
-  appendFileSync(JSONL, `${JSON.stringify(pass)}\n`)
+  appendFileSync(JSONL, `${JSON.stringify(record)}\n`)
 }
 
 if (options.json === true) {
-  say(JSON.stringify(pass, null, 2))
+  say(JSON.stringify(record, null, 2))
 } else {
   const mark = (verdict) => (verdict === 'pass' ? 'pass' : verdict === 'fail' ? 'FAIL' : '----')
   say(`live-health ${pass.at}`)
@@ -794,11 +818,13 @@ if (options.json === true) {
   say(`verdict     ${pass.verdict.toUpperCase()}${options.pin === true ? `  pinned to ${JSONL}` : ''}`)
 }
 
-/**
- * The browser is closed at the end of every pass: this Mac runs twelve seats on 16 GB, and the
- * coordinator measured swap at 79% with a browser left open. `--keep-browser` is for a debugging
- * session, not for the schedule.
- */
-if (options['keep-browser'] !== true) await stopBrowser().catch(() => {})
+} finally {
+  /**
+   * The browser is closed at the end of every pass, even a pass that threw: this Mac runs twelve seats
+   * on 16 GB, and the coordinator measured swap at 79% with a browser left open. `--keep-browser` is
+   * for a debugging session, not for the schedule.
+   */
+  if (options['keep-browser'] !== true) await stopBrowser().catch(() => {})
+}
 
 process.exit(pass.verdict === 'pass' ? 0 : pass.verdict === 'fail' ? 1 : 3)
