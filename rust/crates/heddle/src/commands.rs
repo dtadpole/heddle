@@ -13,7 +13,7 @@ use crate::cli::{Args, CommandWord};
 use crate::output::Output;
 use crate::ports::Record;
 use crate::services::Services;
-use crate::usage::{Capability, served};
+use crate::usage::Capability;
 use crate::{Exit, Invocation};
 
 /// Route a parsed command line: port of `main()` after `parseArgs`.
@@ -25,13 +25,26 @@ use crate::{Exit, Invocation};
 /// A command whose capability is not served yet exits [`Exit::Unported`] naming itself, which is what
 /// keeps a verifier from judging a part that does not exist.
 pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
+    dispatch_serving(args, invocation, out, crate::usage::SERVED)
+}
+
+/// [`dispatch`] for a build that serves `served`: the routing itself, separate from what this build
+/// serves, so a test can judge a command's whole path before its capability is advertised.
+pub fn dispatch_serving(
+    args: &Args,
+    invocation: &Invocation,
+    out: &mut Output<'_>,
+    served: &[Capability],
+) -> Exit {
     if let Some(command) = args.command {
+        let capability = capability_of(command);
+        if !served.contains(&capability) {
+            return unported(command.as_str(), out);
+        }
         return match command {
-            CommandWord::Web if served(Capability::Web) => web(args, invocation, out),
-            CommandWord::Profiles | CommandWord::Config if served(Capability::Config) => {
-                config_command(args, invocation, out)
-            }
-            other => unported(other.as_str(), out),
+            CommandWord::Web => web(args, invocation, out),
+            CommandWord::Profiles | CommandWord::Config => config_command(args, invocation, out),
+            _ => boot_then(args, invocation, out),
         };
     }
     if args.turn.is_some() {
@@ -43,6 +56,47 @@ pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> E
     } else {
         unported("the bare application", out)
     }
+}
+
+/// The capability a command word belongs to, as the help groups them.
+pub fn capability_of(command: CommandWord) -> Capability {
+    match command {
+        CommandWord::Profiles | CommandWord::Config => Capability::Config,
+        CommandWord::Models => Capability::Models,
+        CommandWord::Tools | CommandWord::Commands => Capability::Tools,
+        CommandWord::Sessions | CommandWord::Transcript | CommandWord::Session => {
+            Capability::Sessions
+        }
+        CommandWord::Workspaces
+        | CommandWord::Workspace
+        | CommandWord::Tree
+        | CommandWord::File => Capability::Workspaces,
+        CommandWord::Hooks => Capability::Hooks,
+        CommandWord::Goal => Capability::Goal,
+        CommandWord::Context => Capability::Context,
+        CommandWord::Web => Capability::Web,
+    }
+}
+
+/// Boot the tree the command line names, then answer from it: port of `runCommand`'s
+/// `bootFromArgs` and `settle`.
+fn boot_then(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
+    let options = crate::boot::BootOptions {
+        layers: crate::cli::layer_options(args, &invocation.cwd, &invocation.env),
+        overrides: crate::cli::root_overrides(args, &invocation.cwd)
+            .into_iter()
+            .collect(),
+        target: args.target.clone().unwrap_or_else(|| "heddle".to_owned()),
+        env: invocation.env.clone(),
+    };
+    let catalog = BuiltinCatalog::new(invocation.env.clone(), invocation.cwd.clone());
+    let boot = match crate::boot::boot(&options, &catalog) {
+        Ok(boot) => boot,
+        Err(error) => return out.fail(&error.0),
+    };
+    let exit = booted_command(args, invocation, &boot, out);
+    boot.dispose();
+    exit
 }
 
 /// A request whose part is not wired yet: the binary says so on stderr and exits 2, so a verifier
@@ -1877,6 +1931,116 @@ mod tests {
         assert_eq!(value.as_array().map(Vec::len), Some(2), "{json_out}");
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn every_command_word_belongs_to_the_capability_its_help_line_names() {
+        use crate::usage::LINES;
+        for (word, command) in [
+            ("models", CommandWord::Models),
+            ("tools", CommandWord::Tools),
+            ("commands", CommandWord::Commands),
+            ("sessions", CommandWord::Sessions),
+            ("workspaces", CommandWord::Workspaces),
+            ("tree", CommandWord::Tree),
+            ("file", CommandWord::File),
+            ("context", CommandWord::Context),
+            ("goal", CommandWord::Goal),
+            ("hooks", CommandWord::Hooks),
+            ("web", CommandWord::Web),
+            ("transcript", CommandWord::Transcript),
+            ("profiles", CommandWord::Profiles),
+            ("config", CommandWord::Config),
+        ] {
+            let prefix = format!("  {word} ");
+            let (_, capability) = LINES
+                .iter()
+                .find(|(line, _)| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("the help has a line for {word}"));
+            assert_eq!(capability_of(command), *capability, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_served_booted_command_boots_the_profile_and_answers_from_it() {
+        let script = std::env::temp_dir().join(format!(
+            "heddle-dispatch-script-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&script, "{\"steps\": []}").expect("the script file");
+        let patch = format!(
+            "- insert:\n    - id: model\n      name: model\n      config:\n        readLocalConfig: false\n        endpoints:\n          - name: double\n            kind: scripted\n            baseUrl: {}\n",
+            script.display()
+        );
+        let (home, env) = profile_with("dispatch", &patch);
+        let invocation = Invocation {
+            argv: Vec::new(),
+            env,
+            cwd: home.clone(),
+        };
+        let served = [Capability::Always, Capability::Config, Capability::Models];
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch_serving(
+                &parsed(&["--profile", "dev", "models", "--json"]),
+                &invocation,
+                &mut out,
+                &served,
+            )
+        };
+        assert_eq!(exit, Exit::Success, "{}", captured.stderr_text());
+        let value: serde_json::Value =
+            serde_json::from_str(&captured.stdout_text()).expect("a JSON array");
+        assert!(
+            value
+                .as_array()
+                .is_some_and(|list| list.iter().any(|endpoint| endpoint["name"] == "double")),
+            "{value}"
+        );
+
+        // The same command line, not served, still says so and exits 2.
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(
+                &parsed(&["--profile", "dev", "models"]),
+                &invocation,
+                &mut out,
+            )
+        };
+        assert_eq!(exit, Exit::Unported);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn a_profile_naming_a_row_with_no_adapter_fails_before_answering() {
+        let (home, env) = profile_with(
+            "dispatch-unwired",
+            "- insert:\n    - id: session\n      name: ./src/plugins/session.ts\n",
+        );
+        let invocation = Invocation {
+            argv: Vec::new(),
+            env,
+            cwd: home.clone(),
+        };
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch_serving(
+                &parsed(&["--profile", "dev", "sessions"]),
+                &invocation,
+                &mut out,
+                &[Capability::Always, Capability::Config, Capability::Sessions],
+            )
+        };
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            captured.stderr_text(),
+            "heddle: 1 row(s) failed to load: session\n"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

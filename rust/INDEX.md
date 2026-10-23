@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.4.0
+version: 0.4.1
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on the merged candidate at `5b953ad` that became `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `cc09a59`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -48,7 +48,7 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
   node _tools_/verify-runner/run.mjs _verifiers_/<part>/check*.mjs --json
 ```
 
-**18 check files, 116 checks: 10 passed, 0 failed, 106 unjudged. Part 0 passes.** `05-config-system` exits `0`
+**18 check files, 117 checks: 10 passed, 0 failed, 107 unjudged. Part 0 passes.** `05-config-system` exits `0`
 through the binary: profiles, layers, includes and their cycles, both environment-reference shapes, a missing
 reference, a bad value refused naming the row and the field, a patch against a missing row, provenance and an
 unknown profile. Under `HEDDLE_BIN` its rows name component manifests rather than `.ts` plugins — part 0's Rust shape in
@@ -68,7 +68,7 @@ into a passing part is the binary composing it, and that is the next work for pa
 | 0 configuration system | `_verifiers_/05-config-system` | **passes** — 10 of 10 |
 | 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged |
 | 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
-| 3 context management | `_verifiers_/30-context-management` | 8 checks — unjudged |
+| 3 context management | `_verifiers_/30-context-management` | 9 checks — unjudged; one still reads `dist/` for the reader's view (that verifier's INDEX) |
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
 | 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
 | 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged |
