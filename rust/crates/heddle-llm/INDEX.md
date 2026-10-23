@@ -16,7 +16,7 @@ The Rust port of the backend wire shapes, the HTTP client, streamed content and 
 |---|---|
 | Ported from | `src/llm/`, `src/stream/printer.ts`, the service half of `src/plugins/model.ts` |
 | Judged by | `_verifiers_/10-llm-backends`, `_verifiers_/20-streaming`, `_verifiers_/98-model-endpoints`, through the `heddle` binary |
-| Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-llm` — in-process doubles, no network |
+| Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-llm` — in-process doubles, no network; `tests/wire_shapes.rs` drives each shape end to end against a local double |
 | Sources | [`src/`](src/INDEX.md) |
 
 **State: the stream path is ported, the request path still waits on configuration.** The public types, traits and
