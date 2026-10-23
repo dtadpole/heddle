@@ -18,7 +18,8 @@ import { workspaceKey } from '../../src/session/layout.ts'
  * settles both members and delivers the mail.
  */
 
-const CAPABILITY = 'a turn with tools'
+/** Both checks start `web` and drive the Lead's turn through it, so the probe asks for the server. */
+const CAPABILITY = 'a turn with tools, served by the Web UI'
 
 /**
  * The store the second test boots on, **recorded as bytes** from the TypeScript build at heddle commit `a5b0c66`
@@ -123,7 +124,7 @@ async function waitFor(read, timeoutMs, what) {
 }
 
 test('a Lead spawns, delegates, tasks, messages and answers — and the team survives a restart', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
+  if (!skipUnless(context, /^  web\b/m.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
   const home = isolatedHome('team-e2e')
   const work = fixtureDir('team-e2e-work')
   const root = join(home, 'sessions')
@@ -201,7 +202,7 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
 })
 
 test('boot settles a previous process’s provisioning members and delivers its queued mail', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
+  if (!skipUnless(context, /^  web\b/m.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
   const home = isolatedHome('team-recover')
   const work = fixtureDir('team-recover-work')
   const root = join(home, 'sessions')
