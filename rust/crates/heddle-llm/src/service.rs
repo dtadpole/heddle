@@ -47,12 +47,15 @@ pub const HOOK_MODEL_STREAM: &str = "model/stream";
 pub trait ModelHooks: Send + Sync {
     /// `model/request`: return a replacement request (how a model-selection policy works), or `next()`'s result.
     /// `service` is the service dispatching, for `names()` / `endpoint()` lookups.
+    ///
+    /// An `Err` fails the call before any stream exists, as a listener that throws does in the TypeScript build's
+    /// waterfall; the hook chooses the error's code and sentence, and [`ModelService::stream`] returns it as is.
     fn request(
         &self,
         service: &ModelService,
         request: &GenerateRequest,
-        next: &mut dyn FnMut() -> GenerateRequest,
-    ) -> GenerateRequest {
+        next: &mut dyn FnMut() -> Result<GenerateRequest, ModelError>,
+    ) -> Result<GenerateRequest, ModelError> {
         let _ = (service, request);
         next()
     }
@@ -264,7 +267,7 @@ impl ModelService {
     /// Call one endpoint and stream the answer (`stream`). `NO_ENDPOINT` is returned before any stream exists.
     pub fn stream(&self, request: GenerateRequest) -> Result<ChunkStream, ModelError> {
         self.adapter_for(&request.endpoint)?;
-        let effective = self.request_through_hooks(&request);
+        let effective = self.request_through_hooks(&request)?;
         let resolved = self.adapter_for(&effective.endpoint)?;
         // The provider boundary drops assistant turns that carry only reasoning. Applied after the request hook,
         // so a policy listener sees the request as it was recorded.
@@ -397,17 +400,20 @@ impl ModelService {
             .clone()
     }
 
-    /// The `model/request` waterfall: outermost first, in registration order.
-    fn request_through_hooks(&self, request: &GenerateRequest) -> GenerateRequest {
+    /// The `model/request` waterfall: outermost first, in registration order. The first failure ends it.
+    fn request_through_hooks(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<GenerateRequest, ModelError> {
         let hooks = self.hook_list();
         fn step(
             hooks: &[(HooksId, Arc<dyn ModelHooks>)],
             index: usize,
             service: &ModelService,
             request: &GenerateRequest,
-        ) -> GenerateRequest {
+        ) -> Result<GenerateRequest, ModelError> {
             let Some((_, hook)) = hooks.get(index) else {
-                return request.clone();
+                return Ok(request.clone());
             };
             let mut next = || step(hooks, index + 1, service, request);
             hook.request(service, request, &mut next)
@@ -677,17 +683,80 @@ mod tests {
             &self,
             _service: &ModelService,
             request: &GenerateRequest,
-            next: &mut dyn FnMut() -> GenerateRequest,
-        ) -> GenerateRequest {
+            next: &mut dyn FnMut() -> Result<GenerateRequest, ModelError>,
+        ) -> Result<GenerateRequest, ModelError> {
             if self.veto {
                 let mut replaced = request.clone();
                 replaced.endpoint = self.endpoint.clone();
-                return replaced;
+                return Ok(replaced);
             }
-            let mut effective = next();
+            let mut effective = next()?;
             effective.endpoint = self.endpoint.clone();
-            effective
+            Ok(effective)
         }
+    }
+
+    /// A hook that throws, as 60-hooks installs one on `model/request`.
+    struct Broken;
+
+    impl ModelHooks for Broken {
+        fn request(
+            &self,
+            _service: &ModelService,
+            request: &GenerateRequest,
+            _next: &mut dyn FnMut() -> Result<GenerateRequest, ModelError>,
+        ) -> Result<GenerateRequest, ModelError> {
+            Err(ModelError::new(
+                "a hook failed at model/request (broken) — refused on purpose",
+                request.endpoint.clone(),
+                "HOOK_FAILED",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_hook_that_fails_fails_the_call_with_its_own_sentence() {
+        let fixture = Fixture::new();
+        let service = ModelService::new(vec![
+            fixture.endpoint("a", json!({ "steps": [{ "text": "never sent" }] })),
+        ])
+        .expect("registers");
+        service.add_hooks(Arc::new(Broken));
+        let error = match service.stream(ask("a")) {
+            Ok(_) => panic!("a failing hook fails the call before any stream exists"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "HOOK_FAILED");
+        assert_eq!(
+            error.to_string(),
+            "a hook failed at model/request (broken) — refused on purpose"
+        );
+        let error = service
+            .generate(ask("a"))
+            .await
+            .expect_err("generate fails too");
+        assert_eq!(error.code, "HOOK_FAILED");
+    }
+
+    #[tokio::test]
+    async fn an_inner_hooks_failure_passes_through_an_outer_hook_that_called_next() {
+        let fixture = Fixture::new();
+        let service = ModelService::new(vec![
+            fixture.endpoint("a", json!({ "steps": [{ "text": "from a" }] })),
+            fixture.endpoint("b", json!({ "steps": [{ "text": "from b" }] })),
+        ])
+        .expect("registers");
+        // Outermost first: Rewrite calls next(), which runs Broken, whose failure it propagates.
+        service.add_hooks(Arc::new(Rewrite {
+            endpoint: "b".into(),
+            veto: false,
+        }));
+        service.add_hooks(Arc::new(Broken));
+        let error = service
+            .generate(ask("a"))
+            .await
+            .expect_err("the inner failure wins");
+        assert_eq!(error.code, "HOOK_FAILED");
     }
 
     #[tokio::test]
