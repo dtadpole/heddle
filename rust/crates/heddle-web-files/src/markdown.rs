@@ -503,6 +503,110 @@ mod tests {
     }
 
     #[test]
+    fn a_task_list_is_a_list_with_boxes() {
+        let html = render("- [x] done\n- [ ] todo\n");
+        assert!(html.contains("<ul>"), "{html}");
+        assert!(
+            html.contains("type=\"checkbox\""),
+            "a task list has boxes: {html}"
+        );
+        assert!(
+            html.contains("checked"),
+            "and a done item is checked: {html}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_is_a_reference_and_its_definition() {
+        let html = render("A claim[^1].\n\n[^1]: the source\n");
+        assert!(
+            html.contains("footnote"),
+            "a footnote keeps its machinery: {html}"
+        );
+        assert!(html.contains("the source"), "{html}");
+    }
+
+    #[test]
+    fn a_reference_link_is_followed_and_rewritten() {
+        let html = render_at(
+            "/w/docs/a.md",
+            "See [the index][ref].\n\n[ref]: ../INDEX.md\n",
+        );
+        assert!(
+            html.contains("href=\"/api/raw?path=%2Fw%2FINDEX.md\""),
+            "a reference link resolves like an inline one: {html}"
+        );
+        assert!(html.contains("data-heddle-path=\"/w/INDEX.md\""), "{html}");
+    }
+
+    #[test]
+    fn a_link_title_survives_as_an_attribute() {
+        let html = render_at("/w/a.md", "[x](https://e.example \"the title\")");
+        assert!(html.contains("title=\"the title\""), "{html}");
+        assert!(html.contains("target=\"_blank\""), "{html}");
+    }
+
+    #[test]
+    fn an_image_inside_a_link_keeps_both_resolutions() {
+        let html = render_at("/w/docs/a.md", "[![diagram](shot.png)](../INDEX.md)");
+        assert!(
+            html.contains("src=\"/api/raw?path=%2Fw%2Fdocs%2Fshot.png\""),
+            "the image is served beside the document: {html}"
+        );
+        assert!(
+            html.contains("href=\"/api/raw?path=%2Fw%2FINDEX.md\""),
+            "and the link it sits in is served too: {html}"
+        );
+        assert!(html.contains("data-heddle-path=\"/w/INDEX.md\""), "{html}");
+    }
+
+    #[test]
+    fn a_title_holding_a_greater_than_sign_does_not_end_its_tag_early() {
+        // `tag_end` and `attribute_value` scan the tag rather than splitting on '>', which is what this pins.
+        let html = render_at("/w/a.md", "[x](https://e.example \"a > b\")");
+        assert!(html.contains("title=\"a &gt; b\""), "{html}");
+        assert!(
+            html.contains("rel=\"noreferrer noopener\""),
+            "the tag is still annotated: {html}"
+        );
+    }
+
+    #[test]
+    fn nested_emphasis_and_strikethrough_inside_a_heading() {
+        let html = render("# **bold _and_ `code`**\n");
+        assert!(html.contains("<h1>"), "{html}");
+        assert!(html.contains("<strong>"), "{html}");
+        assert!(html.contains("<code>code</code>"), "{html}");
+    }
+
+    #[test]
+    fn a_blockquote_holding_code_keeps_both() {
+        let html = render("> quoted\n>\n> ```py\n> x = 1\n> ```\n");
+        assert!(html.contains("<blockquote>"), "{html}");
+        assert!(html.contains("<pre><code"), "{html}");
+        assert!(html.contains("language-py"), "{html}");
+    }
+
+    #[test]
+    fn a_hard_break_and_a_soft_break_are_not_confused() {
+        // `breaks` stays off, as in the TypeScript build: a soft break is a space, a two-space break is a `<br>`.
+        let soft = render("one\ntwo\n");
+        assert!(
+            soft.contains("one two") || soft.contains("one\ntwo"),
+            "{soft}"
+        );
+        assert!(
+            !soft.contains("<br"),
+            "a soft break is not a line break: {soft}"
+        );
+        let hard = render("one  \ntwo\n");
+        assert!(
+            hard.contains("<br"),
+            "two trailing spaces are a line break: {hard}"
+        );
+    }
+
+    #[test]
     fn render_inline_answers_spans_only() {
         let html = render_inline("Use **bold** and `code`");
         assert!(!html.contains("<p>"), "no paragraph wrapper: {html}");
