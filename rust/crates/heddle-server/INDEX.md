@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (105 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (110 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -41,11 +41,11 @@ their checks are judged against the TypeScript build.
 | `page` | the embedded page and its `heddle-page` build marker, the favicon, `page_access`, `token_form_page` |
 | `preview` | `html.ts`: the preview allow-lists, `PREVIEW_CSP`, `rewrite_resources`, `/api/html`'s prepared document, where `purify.min.js` is found |
 | `respond` | the response shapes every route answers with (`json`, `json_compact`, `text`, `html`, `error`, …), `JsonBody` (the `readJson` rules), `SessionId` / `SessionPath` (the `session-<36>` rule), `inline_content_type`, `file_bytes` |
-| `stream` | `EventHub` (every session event and approval question, delivered to each subscriber unbounded), `SseFrame`, `sse_response` |
+| `stream` | `EventHub` (every session event and approval question, delivered to each subscriber unbounded), `SseFrame`, `sse_response`, `session_event_forwarder` / `approval_request_forwarder` for the binary's bus listeners |
 | `runs` | `RunRegistry` and `TurnGuard`: running counts, the per-turn clock, completion times, stop by `CancellationToken` |
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
-| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness` |
+| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
 | `server` | `ServerOptions`, `ServerBuilder` (`mount`, `session_view`, `into_router`, `start`), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
 ### How a feature crate mounts its routes
@@ -117,13 +117,27 @@ Each step lands with its unit tests and is pushed; the verifier rows say what it
 | 6 | approvals, goal, todo, team, `/api/html`, `/vendor/purify.js` | done, unit-tested through the traits |
 | 7 | adapters over the real session, workspace and events crates as their APIs land; wiring `heddle web` with the binary's owner | **not started**: the binary crate owns it, and the server has no real `Harness` until those crates land |
 
-**What the binary must do to make the verifiers pass through `HEDDLE_BIN`:** parse `heddle web --host
---port --endpoint --session-root --sandbox-root --dry-run --json`, build a `Harness` whose four required
-traits are implemented over the real services, mount the feature crates, bridge the event bus into
-`ServerBuilder::events()` (`session/event` -> `publish_session_event`, `approval/request` ->
-`publish_approval_request`, `model/request` -> `selection::running_turn_selection`), call `start()`, print
-`announce()[0]`, and on shutdown call `close()`. `DryRunPlan::for_options` and `launch_url` are ready for
-the `--dry-run --json` path.
+**What the binary must do to make the verifiers pass through `HEDDLE_BIN`** (the exact checklist sent
+to the binary's owner):
+
+1. Parse `heddle web --host --port --endpoint --max-rounds --session-root --sandbox-root --dry-run
+   --json`; `--help` must mention `web`. Map to [`ServerOptions`]: host/port/`max_rounds`/
+   `default_endpoint`, `secret_path` (or let [`token::default_secret_path`] read `HEDDLE_HOME`), and
+   `asset_roots` `[repository root, working directory]` for `/vendor/purify.js`.
+2. `--dry-run --json` prints [`DryRunPlan::for_options`] as one JSON object and exits 0 without binding;
+   the human form prints [`DryRunPlan::announce`].
+3. Compose the harness with [`Harness::builder`] (or `HarnessBuilder`): the four required services, the
+   optional ones the profile loaded, and the process's working directory. `attachment_reader`,
+   `markdown_renderer` and `stats_projector` wrap a function as the optional file/renderer/statistics
+   services when the owner crate offers one.
+4. `ServerBuilder::new(harness, options)`, take `events()` **before** `start()`, and register
+   `stream::session_event_forwarder(hub)` and `stream::approval_request_forwarder(hub)` as the bus's
+   `session/event` and `approval/request` listeners; register `running_turn_selection` as the
+   `model/request` waterfall listener. Mount each feature crate with `mount`.
+5. `start().await`, then print `announce()[0]` — `heddle web: <url>`, the line the verifiers wait for —
+   and, when asked, `announce_json()`. On shutdown call `close()`, which ends the open streams.
+6. The turn runner receives a `TurnRequest` with a `CancellationToken`; it must publish the session's
+   events through the bus (step 4 relays them) and watch the token, which is what `/stop` cancels.
 
 The verifiers named here start the server as `node dist/cli.js` and import `dist/server/web.js` and
 `dist/server/token.js`; they judge the Rust binary once the lane integrator has moved them onto `HEDDLE_BIN`.

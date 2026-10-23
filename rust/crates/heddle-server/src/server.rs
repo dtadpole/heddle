@@ -1780,6 +1780,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_harness_builder_attaches_only_the_services_it_is_given() {
+        let harness = Harness::builder(
+            Arc::new(Sessions::with_one()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        )
+        .approvals(Arc::new(Approvals))
+        .markdown(crate::services::markdown_renderer(|text| {
+            format!("<p>{text}</p>")
+        }))
+        .build();
+        assert!(harness.approvals.is_some());
+        assert!(harness.markdown.is_some());
+        assert!(harness.workspaces.is_none());
+        assert!(harness.goals.is_none());
+        assert_eq!(harness.cwd, PathBuf::from("/work"));
+    }
+
     fn harness() -> Harness {
         let mut harness = Harness::new(
             Arc::new(Sessions::with_one()),

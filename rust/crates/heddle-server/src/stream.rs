@@ -93,6 +93,19 @@ impl SseFrame {
     }
 }
 
+/// The listener a binary registers on its event bus's `session/event` channel: it captures the hub the
+/// server streams from and publishes every payload into it. The bus's own signature is the binary's, so
+/// this is a plain function of `(session, event)` rather than a trait this crate would have to guess.
+pub fn session_event_forwarder(hub: EventHub) -> impl Fn(&str, &Value) + Send + Sync + 'static {
+    move |session, event| hub.publish_session_event(session, event)
+}
+
+/// The listener a binary registers on its `approval/request` channel, publishing each question to the
+/// `/api/events` subscribers.
+pub fn approval_request_forwarder(hub: EventHub) -> impl Fn(&Value) + Send + Sync + 'static {
+    move |request| hub.publish_approval_request(request)
+}
+
 /// The hub. Cloning shares it.
 #[derive(Clone, Default)]
 pub struct EventHub {
@@ -336,6 +349,22 @@ mod tests {
             frame.data,
             "{\"session\":\"session-1\",\"event\":{\"n\":2}}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_bus_forwarders_publish_into_the_server_hub() {
+        let hub = EventHub::new();
+        let mut frames = hub.subscribe();
+        let forward_session = session_event_forwarder(hub.clone());
+        let forward_approval = approval_request_forwarder(hub.clone());
+        forward_session("session-1", &serde_json::json!({"type": "user/message"}));
+        forward_approval(&serde_json::json!({"id": "approval-1"}));
+
+        let first = frames.next_frame().await.unwrap();
+        assert_eq!(first.session_id().as_deref(), Some("session-1"));
+        let second = frames.next_frame().await.unwrap();
+        assert_eq!(second.event, "approval");
+        assert_eq!(hub.subscriber_count(), 1);
     }
 
     #[tokio::test]

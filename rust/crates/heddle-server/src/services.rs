@@ -512,4 +512,228 @@ impl Harness {
             cwd,
         }
     }
+
+    /// Start a [`HarnessBuilder`] with the four required services. The optional services are attached
+    /// with its methods, so a binary's composition reads as the profile it booted.
+    pub fn builder(
+        sessions: Arc<dyn SessionService>,
+        models: Arc<dyn ModelService>,
+        turns: Arc<dyn TurnRunner>,
+        sandbox: Arc<dyn SandboxService>,
+        cwd: PathBuf,
+    ) -> HarnessBuilder {
+        HarnessBuilder {
+            harness: Harness::new(sessions, models, turns, sandbox, cwd),
+        }
+    }
+}
+
+/// Assembles a [`Harness`] service by service.
+///
+/// The binary knows which plugins a profile loaded; this type is where it says so, once, in the order
+/// the routes read them. A service left unattached is `None`, and its routes answer
+/// [`crate::respond::plugin_missing`], which is the TypeScript boot's behaviour for a profile that did
+/// not load that plugin.
+pub struct HarnessBuilder {
+    harness: Harness,
+}
+
+impl HarnessBuilder {
+    /// A builder whose four required services are already attached.
+    pub fn new(
+        sessions: Arc<dyn SessionService>,
+        models: Arc<dyn ModelService>,
+        turns: Arc<dyn TurnRunner>,
+        sandbox: Arc<dyn SandboxService>,
+        cwd: PathBuf,
+    ) -> Self {
+        HarnessBuilder {
+            harness: Harness::new(sessions, models, turns, sandbox, cwd),
+        }
+    }
+
+    pub fn sessions(mut self, service: Arc<dyn SessionService>) -> Self {
+        self.harness.sessions = service;
+        self
+    }
+
+    pub fn models(mut self, service: Arc<dyn ModelService>) -> Self {
+        self.harness.models = service;
+        self
+    }
+
+    pub fn turns(mut self, service: Arc<dyn TurnRunner>) -> Self {
+        self.harness.turns = service;
+        self
+    }
+
+    pub fn sandbox(mut self, service: Arc<dyn SandboxService>) -> Self {
+        self.harness.sandbox = service;
+        self
+    }
+
+    pub fn workspaces(mut self, service: Arc<dyn WorkspaceService>) -> Self {
+        self.harness.workspaces = Some(service);
+        self
+    }
+
+    pub fn approvals(mut self, service: Arc<dyn ApprovalService>) -> Self {
+        self.harness.approvals = Some(service);
+        self
+    }
+
+    pub fn goals(mut self, service: Arc<dyn GoalService>) -> Self {
+        self.harness.goals = Some(service);
+        self
+    }
+
+    pub fn todos(mut self, service: Arc<dyn TodoService>) -> Self {
+        self.harness.todos = Some(service);
+        self
+    }
+
+    pub fn team(mut self, service: Arc<dyn TeamService>) -> Self {
+        self.harness.team = Some(service);
+        self
+    }
+
+    pub fn attachments(mut self, service: Arc<dyn AttachmentReader>) -> Self {
+        self.harness.attachments = Some(service);
+        self
+    }
+
+    pub fn markdown(mut self, service: Arc<dyn MarkdownRenderer>) -> Self {
+        self.harness.markdown = Some(service);
+        self
+    }
+
+    pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
+        self.harness.stats = Some(service);
+        self
+    }
+
+    /// The working directory a turn with no folder starts in.
+    pub fn cwd(mut self, cwd: PathBuf) -> Self {
+        self.harness.cwd = cwd;
+        self
+    }
+
+    pub fn build(self) -> Harness {
+        self.harness
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Closure adapters
+//
+// A binary that already has a function for one optional service should not have to declare a type for
+// it. These adapters are also what this crate's own tests and a deployment use to attach behaviour
+// without depending on another crate's internals.
+
+/// An [`AttachmentReader`] over a function.
+pub struct FnAttachmentReader<F>(pub F);
+
+impl<F> AttachmentReader for FnAttachmentReader<F>
+where
+    F: Fn(Option<&Value>) -> Result<Vec<Value>, String> + Send + Sync,
+{
+    fn read(&self, raw: Option<&Value>) -> Result<Vec<Value>, String> {
+        (self.0)(raw)
+    }
+}
+
+/// Wrap a function as an [`AttachmentReader`].
+pub fn attachment_reader<F>(read: F) -> Arc<dyn AttachmentReader>
+where
+    F: Fn(Option<&Value>) -> Result<Vec<Value>, String> + Send + Sync + 'static,
+{
+    Arc::new(FnAttachmentReader(read))
+}
+
+/// A [`MarkdownRenderer`] over a function.
+pub struct FnMarkdownRenderer<F>(pub F);
+
+impl<F> MarkdownRenderer for FnMarkdownRenderer<F>
+where
+    F: Fn(&str) -> String + Send + Sync,
+{
+    fn render(&self, text: &str) -> String {
+        (self.0)(text)
+    }
+}
+
+/// Wrap a function as a [`MarkdownRenderer`].
+pub fn markdown_renderer<F>(render: F) -> Arc<dyn MarkdownRenderer>
+where
+    F: Fn(&str) -> String + Send + Sync + 'static,
+{
+    Arc::new(FnMarkdownRenderer(render))
+}
+
+/// A [`SessionStatsProjector`] over a function.
+pub struct FnSessionStatsProjector<F>(pub F);
+
+impl<F> SessionStatsProjector for FnSessionStatsProjector<F>
+where
+    F: Fn(&str, &[Value]) -> Value + Send + Sync,
+{
+    fn stats(&self, session: &str, events: &[Value]) -> Value {
+        (self.0)(session, events)
+    }
+}
+
+/// Wrap a function as a [`SessionStatsProjector`].
+pub fn stats_projector<F>(project: F) -> Arc<dyn SessionStatsProjector>
+where
+    F: Fn(&str, &[Value]) -> Value + Send + Sync + 'static,
+{
+    Arc::new(FnSessionStatsProjector(project))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_function_becomes_an_attachment_reader() {
+        let reader = attachment_reader(|raw| match raw {
+            Some(value) => Ok(vec![json!({"type": "file", "path": value})]),
+            None => Ok(Vec::new()),
+        });
+        assert!(reader.read(None).unwrap().is_empty());
+        let parts = reader.read(Some(&json!("/u/a.txt"))).unwrap();
+        assert_eq!(parts, vec![json!({"type": "file", "path": "/u/a.txt"})]);
+    }
+
+    #[test]
+    fn a_function_becomes_a_markdown_renderer_and_a_stats_projector() {
+        let renderer = markdown_renderer(|text| format!("<p>{text}</p>"));
+        assert_eq!(renderer.render("hi"), "<p>hi</p>");
+
+        let projector =
+            stats_projector(|session, events| json!({"session": session, "events": events.len()}));
+        assert_eq!(
+            projector.stats("session-1", &[json!({"type": "message"})]),
+            json!({"session": "session-1", "events": 1})
+        );
+    }
+
+    #[test]
+    fn service_error_keeps_its_code() {
+        assert_eq!(
+            ServiceError::new("nope"),
+            ServiceError {
+                message: "nope".into(),
+                code: None
+            }
+        );
+        assert_eq!(
+            ServiceError::with_code("nope", "GOAL_NOT_FOUND"),
+            ServiceError {
+                message: "nope".into(),
+                code: Some("GOAL_NOT_FOUND".into())
+            }
+        );
+    }
 }
