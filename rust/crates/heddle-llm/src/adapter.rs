@@ -69,8 +69,16 @@ pub fn reasoning_value(
 /// Whether an endpoint's models reason at all: the `reasoning` capability, an endpoint-level block, or any offered
 /// model's own block. It decides whether a Responses request asks for a reasoning summary.
 pub fn reasoning_configured(endpoint: &EndpointConfig) -> bool {
-    let _ = endpoint;
-    todo!("port reasoningConfigured from openAiResponsesAdapter")
+    endpoint
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.iter().any(|capability| capability == "reasoning"))
+        || endpoint.reasoning.is_some()
+        || endpoint.models.as_ref().is_some_and(|models| {
+            models.iter().any(|entry| {
+                matches!(entry, heddle_config::ModelEntry::Option(model) if model.reasoning.is_some())
+            })
+        })
 }
 
 /// What one parsed event did to a fold.
@@ -95,4 +103,82 @@ pub trait StreamFold: Send {
 pub fn fold_sse(body: ByteStream, fold: Box<dyn StreamFold>) -> ChunkStream {
     let _ = (body, fold);
     todo!("port the adapters' read loop")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use heddle_config::{EndpointKind, ModelEntry, ModelOption, ReasoningLevel, ReasoningLevels};
+
+    fn endpoint() -> EndpointConfig {
+        EndpointConfig {
+            name: "responses".into(),
+            kind: EndpointKind::OpenaiResponses,
+            base_url: "http://127.0.0.1:1".into(),
+            model: None,
+            models: None,
+            reasoning: None,
+            project: None,
+            region: None,
+            api_key: None,
+            api_key_file: None,
+            headers: None,
+            stream: None,
+            max_output_tokens: None,
+            context_window: None,
+            capabilities: None,
+            input_modalities: None,
+            proxy: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn levels() -> ReasoningLevels {
+        ReasoningLevels {
+            default: Some("default".into()),
+            levels: vec![ReasoningLevel {
+                id: "high".into(),
+                name: "High".into(),
+                value: Some(ReasoningValue::Text("high".into())),
+            }],
+        }
+    }
+
+    #[test]
+    fn an_endpoint_reasons_when_it_declares_the_capability_a_block_or_a_models_own_block() {
+        assert!(
+            !reasoning_configured(&endpoint()),
+            "nothing declared, nothing to ask for"
+        );
+
+        let mut capability = endpoint();
+        capability.capabilities = Some(vec!["tools".into(), "reasoning".into()]);
+        assert!(reasoning_configured(&capability));
+
+        let mut block = endpoint();
+        block.reasoning = Some(levels());
+        assert!(reasoning_configured(&block));
+
+        let mut own = endpoint();
+        own.models = Some(vec![
+            ModelEntry::Id("plain".into()),
+            ModelEntry::Option(ModelOption {
+                id: "thinking".into(),
+                reasoning: Some(levels()),
+                ..ModelOption::default()
+            }),
+        ]);
+        assert!(
+            reasoning_configured(&own),
+            "one model's own block is enough"
+        );
+    }
+
+    #[test]
+    fn a_capability_list_without_reasoning_or_bare_model_ids_does_not_reason() {
+        let mut tools_only = endpoint();
+        tools_only.capabilities = Some(vec!["tools".into(), "offline".into()]);
+        tools_only.models = Some(vec![ModelEntry::Id("plain".into())]);
+        assert!(!reasoning_configured(&tools_only));
+    }
 }

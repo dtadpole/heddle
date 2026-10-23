@@ -239,21 +239,52 @@ pub fn is_healthy_finish(reason: &str) -> bool {
 /// 2. An unknown spelling passes through unchanged; absent or empty is `stop`.
 /// 3. A round that produced tool calls ended in `tool_calls`, whatever the provider called it.
 pub fn canonical_finish_reason(raw: Option<&str>, tool_calls: usize) -> String {
-    let _ = (raw, tool_calls);
-    todo!("port canonicalFinishReason")
+    let word = match raw {
+        Some(word) if !word.is_empty() => word,
+        _ => "stop",
+    };
+    let canonical = match word {
+        // finished
+        "stop" | "end_turn" | "stop_sequence" | "completed" => "stop",
+        // asked for tools, so another round is due
+        "tool_calls" | "tool_use" | "function_call" => "tool_calls",
+        // cut short
+        "length" | "max_tokens" | "max_output_tokens" => "max_output_tokens",
+        // reported as themselves: a filter is its own reason, not a synonym for either
+        "content_filter" | "refusal" => word,
+        // an unknown spelling is reported as itself rather than invented into a category
+        other => other,
+    };
+    if tool_calls > 0 && canonical == "stop" {
+        "tool_calls".to_string()
+    } else {
+        canonical.to_string()
+    }
 }
 
 /// Plain text of a message's text parts, concatenated (`textOf`).
 pub fn text_of(parts: &[ContentPart]) -> String {
-    let _ = parts;
-    todo!("port textOf")
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A plain-text rendering for a summary a person reads (`describeContent`): tool calls as `→ name args`, text and
 /// reasoning as themselves, attachments as `[image name]` / `[file name]`.
 pub fn describe_content(parts: &[ContentPart]) -> String {
-    let _ = parts;
-    todo!("port describeContent")
+    parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::ToolCall(call) => format!("→ {} {}", call.name, call.arguments),
+            ContentPart::Text { text } | ContentPart::Reasoning { text } => text.clone(),
+            ContentPart::Image(image) => format!("[image {}]", image.name),
+            ContentPart::File(file) => format!("[file {}]", file.name),
+        })
+        .collect()
 }
 
 /// A one-message user request, which is what a turn and a probe both are (`userMessage`).
@@ -265,8 +296,17 @@ pub fn user_message(text: impl Into<String>) -> Message {
 /// a tool call (a reasoning-only turn) is dropped, because reasoning is not replayed and a provider refuses an
 /// assistant message with no content. The log keeps the turn; only the request loses it.
 pub fn request_messages(messages: &[Message]) -> Vec<Message> {
-    let _ = messages;
-    todo!("port requestMessages")
+    messages
+        .iter()
+        .filter(|message| {
+            message.role != Role::Assistant
+                || message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::Text { .. } | ContentPart::ToolCall(_)))
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -410,6 +450,198 @@ mod tests {
         assert_eq!(
             json(&request),
             r#"{"endpoint":"chat","messages":[{"role":"user","content":[{"type":"text","text":"q"}]}],"round":1}"#
+        );
+    }
+
+    #[test]
+    fn every_wire_shape_spells_the_same_finish_the_loops_way() {
+        // A healthy end is `stop` under each provider's own word.
+        assert_eq!(canonical_finish_reason(Some("stop"), 0), "stop");
+        assert_eq!(canonical_finish_reason(Some("end_turn"), 0), "stop");
+        assert_eq!(canonical_finish_reason(Some("stop_sequence"), 0), "stop");
+        assert_eq!(canonical_finish_reason(Some("completed"), 0), "stop");
+        // A round that asked for tools ended in `tool_calls`.
+        assert_eq!(canonical_finish_reason(Some("tool_calls"), 0), "tool_calls");
+        assert_eq!(canonical_finish_reason(Some("tool_use"), 0), "tool_calls");
+        assert_eq!(
+            canonical_finish_reason(Some("function_call"), 0),
+            "tool_calls"
+        );
+        // A reply cut short says so.
+        assert_eq!(
+            canonical_finish_reason(Some("length"), 0),
+            "max_output_tokens"
+        );
+        assert_eq!(
+            canonical_finish_reason(Some("max_tokens"), 0),
+            "max_output_tokens"
+        );
+        assert_eq!(
+            canonical_finish_reason(Some("max_output_tokens"), 0),
+            "max_output_tokens"
+        );
+        // An unknown word is reported as itself rather than invented into a category.
+        assert_eq!(
+            canonical_finish_reason(Some("something_new"), 0),
+            "something_new"
+        );
+        assert_eq!(
+            canonical_finish_reason(Some("content_filter"), 0),
+            "content_filter"
+        );
+        assert_eq!(canonical_finish_reason(Some("refusal"), 0), "refusal");
+        // Absent and empty are a stop, as the loop reads them.
+        assert_eq!(canonical_finish_reason(None, 0), "stop");
+        assert_eq!(canonical_finish_reason(Some(""), 0), "stop");
+        // The third rule: a provider that says "finished" while having asked for tools did not finish.
+        assert_eq!(canonical_finish_reason(Some("completed"), 2), "tool_calls");
+        assert_eq!(canonical_finish_reason(Some("end_turn"), 1), "tool_calls");
+        // A cut reply stays cut even with calls in it.
+        assert_eq!(
+            canonical_finish_reason(Some("length"), 1),
+            "max_output_tokens"
+        );
+    }
+
+    #[test]
+    fn only_stop_and_tool_calls_are_healthy_and_those_are_what_the_table_emits() {
+        assert!(is_healthy_finish("stop"));
+        assert!(is_healthy_finish("tool_calls"));
+        assert!(!is_healthy_finish("max_output_tokens"));
+        assert!(!is_healthy_finish("completed"));
+        // A provider word never reaches the loop as itself when the table knows it.
+        assert!(is_healthy_finish(&canonical_finish_reason(
+            Some("end_turn"),
+            0
+        )));
+    }
+
+    #[test]
+    fn text_of_joins_only_the_text_parts() {
+        let parts = [
+            ContentPart::text("one"),
+            ContentPart::reasoning("not this"),
+            ContentPart::Text {
+                text: " two".into(),
+            },
+            ContentPart::ToolCall(ToolCall {
+                id: "c".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }),
+        ];
+        assert_eq!(text_of(&parts), "one two");
+        assert_eq!(text_of(&[]), "");
+    }
+
+    #[test]
+    fn describe_content_renders_every_part_for_a_person_reading_a_summary() {
+        let image = ContentPart::Image(ImagePart {
+            name: "shot.png".into(),
+            mime_type: ImageMediaType::Png,
+            path: "/u/shot.png".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            data: None,
+        });
+        let file = ContentPart::File(FilePart {
+            name: "notes.md".into(),
+            path: "/u/notes.md".into(),
+            bytes: 9,
+            sha256: "cd".into(),
+        });
+        let parts = [
+            ContentPart::text("look "),
+            ContentPart::reasoning("(thinking)"),
+            ContentPart::ToolCall(ToolCall {
+                id: "c".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            }),
+            image,
+            file,
+        ];
+        assert_eq!(
+            describe_content(&parts),
+            r#"look (thinking)→ read_file {"path":"a"}[image shot.png][file notes.md]"#
+        );
+    }
+
+    #[test]
+    fn an_assistant_turn_made_only_of_reasoning_is_not_sent() {
+        let messages = vec![
+            Message::new(Role::System, vec![ContentPart::text("be brief")]),
+            user_message("hello"),
+            Message::new(Role::Assistant, vec![ContentPart::reasoning("one word")]),
+            Message::new(Role::Assistant, vec![ContentPart::text("hi")]),
+        ];
+        let sendable = request_messages(&messages);
+        assert_eq!(
+            sendable
+                .iter()
+                .map(|message| message.role)
+                .collect::<Vec<_>>(),
+            vec![Role::System, Role::User, Role::Assistant]
+        );
+        assert_eq!(sendable[2].content, vec![ContentPart::text("hi")]);
+    }
+
+    #[test]
+    fn a_reasoning_part_beside_text_or_a_tool_call_does_not_disqualify_the_turn() {
+        let messages = vec![
+            user_message("read the file"),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentPart::reasoning("the tool can list it"),
+                    ContentPart::ToolCall(ToolCall {
+                        id: "call-1".into(),
+                        name: "read_file".into(),
+                        arguments: r#"{"path":"a.ts"}"#.into(),
+                    }),
+                ],
+            ),
+            Message {
+                role: Role::Tool,
+                tool_call_id: Some("call-1".into()),
+                content: vec![ContentPart::text("file body")],
+                source: None,
+            },
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentPart::reasoning("now answer"),
+                    ContentPart::text("done"),
+                ],
+            ),
+        ];
+        assert_eq!(request_messages(&messages).len(), 4);
+    }
+
+    #[test]
+    fn user_system_and_tool_messages_are_never_dropped_and_the_order_is_kept() {
+        let messages = vec![
+            Message::new(Role::System, vec![ContentPart::text("be brief")]),
+            user_message("hello"),
+            Message {
+                role: Role::Tool,
+                tool_call_id: Some("call-1".into()),
+                content: vec![ContentPart::text("output")],
+                source: None,
+            },
+            user_message("one"),
+            Message::new(Role::Assistant, vec![]),
+            user_message("two"),
+        ];
+        let sendable = request_messages(&messages);
+        assert_eq!(sendable.len(), 5, "only the empty assistant turn goes");
+        assert_eq!(
+            sendable
+                .iter()
+                .skip(3)
+                .map(|message| text_of(&message.content))
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
         );
     }
 }
