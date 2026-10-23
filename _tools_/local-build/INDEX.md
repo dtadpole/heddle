@@ -1,6 +1,6 @@
 ---
 title: Local build
-version: 1.1.0
+version: 1.2.0
 description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once.
 grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
@@ -37,11 +37,39 @@ _tools_/local-build/run status                                               # w
 Run it from inside your own worktree: the command inherits the caller's working directory, and a cargo command
 started in the wrong tree tests the wrong tree.
 
+## The cap
+
+The coordinator can cut the Mac to fewer usable slots in one write, without every seat changing an environment
+variable:
+
+```bash
+echo 2 > ~/.hd-build-slots/cap     # two usable slots until the file says otherwise
+rm ~/.hd-build-slots/cap           # back to the default, every slot
+```
+
+`run` reads the file on every call. It must hold a whole number from 1 to the slot count; anything else is
+reported and ignored, and the default count applies. Slots beyond the cap are not taken, but a dead one is
+still swept, so a leaked directory cannot linger. `status` prints the cap in force and marks a slot that is
+beyond it.
+
+## Seeing the machine
+
+The coordinator's review pass starts with one report of the Mac:
+
+```bash
+node _tools_/load-check/load-check.mjs
+```
+
+It prints the free disk against the 26 GB and 20 GB lines, the load average per core, swap, every slot's
+owner, and the processes in the `~/heddle--*` worktrees, then exits 0 ok, 1 warn, 2 stop (see
+[`../load-check/INDEX.md`](../load-check/INDEX.md)).
+
 ## `status`
 
 ```text
 root: ~/.hd-build-slots
 slots: 3  jobs: 3
+cap: 3 of 3 slots (default; no cap file)
 slot 0: busy pid=3521 cargo=3499 age=151s cwd=~/heddle--developer-six
 slot 1: free
 slot 2: stale pid=7371 cargo=0 age=3601s cwd=~/heddle--developer-twelve
