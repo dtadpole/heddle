@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T11:18:39Z
+modified: 2026-10-23T11:35:45Z
 version: 0.6.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -313,7 +313,8 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-23 | lane `cce4bec` (a baseline regression must reproduce on a re-run to block; no Rust changed since `77fb012`) | `HEDDLE_BIN=<release build of this branch at 77fb012's code> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at `cce4bec`; its `lane.mjs 05-config-system`; then `--write-baseline` and `--baseline` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline 0 newly passing, 0 regressed |
 | 2026-10-23 | lane `6549572` (`heddle-team` proves mail to an idle teammate is delivered before send returns — a test file only — and the check-teams metadata-read fix) | `HEDDLE_BIN=<debug build of exactly 6549572> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green |
 | 2026-10-23 | main `33407a4` (UI merge: `heddle-server` runs a turn to its end when its reader goes away) | `HEDDLE_BIN=<debug build of exactly 33407a4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
-| 2026-10-23 | lane `ddc5e2b` (`web`'s default endpoint falls back to the first endpoint, as TypeScript does — the part-70 follow-up turn's 400) | `HEDDLE_BIN=<debug build of exactly ddc5e2b> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1 |
+| 2026-10-23 | lane `ddc5e2b` (`web`'s default endpoint falls back to the first endpoint, as TypeScript does — the part-70 follow-up turn's 400) | `HEDDLE_BIN=<debug build of exactly ddc5e2b> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1. Main `e69f552` and `c1d59f5` carry the same code (measured: no non-Markdown change under `rust/` since) |
+| 2026-10-23 | lane `65dae73` (`web` leaves goal edges to the boot's goal-driver row) | `HEDDLE_BIN=<debug build of exactly 65dae73> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1 |
 
 ## Known differences from the TypeScript build
 
