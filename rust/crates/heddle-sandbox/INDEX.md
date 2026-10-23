@@ -1,8 +1,8 @@
 ---
 title: The heddle-sandbox crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:45:24Z
-version: 0.7.0
+modified: 2026-10-23T13:14:11Z
+version: 0.7.1
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
@@ -60,7 +60,8 @@ is inside its root (the TypeScript prefix test refuses it).
 
 ## What the other crates must do with it
 
-The verifiers judge the binary, so the checks pass only when these land beside this crate:
+These obligations have landed, and both verifiers pass through the binary (task 7 below). The table stays as the
+contract a change to any of these crates has to keep:
 
 | Crate (seat) | Obligation |
 |---|---|
@@ -68,7 +69,7 @@ The verifiers judge the binary, so the checks pass only when these land beside t
 | `heddle-agent` (developer-five) | the runtime-context snapshot's `sandbox:policy` section is `policy_statement(&sandbox.policy(effective_mode))` |
 | `heddle-session` (developer-eight) | the `permission/mode` event and the effective-mode fold use `SandboxMode` |
 | `heddle-server` (developer-ten) | hold an `AnswererGuard` while serving; forward `subscribe()` as SSE `event: approval`; `GET /api/approvals` → `{requests: pending_requests()}`; `POST /api/approvals/<id>`: `is_approval_id` else 400, `Answer::parse` else 400, `answer` false → 409; the permission route runs `permission_transition(effective, body.mode, body.confirm)` and refuses with 409 |
-| `heddle` boot (developer-two) | build both services from the profile rows (`sandbox`, `approvals`) and share them as `Arc` |
+| `heddle` boot (developer-two), and its web file (developer-ten, D-047) | build both services from the profile rows (`sandbox`, `approvals`) and share them as `Arc`; `web` gives the server the approvals service with the server attached as its answerer |
 
 ## Port plan
 
@@ -115,7 +116,8 @@ advertises `web` and `--turn` under D-048. No shim was involved, and the verifie
 | `node _tools_/verify-runner/lane.mjs 75-permission-sandbox` | "17 checks: 17 pass, 0 fail, 0 unjudged", lane green | — |
 | `run.mjs` again | — | 3 pass |
 
-The rehearsals that led here follow.
+It is kept judged: every change on `main` to this crate, approvals, the turn or `web.rs` is re-run. The team's
+status table in `rust/INDEX.md` carries the current count. The rehearsals that led here follow.
 
 ### Rehearsals before the capability was advertised
 
@@ -149,14 +151,15 @@ With the same binary, three checks failed from `/tmp` and none from `~/heddle--d
 
 ## Risks, stated now
 
-- **On Linux the verifier cannot pass as written.** `check-shell-confinement.mjs` skips its three kernel checks
-  off macOS, and the shared runner (`_tools_/verify-runner/run.mjs`) reports any skip as unjudged (exit 3). The
-  Linux rungs are ported here, but the build host has no `bwrap` (measured 2026-10-22: not on `PATH`, unprivileged
-  user namespaces work) and no Landlock (absent from `/sys/kernel/security/lsm`). Passing needs a Linux branch in
-  that check (the bwrap dialect is `read-only file system`) and `bwrap` on the host — the backend verifiers'
-  integrator and the host's owner decide, not this crate.
-- The verifiers' profiles name TypeScript module paths (`src/sandbox/service.ts`) for each row; mapping a row to
-  this crate is the configuration and boot crates' job.
+- **Off macOS the verifier cannot pass as written.** `check-shell-confinement.mjs` skips its three kernel checks
+  off macOS, and the shared runner (`_tools_/verify-runner/run.mjs`) reports any skip as unjudged (exit 3). The team
+  judges on macOS, where all four checks run and pass. The Linux rungs are ported here, but the Linux build host
+  used before had no `bwrap` (measured 2026-10-22: not on `PATH`, unprivileged user namespaces work) and no Landlock
+  (absent from `/sys/kernel/security/lsm`). Judging there would need a Linux branch in that check (the bwrap dialect
+  is `read-only file system`) and `bwrap` on the host. The backend verifiers' integrator decides that, not this crate.
+- Resolved: the verifiers' profiles name TypeScript module paths (`src/sandbox/service.ts`) for each row, and the
+  binary's boot recognises a name ending in `src/<module>.ts` as the built-in row (`rust/crates/heddle/src/builtins.rs`).
+  75's profiles were validated through the binary on 2026-10-22.
 - Adding the four dependencies changes `rust/Cargo.lock`, which this seat does not commit; it regenerates on merge.
 
 ## Read next
