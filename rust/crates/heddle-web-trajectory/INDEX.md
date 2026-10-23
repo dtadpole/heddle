@@ -115,6 +115,16 @@ key order kept), so it depends on no session type.
   agent loop's `model/request` record (`heddle-agent`'s `ModelRequestRecord`) already has the same fields in
   the same order as the recorded one.
 
+- **On logs the Rust harness recorded** (2026-10-22, a scratch probe outside the repository over the binary's
+  branch at ad04b9a): the rows a turn needs were started through the binary's own catalog, `agent_runtime`
+  composed the real heddle-agent loop over the real heddle-session store, and `heddle_agent::run_turn` ran
+  85's scripted bash turn and check-trajectory-view's two `list_dir` turns. The logs it wrote match the
+  TypeScript-recorded fixtures **event for event** — 12 and 22 events, the same types, roles, tool-call ids,
+  fields and field order; the values differ only where the setups do (the probe loaded fewer tool rows, so the
+  tool list and token estimates are smaller, and its paths are longer) — and every one of the 14 trajectory
+  assertions above holds on this crate's projection of them. What separates that from a judged verifier is
+  `heddle web` itself.
+
 ### How to repeat the differential
 
 1. Decode a log: `zstd -dc session.v2.jsonl.zstd > /tmp/session.jsonl`.
