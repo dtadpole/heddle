@@ -216,8 +216,52 @@ impl LayerOptions {
 ///
 /// Fails on an unknown profile, and on anything [`crate::read_layer`] refuses.
 pub fn default_layers(options: &LayerOptions, env: &Env) -> Result<Vec<NamedLayer>, ConfigError> {
-    let _ = (options, env);
-    todo!("heddle-config: default_layers")
+    let mut layers = Vec::new();
+    if let Some(profile) = &options.profile {
+        let profile = resolve_profile(profile, env)?;
+        for file in &profile.layers {
+            let path = profile.dir.join(file);
+            layers.push(NamedLayer::read(
+                format!("{}/{}", profile.name, file),
+                &path,
+                env,
+            )?);
+        }
+    } else if let Some(base) = &options.base {
+        let path = absolute(base, env);
+        layers.push(NamedLayer::read(
+            path.to_string_lossy().into_owned(),
+            &path,
+            env,
+        )?);
+        if options.include_project_patch {
+            // The project patch sits beside the **base layer**, not beside the working directory.
+            let anchor = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            let project_patch = anchor.join(PROJECT_PATCH);
+            if project_patch.exists() {
+                layers.push(NamedLayer::read(
+                    project_patch.to_string_lossy().into_owned(),
+                    &project_patch,
+                    env,
+                )?);
+            }
+        }
+    }
+    for patch in &options.patches {
+        let path = absolute(patch, env);
+        layers.push(NamedLayer::read(
+            path.to_string_lossy().into_owned(),
+            &path,
+            env,
+        )?);
+    }
+    Ok(layers)
+}
+
+/// A layer path as the TypeScript build made it: `~` expanded and resolved against the working
+/// directory, so a relative `--config` names the same file `read_layer` opens.
+fn absolute(path: &Path, env: &Env) -> PathBuf {
+    crate::paths::resolve_from_cwd(&expand_home(&path.to_string_lossy(), env))
 }
 
 #[cfg(test)]
@@ -243,6 +287,13 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, "[]\n").unwrap();
+    }
+
+    fn write_text(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
     }
 
     #[test]
@@ -400,6 +451,108 @@ mod tests {
         };
         assert_eq!(with_default.base, Some(cwd.join("cordis.yml")));
         assert!(with_default.include_project_patch);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_project_patch_is_read_beside_the_base_not_from_the_cwd() {
+        let root = scratch("default-base");
+        let project = root.join("project");
+        write(&project.join("cordis.yml"));
+        write_text(
+            &project.join("heddle.patch.yml"),
+            "- insert:\n    - id: alpha\n      name: ./alpha\n",
+        );
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let options = LayerOptions::for_run(
+            None,
+            Some(project.join("cordis.yml")),
+            Vec::new(),
+            &elsewhere,
+        );
+        let layers = default_layers(&options, &Env::default()).unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(
+            layers[0].file,
+            project.join("cordis.yml").to_string_lossy(),
+            "the base is named by its absolute path"
+        );
+        assert!(layers[0].entries.is_empty());
+        assert_eq!(
+            layers[1].file,
+            project.join("heddle.patch.yml").to_string_lossy(),
+            "the project patch is looked for beside the base, not in the cwd"
+        );
+        assert_eq!(
+            layers[1].entries[0].insert[0]
+                .get("id")
+                .and_then(crate::value::LayerValue::as_str),
+            Some("alpha")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_profile_reads_its_layer_files_in_order_under_its_name() {
+        let root = scratch("default-profile");
+        let home = root.join("home");
+        write(&home.join("profiles/dev/cordis.yml"));
+        write_text(
+            &home.join("profiles/dev/heddle.patch.yml"),
+            "- insert:\n    - id: alpha\n      name: ./alpha\n",
+        );
+        let env = env_at(&home);
+        let options =
+            LayerOptions::for_run(Some("dev".into()), None, Vec::new(), Path::new("/unused"));
+        let layers = default_layers(&options, &env).unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].layer, "dev/cordis.yml");
+        assert_eq!(layers[1].layer, "dev/heddle.patch.yml");
+        assert_eq!(
+            layers[1].file,
+            home.join("profiles/dev/heddle.patch.yml").to_string_lossy()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_profile_fails_through_default_layers() {
+        let root = scratch("default-unknown");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("profiles")).unwrap();
+        let options = LayerOptions::for_run(
+            Some("nowhere".into()),
+            None,
+            Vec::new(),
+            Path::new("/unused"),
+        );
+        let error = default_layers(&options, &env_at(&home)).unwrap_err();
+        assert!(error.problems()[0].contains("no profile named 'nowhere'"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn patches_are_read_after_the_base_and_named_by_their_path() {
+        let root = scratch("default-patches");
+        let project = root.join("project");
+        write(&project.join("cordis.yml"));
+        let patch = root.join("extra.yml");
+        write_text(&patch, "- insert:\n    - id: beta\n      name: ./beta\n");
+        let options = LayerOptions::for_run(
+            None,
+            Some(project.join("cordis.yml")),
+            vec![patch.clone()],
+            Path::new("/unused"),
+        );
+        let layers = default_layers(&options, &Env::default()).unwrap();
+        assert_eq!(
+            layers.len(),
+            2,
+            "an explicit patch excludes the project patch"
+        );
+        assert_eq!(layers[1].file, patch.to_string_lossy());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -19,7 +19,7 @@ the path rules, the machine's local file, and endpoint configuration.
 | Ported from | `src/config/`, `src/local-config.ts`, `src/paths.ts`, `src/endpoints.ts`; the configuration half of `src/llm/types.ts`; `runConfigCommand` and `baseLayer` of `src/cli.ts` |
 | Judged by | `_verifiers_/05-config-system`, through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| State | **contract landed**: every public item declared and documented; `Env`, `ConfigError`, home, paths, `LayerValue`, the serde shapes and environment references implemented with tests (steps 1–2), composition with provenance and component names (step 4), profile discovery and layer options (step 5), schema validation plus `anchor_dir` (step 6), and the machine's local file and endpoint resolution (step 8); steps 3, `default_layers` and `command::run` wait on the YAML reader; `command::run` is the last `todo!()` |
+| State | **implemented**: every public item declared and documented is now implemented, with unit tests (steps 1–8); the last step is `05-config-system` through the binary (developer-two wires `command::run`), where the `--validate` check still waits on open question 1 |
 
 ## The public API
 
@@ -94,11 +94,11 @@ because each later step is checked through the earlier ones.
 |---|---|---|
 | 1 | done: `Env`, `ConfigError`, home, paths, `LayerValue`, serde shapes | 27 |
 | 2 | done: `references_in`, `parse_scalar`, `resolve_env` | 11 |
-| 3 | `read_layer`, `NamedLayer::read`, `anchor_dir` — a YAML reader that keeps `!env` / `!include` tags | include order; list includes; a cycle names every file; non-array, bad key, non-path include, empty file |
+| 3 | done: `read_layer`, `NamedLayer::read` on saphyr 0.0.6; `anchor_dir` landed early in step 6 | 12 new |
 | 4 | done: `compose`, `origin_of`, `ComposedRow::to_report`, `EntryRow::component` | 11 new |
-| 5 | partly done: `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions`; `default_layers` waits on step 3 | 9 new |
+| 5 | done: `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions`, `default_layers` | 13 new |
 | 6 | done: `Schema::check`, `validate_rows`; `anchor_dir` landed early because validation anchors through it | 13 new |
-| 7 | `command::run` | each text and JSON shape against the TypeScript output; exit codes |
+| 7 | done: `command::run` | 5 new |
 | 8 | done: `local`, `endpoints` | 17 new |
 | 9 | `05-config-system` through `HEDDLE_BIN`, once the binary delegates to `command::run` | the verifier |
 
@@ -110,8 +110,8 @@ because each later step is checked through the earlier ones.
    profile (`./alpha.component.yml`: `command`, and `config` as a JSON Schema), `--validate` reads the manifest
    without starting anything, and the verifier's `HEDDLE_BIN` branch writes manifests instead of `.ts` files. It
    touches part 4's outside-process protocol, so it is agreed with `heddle-tools` before it is built.
-2. **YAML reader.** Step 3 needs one that exposes tags; the candidates are a maintained `serde_yaml` fork and
-   `saphyr`. It goes into `[workspace.dependencies]` through the workspace's owner.
+2. **YAML reader.** *Resolved*: `saphyr` 0.0.6 (MIT OR Apache-2.0, YAML 1.2, exposes tagged nodes as
+   `Yaml::Tagged(Tag, Box<Yaml>)`), added to `[workspace.dependencies]` by integrator-one (7ea2a3e).
 3. **`serde_json`'s `preserve_order`.** Off here. Features unify across the workspace, so turning it on changes
    every crate's map order; whichever crate needs byte-compatible JSON (the session log) asks for it workspace-wide.
 
