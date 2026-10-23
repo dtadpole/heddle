@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, scriptedConfig, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The access-mode chip as a **control**, judged in a browser.
@@ -218,6 +218,7 @@ async function clickMenuItem(browser, label) {
 }
 
 test('the chip is a menu control with the reference’s anatomy and a selected state', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('menu')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -318,6 +319,7 @@ test('the chip is a menu control with the reference’s anatomy and a selected s
 })
 
 test('full access needs the risk gate, and the server refuses an unconfirmed escalation', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('gate')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -398,6 +400,7 @@ test('full access needs the risk gate, and the server refuses an unconfirmed esc
 })
 
 test('a refused write is visible on the closed row, and no UI action widens the session by itself', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
    * The reference prints a failed tool as one red line a reader sees without opening anything, and a mode
@@ -452,6 +455,7 @@ test('a refused write is visible on the closed row, and no UI action widens the 
 })
 
 test('the chip stays usable while a turn runs, and the mode is applied to the next call', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('running', { holdOpenMs: 2500 })
   const browser = await openBrowser({ width: 1280, height: 900 })

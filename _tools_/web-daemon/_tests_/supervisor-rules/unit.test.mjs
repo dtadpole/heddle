@@ -40,8 +40,11 @@ function fakeServer({ name, exitAfterMs = null }) {
 }
 
 /** Run the supervisor in front of a stand-in server; resolves with its exit, code and output. */
-function supervise(command, { maxFailures = 10 } = {}) {
-  const child = spawn(process.execPath, [supervisor, '--max-failures', String(maxFailures), '--', ...command], {
+function supervise(command, { maxFailures = 10, retrySeconds = null, giveUp = false } = {}) {
+  const flags = ['--max-failures', String(maxFailures)]
+  if (retrySeconds !== null) flags.push('--retry-seconds', String(retrySeconds))
+  if (giveUp) flags.push('--give-up')
+  const child = spawn(process.execPath, [supervisor, ...flags, '--', ...command], {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stdout = ''
@@ -68,10 +71,18 @@ test('the command line is everything after --, untouched, and the flags before i
   assert.deepEqual(parseSupervisorArgs(['--', '/b/heddle', 'web', '--port', '8082']), {
     command: ['/b/heddle', 'web', '--port', '8082'],
     maxFailures: 10,
+    slowRetryMs: 60_000,
+    giveUp: false,
   })
   const spaced = parseSupervisorArgs(['--max-failures', '3', '--', '/a b/heddle', 'web', '--config', '/a b/cordis.yml'])
   assert.deepEqual(spaced.command, ['/a b/heddle', 'web', '--config', '/a b/cordis.yml'], 'a path with a space stays one argument')
   assert.equal(spaced.maxFailures, 3)
+  assert.equal(spaced.slowRetryMs, 60_000, 'the limit means slow retries by default')
+  assert.equal(spaced.giveUp, false)
+  const bounded = parseSupervisorArgs(['--max-failures', '4', '--retry-seconds', '7', '--give-up', '--', '/b/heddle'])
+  assert.equal(bounded.maxFailures, 4)
+  assert.equal(bounded.slowRetryMs, 7_000)
+  assert.equal(bounded.giveUp, true)
   for (const [argv, message] of [
     [[], /missing "--"/],
     [['--'], /no server command/],
@@ -90,10 +101,14 @@ test('a failed start backs off, and a run that lasted resets the count', () => {
   assert.equal(restartDelay(9), 5000, 'capped, so a crash loop is never silent for long')
   assert.equal(restartDelay(40), 5000)
 
-  assert.deepEqual(nextAttempt({ ranForMs: 120, failures: 0 }), { failures: 1, delayMs: 250, giveUp: false })
-  assert.deepEqual(nextAttempt({ ranForMs: 120, failures: 2 }), { failures: 3, delayMs: 1000, giveUp: false })
-  assert.deepEqual(nextAttempt({ ranForMs: 60_000, failures: 4 }), { failures: 0, delayMs: 0, giveUp: false }, 'a kill after a long run is not a failure to start')
-  assert.deepEqual(nextAttempt({ ranForMs: 10, failures: 2, maxFailures: 3 }), { failures: 3, delayMs: 0, giveUp: true }, 'the last allowed failure gives up instead of looping')
+  assert.deepEqual(nextAttempt({ ranForMs: 120, failures: 0 }), { failures: 1, delayMs: 250, slow: false, giveUp: false })
+  assert.deepEqual(nextAttempt({ ranForMs: 120, failures: 2 }), { failures: 3, delayMs: 1000, slow: false, giveUp: false })
+  assert.deepEqual(nextAttempt({ ranForMs: 60_000, failures: 4 }), { failures: 0, delayMs: 0, slow: false, giveUp: false }, 'a kill after a long run is not a failure to start')
+  // The default at the limit is a slow retry, not an exit: on a host whose platform does not restart the job, exiting
+  // means the page stays down even after a transient cause has cleared. Measured reason in supervisor.mjs.
+  assert.deepEqual(nextAttempt({ ranForMs: 10, failures: 2, maxFailures: 3 }), { failures: 3, delayMs: 60_000, slow: true, giveUp: false })
+  assert.deepEqual(nextAttempt({ ranForMs: 10, failures: 2, maxFailures: 3, slowRetryMs: 5_000 }), { failures: 3, delayMs: 5_000, slow: true, giveUp: false })
+  assert.deepEqual(nextAttempt({ ranForMs: 10, failures: 2, maxFailures: 3, giveUp: true }), { failures: 3, delayMs: 0, slow: false, giveUp: true }, '--give-up keeps the bounded behaviour for a host that restarts the job')
 })
 
 test('a killed server is put back, and stopping the supervisor stops it', async () => {
@@ -118,9 +133,23 @@ test('a killed server is put back, and stopping the supervisor stops it', async 
   }
 })
 
-test('a server that cannot stay up is retried at a bounded rate, then the supervisor gives up and says so', async () => {
+test('a server that cannot stay up is retried slowly for as long as it takes, not abandoned', async () => {
+  const server = fakeServer({ name: 'slow', exitAfterMs: 10 })
+  const run = supervise([process.execPath, server.path], { maxFailures: 2, retrySeconds: 1 })
+  try {
+    await until(() => lines(server.pids).length >= 3, 'a third start after the limit, which the old version refused')
+    assert.equal(run.child.exitCode, null, 'still running, so a transient cause can clear without a person')
+    assert.match(run.output().stderr, /still retrying, every 1 s/, 'and it says why it is still trying')
+  } finally {
+    run.child.kill('SIGTERM')
+    const exited = await run.exited
+    assert.equal(exited.code, 0, 'a supervisor asked to stop still exits cleanly')
+  }
+})
+
+test('--give-up asks for the bounded behaviour, for a host whose platform restarts the job', async () => {
   const server = fakeServer({ name: 'crash', exitAfterMs: 10 })
-  const run = supervise([process.execPath, server.path], { maxFailures: 3 })
+  const run = supervise([process.execPath, server.path], { maxFailures: 3, giveUp: true })
   const exited = await run.exited
   assert.equal(exited.code, 1, 'exit 1, so the platform and a person both see a service that is not running')
   assert.equal(lines(server.pids).length, 3, 'three starts, not an endless loop')

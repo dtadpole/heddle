@@ -48,9 +48,16 @@ import {
 
 const GATE_URL = 'http://127.0.0.1:8082/'
 
+/**
+ * This verifier judges **the deployment**, never a scratch service: the overrides `rehearse.sh` sets so that
+ * `95-web-daemon` can be judged on a scratch agent are blanked here, because the page behind 8082 is the deployment's
+ * whatever the shell this runs in happens to name.
+ */
+const DEPLOYMENT_ENV = { ...process.env, HEDDLE_WEB_LABEL: '', HEDDLE_WEB_UNIT: '' }
+
 /** The installed service and the process owning its port, or a reason this host cannot be judged. */
 function deployment() {
-  const service = installedService()
+  const service = installedService(DEPLOYMENT_ENV)
   if (service === null) return { reason: 'an installed agent or user unit on this machine' }
   if (service.port === null) return { reason: `a --port in the installed service's command line (${service.path})` }
   const pid = listenerPid(service.port)
@@ -133,7 +140,7 @@ test("the page the owner sees is the deployment checkout's built page, byte for 
 })
 
 test('the deployment checkout contains only committed main', async (context) => {
-  const service = installedService()
+  const service = installedService(DEPLOYMENT_ENV)
   if (!skipUnless(context, service !== null && service.root !== null, 'an installed agent or user unit on this machine')) return
   const verdict = checkoutVerdict(checkoutState(service.root))
   assert.ok(verdict.ok, `the deployment checkout ${service.root} contains only committed main: ${verdict.reason}`)

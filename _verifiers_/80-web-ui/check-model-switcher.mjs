@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, isolatedHome, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The model selector, judged in a browser against DSH's measured control.
@@ -517,6 +517,7 @@ async function sessionsOf(server) {
 }
 
 test('the seat and its two-level menu are DSH’s measured control', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
   const server = await startServer('anatomy')
   const browser = await openBrowser({ width: 1280, height: 1000 })
@@ -640,6 +641,7 @@ test('the seat and its two-level menu are DSH’s measured control', async (cont
 })
 
 test('choosing a model type and an effort is recorded, sent, and survives a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
   const server = await startServer('record')
   const browser = await openBrowser({ width: 1280, height: 1000 })
@@ -721,6 +723,7 @@ test('choosing a model type and an effort is recorded, sent, and survives a relo
 })
 
 test('the menu is keyboard-operable and a selection restores focus without a ring', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
   const server = await startServer('keyboard')
   const browser = await openBrowser({ width: 1280, height: 1000 })
@@ -816,6 +819,7 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
    * tool call until the browser confirms the switch; releasing it must route the next call to the second
    * endpoint. A fixed 3.2-second delay raced against layout changes and browser instrumentation.
    */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
   const server = await startServer('running', { toolFirst: true })
   const browser = await openBrowser({ width: 1280, height: 1000 })
@@ -864,6 +868,7 @@ test('a model or a level the endpoint does not declare is refused, and nothing i
    * following turn of the session with a name nobody chose — and the seat would have shown a control for a value
    * the provider never receives.
    */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
   const server = await startServer('refuse')
   try {

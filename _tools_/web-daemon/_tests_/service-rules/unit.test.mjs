@@ -17,6 +17,7 @@ import {
   parseUnit,
   pidFromLaunchctl,
   plistPath,
+  serviceTarget,
   splitCommandLine,
   supervisorFor,
   unitPath,
@@ -188,4 +189,17 @@ test('a deployment checkout is committed main: on main at its tip, or detached e
   assert.match(checkoutVerdict({ ...clean, branch: 'main', head: a, dirty: ' M src/x.ts' }).reason, /uncommitted changes: {2}M src\/x\.ts/)
   assert.match(checkoutVerdict({ ...clean, branch: 'HEAD', head: a, dirty: '?? scratch' }).reason, /uncommitted/, 'detached does not excuse a dirty tree')
   assert.match(checkoutVerdict({ branch: null, head: null, dirty: null, mainTip: null, originTip: null }).reason, /not a git checkout/)
+})
+
+test('the judged service is the deployment unless a scratch label names another, and only a scratch one takes its port from the environment', () => {
+  assert.deepEqual(serviceTarget({}, 'darwin'), { label: 'com.dtadpole.heddle-web', unit: UNIT, scratch: false, documentedPort: 3082 })
+  assert.deepEqual(serviceTarget({}, 'linux'), { label: 'com.dtadpole.heddle-web', unit: UNIT, scratch: false, documentedPort: 8082 })
+  // An environment variable alone must never change what the deployment is held to.
+  assert.equal(serviceTarget({ HEDDLE_WEB_PORT: '9999' }, 'darwin').documentedPort, 3082)
+  assert.equal(serviceTarget({ HEDDLE_WEB_LABEL: '', HEDDLE_WEB_UNIT: '' }, 'darwin').scratch, false, 'blank overrides are the deployment (96 blanks them)')
+  const scratch = serviceTarget({ HEDDLE_WEB_LABEL: 'com.dtadpole.heddle-web.rehearsal', HEDDLE_WEB_PORT: '3096' }, 'darwin')
+  assert.equal(scratch.scratch, true)
+  assert.equal(scratch.documentedPort, 3096)
+  assert.equal(plistPath({ HOME: '/h', HEDDLE_WEB_LABEL: 'com.dtadpole.heddle-web.rehearsal' }), '/h/Library/LaunchAgents/com.dtadpole.heddle-web.rehearsal.plist')
+  assert.equal(unitPath({ HOME: '/h', HEDDLE_WEB_UNIT: 'heddle-web-rehearsal.service' }), '/h/.config/systemd/user/heddle-web-rehearsal.service')
 })
