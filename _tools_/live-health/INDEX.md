@@ -46,8 +46,10 @@ served with, it needs no file of its own, and it never lands in the deployment c
 | `console` | the console is clean | error-level messages fail; warnings and verbose kept; read on load **and** after the turn |
 | `dsh` | the reference is the reference | `127.0.0.1:8080/`: title, `window.__DSH_BOOT__` keys, composer, console errors |
 
-Exit `0` pass, `1` fail, `3` unjudged (the address answers nothing, or no token is readable). A pass
-that could not be judged is never pinned as healthy.
+Exit `0` pass, `1` fail, `3` unjudged. A **dead address is a failure**, not an unknown: a live
+deployment that stops answering is exactly what the monitor exists to catch. `3` is for a check that
+cannot be decided even though the deployment answered — no built page to compare the marker against, or
+a console that cannot be read. A pass that could not be judged is never pinned as healthy.
 
 ## The rules, and their tests
 

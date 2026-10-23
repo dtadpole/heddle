@@ -44,8 +44,9 @@
  *   _tools_/live-health/probe.mjs --no-turn           # judge the page, do not spend a turn
  *   _tools_/live-health/probe.mjs --log=~/.heddle/web.log --deploy=~/heddle-live
  *
- * Exit: 0 when every judged check passes, 1 when one fails, 3 when the address answers nothing and the
- * pass cannot be judged (the project's verifier contract: unjudged is never passing).
+ * Exit: 0 when every judged check passes, 1 when one fails or the address does not answer (a live
+ * deployment that stops answering is a failure), 3 when a check cannot be decided although the
+ * deployment answered (the project's verifier contract: unjudged is never passing).
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -665,7 +666,7 @@ pass.compare = {
   /** The same DOM inventory on both pages; the full parity ledger is the ui lane's, this is the live cross-check. */
   heddle: pass.checks.load.inventory ?? null,
   dsh: pass.dsh.inventory ?? null,
-  note: 'counts only; the page follows DSH for the composer, tree, trajectory and access control, and a number that moves between passes is a regression to show the ui lane',
+  note: 'counts only; they move with content (session rows in the tree, turns in the log), so compare them at equal content and name a move at equal content as a regression for the ui lane',
 }
 
 pass.verdict = passVerdict(pass.checks)

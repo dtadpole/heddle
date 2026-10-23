@@ -54,8 +54,9 @@ deployment checkout clean for `96-deployment`.
 
 ## Pinned passes
 
-Times are PDT. `pass` = every judged check passed; `fail` = one failed; `----` = unjudged (the address
-did not answer, or no token was readable). The full record is [`live-health.jsonl`](live-health.jsonl).
+Times are PDT. `pass` = every judged check passed; `fail` = one failed (a dead address is a failure,
+not an unknown); `----` = unjudged, a check that could not be decided although the deployment answered
+(no built page to compare, no token readable). The full record is [`live-health.jsonl`](live-health.jsonl).
 
 | At | Deployment | Gate | Door | Load | Marker | Turn | Console | Verdict |
 |---|---|---|---|---|---|---|---|---|
@@ -115,7 +116,11 @@ public, paths are stated under `~`, and the repository's public-hygiene gate che
 
 The heddle page follows DSH for the composer, tree, trajectory and access control; the comparison
 method is the seat's `ui-comparison` baseline, numbers only, recorded in
-[`INDEX.md`](INDEX.md) and the parity skill.
+[`INDEX.md`](INDEX.md) and the parity skill. The counts move with **content** — each session in the
+tree is a treeitem and each turn adds message controls — so a pass compares them at equal content, and
+a move at equal content is the finding that goes to the ui lane. Measured flat (no session selected):
+heddle 46 interactive / 18 enabled; DSH 139 / 17, with DSH's 1 hit-test miss and 1 clip on its own
+gated surfaces.
 
 ## How often
 
