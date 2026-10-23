@@ -13,4 +13,5 @@ Instance-level `_tests_` type folder for [`_tools_/verify-runner/`](../../INDEX.
 | Instance | The suite |
 |---|---|
 | [`verdict-rules/`](verdict-rules/INDEX.md) | `classify`, `tapCounts` and `collectNames` — the mapping every verifier's result passes through |
+| [`lane-rules/`](lane-rules/INDEX.md) | `laneVerdict`, `parseArgs` and `parseVerdictLine` — the lane gate's decision and its command line |
 | [`helper-rules/`](helper-rules/INDEX.md) | the check library — transcript finding and decoding, session listing, JSON extraction, fingerprints, `skipUnless` |

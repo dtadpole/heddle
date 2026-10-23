@@ -12,7 +12,6 @@ use crate::builtins::BuiltinCatalog;
 use crate::cli::{Args, CommandWord};
 use crate::output::Output;
 use crate::ports::Record;
-use crate::services::Services;
 use crate::usage::Capability;
 use crate::{Exit, Invocation};
 
@@ -37,18 +36,17 @@ pub fn dispatch_serving(
     served: &[Capability],
 ) -> Exit {
     if let Some(command) = args.command {
-        let capability = capability_of(command);
-        if !served.contains(&capability) {
-            return unported(command.as_str(), out);
-        }
+        // A command that answers is routed whether or not the help advertises it yet: SERVED decides
+        // what a verifier may judge, not what the binary does. Only `web` waits for its crate.
         return match command {
-            CommandWord::Web => web(args, invocation, out),
+            CommandWord::Web if served.contains(&Capability::Web) => web(args, invocation, out),
+            CommandWord::Web => unported(command.as_str(), out),
             CommandWord::Profiles | CommandWord::Config => config_command(args, invocation, out),
             _ => boot_then(args, invocation, out),
         };
     }
     if args.turn.is_some() {
-        return unported("--turn", out);
+        return turn(args, invocation, out);
     }
     let project_base = invocation.cwd.join(heddle_config::PROJECT_BASE).exists();
     if crate::cli::names_a_tree(args, project_base) {
@@ -81,6 +79,17 @@ pub fn capability_of(command: CommandWord) -> Capability {
 /// Boot the tree the command line names, then answer from it: port of `runCommand`'s
 /// `bootFromArgs` and `settle`.
 fn boot_then(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    let exit = booted_command(args, invocation, &boot, out);
+    boot.dispose();
+    exit
+}
+
+/// The tree the command line names, booted over the built-in catalog: port of `bootFromArgs`.
+fn boot_tree(args: &Args, invocation: &Invocation) -> Result<Boot, String> {
     let options = crate::boot::BootOptions {
         layers: crate::cli::layer_options(args, &invocation.cwd, &invocation.env),
         overrides: crate::cli::root_overrides(args, &invocation.cwd)
@@ -90,13 +99,7 @@ fn boot_then(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit
         env: invocation.env.clone(),
     };
     let catalog = BuiltinCatalog::new(invocation.env.clone(), invocation.cwd.clone());
-    let boot = match crate::boot::boot(&options, &catalog) {
-        Ok(boot) => boot,
-        Err(error) => return out.fail(&error.0),
-    };
-    let exit = booted_command(args, invocation, &boot, out);
-    boot.dispose();
-    exit
+    crate::boot::boot(&options, &catalog).map_err(|error| error.0)
 }
 
 /// A request whose part is not wired yet: the binary says so on stderr and exits 2, so a verifier
@@ -172,102 +175,26 @@ pub fn booted_command(
         tools.filter_to(&tools.allow_list());
     }
     match args.command {
-        Some(CommandWord::Models) => models_command(args, boot, out),
-        Some(CommandWord::Tools) => tools_command(args, boot, out),
-        Some(CommandWord::Commands) => registered_commands(args, boot, out),
+        Some(CommandWord::Models) => owned_models(args, invocation, boot, out),
+        Some(CommandWord::Tools) => {
+            owned_tools(heddle_tools::command::Command::Tools, args, boot, out)
+        }
+        Some(CommandWord::Commands) => {
+            owned_tools(heddle_tools::command::Command::Commands, args, boot, out)
+        }
         Some(CommandWord::Sessions) => sessions_command(args, boot, out),
         Some(CommandWord::Transcript) => transcript_command(args, boot, out),
-        Some(CommandWord::Hooks) => hooks_command(args, out),
+        Some(CommandWord::Hooks) => owned_hooks(args, out),
         Some(CommandWord::Workspaces) => workspaces_command(args, boot, out),
         Some(CommandWord::Workspace) => workspace_command(args, boot, out),
         Some(CommandWord::Tree) => tree_command(args, boot, out),
         Some(CommandWord::Session) => session_command(args, invocation, boot, out),
         Some(CommandWord::File) => file_command(args, invocation, boot, out),
-        Some(CommandWord::Goal) => goal_command(args, invocation, boot, out),
-        Some(CommandWord::Context) => context_command(args, invocation, boot, out),
+        Some(CommandWord::Goal) => owned_goal(args, invocation, boot, out),
+        Some(CommandWord::Context) => owned_context(args, invocation, boot, out),
         Some(other) => unported(other.as_str(), out),
         None => unported("the configured tree", out),
     }
-}
-
-/// `models`: the configured endpoints, described without their credentials.
-fn models_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(model) = boot.services.model() else {
-        return out.fail("this profile does not load the model plugin");
-    };
-    let endpoints = model.describe();
-    if args.json {
-        out.json(&serde_json::Value::Array(endpoints));
-        return Exit::Success;
-    }
-    out.out(&format!("heddle: {} endpoint(s)\n", endpoints.len()));
-    for endpoint in &endpoints {
-        let credential =
-            if endpoint.get("credential").is_some() || endpoint.get("credentialFile").is_some() {
-                " credential"
-            } else {
-                ""
-            };
-        out.out(&format!(
-            "  {:<18} {:<16} {}{credential}\n",
-            field(endpoint, "name"),
-            field(endpoint, "kind"),
-            endpoint
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("-"),
-        ));
-    }
-    Exit::Success
-}
-
-/// `tools`: the registered tools, each with the first sentence of its description.
-fn tools_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(tools) = boot.services.tools() else {
-        return out.fail("this profile does not load the tools plugin");
-    };
-    let described = tools.describe();
-    if args.json {
-        let records: Vec<serde_json::Value> = described
-            .iter()
-            .map(|tool| {
-                serde_json::json!({
-                    "name": field(tool, "name"),
-                    "description": field(tool, "description"),
-                })
-            })
-            .collect();
-        out.json(&serde_json::Value::Array(records));
-        return Exit::Success;
-    }
-    out.out(&format!("heddle: {} tool(s)\n", described.len()));
-    for tool in &described {
-        let description = field(tool, "description");
-        let first = description.split('.').next().unwrap_or("");
-        out.out(&format!("  {:<14} {first}\n", field(tool, "name"),));
-    }
-    Exit::Success
-}
-
-/// `commands`: the commands the tools plugin registered.
-fn registered_commands(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(tools) = boot.services.tools() else {
-        return out.fail("this profile does not load the tools plugin");
-    };
-    let described = tools.describe_commands();
-    if args.json {
-        out.json(&serde_json::Value::Array(described));
-        return Exit::Success;
-    }
-    out.out(&format!("heddle: {} command(s)\n", described.len()));
-    for command in &described {
-        out.out(&format!(
-            "  {:<14} — {}\n",
-            field(command, "name"),
-            field(command, "description"),
-        ));
-    }
-    Exit::Success
 }
 
 /// `sessions`: the store's sessions, newest first, the first twenty.
@@ -679,164 +606,6 @@ fn file_command(args: &Args, _invocation: &Invocation, boot: &Boot, out: &mut Ou
     Exit::Success
 }
 
-/// `goal [<session-id>]`: what the session works toward.
-fn goal_command(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(goal) = boot.services.goal() else {
-        return out.fail("this profile does not load the goal plugin");
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let handle = match args.target.as_deref().filter(|target| !target.is_empty()) {
-        Some(target) => session.resume(target),
-        None => session.current(&invocation.cwd),
-    };
-    let handle = match handle {
-        Ok(handle) => handle,
-        Err(error) => return out.fail(&error.message),
-    };
-    let view = match goal.get(&handle) {
-        Ok(view) => view,
-        Err(error) => return out.fail(&error.message),
-    };
-    if args.json {
-        out.json(&serde_json::json!({
-            "session": handle.id,
-            "goal": view.clone().unwrap_or(serde_json::Value::Null),
-        }));
-        return Exit::Success;
-    }
-    let Some(view) = view else {
-        out.out(&format!("heddle: no goal is current in {}\n", handle.id));
-        return Exit::Success;
-    };
-    out.out(&format!(
-        "heddle: {}  revision {}  {} ({})\n",
-        field(&view, "id"),
-        js(view.get("revision").unwrap_or(&serde_json::Value::Null)),
-        field(&view, "phase"),
-        field(&view, "activation"),
-    ));
-    out.out(&format!("  objective: {}\n", field(&view, "objective")));
-    out.out(&format!(
-        "  rounds: {}/{}\n",
-        js(view
-            .get("roundsStarted")
-            .unwrap_or(&serde_json::Value::Null)),
-        js(view
-            .get("maxGoalRounds")
-            .unwrap_or(&serde_json::Value::Null)),
-    ));
-    if let Some(blocked) = view.get("blockedReason") {
-        out.out(&format!(
-            "  blocked: {} — {}\n",
-            field(blocked, "code"),
-            field(blocked, "message")
-        ));
-    }
-    Exit::Success
-}
-
-/// `context [<id>]`: the assembled context, without calling a model.
-fn context_command(
-    args: &Args,
-    invocation: &Invocation,
-    boot: &Boot,
-    out: &mut Output<'_>,
-) -> Exit {
-    let Some(context) = boot.services.context() else {
-        return out.fail("this profile does not load the context plugin");
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let Some(tools) = boot.services.tools() else {
-        return out.fail("this profile does not load the tools plugin");
-    };
-    let handle = match args.target.as_deref().filter(|target| !target.is_empty()) {
-        Some(target) => session.resume(target),
-        None => session.current(&invocation.cwd),
-    };
-    let handle = match handle {
-        Ok(handle) => handle,
-        Err(error) => return out.fail(&error.message),
-    };
-    // The session's own folder is what a run would resolve instructions from; the sandbox root is only
-    // a fallback for a record that has none.
-    let cwd = session.folder(&handle).or_else(|| {
-        boot.services
-            .sandbox()
-            .map(|sandbox| sandbox.workspace_root())
-    });
-    let report = match context.assemble(
-        &handle,
-        crate::ports::AssembleOptions {
-            cwd,
-            tools: tools.describe(),
-            endpoint: args.endpoint.clone(),
-            model: args.model.clone(),
-        },
-    ) {
-        Ok(report) => report,
-        Err(error) => return out.fail(&error.message),
-    };
-    let messages = report
-        .get("messages")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let instructions = report
-        .get("instructions")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if args.json {
-        out.json(&serde_json::json!({
-            "session": handle.id,
-            "messageCount": messages.len(),
-            "messages": messages,
-            "estimatedTokens": report.get("estimatedTokens").cloned().unwrap_or_default(),
-            "thresholdTokens": report.get("thresholdTokens").cloned().unwrap_or_default(),
-            "contextWindow": report.get("contextWindow").cloned().unwrap_or_default(),
-            "pruned": report.get("pruned").cloned().unwrap_or_default(),
-            "compacted": report.get("compacted").cloned().unwrap_or_default(),
-            "instructions": instructions,
-        }));
-        return Exit::Success;
-    }
-    out.out(&format!(
-        "heddle: {} message(s), about {} token(s)\n",
-        messages.len(),
-        js(report
-            .get("estimatedTokens")
-            .unwrap_or(&serde_json::Value::Null))
-    ));
-    out.out(&format!(
-        "heddle: budget {} of {}; pruned {}; compacted {}\n",
-        js(report
-            .get("thresholdTokens")
-            .unwrap_or(&serde_json::Value::Null)),
-        js(report
-            .get("contextWindow")
-            .unwrap_or(&serde_json::Value::Null)),
-        js(report.get("pruned").unwrap_or(&serde_json::Value::Null)),
-        js(report.get("compacted").unwrap_or(&serde_json::Value::Null)),
-    ));
-    for path in &instructions {
-        out.out(&format!("  instruction {}\n", js(path)));
-    }
-    for message in &messages {
-        let text = field(message, "text");
-        let shortened: String = text.chars().take(80).collect();
-        out.out(&format!(
-            "  {}: {}\n",
-            field(message, "role"),
-            shortened.replace('\n', " ")
-        ));
-    }
-    Exit::Success
-}
-
 /// A value printed the way JavaScript's `String(value)` prints it.
 fn js(value: &serde_json::Value) -> String {
     match value {
@@ -846,26 +615,6 @@ fn js(value: &serde_json::Value) -> String {
         serde_json::Value::String(text) => text.clone(),
         other => other.to_string(),
     }
-}
-
-/// `hooks`: the hook points this build emits.
-fn hooks_command(args: &Args, out: &mut Output<'_>) -> Exit {
-    if args.json {
-        let points: Vec<serde_json::Value> = HOOK_POINTS
-            .iter()
-            .map(|point| {
-                serde_json::json!({
-                    "name": point.name,
-                    "mode": point.mode,
-                    "what": point.what,
-                })
-            })
-            .collect();
-        out.json(&serde_json::Value::Array(points));
-        return Exit::Success;
-    }
-    out.out(&describe_hooks(HOOK_POINTS));
-    Exit::Success
 }
 
 /// A string field of a record, as `String(record.field)` would print it; `-` when absent.
@@ -886,16 +635,231 @@ pub fn bare_application(args: &Args, out: &mut Output<'_>) -> Exit {
     todo!("port createApp from src/app.ts and the bare branch of main()")
 }
 
-/// `--turn <text>`: the folder's session (or `--resume`'s), its workspace ensured, the turn run, the goal
-/// driver joined, and the answer printed as text or `--json`. Exit 1 on a denial other than `UNKNOWN_TOOL`.
-pub fn turn(
+/// `--turn <text>`: the folder's session (or `--resume`'s), its workspace ensured, the turn run, and the
+/// answer printed as text or `--json` — `heddle-agent`'s entry point, over the runtime the boot composed.
+/// A tree with an entry still pending is refused first, as the TypeScript build's `settle` check does.
+pub fn turn(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    let exit = turn_on(args, invocation, &boot, out);
+    boot.dispose();
+    exit
+}
+
+fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
+    let pending = crate::boot::settle(boot);
+    if !pending.is_empty() {
+        out.out(&format!(
+            "heddle: {} entry(ies) still pending: {}\n",
+            pending.len(),
+            pending.join(", ")
+        ));
+        return Exit::Failure;
+    }
+    // The allow list is applied now, after every row has had its chance to register a tool.
+    if let Some(tools) = boot.services.tools() {
+        tools.filter_to(&tools.allow_list());
+    }
+    let runtime = match crate::runtime::agent_runtime(&boot.services) {
+        Ok(runtime) => runtime,
+        Err(message) => return out.fail(&message),
+    };
+    let (Some(models), Some(sessions)) = (
+        boot.services
+            .get::<std::sync::Arc<heddle_llm::ModelService>>("model"),
+        boot.services
+            .get::<std::sync::Arc<heddle_session::SessionService>>("session"),
+    ) else {
+        return out.fail("this profile does not load the model and session plugins");
+    };
+    let workspace = boot
+        .services
+        .get::<std::sync::Arc<heddle_workspace::WorkspaceService>>("workspace");
+    let ensure = move |folder: &str| {
+        if let Some(workspace) = &workspace {
+            let _ = workspace.ensure_owner(folder);
+        }
+    };
+    let failed_rows = crate::boot::failed_entries(boot)
+        .into_iter()
+        .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))
+        .collect();
+    let turn_args = heddle_agent::command::Args {
+        turn: args.turn.clone(),
+        endpoint: args.endpoint.clone(),
+        model: args.model.clone(),
+        system: args.system.clone(),
+        max_rounds: args.max_rounds,
+        max_output_tokens: args.max_output_tokens,
+        resume: args.resume.clone(),
+        fresh: args.fresh,
+        json: args.json,
+    };
+    let context = heddle_agent::command::Context {
+        cwd: invocation.cwd.clone(),
+        runtime: &runtime,
+        models: &models,
+        sessions: &sessions,
+        failed_rows,
+        ensure_workspace: Some(&ensure),
+        stream: None,
+        goal: None,
+    };
+    let (stdout, stderr) = out.writers();
+    let code = crate::runtime::tokio().block_on(heddle_agent::command::run(
+        heddle_agent::command::Command::Turn,
+        &turn_args,
+        &context,
+        stdout,
+        stderr,
+    ));
+    exit_code(code)
+}
+
+/// `models`: `heddle-llm`'s entry point over the model row's service.
+fn owned_models(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
+    let Some(service) = boot
+        .services
+        .get::<std::sync::Arc<heddle_llm::ModelService>>("model")
+    else {
+        return out.fail("this profile does not load the model plugin");
+    };
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_llm::command::run(
+        heddle_llm::command::Command::Models,
+        &heddle_llm::command::Args { json: args.json },
+        &heddle_llm::command::Context {
+            cwd: invocation.cwd.clone(),
+            service: &service,
+        },
+        stdout,
+        stderr,
+    ))
+}
+
+/// `tools` and `commands`: `heddle-tools`' entry point over the tools row's registry.
+fn owned_tools(
+    command: heddle_tools::command::Command,
     args: &Args,
-    invocation: &Invocation,
-    services: &Services,
+    boot: &Boot,
     out: &mut Output<'_>,
 ) -> Exit {
-    let _ = (args, invocation, services, out);
-    todo!("port the turn branch of main() from src/cli.ts")
+    let Some(registry) = boot
+        .services
+        .get::<std::sync::Arc<heddle_tools::ToolRegistry>>("tools")
+    else {
+        return out.fail("this profile does not load the tools plugin");
+    };
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_tools::command::run(
+        command,
+        &heddle_tools::command::Args { json: args.json },
+        &heddle_tools::command::Context {
+            registry: &registry,
+        },
+        stdout,
+        stderr,
+    ))
+}
+
+/// `hooks`: `heddle-events`' entry point; the catalog is the build's, so it needs no service.
+fn owned_hooks(args: &Args, out: &mut Output<'_>) -> Exit {
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_events::command::run(
+        heddle_events::command::Command::Hooks,
+        &heddle_events::command::Args { json: args.json },
+        &heddle_events::command::Context,
+        stdout,
+        stderr,
+    ))
+}
+
+/// `goal [<id>]`: `heddle-goal`'s entry point, with the session the positional or the folder names.
+fn owned_goal(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
+    let goals = boot
+        .services
+        .get::<std::sync::Arc<heddle_goal::GoalService>>("goal");
+    let sessions = boot
+        .services
+        .get::<std::sync::Arc<heddle_session::SessionService>>("session");
+    let target = args.target.clone().filter(|target| !target.is_empty());
+    let cwd = invocation.cwd.to_string_lossy().into_owned();
+    let resolve = move || -> Result<String, String> {
+        let sessions = sessions
+            .as_ref()
+            .ok_or("this profile does not load the session plugin")?;
+        let options = match &target {
+            Some(id) => heddle_session::StartOptions {
+                resume: Some(id.clone()),
+                ..heddle_session::StartOptions::default()
+            },
+            None => heddle_session::StartOptions {
+                cwd: Some(cwd.clone()),
+                ..heddle_session::StartOptions::default()
+            },
+        };
+        sessions
+            .start(options)
+            .map(|handle| handle.id.to_string())
+            .map_err(|error| error.to_string())
+    };
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_goal::command::run(
+        heddle_goal::command::Command::Goal,
+        &heddle_goal::command::Args { json: args.json },
+        &heddle_goal::command::Context {
+            goals: goals.as_deref(),
+            session: &resolve,
+        },
+        stdout,
+        stderr,
+    ))
+}
+
+/// `context [<id>]`: `heddle-context`'s entry point over the context row's service.
+fn owned_context(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
+    let Some(context) = boot
+        .services
+        .get::<std::sync::Arc<crate::adapters::Context>>("context")
+    else {
+        return out.fail("this profile does not load the context plugin");
+    };
+    let Some(sessions) = boot
+        .services
+        .get::<std::sync::Arc<heddle_session::SessionService>>("session")
+    else {
+        return out.fail("this profile does not load the session plugin");
+    };
+    let tools: Vec<heddle_llm::ToolSpec> = boot
+        .services
+        .get::<std::sync::Arc<heddle_tools::ToolRegistry>>("tools")
+        .map(|registry| registry.describe())
+        .unwrap_or_default();
+    let workspace_root = boot
+        .services
+        .sandbox()
+        .map(|sandbox| sandbox.workspace_root());
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_context::command::run(
+        heddle_context::command::Command::Context,
+        &heddle_context::command::Args {
+            target: args.target.clone(),
+            json: args.json,
+            endpoint: args.endpoint.clone(),
+            model: args.model.clone(),
+        },
+        &heddle_context::command::Context {
+            cwd: invocation.cwd.clone(),
+            sessions: &sessions,
+            context: &context,
+            tools: &tools,
+            workspace_root,
+        },
+        stdout,
+        stderr,
+    ))
 }
 
 /// `web`: boot, settle, then either print the plan (`--dry-run`) or start the server, resume active goals,
@@ -906,68 +870,12 @@ pub fn web(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
     todo!("port runWeb from src/cli.ts over heddle-server")
 }
 
-/// One hook point this build emits: `hooks` lists them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HookPoint {
-    /// The event name.
-    pub name: &'static str,
-    /// How listeners combine: `waterfall` or `emit`.
-    pub mode: &'static str,
-    /// What a listener may do there.
-    pub what: &'static str,
-}
-
-/// The hook points, as `hooks` lists them in `src/cli.ts`.
-pub const HOOK_POINTS: &[HookPoint] = &[
-    HookPoint {
-        name: "agent/pre-step",
-        mode: "waterfall",
-        what: "before a round request is built; may replace messages or tools",
-    },
-    HookPoint {
-        name: "model/request",
-        mode: "waterfall",
-        what: "before an adapter is chosen; may replace the request",
-    },
-    HookPoint {
-        name: "model/stream",
-        mode: "waterfall",
-        what: "around the adapter stream; may yield its own chunks",
-    },
-    HookPoint {
-        name: "tools/pre-execute",
-        mode: "waterfall",
-        what: "before a tool runs; may refuse it",
-    },
-    HookPoint {
-        name: "tools/post-execute",
-        mode: "waterfall",
-        what: "after a tool runs; may replace the result",
-    },
-    HookPoint {
-        name: "session/event",
-        mode: "emit",
-        what: "after an event reaches the session file",
-    },
-];
-
-/// `hooks` as text: a count line, then each point's name padded to 20 and mode padded to 10.
-pub fn describe_hooks(points: &[HookPoint]) -> String {
-    let mut text = format!("heddle: {} hook point(s)\n", points.len());
-    for point in points {
-        text.push_str(&format!(
-            "  {:<20} {:<10} {}\n",
-            point.name, point.mode, point.what
-        ));
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::output::Captured;
+    use crate::services::Services;
     use heddle_config::Env;
     use std::path::PathBuf;
 
@@ -985,27 +893,36 @@ mod tests {
     }
 
     #[test]
-    fn a_command_whose_crate_is_not_wired_says_so_and_exits_two() {
-        // `profiles` and `config` are served now and answer through heddle-config; the rest of the
-        // command words still say so and exit 2.
-        for word in ["web", "models", "hooks", "workspaces"] {
-            let mut captured = Captured::default();
-            let exit = {
-                let mut out = captured.output();
-                dispatch(&parsed(&[word]), &invocation("/nonexistent"), &mut out)
-            };
-            assert_eq!(exit, Exit::Unported, "{word}");
-            assert_eq!(
-                captured.stderr_text(),
-                format!("heddle: not ported to Rust yet: {word}\n"),
-                "{word}"
-            );
-            assert!(captured.stdout.is_empty(), "{word} prints no answer");
-        }
+    fn web_says_it_is_not_ported_until_its_crate_is_on_this_branch() {
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(&parsed(&["web"]), &invocation("/nonexistent"), &mut out)
+        };
+        assert_eq!(exit, Exit::Unported);
+        assert_eq!(
+            captured.stderr_text(),
+            "heddle: not ported to Rust yet: web\n"
+        );
+        assert!(captured.stdout.is_empty());
     }
 
     #[test]
-    fn a_turn_names_its_flag_and_a_bare_run_names_the_application() {
+    fn a_command_on_a_tree_without_its_row_names_the_missing_plugin() {
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(&parsed(&["models"]), &invocation("/nonexistent"), &mut out)
+        };
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            captured.stderr_text(),
+            "heddle: this profile does not load the model plugin\n"
+        );
+    }
+
+    #[test]
+    fn a_turn_on_a_tree_without_the_model_row_says_so_and_a_bare_run_names_the_application() {
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
@@ -1015,10 +932,10 @@ mod tests {
                 &mut out,
             )
         };
-        assert_eq!(exit, Exit::Unported);
+        assert_eq!(exit, Exit::Failure);
         assert_eq!(
             captured.stderr_text(),
-            "heddle: not ported to Rust yet: --turn\n"
+            "heddle: this profile does not load the model plugin\n"
         );
 
         let mut captured = Captured::default();
@@ -1052,27 +969,9 @@ mod tests {
     }
 
     use crate::boot::{Entry, FiberState};
-    use crate::ports::{ModelPort, SessionHandle, SessionPort, ToolsPort};
+    use crate::ports::{SessionHandle, SessionPort, ToolsPort};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
-
-    struct StubModel {
-        described: Vec<Record>,
-    }
-
-    impl ModelPort for StubModel {
-        fn describe(&self) -> Vec<Record> {
-            self.described.clone()
-        }
-
-        fn names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
-        fn default_endpoint(&self) -> Option<String> {
-            None
-        }
-    }
 
     #[derive(Default)]
     struct StubTools {
@@ -1220,86 +1119,6 @@ mod tests {
     }
 
     #[test]
-    fn models_prints_the_typescript_table_and_its_json() {
-        let mut services = Services::new();
-        services.provide(
-            "model",
-            Arc::new(StubModel {
-                described: vec![
-                    json!({ "name": "fast", "kind": "openai-chat", "model": "m-1" }),
-                    json!({ "name": "local", "kind": "scripted", "credential": true }),
-                ],
-            }) as Arc<dyn ModelPort>,
-        );
-        let boot = boot_with(services);
-        let (exit, stdout, _) = run(&boot, &["models"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: 2 endpoint(s)\n  fast               openai-chat      m-1\n  local              scripted         - credential\n"
-        );
-        let (_, stdout, _) = run(&boot, &["models", "--json"]);
-        // Key order is the map's own (insertion order when `preserve_order` is unified on); the
-        // contract is the shape and the values, and the verifiers parse JSON.
-        let value: serde_json::Value = serde_json::from_str(&stdout).expect("a JSON array");
-        assert_eq!(
-            value,
-            json!([
-                { "name": "fast", "kind": "openai-chat", "model": "m-1" },
-                { "name": "local", "kind": "scripted", "credential": true },
-            ])
-        );
-    }
-
-    #[test]
-    fn tools_print_the_first_sentence_and_only_name_and_description_with_json() {
-        let mut services = Services::new();
-        services.provide(
-            "tools",
-            Arc::new(StubTools {
-                described: vec![json!({
-                    "name": "write_file",
-                    "description": "Write a file. It refuses outside the sandbox.",
-                    "parameters": {},
-                })],
-                ..StubTools::default()
-            }) as Arc<dyn ToolsPort>,
-        );
-        let boot = boot_with(services);
-        let (exit, stdout, _) = run(&boot, &["tools"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(stdout, "heddle: 1 tool(s)\n  write_file     Write a file\n");
-        let (_, stdout, _) = run(&boot, &["tools", "--json"]);
-        let value: serde_json::Value = serde_json::from_str(&stdout).expect("a JSON array");
-        assert_eq!(
-            value,
-            json!([{
-                "name": "write_file",
-                "description": "Write a file. It refuses outside the sandbox.",
-            }]),
-            "only the name and the description cross, without the schema"
-        );
-    }
-
-    #[test]
-    fn registered_commands_print_with_an_em_dash() {
-        let mut services = Services::new();
-        services.provide(
-            "tools",
-            Arc::new(StubTools {
-                commands: vec![json!({ "name": "review", "description": "Review a file" })],
-                ..StubTools::default()
-            }) as Arc<dyn ToolsPort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["commands"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: 1 command(s)\n  review         — Review a file\n"
-        );
-    }
-
-    #[test]
     fn the_allow_list_is_applied_once_before_a_command_answers() {
         let tools = Arc::new(StubTools {
             allow: vec!["read_file".to_owned()],
@@ -1307,8 +1126,7 @@ mod tests {
         });
         let mut services = Services::new();
         services.provide("tools", Arc::clone(&tools) as Arc<dyn ToolsPort>);
-        let (exit, _, _) = run(&boot_with(services), &["tools"]);
-        assert_eq!(exit, Exit::Success);
+        let (_, _, _) = run(&boot_with(services), &["sessions"]);
         assert_eq!(
             *tools.applied.lock().expect("the stub's lock"),
             vec![vec!["read_file".to_owned()]]
@@ -1401,18 +1219,6 @@ mod tests {
     }
 
     #[test]
-    fn hooks_print_every_point_in_both_forms() {
-        let (exit, stdout, _) = run(&boot_with(Services::new()), &["hooks"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(stdout, describe_hooks(HOOK_POINTS));
-        let (_, json_out, _) = run(&boot_with(Services::new()), &["hooks", "--json"]);
-        let points: serde_json::Value = serde_json::from_str(&json_out).expect("a JSON array");
-        assert_eq!(points.as_array().map(Vec::len), Some(HOOK_POINTS.len()));
-        assert_eq!(points[0]["name"], "agent/pre-step");
-        assert_eq!(points[5]["mode"], "emit");
-    }
-
-    #[test]
     fn a_failed_row_is_reported_before_any_command_answers() {
         let boot = Boot {
             rows: Vec::new(),
@@ -1499,30 +1305,6 @@ mod tests {
 
         fn generated(&self) -> Vec<String> {
             self.generated.clone()
-        }
-    }
-
-    struct StubGoal {
-        view: Option<Record>,
-    }
-
-    impl crate::ports::GoalPort for StubGoal {
-        fn get(&self, _handle: &SessionHandle) -> crate::ports::PortResult<Option<Record>> {
-            Ok(self.view.clone())
-        }
-    }
-
-    struct StubContext {
-        report: Record,
-    }
-
-    impl crate::ports::ContextPort for StubContext {
-        fn assemble(
-            &self,
-            _handle: &SessionHandle,
-            _options: crate::ports::AssembleOptions,
-        ) -> crate::ports::PortResult<Record> {
-            Ok(self.report.clone())
         }
     }
 
@@ -1798,78 +1580,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn goal_prints_the_view_and_its_rounds() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "goal",
-            Arc::new(StubGoal {
-                view: Some(json!({
-                    "id": "goal-1",
-                    "revision": 2,
-                    "phase": "active",
-                    "activation": "armed",
-                    "objective": "ship the binary",
-                    "roundsStarted": 3,
-                    "maxGoalRounds": 256,
-                })),
-            }) as Arc<dyn crate::ports::GoalPort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["goal", "s-1"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: goal-1  revision 2  active (armed)\n  objective: ship the binary\n  rounds: 3/256\n"
-        );
-    }
-
-    #[test]
-    fn goal_says_when_no_goal_is_current() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "goal",
-            Arc::new(StubGoal { view: None }) as Arc<dyn crate::ports::GoalPort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["goal", "s-1"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(stdout, "heddle: no goal is current in s-1\n");
-    }
-
-    #[test]
-    fn context_prints_the_report_and_its_messages() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "tools",
-            Arc::new(StubTools {
-                described: vec![json!({ "name": "read_file", "description": "Read" })],
-                ..StubTools::default()
-            }) as Arc<dyn ToolsPort>,
-        );
-        services.provide(
-            "context",
-            Arc::new(StubContext {
-                report: json!({
-                    "messages": [
-                        { "role": "user", "text": "hello there" },
-                        { "role": "assistant", "text": "hi" },
-                    ],
-                    "estimatedTokens": 12,
-                    "thresholdTokens": 1000,
-                    "contextWindow": 8000,
-                    "pruned": false,
-                    "compacted": 0,
-                    "instructions": ["/work/AGENTS.md"],
-                }),
-            }) as Arc<dyn crate::ports::ContextPort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["context", "s-1"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: 2 message(s), about 12 token(s)\nheddle: budget 1000 of 8000; pruned false; compacted 0\n  instruction /work/AGENTS.md\n  user: hello there\n  assistant: hi\n"
-        );
-    }
-
     /// A profile named `dev` holding the patch that inserts these rows, under a fresh HEDDLE_HOME.
     fn profile_with(label: &str, patch: &str) -> (PathBuf, Env) {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1999,7 +1709,8 @@ mod tests {
             "{value}"
         );
 
-        // The same command line, not served, still says so and exits 2.
+        // The same command line answers through the default dispatch too: SERVED only decides what
+        // the help advertises.
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
@@ -2009,7 +1720,7 @@ mod tests {
                 &mut out,
             )
         };
-        assert_eq!(exit, Exit::Unported);
+        assert_eq!(exit, Exit::Success, "{}", captured.stderr_text());
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_file(&script);
     }
@@ -2041,23 +1752,5 @@ mod tests {
             "heddle: 1 row(s) failed to load: session\n"
         );
         let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn hooks_print_as_the_typescript_build_prints_them() {
-        // Measured against `node dist/cli.js hooks` in an empty folder, 2026-10-22.
-        // (A `\` line continuation would strip the two leading spaces, so the lines are joined instead.)
-        let expected = [
-            "heddle: 6 hook point(s)",
-            "  agent/pre-step       waterfall  before a round request is built; may replace messages or tools",
-            "  model/request        waterfall  before an adapter is chosen; may replace the request",
-            "  model/stream         waterfall  around the adapter stream; may yield its own chunks",
-            "  tools/pre-execute    waterfall  before a tool runs; may refuse it",
-            "  tools/post-execute   waterfall  after a tool runs; may replace the result",
-            "  session/event        emit       after an event reaches the session file",
-            "",
-        ]
-        .join("\n");
-        assert_eq!(describe_hooks(HOOK_POINTS), expected);
     }
 }
