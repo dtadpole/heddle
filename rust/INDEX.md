@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.8.1
+version: 0.8.2
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -62,10 +62,11 @@ service default with the nominated endpoint only; it now falls back to the first
 does, and `70-workspaces-sessions` passes 45 of 45.
 
 **The ui lane's parts:** part 9 is met on `main` `33407a4` by the ui lane's gate — `80-web-ui` passes all 75 checks in
-two runs, and 85, 87 and 88 pass in full; part 10 passes 9 of 9. Three checks are intermittent through the binary:
-`check-chat-view` #11 and #16 (owned by the served web: `web.rs` and `heddle-server`; #16 failed 1 in 26 alone under
-load, the page settling on a prefix of the answer) and `check-goal` #1 (owned by `web.rs`'s goal route: after a
-restart, `POST /api/goal` "complete" can answer 404 for a session `GET /api/goal` still finds). Measured again in the
+two runs (90 of 90 across the ui parts each time), and 85, 87 and 88 pass in full; part 10 passes 9 of 9. Three
+checks are intermittent through the binary: `check-chat-view` #11, a scroll race between the page and the check, seen
+on the TypeScript build too; `check-chat-view` #16, not yet root-caused (owned by the served web: `web.rs` and
+`heddle-server`; it failed 1 in 26 alone under load, the page settling on a prefix of the answer); and `check-goal` #1,
+a torn read of a session's metadata (owned by `heddle-session`, whose metadata is written in place; a fix is pending). Measured again in the
 backend lane on `e69f552`'s binary, which gates no ui merge: 88 of 90, 0 regressed against `main`'s binary. Its two
 failures fail on `main`'s binary as well: `80-web-ui/check.mjs`'s default-port check, because this Mac's live
 deployment already listens on the documented default port, and `88-file-preview`'s html preview, which timed out
