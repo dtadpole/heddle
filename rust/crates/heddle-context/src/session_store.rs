@@ -516,4 +516,113 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// A store adapter that maps only the required methods, as a composition writing its own would:
+    /// the surface and the scans then fall back to the trait's per-node and copying defaults.
+    struct RequiredOnly(SessionStore);
+
+    impl ContextStore for RequiredOnly {
+        type Handle = SessionHandle;
+
+        fn count(&self, session: &SessionHandle) -> Result<u64, crate::store::StoreError> {
+            ContextStore::count(&self.0, session)
+        }
+
+        fn read(
+            &self,
+            session: &SessionHandle,
+        ) -> Result<Vec<crate::store::LogEvent>, crate::store::StoreError> {
+            ContextStore::read(&self.0, session)
+        }
+
+        fn surface(
+            &self,
+            session: &SessionHandle,
+        ) -> Result<crate::store::SurfaceState, crate::store::StoreError> {
+            ContextStore::surface(&self.0, session)
+        }
+
+        fn derive_node(
+            &self,
+            session: &SessionHandle,
+            seq: u64,
+        ) -> Result<Option<Message>, crate::store::StoreError> {
+            ContextStore::derive_node(&self.0, session, seq)
+        }
+
+        fn append(
+            &self,
+            session: &SessionHandle,
+            event: serde_json::Value,
+            options: AppendOptions,
+        ) -> Result<u64, crate::store::StoreError> {
+            ContextStore::append(&self.0, session, event, options)
+        }
+    }
+
+    /// Not a check: a measurement of what the overrides buy on a long session. Run with
+    /// `cargo test -p heddle-context --lib -- --ignored --nocapture measure_cost`.
+    #[test]
+    #[ignore = "a timing, not a property"]
+    fn measure_cost_of_the_bound_store_against_a_required_only_adapter() {
+        use crate::service::{ContextConfig, ContextDependencies, ContextService};
+
+        let (store, handle, root) = session();
+        // A long session: 600 rounds, each a prompt, a streamed answer of 20 chunks and a tool result.
+        for round in 0..600 {
+            append_message(
+                &store,
+                &handle,
+                text_message(Role::User, format!("prompt {round}")),
+            );
+            for piece in 0..20 {
+                ContextStore::append(
+                    &store,
+                    &handle,
+                    json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": format!("piece {piece} ")}}),
+                    AppendOptions::default(),
+                )
+                .expect("a chunk appends");
+            }
+            ContextStore::append(
+                &store,
+                &handle,
+                json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+                AppendOptions::default(),
+            )
+            .expect("the run closes");
+        }
+        let events = ContextStore::count(&store, &handle).expect("the count");
+        let root_path = store.root().to_string();
+        let config = || ContextConfig {
+            instructions: false,
+            ..ContextConfig::default()
+        };
+        let deps = || ContextDependencies {
+            model: None,
+            heddle_home: root.clone(),
+        };
+
+        let bound = ContextService::new(Arc::new(store), config(), deps());
+        let started = std::time::Instant::now();
+        bound.measure(&handle, &[]).expect("measures");
+        let bound_time = started.elapsed();
+
+        let other = ContextService::new(
+            Arc::new(RequiredOnly(SessionStore::new(
+                &root_path,
+                &Env::from_process(),
+            ))),
+            config(),
+            deps(),
+        );
+        let started = std::time::Instant::now();
+        other.measure(&handle, &[]).expect("measures");
+        let other_time = started.elapsed();
+
+        println!(
+            "{events} events: bound store {bound_time:?}, required-only adapter {other_time:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
