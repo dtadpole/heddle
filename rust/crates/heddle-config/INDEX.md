@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:17:09Z
+modified: 2026-10-23T07:19:23Z
 version: 0.4.1
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -299,6 +299,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `e9a0836` (D-048: the binary advertises web, the turn, context, tools, hooks and models) | `HEDDLE_BIN=<debug build of exactly e9a0836> sh _verifiers_/05-config-system/verify.sh --json`, and with the same binary the backend lane `lane.mjs --json 05-config-system 10-llm-backends 20-streaming 30-context-management 40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints` | 10/10 passed, verdict 0 — no passing check turns into a failure for part 0. Backend lane: 117 checks, 101 pass, 7 fail, 9 unjudged; the 7 failures (50 teams, 70 session ordering, 75 sandbox enforcement) are none of this crate's: the sandbox row's configuration reaches the binary intact |
 | 2026-10-22 | lane `b72cc1a` (rebuilt without `e9a0836`: developer-two's branch with `--stream` through the stream hub, models and streaming advertised, the hidden adapter-call command, and the team row through `start_row`) | `HEDDLE_BIN=<debug build of exactly b72cc1a> sh _verifiers_/05-config-system/verify.sh --json`, and the backend lane with the same binary | 10/10 passed, verdict 0. Backend lane: 117 checks, 108 pass, 5 fail, 4 unjudged; the team failures are gone, and the five left (70 session ordering, 75 sandbox enforcement) are none of this crate's. `web --dry-run` boots; the repository's own profile validates, 16 rows checked, 0 problems |
 | 2026-10-22 | lane `f7b2c5e` (the lane gate judges a candidate against a per-check baseline, D-048; no Rust changed since `b72cc1a`, now main `d171876`) | `HEDDLE_BIN=<debug build of exactly f7b2c5e> sh _verifiers_/05-config-system/verify.sh --json`; the new `lane.mjs 05-config-system`; then `lane.mjs --write-baseline <file> 05-config-system` and `lane.mjs --baseline <file> 05-config-system` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline: 0 newly passing, 0 regressed. The baseline lists part 0's ten checks by name, all `pass` |
+| 2026-10-23 | lane `ffd5f27` (the bare application and the printed tree, the binary's last unported paths; the printed tree boots through `boot_tree`) | `HEDDLE_BIN=<debug build of exactly ffd5f27> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; an unknown `--profile` or a missing `--config` on the bare path gives this crate's sentence and exit 1. A third probe found this crate refusing a `null` layer document that `readLayer` reads as no layers; fixed in `a042777` |
 
 ## Decisions the contract makes
 
