@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment''s measurements, 2026-10-22'
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T05:31:53Z
+modified: 2026-10-23T05:41:45Z
 level: L3
 version: 1.0.0
 description: The readings behind the deployment record — the bring-up proof, restart windows, the scratch rehearsals, the Rust branch and the gate.
@@ -50,9 +50,9 @@ the default 5 s gives about 20 s).
 failed after 20 s — `heddle: not ported to Rust yet: web`, exit 2 after 4 ms — and the other claims were unjudged.
 At 21:43 main's own binary, built at `a2d4ae4` after the heddle-server merge, answered the same.
 
-**The Rust preview, 21:52–21:56**, `b6995b6` on 3097: page and token flow work, a SIGKILL is restarted in 48 ms;
-`/api/endpoints` 404 and `/api/tree` 503, and sessions and turns refuse, because only the model, sandbox and approvals
-components have adapters on that branch.
+**The Rust preview.** 21:52, `b6995b6`: page and token flow only; sessions and turns refused. 22:39, main `6be6ccd`
+with `51c7bf4`: turns typed in the page stream back the fixture reply; `/api/endpoints` and `/api/markdown` 404,
+`/api/tree`, `/api/goal`, `/api/todo` and `/api/team` 503.
 
 **The gate, about 21:29**, its unchanged code on 8096 in front of a scratch heddle on 3096: killed under launchd
 alone it stayed down at 2, 5, 10 and 15 s; under `supervisor.mjs` it was back in 400 ms and answered
