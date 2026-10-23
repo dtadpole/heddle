@@ -376,12 +376,27 @@ impl ServerBuilder {
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
-            if router.has_routes() && routes.has_routes() {
-                // `merge` panics on a duplicate method+path; catching it here would need the router to be
-                // unwound, so the duplicate is reported by `merge` itself, naming the feature below.
-                tracing::debug!(feature = name, "mounting feature routes");
-            }
-            router = router.merge(routes);
+            // `Router::merge` panics when two routers claim one method and path. A feature crate is a
+            // whole router, so the duplicate is only discoverable at merge time; it is caught here and
+            // reported as [`ServerError::Route`], which is the startup error the contract promises.
+            let merged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                router.merge(routes)
+            }));
+            router = match merged {
+                Ok(merged) => merged,
+                Err(payload) => {
+                    let detail = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| {
+                            payload
+                                .downcast_ref::<&str>()
+                                .map(|text| (*text).to_owned())
+                        })
+                        .unwrap_or_else(|| "two routers claim the same route".to_owned());
+                    return Err(ServerError::Route(format!("the {name} feature: {detail}")));
+                }
+            };
         }
         let router = router
             .fallback(fallback_route)
@@ -2408,6 +2423,42 @@ mod tests {
         assert!(fenced.starts_with("HTTP/1.1 403"), "{fenced}");
 
         server.close().await;
+    }
+
+    struct DuplicateFeature;
+
+    impl Feature for DuplicateFeature {
+        fn name(&self) -> &'static str {
+            "duplicate"
+        }
+
+        fn routes(&self) -> Router<AppState> {
+            Router::new().route("/healthz", get(|| async { "mine" }))
+        }
+    }
+
+    #[test]
+    fn a_feature_claiming_a_core_route_is_a_startup_error() {
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("conflict")),
+                ..ServerOptions::default()
+            },
+        )
+        .mount(DuplicateFeature);
+        let error = builder
+            .into_router(3082)
+            .err()
+            .expect("a route conflict is refused");
+        match error {
+            ServerError::Route(message) => {
+                assert!(message.contains("duplicate"), "{message}");
+                assert!(message.contains("/healthz"), "{message}");
+            }
+            other => panic!("expected a route conflict, got {other:?}"),
+        }
     }
 
     // `to_bytes` is used by `call`'s siblings in other modules; the import is kept explicit here.

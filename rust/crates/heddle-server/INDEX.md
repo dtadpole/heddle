@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (110 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (111 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -111,7 +111,7 @@ Each step lands with its unit tests and is pushed; the verifier rows say what it
 |---|---|---|
 | 1 | `token`, `fence`, `page` (marker, token form, access), `respond`: pure rules, ported line for line, with tests against the TypeScript vectors (cookie name, minted value, `read_cookie`, Origin parsing) | done, unit-tested |
 | 2 | `stream` (`EventHub`, SSE framing) and `runs` (counts, clock, completion, stop) | done, unit-tested |
-| 3 | `server`: the builder, the door middleware, `/healthz`, favicon, `/`, `/api/events`, `/api/status`, `start` and `close` on `--port 0`; driven in tests through `into_router` with a doubled `Harness` | done, unit-tested (the door's order is tested: fence, handshake, cookie, page, 401) |
+| 3 | `server`: the builder, the door middleware, `/healthz`, favicon, `/`, `/api/events`, `/api/status`, `start` and `close` on `--port 0`, and a route conflict reported as `ServerError::Route` at startup; driven in tests through `into_router` with a doubled `Harness` | done, unit-tested (the door's order is tested: fence, handshake, cookie, page, 401; the door is also driven over a real socket, and a feature claiming a core route is refused at startup) |
 | 4 | `transcript`, `selection`, and the session routes: list, chat view, create, `folders/session`, fork, flags, title, permission, steer, stop, and `/api/turn` streaming | done, unit-tested |
 | 5 | workspace routes (`/api/tree`, `/api/workspaces`) | done, unit-tested through the trait |
 | 6 | approvals, goal, todo, team, `/api/html`, `/vendor/purify.js` | done, unit-tested through the traits |
