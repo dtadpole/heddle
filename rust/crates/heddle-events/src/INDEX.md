@@ -21,7 +21,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`points.rs`](points.rs) | the point names, the `heddle hooks` catalog, the lifecycle events |
 | [`command.rs`](command.rs) | `heddle hooks [--json]`, behind the binary's entry-point convention (D-043) |
 | [`bridge.rs`](bridge.rs) | the catalog's points as JSON, the blocking dispatch, and one function per hook-port method |
-| [`ports.rs`](ports.rs) | `BusHooks` over `heddle-tools`' and `heddle-agent`'s hook ports, and an outside component's declared listeners |
+| [`ports.rs`](ports.rs) | `BusHooks` over `heddle-llm`'s, `heddle-tools`' and `heddle-agent`'s hook ports, and an outside component's declared listeners |
 | [`outside.rs`](outside.rs) | outside listeners: message shapes, the `JsonListener` seam, bridges, the stdio transport |
 
 ## Read next

@@ -37,7 +37,7 @@ contract. `cargo doc -p heddle-events` renders it.
 
 | `bridge` | the seam from the feature crates' synchronous hook ports to the bus: the catalog's points as JSON markers (`AgentPreStep`, `ModelRequest`, `ToolsPreExecute`, `ToolsPostExecute`, `SessionEvent`), `expose_catalog`, `EventBus::waterfall_blocking`, and one function per port method (`model_request`, `pre_execute`, `post_execute`, `pre_step`, `session_event`) with the TypeScript defaults and no runtime touched when nothing listens |
 
-| `ports` | `BusHooks`, which implements `heddle-tools`' `ToolHooks` and `heddle-agent`'s `TurnHooks` over the bus (the oracle's failure semantics where the port can express them), and `attach_component_listeners`, which attaches a `heddle-tools` `OutsideComponent`'s declared listeners over its own connection. This crate depends on those two; they must never depend on it |
+| `ports` | `BusHooks`, which implements `heddle-llm`'s `ModelHooks`, `heddle-tools`' `ToolHooks` and `heddle-agent`'s `TurnHooks` over the bus (the oracle's failure semantics where the port can express them), and `attach_component_listeners`, which attaches a `heddle-tools` `OutsideComponent`'s declared listeners over its own connection. This crate depends on those two; they must never depend on it |
 
 ### Who uses which part
 
@@ -72,7 +72,7 @@ contract. `cargo doc -p heddle-events` renders it.
 | 4 | `StdioListener`: spawn, correlate by `id`, timeouts, child death, stderr to the log; tested against a small script child | landed |
 | 4b | The component shape (D-031): listeners declared in `initialize`, `merge` for a post-execute rewrite that keeps the tool's result, `RpcListener` so one process serves tools and listeners, and a child's own requests answered without id collisions | landed |
 | 4c | The port bridge: `llm`, `tools` and `agent` intercept through ports of their own, synchronous and without this crate; `bridge` makes an adapter over the bus a few lines in whichever crate holds it | landed |
-| 4d | The port adapters (`ports`): the boot passes one `BusHooks` where it passes the no-listener defaults today; `ModelHooks` follows once its failure path is on main | landed for tools and turns |
+| 4d | The port adapters (`ports`): the boot passes one `BusHooks` where it passes the no-listener defaults today, for model requests, tool calls and rounds | landed |
 | 5 | `60-hooks` through `HEDDLE_BIN`: the boot attaches a component's declared listeners (developer-two); the verifier branch writes each hook as a `.component.yml` and a process instead of a `.ts` plugin (patch sent to integrator-one) | next, with the binary |
 
 ## Read next

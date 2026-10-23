@@ -8,13 +8,16 @@
 //!
 //! | Port | Point | When the listener fails |
 //! |---|---|---|
-//! | `heddle_tools::ToolHooks::pre_execute` | `tools/pre-execute` | the oracle's throw fails the turn; the port cannot fail, so the call is refused with the failure's sentence |
+//! | `heddle_tools::ToolHooks::pre_execute` | `tools/pre-execute` | `ToolHookError` with the hook's sentence; the loop answers that call as `INTERRUPTED` and the turn goes on, as the oracle's does |
 //! | `heddle_tools::ToolHooks::post_execute` | `tools/post-execute` | `TOOL_FAILED` with the sentence, as the oracle's `try` around the call does |
 //! | `heddle_agent::TurnHooks::pre_step` | `agent/pre-step` | a refusal is reported as is; a broken hook as `HookFailure::Broken`, which the loop prints as `a hook failed at agent/pre-step — …` |
 //!
-//! `model/request` is implemented for `heddle_llm::ModelHooks` once that port can fail (developer-three's
-//! change, next on main). Nothing here touches a runtime while no listener is attached; with one, the
-//! process must run on Tokio's multi-thread runtime ([`EventBus::waterfall_blocking`]).
+//! | `heddle_llm::ModelHooks::request` | `model/request` | the call fails before any stream exists, with the hook's sentence and [`MODEL_HOOK_FAILED`] (or [`MODEL_HOOK_REFUSED`]) |
+//!
+//! `heddle-llm` runs its own hooks in a chain whose `next` continues with the *original* request, so the bus is
+//! one link of it: when every listener passes, the rest of that chain runs; when one changed the request, its
+//! answer stands. Nothing here touches a runtime while no listener is attached; with one, the process must run
+//! on Tokio's multi-thread runtime ([`EventBus::waterfall_blocking`]).
 //!
 //! **Direction of dependency.** This crate depends on `heddle-tools` and `heddle-agent` for their port traits;
 //! they must never depend on this crate, or the workspace has a cycle. Every feature crate keeps its port for
@@ -23,7 +26,10 @@
 use std::sync::Arc;
 
 use heddle_agent::{HookFailure, PreStep, TurnHooks};
-use heddle_tools::{OutsideComponent, PreExecute, ToolCall, ToolError, ToolHooks, ToolResult};
+use heddle_llm::{GenerateRequest, ModelError, ModelHooks, ModelService};
+use heddle_tools::{
+    OutsideComponent, PreExecute, ToolCall, ToolError, ToolHookError, ToolHooks, ToolResult,
+};
 use serde_json::{Value, json};
 
 use crate::bridge;
@@ -50,6 +56,53 @@ impl BusHooks {
     }
 }
 
+/// The code a call fails with when a `model/request` listener broke.
+pub const MODEL_HOOK_FAILED: &str = "HOOK_FAILED";
+
+/// The code a call fails with when a `model/request` listener refused it.
+pub const MODEL_HOOK_REFUSED: &str = "HOOK_REFUSED";
+
+impl ModelHooks for BusHooks {
+    fn request(
+        &self,
+        service: &ModelService,
+        request: &GenerateRequest,
+        next: &mut dyn FnMut() -> Result<GenerateRequest, ModelError>,
+    ) -> Result<GenerateRequest, ModelError> {
+        let _ = service;
+        if self.bus.listener_count(points::MODEL_REQUEST) == 0 {
+            return next();
+        }
+        let fail =
+            |message: String, code: &str| ModelError::new(message, request.endpoint.clone(), code);
+        let sent = serde_json::to_value(request).map_err(|error| {
+            fail(
+                format!("the request does not serialize: {error}"),
+                MODEL_HOOK_FAILED,
+            )
+        })?;
+        let answer = bridge::model_request(&self.bus, sent.clone()).map_err(|error| {
+            let code = if error.is_refusal() {
+                MODEL_HOOK_REFUSED
+            } else {
+                MODEL_HOOK_FAILED
+            };
+            fail(error.to_string(), code)
+        })?;
+        if answer == sent {
+            return next();
+        }
+        serde_json::from_value::<GenerateRequest>(answer).map_err(|error| {
+            fail(
+                format!(
+                    "a model/request listener answered something that is not a request: {error}"
+                ),
+                MODEL_HOOK_FAILED,
+            )
+        })
+    }
+}
+
 /// A tool result that says the call failed, as the registry reports any thrown error.
 fn tool_failed(message: String) -> ToolResult {
     ToolResult {
@@ -63,15 +116,13 @@ fn tool_failed(message: String) -> ToolResult {
 }
 
 impl ToolHooks for BusHooks {
-    fn pre_execute(&self, call: &ToolCall<'_>) -> PreExecute {
+    fn pre_execute(&self, call: &ToolCall<'_>) -> Result<PreExecute, ToolHookError> {
         match bridge::pre_execute(&self.bus, call.name, &Value::Object(call.args.clone())) {
-            Ok(decision) if decision.allowed => PreExecute::Allowed,
-            Ok(decision) => PreExecute::Refused {
+            Ok(decision) if decision.allowed => Ok(PreExecute::Allowed),
+            Ok(decision) => Ok(PreExecute::Refused {
                 reason: decision.reason,
-            },
-            Err(error) => PreExecute::Refused {
-                reason: Some(error.to_string()),
-            },
+            }),
+            Err(error) => Err(ToolHookError::new(error.to_string())),
         }
     }
 
@@ -143,8 +194,8 @@ impl TurnHooks for BusHooks {
 /// component's own connection — one process serves its tools and its listeners. A component that declared none
 /// attaches nothing.
 ///
-/// An emit point (`session/event`) is sent as a `hooks/call` request whose answer is dropped, on the current
-/// runtime, until `OutsideComponent` offers a notification; with no runtime it is skipped.
+/// An emit point (`session/event`) is a `hooks/call` notification, sent on the current runtime; with no
+/// runtime it is skipped, and a component that has exited is skipped with a log line.
 pub fn attach_component_listeners(
     scope: &Scope,
     component: Arc<OutsideComponent>,
@@ -169,7 +220,9 @@ pub fn attach_component_listeners(
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let component = for_notifications.clone();
                 handle.spawn(async move {
-                    let _ = component.request(RpcListener::METHOD, params, None).await;
+                    if let Err(error) = component.notify(RpcListener::METHOD, params).await {
+                        tracing::warn!(%error, "an outside listener was not told of an event");
+                    }
                 });
             }
         },
@@ -233,7 +286,7 @@ mod tests {
             name: "write_file",
             args: &args,
         };
-        assert_eq!(hooks.pre_execute(&call), PreExecute::Allowed);
+        assert_eq!(hooks.pre_execute(&call), Ok(PreExecute::Allowed));
         let result = ToolResult {
             output: "wrote x".into(),
             error: None,
@@ -265,9 +318,9 @@ mod tests {
                 name: "write_file",
                 args: &write
             }),
-            PreExecute::Refused {
+            Ok(PreExecute::Refused {
                 reason: Some("this hook refuses writes".into())
-            }
+            })
         );
         assert_eq!(
             seen.lock().unwrap()[0].payload,
@@ -280,12 +333,12 @@ mod tests {
                 name: "read_file",
                 args: &read
             }),
-            PreExecute::Allowed
+            Ok(PreExecute::Allowed)
         );
     }
 
     #[test]
-    fn a_broken_pre_execute_listener_refuses_with_a_sentence_that_names_the_hook() {
+    fn a_broken_pre_execute_listener_fails_the_call_with_a_sentence_that_names_the_hook() {
         let (hooks, _scope, _seen) = hooked("tools/pre-execute", |_call| {
             Err(HookError::fail("this hook is broken"))
         });
@@ -295,11 +348,9 @@ mod tests {
                 name: "write_file",
                 args: &args
             }),
-            PreExecute::Refused {
-                reason: Some(
-                    "a hook failed at tools/pre-execute (hook-1) — this hook is broken".into()
-                )
-            }
+            Err(ToolHookError::new(
+                "a hook failed at tools/pre-execute (hook-1) — this hook is broken"
+            ))
         );
     }
 
@@ -451,6 +502,155 @@ mod tests {
             Err(HookFailure::Broken(
                 "an agent/pre-step listener answered without 'tools'".into()
             ))
+        );
+    }
+
+    fn request_to(endpoint: &str) -> GenerateRequest {
+        GenerateRequest {
+            endpoint: endpoint.to_owned(),
+            model: Some(endpoint.to_owned()),
+            messages: vec![heddle_llm::Message::new(
+                heddle_llm::Role::User,
+                vec![heddle_llm::ContentPart::Text {
+                    text: "say something".into(),
+                }],
+            )],
+            ..GenerateRequest::default()
+        }
+    }
+
+    fn retarget(call: &HookCall) -> Result<HookReply, HookError> {
+        let mut request = call.payload.clone();
+        request["endpoint"] = json!("scripted");
+        Ok(HookReply::Replace { value: request })
+    }
+
+    #[test]
+    fn a_model_request_with_no_listener_runs_the_rest_of_the_chain() {
+        let hooks = BusHooks::new(EventBus::new());
+        let service = ModelService::new(Vec::new()).unwrap();
+        let mut ran = 0;
+        let out = hooks
+            .request(&service, &request_to("double"), &mut || {
+                ran += 1;
+                Ok(request_to("from-next"))
+            })
+            .unwrap();
+        assert_eq!(ran, 1);
+        assert_eq!(out.endpoint, "from-next");
+    }
+
+    #[test]
+    fn a_retarget_is_the_answer_and_a_passing_listener_hands_on_to_the_chain() {
+        let (hooks, _scope, seen) = hooked("model/request", retarget);
+        let service = ModelService::new(Vec::new()).unwrap();
+        let mut ran = 0;
+        let out = hooks
+            .request(&service, &request_to("double"), &mut || {
+                ran += 1;
+                Ok(request_to("from-next"))
+            })
+            .unwrap();
+        assert_eq!(out.endpoint, "scripted");
+        assert_eq!(
+            out.model.as_deref(),
+            Some("double"),
+            "the rest of the request is kept"
+        );
+        assert_eq!(ran, 0, "a listener that answered decided alone");
+        assert_eq!(seen.lock().unwrap()[0].payload["endpoint"], "double");
+
+        let (hooks, _scope, _seen) = hooked("model/request", |_call| Ok(HookReply::Next));
+        let mut ran = 0;
+        let out = hooks
+            .request(&service, &request_to("double"), &mut || {
+                ran += 1;
+                Ok(request_to("from-next"))
+            })
+            .unwrap();
+        assert_eq!((ran, out.endpoint.as_str()), (1, "from-next"));
+    }
+
+    #[test]
+    fn a_broken_or_refusing_model_request_listener_fails_the_call_naming_the_hook() {
+        let service = ModelService::new(Vec::new()).unwrap();
+        let (hooks, _scope, _seen) = hooked("model/request", |_call| {
+            Err(HookError::fail("this hook is broken too"))
+        });
+        let error = hooks
+            .request(&service, &request_to("double"), &mut || {
+                Ok(request_to("never"))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, MODEL_HOOK_FAILED);
+        assert_eq!(error.endpoint, "double");
+        assert_eq!(
+            error.message,
+            "a hook failed at model/request (hook-1) — this hook is broken too"
+        );
+        assert_eq!(
+            error.to_string(),
+            error.message,
+            "the turn prints the hook's sentence"
+        );
+
+        let (hooks, _scope, _seen) = hooked("model/request", |_call| {
+            Ok(HookReply::Refuse {
+                reason: "not this model".into(),
+            })
+        });
+        let error = hooks
+            .request(&service, &request_to("double"), &mut || {
+                Ok(request_to("never"))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, MODEL_HOOK_REFUSED);
+        assert_eq!(error.message, "refused by hook: not this model");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retargeted_request_is_answered_by_the_endpoint_the_hook_named() {
+        let dir = std::env::temp_dir().join(format!(
+            "heddle-events-ports-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("scripted.json");
+        std::fs::write(&script, r#"{"steps":[{"text":"the scripted answer"}]}"#).unwrap();
+        let endpoint = |name: &str, kind: heddle_llm::EndpointKind, base_url: &str| {
+            heddle_llm::EndpointConfig {
+                name: name.to_owned(),
+                kind,
+                base_url: base_url.to_owned(),
+                model: Some(name.to_owned()),
+                ..heddle_llm::EndpointConfig::default()
+            }
+        };
+        let service = ModelService::new(vec![
+            endpoint(
+                "scripted",
+                heddle_llm::EndpointKind::Scripted,
+                &script.display().to_string(),
+            ),
+            endpoint(
+                "double",
+                heddle_llm::EndpointKind::OpenaiChat,
+                "http://127.0.0.1:9/v1",
+            ),
+        ])
+        .unwrap();
+        let (hooks, _scope, _seen) = hooked("model/request", retarget);
+        service.add_hooks(Arc::new(hooks));
+        let generated = service.generate(request_to("double")).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let generated = generated.expect("the scripted endpoint answered");
+        assert_eq!(
+            generated.text, "the scripted answer",
+            "the configured double was never reached"
         );
     }
 }
