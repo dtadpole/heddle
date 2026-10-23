@@ -17,7 +17,7 @@ the routed endpoint's window, reduced by pruning before it is reduced by compact
 |---|---|
 | Ported from | `src/context/` (1,726 lines in seven files) |
 | Judged by | `_verifiers_/30-context-management`, through the `heddle` binary |
-| Sources | [`src/`](src/INDEX.md); integration tests in `tests/` (`typescript-agreement.rs`: values measured from the TypeScript build) |
+| Sources | [`src/`](src/INDEX.md); integration tests in `tests/`: `typescript-agreement.rs` (prices, budgets, prune text and digests measured from the TypeScript build) and `engine-agreement.rs` (the TypeScript store and engine's own record of four scenarios, `tests/fixtures/engine-oracle.json`, replayed and compared event for event; regenerate it with `node tests/fixtures/generate-engine-oracle.mjs`) |
 | State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported. Step 5's remaining half is the `ContextStore` adapter for `heddle-session`'s store, which waits on that store reaching `main`; step 6 waits on the loop and the command line |
 
 ## Public API
