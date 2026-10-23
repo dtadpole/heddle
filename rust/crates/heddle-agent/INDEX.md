@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:23:32Z
-version: 0.6.3
+modified: 2026-10-23T05:40:53Z
+version: 0.6.5
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -61,13 +61,20 @@ the loop reads), and the session-meta and create-session records, converted at t
   `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
   `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
 - **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule — a scratch worktree at main
-  `cfa6a2b`, whose turn hooks chain the context service's overflow recovery after the event bus, with this branch
+  `cfa6a2b` and again at main `db3d76d` (after the context report became the context crate's own and the goal
+  driver moved to a pinned runtime), whose turn hooks chain the context service's overflow recovery after the event bus, with this branch
   merged and only `usage::SERVED` edited to add Tools and Turn, a debug build, the verifiers through `HEDDLE_BIN`):**
   `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs` **1/1** pass with the binary's own rows;
   `check-teams.mjs` is unjudged (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed
   the delegation limit (`maxActive` never triggered, so a child's replayed `delegate` made a grandchild session).
-- **Open, not in this crate:** serving `Capability::Turn` in the binary, and the Web UI serving a turn with tools
-  for `check-teams.mjs`.
+- **`check-teams.mjs` with web served (2026-10-22, the same rule, at the binary owner's web tip `51c7bf4` with main
+  merged and Tools, Turn and Web added to `SERVED`):** 0/2. The Lead's `POST /api/turn` answers `503 this profile does
+  not load the workspace plugin` (the server's turn route, `heddle-server` `plugin_missing("workspace")`), because the
+  binary's web composition gives the server no workspace service; and the boot never logs `recovered 1 team(s)`,
+  because that composition runs no team recovery (`notes` stays empty). Both are on the web path, not in this crate;
+  `check.mjs` and `check-subagents.mjs` still pass in the same run.
+- **Open, not in this crate:** serving `Capability::Turn` in the binary, and the web composition above for
+  `check-teams.mjs`.
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
   runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
   starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.

@@ -47,7 +47,7 @@ tested.
 | `runtime` | `tokio()` (the process's one multi-thread runtime), `agent_runtime(&Services)`, `shared_runtime(&mut Services)` — `heddle-agent`'s `AgentRuntime` from its own adapters over the booted services |
 | `services` | `Services`: a service is a name with typed views — `provide`, `get`, `provides`, `withdraw`, and one accessor per port (`session()`, `model()`, …) |
 | `ports` | the consumer contract: one trait per service the commands read (below), `SessionHandle`, `Record = serde_json::Value`, `PortError`, `DEFAULT_WEB_PORT = 3082` |
-| `commands` | `dispatch`, `dispatch_serving`, `config_command`, `booted_command` (each word → its owner's `command::run`), `turn` (→ `heddle_agent::command::run`), `web`, `bare_application` |
+| `commands` | `dispatch`, `config_command`, `booted_command` (each word → its owner's `command::run`), `turn` (→ `heddle_agent::command::run`), `web`, `bare_application` |
 | `output` | `Output` (both streams), `Captured` (for tests), `stringify` (`JSON.stringify(value, null, 2)`) |
 
 ### How a row becomes a running crate

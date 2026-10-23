@@ -17,6 +17,7 @@ name = "heddle"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 futures.workspace = true
 heddle-agent.workspace = true
 heddle-config.workspace = true
@@ -25,10 +26,14 @@ heddle-events.workspace = true
 heddle-llm.workspace = true
 heddle-goal.workspace = true
 heddle-sandbox.workspace = true
+heddle-server.workspace = true
 heddle-session.workspace = true
 heddle-team.workspace = true
 heddle-todo.workspace = true
 heddle-tools.workspace = true
+heddle-web-composer.workspace = true
+heddle-web-files.workspace = true
+heddle-web-trajectory.workspace = true
 heddle-workspace.workspace = true
 serde.workspace = true
 serde_json.workspace = true
