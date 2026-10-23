@@ -22,3 +22,9 @@ tokio.workspace = true
 # Teammate session ids and message ids are `session-<uuid v4>` and `team-message-<uuid v4>`, as in the
 # TypeScript build. Not yet a workspace dependency; to be hoisted into rust/Cargo.toml by its owner.
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Test-only: `tests/session_store.rs` runs the team layer over the real session store, booted on the recorded
+# check-teams fixture. The library itself still depends on no other heddle crate.
+heddle-config.workspace = true
+heddle-session.workspace = true
