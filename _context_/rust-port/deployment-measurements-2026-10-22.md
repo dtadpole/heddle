@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment''s measurements, 2026-10-22'
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T04:42:38Z
+modified: 2026-10-23T04:44:23Z
 level: L3
 version: 1.0.0
 description: The readings behind the deployment record — the bring-up proof, restart windows, the scratch rehearsals, the Rust branch and the gate.
@@ -42,6 +42,7 @@ The first run, before the bootstrap fix, failed the reinstall claim (`5: Input/o
 
 **The Rust branch, about 21:20.** The lanes' release binary (sha256 `a355a0aa1fc4…`) through `HEDDLE_BIN`: started
 failed after 20 s — `heddle: not ported to Rust yet: web`, exit 2 after 4 ms — and the other claims were unjudged.
+At 21:43 main's own binary, built at `a2d4ae4` after the heddle-server merge, answered the same.
 
 **The gate, about 21:29**, its unchanged code on 8096 in front of a scratch heddle on 3096: killed under launchd
 alone it stayed down at 2, 5, 10 and 15 s; under `supervisor.mjs` it was back in 400 ms and answered
