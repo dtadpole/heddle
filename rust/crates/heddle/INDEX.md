@@ -42,7 +42,8 @@ tested.
 | `cli` | `Args` (one field per TypeScript `Args` field, quirks kept), `CommandWord`, `Subcommand`, `UsageError`, `parse_args(argv)`, `layer_options` (→ `heddle_config::LayerOptions`), `config_args` (→ `heddle_config::command::ConfigArgs`), `root_overrides` (→ an inline `NamedLayer`), `names_a_tree` |
 | `usage` | `Capability`, `SERVED`, `GATE_WORDS`, `LINES`, `usage(served)` — the help, gated by what is wired |
 | `boot` | `FiberState` (Cordis's numbering and names), `Entry`, `BootOptions { layers, overrides, target, env }`, `BootError`, `Boot { rows: Vec<ComposedRow>, entries, services, anchor }`, `boot`, `load`, `settle`, `failed_entries`, `describe_entries` |
-| `builtins` | `Builtin`, `BuiltinSpec`, `BUILTINS`, `ComponentRef { Builtin, Outside, Unresolved }`, `resolve_component(&ComponentName)`, `Component { requires, schema, start }`, `Catalog`, `BuiltinCatalog` (also `heddle_config::ComponentCatalog`, for `--validate`) |
+| `builtins` | `Builtin`, `BuiltinSpec`, `BUILTINS`, `ComponentRef { Builtin, Outside, Unresolved }`, `resolve_component(&ComponentName)`, `Component { requires, schema, start }`, `Catalog`, `BuiltinCatalog::new(env)` (also `heddle_config::ComponentCatalog`, for `--validate`) |
+| `adapters` | one adapter per built-in over the owning crate's own types; `ModelComponent` so far, which composes `heddle-llm`'s service from the row, the layers and the machine's file |
 | `services` | `Services`: a service is a name with typed views — `provide`, `get`, `provides`, `withdraw`, and one accessor per port (`session()`, `model()`, …) |
 | `ports` | the consumer contract: one trait per service the commands read (below), `SessionHandle`, `Record = serde_json::Value`, `PortError`, `DEFAULT_WEB_PORT = 3082` |
 | `commands` | `dispatch`, `config_command`, `booted_command`, `bare_application`, `turn`, `web`, `HOOK_POINTS`, `describe_hooks` |
@@ -134,7 +135,8 @@ The library shape is complete and every module below compiles with its unit test
 | `commands::config_command` | implemented: `profiles` and `config` are `heddle_config::command::run`'s, exit code mapped |
 | `boot::boot`, `load`, `settle`, `failed_entries`, `dispose` | implemented: composition through `heddle-config`, the loader swept to a fixed point, tested with a stub catalog and a profile fixture |
 | `commands::booted_command` and every non-turn command | implemented against the ports, tested with doubles: `models`, `tools`, `commands`, `sessions`, `transcript`, `hooks`, `workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file`, `session new`, `goal`, `context` |
-| `builtins::BuiltinCatalog` | implemented over the built-in table and, for an outside row, `heddle-config`'s component manifest; one adapter per built-in still lands as its crate's API does (step 5) |
+| `builtins::BuiltinCatalog` | implemented over the built-in table and, for an outside row, `heddle-config`'s component manifest; it builds an adapter per built-in, and one whose adapter is not written yet answers `None` |
+| `adapters::ModelComponent` | implemented and measured end to end: a profile naming the `model` row boots it and `models` answers from `heddle-llm` over `heddle-config`'s resolved endpoints |
 | the adapters, `commands::web`, `turn`, `bare_application` | declared; they answer once the crates they compose exist |
 | `boot.rs`'s `heddle/ready` announcement | waits for `heddle-events`' bus, which every plugin will log through |
 

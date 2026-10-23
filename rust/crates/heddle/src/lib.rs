@@ -11,6 +11,7 @@
 //! (`src/plugins/console-exporter.ts`, `greeting.ts`, `announce.ts`). The port plan, and what each
 //! other crate is asked to provide, is in this crate's `INDEX.md`.
 
+pub mod adapters;
 pub mod boot;
 pub mod builtins;
 pub mod cli;

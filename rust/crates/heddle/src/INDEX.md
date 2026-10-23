@@ -23,6 +23,7 @@ verifiers judge the built binary from outside. Run them with
 | [`usage.rs`](usage.rs) | the help, line by line, gated by the capabilities the binary serves |
 | [`boot.rs`](boot.rs) | the boot and the loader: composition through `heddle-config`, entries and fiber states started to a fixed point, `settle`, `failed_entries`, `dispose`, the printed tree |
 | [`builtins.rs`](builtins.rs) | the built-in table, how a row's `name` resolves, the `Component` and `Catalog` traits |
+| [`adapters.rs`](adapters.rs) | one adapter per built-in, over the owning crate's own types: the model row so far |
 | [`services.rs`](services.rs) | the service registry: a name with typed views, the injection gate |
 | [`ports.rs`](ports.rs) | what the binary asks of each crate, one trait per service |
 | [`commands.rs`](commands.rs) | every command and its dispatch, the configuration commands delegating to `heddle-config`, and the hook points `hooks` lists |

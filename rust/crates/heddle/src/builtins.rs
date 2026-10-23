@@ -17,7 +17,7 @@
 
 use std::path::{Component as PathComponent, Path, PathBuf};
 
-use heddle_config::{ComponentCatalog, ComponentName, EntryRow, Schema, SchemaLookup};
+use heddle_config::{ComponentCatalog, ComponentName, EntryRow, Env, Schema, SchemaLookup};
 use serde_json::Value;
 
 use crate::services::Services;
@@ -363,15 +363,33 @@ pub trait Catalog {
 }
 
 /// The binary's own catalog: an adapter per built-in, and the outside-process host for other paths.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BuiltinCatalog;
+///
+/// It carries the run's [`Env`] because an adapter reads a row's configuration, which may name an
+/// environment reference, and the model plugin also reads the machine's own endpoint file.
+#[derive(Debug, Clone, Default)]
+pub struct BuiltinCatalog {
+    env: Env,
+}
+
+impl BuiltinCatalog {
+    /// The catalog for a run with this environment.
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+}
 
 impl Catalog for BuiltinCatalog {
     fn component(&self, reference: &ComponentRef) -> Option<Box<dyn Component>> {
-        let _ = reference;
-        todo!(
-            "one adapter per built-in, added as each crate's API lands; outside paths go to heddle-tools"
-        )
+        match reference {
+            ComponentRef::Builtin(Builtin::Model) => Some(Box::new(
+                crate::adapters::ModelComponent::new(self.env.clone()),
+            )),
+            // The rest land with their crate's API: a built-in with no adapter answers `None`, so its
+            // row fails naming itself rather than starting nothing.
+            ComponentRef::Builtin(_) | ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => {
+                None
+            }
+        }
     }
 }
 
@@ -383,9 +401,18 @@ impl ComponentCatalog for BuiltinCatalog {
         // it, and only an all-in-memory tree has none, where `.` is the same relative name.
         let resolved_against = anchor.unwrap_or(Path::new("."));
         match resolve_component(&row.component(resolved_against)) {
-            // One adapter per built-in lands with its crate (port plan step 5); until then a built-in
-            // takes no declared schema, which validation skips rather than calling it a problem.
-            ComponentRef::Builtin(_) => SchemaLookup::NoSchema,
+            // A built-in's schema is its adapter's, where one has landed; a built-in with no adapter
+            // yet declares none, which validation skips rather than calling it a problem.
+            ComponentRef::Builtin(builtin) => {
+                let reference = ComponentRef::Builtin(builtin);
+                match self
+                    .component(&reference)
+                    .and_then(|component| component.schema())
+                {
+                    Some(schema) => SchemaLookup::Schema(Box::new(schema)),
+                    None => SchemaLookup::NoSchema,
+                }
+            }
             // An outside component declares itself: the row names a manifest carrying the program and
             // its configuration schema, read without starting anything. `heddle-config` owns that
             // reading, including the sentences for a missing or malformed manifest.
@@ -607,7 +634,7 @@ mod tests {
             name: "./alpha.component.yml".to_owned(),
             ..EntryRow::default()
         };
-        let lookup = BuiltinCatalog.lookup(&row, Some(&root));
+        let lookup = BuiltinCatalog::default().lookup(&row, Some(&root));
         let SchemaLookup::Schema(schema) = lookup else {
             panic!("the manifest's schema is read: {lookup:?}");
         };
@@ -634,7 +661,7 @@ mod tests {
             name: "./alpha.component.yml".to_owned(),
             ..EntryRow::default()
         };
-        let lookup = BuiltinCatalog.lookup(&row, Some(&root));
+        let lookup = BuiltinCatalog::default().lookup(&row, Some(&root));
         match lookup {
             SchemaLookup::Unresolvable(why) => {
                 assert!(why.contains("does not exist"), "{why}");
@@ -651,7 +678,7 @@ mod tests {
             ..EntryRow::default()
         };
         assert_eq!(
-            BuiltinCatalog.lookup(&row, Some(Path::new("/repo"))),
+            BuiltinCatalog::default().lookup(&row, Some(Path::new("/repo"))),
             SchemaLookup::NoSchema
         );
     }

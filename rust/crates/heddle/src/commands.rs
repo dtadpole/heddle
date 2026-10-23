@@ -64,7 +64,7 @@ pub fn config_command(args: &Args, invocation: &Invocation, out: &mut Output<'_>
         _ => ConfigCommand::Config,
     };
     let config_args = crate::cli::config_args(args, &invocation.cwd, &invocation.env);
-    let catalog = BuiltinCatalog;
+    let catalog = BuiltinCatalog::new(invocation.env.clone());
     let context = CommandContext {
         env: &invocation.env,
         cwd: invocation.cwd.clone(),
@@ -1814,6 +1814,69 @@ mod tests {
             stdout,
             "heddle: 2 message(s), about 12 token(s)\nheddle: budget 1000 of 8000; pruned false; compacted 0\n  instruction /work/AGENTS.md\n  user: hello there\n  assistant: hi\n"
         );
+    }
+
+    /// A profile named `dev` holding the patch that inserts these rows, under a fresh HEDDLE_HOME.
+    fn profile_with(label: &str, patch: &str) -> (PathBuf, Env) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::temp_dir().join(format!(
+            "heddle-commands-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("profiles").join("dev");
+        std::fs::create_dir_all(&dir).expect("the profile directory");
+        std::fs::write(dir.join("cordis.yml"), "[]\n").expect("the base layer");
+        std::fs::write(dir.join("heddle.patch.yml"), patch).expect("the patch layer");
+        let env = Env::from_pairs([
+            ("HEDDLE_HOME", home.to_string_lossy().into_owned()),
+            ("HOME", home.to_string_lossy().into_owned()),
+        ]);
+        (home, env)
+    }
+
+    #[test]
+    fn a_profile_that_names_the_model_row_composes_it_and_models_answers() {
+        let script = std::env::temp_dir().join(format!(
+            "heddle-commands-script-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&script, "{\"steps\": []}").expect("the script file");
+        let patch = format!(
+            "- insert:\n    - id: model\n      name: model\n      config:\n        readLocalConfig: false\n        default: double\n        endpoints:\n          - name: double\n            kind: scripted\n            baseUrl: {}\n            model: scripted\n",
+            script.display()
+        );
+        let (home, env) = profile_with("model", &patch);
+        let options = crate::boot::BootOptions {
+            layers: heddle_config::LayerOptions {
+                profile: Some("dev".to_owned()),
+                ..heddle_config::LayerOptions::default()
+            },
+            overrides: Vec::new(),
+            target: "heddle".to_owned(),
+            env: env.clone(),
+        };
+        let boot = crate::boot::boot(&options, &crate::builtins::BuiltinCatalog::new(env))
+            .expect("the profile composes");
+        assert_eq!(
+            boot.entries
+                .iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![FiberState::Active],
+            "the model row starts, because its adapter exists"
+        );
+        let (exit, stdout, _) = run(&boot, &["models"]);
+        assert_eq!(exit, Exit::Success);
+        assert!(stdout.starts_with("heddle: 2 endpoint(s)\n"), "{stdout}");
+        assert!(stdout.contains("double"), "{stdout}");
+        let (_, json_out, _) = run(&boot, &["models", "--json"]);
+        let value: serde_json::Value = serde_json::from_str(&json_out).expect("a JSON array");
+        assert_eq!(value.as_array().map(Vec::len), Some(2), "{json_out}");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]
