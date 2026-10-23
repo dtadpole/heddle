@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T09:01:12Z
+modified: 2026-10-23T11:18:39Z
 version: 0.6.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -188,7 +188,7 @@ with the invocation's `Env`:
 
 | Call | What to know |
 |---|---|
-| `describe_endpoints(&endpoints, nominated)` | `default` is `null` unless the nominated endpoint is in the list; no key value ever appears, only `credential: "set"` and a key file's path |
+| `describe_endpoints(&endpoints, nominated)` | `default` is `null` unless the nominated endpoint is in the list; no key value ever appears, only `credential: "set"` and a key file's path. This is the listing's `default`, not the endpoint a turn uses when nothing names one: that is the model service's `default_endpoint` (the nominated one, else the first endpoint, as `src/llm/service.ts` answers), which `web.rs` uses since `4da44cf` |
 | `selection_problem(&endpoint, model, effort)` | the caller finds the endpoint by name first; an unknown endpoint name is the caller's sentence, not this one |
 | `heddle_home(&env)` | the uploads directory, `$HEDDLE_HOME/uploads` (`uploads.ts`: `uploadDirectory(heddleHome())`), the launch secret's directory and the page host's home; `HEDDLE_HOME=""` is honoured as given, as the TypeScript `??` honoured it |
 
@@ -313,6 +313,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-23 | lane `cce4bec` (a baseline regression must reproduce on a re-run to block; no Rust changed since `77fb012`) | `HEDDLE_BIN=<release build of this branch at 77fb012's code> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at `cce4bec`; its `lane.mjs 05-config-system`; then `--write-baseline` and `--baseline` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline 0 newly passing, 0 regressed |
 | 2026-10-23 | lane `6549572` (`heddle-team` proves mail to an idle teammate is delivered before send returns — a test file only — and the check-teams metadata-read fix) | `HEDDLE_BIN=<debug build of exactly 6549572> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green |
 | 2026-10-23 | main `33407a4` (UI merge: `heddle-server` runs a turn to its end when its reader goes away) | `HEDDLE_BIN=<debug build of exactly 33407a4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
+| 2026-10-23 | lane `ddc5e2b` (`web`'s default endpoint falls back to the first endpoint, as TypeScript does — the part-70 follow-up turn's 400) | `HEDDLE_BIN=<debug build of exactly ddc5e2b> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1 |
 
 ## Known differences from the TypeScript build
 
