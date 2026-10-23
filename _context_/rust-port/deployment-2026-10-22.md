@@ -106,7 +106,7 @@ the deployment stays clean:
 | `~/.heddle/deployment-scripted.json` | the script: one turn step whose text begins **`scripted endpoint: offline fixture reply, not a model`** |
 | `~/.heddle/heddle.json` | `{"endpoints": [{"name": "scripted", "baseUrl": "/Users/zhenchen/.heddle/deployment-scripted.json"}]}` — the machine's endpoint list is an **array** of partial endpoints, merged over the repository defaults by name |
 
-Measured 2026-10-22 20:34 PDT, after a restart (the configuration is read at start): a turn through
+Measured 2026-10-22 20:30:47 PDT, after a restart (the configuration is read at start): a turn through
 `POST /api/turn` with a session cookie wrote 8 session events, `assistant/chunk` seq 5 as a `text-delta` beginning
 with that sentence, `assistant/completed` seq 7 and `turn/completed`, and **zero** `event: error`. The owner's page
 therefore answers, and nobody can mistake the answer for a model's: the first line says it is the fixture.
@@ -128,6 +128,13 @@ same whether the build is broken or nothing is running it.
   port. The page was answering again from a new pid within about 15 s. The restore was the **interim guard**
   below; its log records `port 3082 silent, kickstarting`.
 
+**Measured again at 20:32 PDT, with the guard paused**, because one run had looked like launchd recovering by
+itself: killing the process that owned 3082 left it silent for **12 seconds**, `launchctl print` kept
+`runs = 2`, and the port never answered. It had to be kickstarted by hand. The run that looked like a fast
+recovery was `_verifiers_/95-web-daemon` (main's checks) **passing 3 of 3 in 731 ms** because the guard's
+15-second probe happened to land in the same second as the kill: a real pass, but not a repeatable one, and not
+launchd's. Until the supervisor is on main, main's 95 result on this host depends on the guard.
+
 **What restarts it today.** Until this branch reaches `main`, the answer is an interim guard run from this
 session: every 15 s it probes `3082/healthz` and runs `launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`
 when the port is silent (`~/.heddle/guard.log`). That is a hand, not a design — it dies with the session. The
@@ -148,8 +155,8 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | At (PDT) | main moved to | Deployment | Reading |
 |---|---|---|---|
 | 20:12 | `a5b0c66` | `a5b0c66`, clean | 8082 200, page 533,283 bytes against 533,280, marker `dd6d45d28567`; 96 3/3 with the branch's checks, 2/3 with main's |
-| 20:33 | `b4f8abf` (Rust lockfile chore) | `b4f8abf`, clean | 8082 200, healthz 200, page identical (533,283 / 533,280, same marker); 96 3/3 with the branch's checks, 2/3 with main's |
-| 20:34 | `eaaa6bb` (Rust status run) | `eaaa6bb`, clean | 8082 200, healthz 200, page identical; a turn answers with the labelled offline fixture (D-030), 0 errors; 96 3/3 with the branch's checks, 2/3 with main's |
+| 20:29 | `b4f8abf` (Rust lockfile chore) | `b4f8abf`, clean | 8082 200, healthz 200, page identical (533,283 / 533,280, same marker); 96 3/3 with the branch's checks, 2/3 with main's |
+| 20:31 | `eaaa6bb` (Rust status run) | `eaaa6bb`, clean | 8082 200, healthz 200, page identical; a turn answers with the labelled offline fixture (D-030), 0 errors; 96 3/3 with the branch's checks, 2/3 with main's |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
