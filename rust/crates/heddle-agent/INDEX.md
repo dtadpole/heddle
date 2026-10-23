@@ -1,5 +1,7 @@
 ---
 title: The heddle-agent crate
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:05:53Z
 version: 0.6.0
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:

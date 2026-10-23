@@ -1,5 +1,7 @@
 ---
 title: The outside-component protocol
+created: 2026-10-23T01:42:22Z
+modified: 2026-10-23T05:05:53Z
 version: 0.2.0
 description: How the Rust heddle binary speaks to an outside tool (part 4) and, later, an outside hook listener (part 6) — a process declared in configuration, spoken to as line-delimited JSON-RPC 2.0 on stdio.
 grounded_in:
