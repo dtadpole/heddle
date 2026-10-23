@@ -47,6 +47,33 @@ export default class ${name[0].toUpperCase()}${name.slice(1)} extends Service {
 }
 
 /**
+ * The file a row names for a component.
+ *
+ * The TypeScript build loads a `.ts` plugin. The Rust binary cannot load TypeScript, so under `HEDDLE_BIN` the row
+ * names a **component manifest** beside the profile instead — the port's part-0 shape, where a row names a built-in
+ * or an outside component rather than a module path. The manifest's `config` is the schema the `.ts` plugin declares,
+ * written as JSON Schema, and `--validate` must read it **without starting** the command.
+ */
+const binaryUnderTest = typeof process.env.HEDDLE_BIN === 'string' && process.env.HEDDLE_BIN.length > 0
+
+/** The row's `name:` for a component: the TypeScript plugin, or the manifest the binary reads. */
+const componentFile = (name) => (binaryUnderTest ? `./${name}.component.yml` : `./${name}.ts`)
+
+/** A component manifest: what a row names under `HEDDLE_BIN`, carrying the same schema as the `.ts` plugin. */
+function manifestSource(name) {
+  return `program: ./${name}.ts
+args: []
+config:
+  type: object
+  properties:
+    label:
+      type: string
+    count:
+      type: number
+`
+}
+
+/**
  * Write a profile directory and return a home that holds it.
  *
  * The home is returned rather than the directory because every check drives the CLI with
@@ -57,9 +84,12 @@ function profileFixture(label, options) {
   const home = fixtureDir(`config-home-${label}`)
   const dir = join(home, 'profiles', options.profile ?? 'dev')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'alpha.ts'), pluginSource('alpha'))
-  writeFileSync(join(dir, 'beta.ts'), pluginSource('beta'))
-  writeFileSync(join(dir, 'gamma.ts'), pluginSource('gamma'))
+  for (const name of ['alpha', 'beta', 'gamma']) {
+    writeFileSync(
+      join(dir, binaryUnderTest ? `${name}.component.yml` : `${name}.ts`),
+      binaryUnderTest ? manifestSource(name) : pluginSource(name),
+    )
+  }
   writeFileSync(join(dir, 'cordis.yml'), '[]\n')
   writeFileSync(join(dir, 'heddle.patch.yml'), options.patch)
   for (const [name, text] of Object.entries(options.extra ?? {})) writeFileSync(join(dir, name), text)
@@ -68,11 +98,11 @@ function profileFixture(label, options) {
 
 const BASE_PATCH = `- insert:
     - id: alpha
-      name: ./alpha.ts
+      name: ${componentFile('alpha')}
       config:
         label: from-profile
     - id: beta
-      name: ./beta.ts
+      name: ${componentFile('beta')}
 `
 
 async function supportsProfiles() {
@@ -133,7 +163,7 @@ test('a layer includes another layer file', async (context) => {
     extra: {
       'extra.yml': `- insert:
     - id: gamma
-      name: ./gamma.ts
+      name: ${componentFile('gamma')}
       config:
         label: from-the-included-file
 `,
@@ -177,7 +207,7 @@ test('a value can come from the environment without being written into the tree'
   const fixture = profileFixture('env', {
     patch: `- insert:
     - id: alpha
-      name: ./alpha.ts
+      name: ${componentFile('alpha')}
       config:
         label: \${HEDDLE_FIXTURE_LABEL}
         count: !env HEDDLE_FIXTURE_COUNT
@@ -201,7 +231,7 @@ test('a missing environment reference fails and names the variable', async (cont
   const fixture = profileFixture('env-missing', {
     patch: `- insert:
     - id: alpha
-      name: ./alpha.ts
+      name: ${componentFile('alpha')}
       config:
         label: \${HEDDLE_FIXTURE_ABSENT}
 `,
@@ -220,7 +250,7 @@ test('a bad value fails naming the row and the field', async (context) => {
   const fixture = profileFixture('validate', {
     patch: `- insert:
     - id: alpha
-      name: ./alpha.ts
+      name: ${componentFile('alpha')}
       config:
         count: not-a-number
 `,
@@ -241,7 +271,7 @@ test('a patch against a row no layer inserted is refused where it is written', a
   const fixture = profileFixture('unknown-patch', {
     patch: `- insert:
     - id: alpha
-      name: ./alpha.ts
+      name: ${componentFile('alpha')}
 - patch:
     - id: nowhere
       config: {}

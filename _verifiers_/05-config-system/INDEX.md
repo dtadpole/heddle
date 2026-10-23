@@ -39,6 +39,30 @@ sh verify.sh --json     # one parseable object
 
 Exit `0` when the claim holds, `1` when it fails, `3` when it could not be judged.
 
+## The fixture under `HEDDLE_BIN`
+
+The TypeScript build's rows name a `.ts` plugin. The Rust binary cannot load one, so when `HEDDLE_BIN` names the
+harness under test this check writes a **component manifest** beside the profile instead and the row names that
+manifest — the port's part-0 shape, where a row names a built-in or an outside component rather than a module path:
+
+```yaml
+# alpha.component.yml, beside the profile; the row is `name: ./alpha.component.yml`
+program: ./alpha.ts          # what would start it; --validate never starts or connects to it
+args: []
+config:                      # the same schema the .ts plugin declares, as JSON Schema
+  type: object
+  properties:
+    label: { type: string }
+    count: { type: number }
+```
+
+The component shape is `program` + `args` + `config` (D-031), the same shape an outside tool's spec uses, so one
+manifest can later serve both validation and the tool's own declaration.
+
+The manifest's `config` is the schema validation reads, so the bad-value check still asks the same question — the
+failure names the row and the field — and the `.ts` fixtures and their verdicts on the TypeScript build are
+unchanged. A manifest is read, never started, which is what makes `--validate` judgeable through the seam.
+
 ## What it deliberately does not judge
 
 - **Whether a plugin's own defaults are sensible.** Validation checks what a layer wrote against the
