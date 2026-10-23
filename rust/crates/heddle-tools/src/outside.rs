@@ -769,10 +769,7 @@ mod tests {
             _: &[String],
             mode: SandboxMode,
         ) -> Result<ConfinedArgv, SandboxUnavailable> {
-            Err(SandboxUnavailable {
-                mode,
-                message: "no backend in the double".into(),
-            })
+            Err(SandboxUnavailable { mode, detail: None })
         }
         fn classify_outcome(&self, _: i32, _: &str, _: Option<&ConfinedArgv>) -> SandboxOutcome {
             SandboxOutcome::Exited
@@ -785,6 +782,7 @@ mod tests {
         fn check(&self, _: &str) -> ApprovalDecision {
             ApprovalDecision {
                 allowed: true,
+                mode: heddle_sandbox::ApprovalMode::Allow,
                 reason: None,
             }
         }

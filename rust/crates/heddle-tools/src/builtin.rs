@@ -344,24 +344,25 @@ fn bash_tool(
                     ) {
                         Ok(confined) => Some(confined),
                         Err(unavailable) => {
-                            context.log(&format!(
-                                "refused a '{mode}' shell: {}",
-                                unavailable.message
-                            ));
+                            let message = unavailable.to_string();
+                            context.log(&format!("refused a '{mode}' shell: {message}"));
                             let data = serde_json::Map::from_iter([(
                                 "sandbox".to_owned(),
                                 json!({ "mode": mode, "denied": false, "unavailable": true }),
                             )]);
-                            return Ok(ToolResult::refused(
-                                codes::SANDBOX_UNAVAILABLE,
-                                unavailable.message,
-                            )
-                            .with_data(data));
+                            return Ok(ToolResult::refused(codes::SANDBOX_UNAVAILABLE, message)
+                                .with_data(data));
                         }
                     }
                 };
-                let argv = confined.as_ref().map_or_else(
-                    || vec!["/bin/sh".to_owned(), "-c".to_owned(), command],
+                let argv: Vec<std::ffi::OsString> = confined.as_ref().map_or_else(
+                    || {
+                        vec![
+                            std::ffi::OsString::from("/bin/sh"),
+                            std::ffi::OsString::from("-c"),
+                            std::ffi::OsString::from(command),
+                        ]
+                    },
                     |confined| confined.argv.clone(),
                 );
                 // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
@@ -391,7 +392,7 @@ fn bash_tool(
 /// whole process tree is under the kernel profile, not only the process this tool spawns.
 async fn run_command(
     sandbox: &dyn SandboxGate,
-    argv: &[String],
+    argv: &[std::ffi::OsString],
     mode: SandboxMode,
     confined: Option<&crate::upstream::ConfinedArgv>,
     limit_ms: u64,
@@ -576,12 +577,12 @@ mod tests {
             mode: SandboxMode,
         ) -> Result<ConfinedArgv, SandboxUnavailable> {
             match &self.unavailable {
-                Some(message) => Err(SandboxUnavailable {
+                Some(detail) => Err(SandboxUnavailable {
                     mode,
-                    message: message.clone(),
+                    detail: Some(detail.clone()),
                 }),
                 None => Ok(ConfinedArgv {
-                    argv: argv.to_vec(),
+                    argv: argv.iter().map(std::ffi::OsString::from).collect(),
                     enforcement: SandboxEnforcement::Full,
                     denial_signatures: vec!["operation not permitted".into()],
                     runner_failure_rules: Vec::<RunnerFailureRule>::new(),

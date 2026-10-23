@@ -417,6 +417,7 @@ pub(crate) mod tests {
         fn check(&self, _action: &str) -> ApprovalDecision {
             ApprovalDecision {
                 allowed: true,
+                mode: heddle_sandbox::ApprovalMode::Allow,
                 reason: None,
             }
         }
@@ -471,10 +472,7 @@ pub(crate) mod tests {
             mode: SandboxMode,
         ) -> Result<ConfinedArgv, SandboxUnavailable> {
             let _ = argv;
-            Err(SandboxUnavailable {
-                mode,
-                message: "no backend in the test double".into(),
-            })
+            Err(SandboxUnavailable { mode, detail: None })
         }
         fn classify_outcome(
             &self,
@@ -649,6 +647,7 @@ pub(crate) mod tests {
         fn check(&self, _: &str) -> ApprovalDecision {
             ApprovalDecision {
                 allowed: false,
+                mode: heddle_sandbox::ApprovalMode::Allow,
                 reason: self.reason.clone(),
             }
         }
@@ -690,6 +689,7 @@ pub(crate) mod tests {
         fn check(&self, _: &str) -> ApprovalDecision {
             ApprovalDecision {
                 allowed: true,
+                mode: heddle_sandbox::ApprovalMode::Allow,
                 reason: None,
             }
         }
@@ -1169,6 +1169,7 @@ pub(crate) mod tests {
             fn check(&self, action: &str) -> ApprovalDecision {
                 ApprovalDecision {
                     allowed: !action.starts_with("command:"),
+                    mode: heddle_sandbox::ApprovalMode::Allow,
                     reason: Some("commands are closed".into()),
                 }
             }

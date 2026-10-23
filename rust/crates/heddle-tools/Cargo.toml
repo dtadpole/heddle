@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+heddle-sandbox.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

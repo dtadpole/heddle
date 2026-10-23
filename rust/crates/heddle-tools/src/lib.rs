@@ -15,11 +15,13 @@
 //! | [`config`] | the `tools` configuration row |
 //! | [`protocol`] | the outside-component wire: line-delimited JSON-RPC 2.0 on stdio |
 //! | [`outside`] | starting an outside component and forwarding its tools' calls |
-//! | [`upstream`] | provisional mirrors of types `heddle-llm`, `heddle-sandbox` and `heddle-session` own |
+//! | [`upstream`] | `heddle-sandbox`'s own types, and provisional mirrors of `heddle-llm`/`heddle-session` types |
+//! | [`adapters`] | the gate ports over the real `heddle-sandbox` services |
 //!
 //! Background jobs are named in this crate's description but have no TypeScript source and no verifier
 //! yet; they are not part of this API until the oracle has them.
 
+pub mod adapters;
 pub mod builtin;
 pub mod config;
 pub mod gates;
@@ -42,9 +44,9 @@ pub use tool::{
     ToolRunContext, codes, tool_fn,
 };
 pub use upstream::{
-    ApprovalDecision, ConfinedArgv, EscalationRefusal, EscalationRefusalCode, EscalationSubject,
-    RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode, SandboxOutcome,
-    SandboxUnavailable, SessionHandle, ToolSpec,
+    ApprovalDecision, ApprovalMode, ConfinedArgv, EscalationRefusal, EscalationRefusalCode,
+    EscalationSubject, RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode,
+    SandboxOutcome, SandboxUnavailable, SessionHandle, ToolSpec,
 };
 
 /// The cancellation token every call carries for a Stop — the TypeScript build's `AbortSignal`.

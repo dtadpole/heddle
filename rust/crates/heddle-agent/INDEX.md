@@ -31,7 +31,7 @@ The Rust port of the agentic loop, turns and subagents.
 | `delegate_subagent`, `subagent_tools`, `subagent_runner`, `SubagentConfig`, `SubagentLimits`, `SubagentError(Code)`, `final_assistant_text`, `parent_facts` | delegation to a child agent in its own session; the `delegate` tool; the `subagent-tool` row (`maxDepth` 2, `maxActive` 1) | `heddle` (boot), `heddle-team` |
 | `ModelPort`, `SessionPort`, `ContextPort`, `TurnHooks`, `SubagentStore`, `SubagentRun` | what a turn and a delegation ask of other crates | implemented over `heddle-llm`, `heddle-session`, `heddle-context`, `heddle-events` |
 | `has_new_input`, `parse_arguments`, `merge_usage`, `turn::tool_message_text`, `turn::is_hook_refusal` | the loop's pure rules | the loop; tests |
-| `upstream` | **provisional mirrors**: `Message`, `Role`, `ContentPart`, `Chunk`, `TokenUsage`, `GenerateRequest` (`heddle-llm`); `SessionEvent`, `SessionMeta`, `CreateSession`, `SurfaceView` (`heddle-session`); `ContextReport`, `PrepareOptions`, `RuntimeContextSection` (`heddle-context`) | replaced by `pub use` of the owner's type when it lands |
+| `upstream` | **provisional mirrors**: `Message`, `Role`, `ContentPart`, `Chunk`, `TokenUsage`, `GenerateRequest` (`heddle-llm`); `SessionEvent`, `SessionMeta`, `CreateSession`, `SurfaceView` (`heddle-session`); `ContextReport`, `PrepareOptions`, `RuntimeContextSection` (`heddle-context`) — the sandbox and session-handle types are `heddle-tools`' re-exports, already `heddle-sandbox`'s own | replaced by `pub use` of the owner's type when it lands |
 
 The records the loop writes keep the TypeScript spelling: `model/request` (`ModelRequestRecord`, field order
 included), `assistant/chunk`, the `tool` message (`error (<code>): <message>`, the output, or
