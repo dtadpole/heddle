@@ -95,20 +95,33 @@ pub async fn wire(request: WireRequest) -> Result<WireResponse, ModelError> {
         )
         .with_source(error)
     })?;
-    let (url, host) = destination(&request, &target)?;
+    let proxy = proxy_for(&request, &target)?;
     let idle = Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
 
-    let client = reqwest::Client::builder()
+    // `no_proxy` first: the client must not inherit an ambient HTTP_PROXY, which the TypeScript client never
+    // read either. An endpoint's own proxy is then added explicitly, in the proxy's absolute request form.
+    let mut client_builder = reqwest::Client::builder()
         .http1_title_case_headers()
-        .build()
-        .map_err(|error| {
+        .no_proxy();
+    if let Some(proxy) = proxy {
+        let configured = reqwest::Proxy::http(proxy.clone()).map_err(|error| {
             ModelError::new(
-                format!("the HTTP client for '{endpoint}' could not be built — {error}"),
+                format!("'{endpoint}' has a proxy that could not be used — {error}"),
                 endpoint.clone(),
-                crate::error::code::TRANSPORT,
+                crate::error::code::PROXY,
             )
             .with_source(error)
         })?;
+        client_builder = client_builder.proxy(configured);
+    }
+    let client = client_builder.build().map_err(|error| {
+        ModelError::new(
+            format!("the HTTP client for '{endpoint}' could not be built — {error}"),
+            endpoint.clone(),
+            crate::error::code::TRANSPORT,
+        )
+        .with_source(error)
+    })?;
 
     // Defaults first, then the configured headers: a configured name replaces the default in place, as an
     // object spread did. A duplicate Content-Length is what the Title-Case rule exists to prevent.
@@ -131,15 +144,12 @@ pub async fn wire(request: WireRequest) -> Result<WireResponse, ModelError> {
             vec![("Authorization".to_string(), format!("Bearer {api_key}"))],
         );
     }
-    if let Some(host) = host {
-        merge_headers(&mut headers, vec![("Host".to_string(), host)]);
-    }
 
     let method = match request.method {
         Method::Post => reqwest::Method::POST,
         Method::Get => reqwest::Method::GET,
     };
-    let mut builder = client.request(method, url);
+    let mut builder = client.request(method, request.url.clone());
     for (name, value) in headers {
         builder = builder.header(name, value);
     }
@@ -255,14 +265,15 @@ fn merge_headers(headers: &mut Vec<(String, String)>, extra: Vec<(String, String
     }
 }
 
-/// Where a request actually goes and which host it names, in the proxy's absolute form.
-fn destination(
+/// The forwarding proxy a request uses, after the two refusals that keep a proxy from silently connecting
+/// somewhere nobody asked for. `None` means a direct connection.
+fn proxy_for(
     request: &WireRequest,
     target: &reqwest::Url,
-) -> Result<(String, Option<String>), ModelError> {
+) -> Result<Option<reqwest::Url>, ModelError> {
     let endpoint = &request.endpoint;
     let Some(proxy) = &request.proxy else {
-        return Ok((request.url.clone(), None));
+        return Ok(None);
     };
     let proxy_url = reqwest::Url::parse(proxy).map_err(|error| {
         ModelError::new(
@@ -282,6 +293,8 @@ fn destination(
             crate::error::code::PROXY,
         ));
     }
+    // An `https` target through a plaintext proxy would need a CONNECT tunnel and a second TLS handshake. The
+    // forwarding agent this exists for terminates TLS itself, so the target is `http:`; anything else is named.
     if target.scheme() != "http" {
         return Err(ModelError::new(
             format!(
@@ -292,15 +305,7 @@ fn destination(
             crate::error::code::PROXY,
         ));
     }
-    let host = target.host_str().map(|host| match target.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    });
-    // The request is addressed to the proxy and names the target absolutely: a proxy's own form.
-    let mut proxied = proxy_url;
-    proxied.set_path(target.path());
-    proxied.set_query(target.query());
-    Ok((proxied.to_string(), host))
+    Ok(Some(proxy_url))
 }
 
 /// A response body as the client reads it, with the socket-inactivity timeout applied to every read.
@@ -721,6 +726,34 @@ mod tests {
             .expect_err("fails");
         assert_eq!(error.code, crate::error::code::BAD_BODY);
         assert!(error.to_string().contains("not JSON"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_forwarding_proxy_is_addressed_in_its_own_absolute_form() {
+        // The proxy double answers for a target it never resolves, which is what a forwarding agent does: the
+        // request line names the gateway absolutely and Host carries it, so the agent knows where to forward.
+        let server =
+            Server::start(|_| reply("200 OK", Some("application/json"), r#"{"via":"proxy"}"#))
+                .await;
+        let answer = wire(WireRequest {
+            url: "http://gateway.example/v1/chat".into(),
+            proxy: Some(server.url.clone()),
+            headers: vec![("x-enterprise-inject".into(), "descriptor".into())],
+            ..request("")
+        })
+        .await
+        .expect("answers");
+        match answer {
+            WireResponse::Json(value) => assert_eq!(value, serde_json::json!({ "via": "proxy" })),
+            other => panic!("a JSON answer through the proxy is buffered, got {other:?}"),
+        }
+        let seen = server.seen().join("\n");
+        assert!(
+            seen.starts_with("POST http://gateway.example/v1/chat HTTP/1.1"),
+            "the request line names the target absolutely: {seen}"
+        );
+        assert!(seen.contains("Host: gateway.example"), "{seen}");
+        assert!(seen.contains("X-Enterprise-Inject: descriptor"), "{seen}");
     }
 
     #[tokio::test]

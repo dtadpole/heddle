@@ -9,10 +9,12 @@
 //! replayed (a thinking block needs the provider's signature). A requested level is sent as
 //! `thinking: {type: "adaptive", display: "summarized"}` plus `output_config.effort`.
 
+use futures::StreamExt;
 use serde_json::Value;
 
-use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
+use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse};
 use crate::error::ModelError;
+use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
 use crate::types::{Chunk, ContentPart, GenerateRequest, Message, ToolCall};
 use heddle_config::EndpointConfig;
@@ -41,8 +43,40 @@ impl Adapter for AnthropicVertexAdapter {
     }
 
     fn stream(&self, request: GenerateRequest) -> ChunkStream {
-        let _ = request;
-        todo!("port anthropicVertexAdapter")
+        let prepared = match anthropic_call(&self.endpoint, &request) {
+            Ok(prepared) => prepared,
+            Err(error) => return crate::adapter::error_stream(error),
+        };
+        let endpoint = self.endpoint.clone();
+        let lazy = futures::stream::once(async move {
+            let call = WireRequest {
+                url: prepared.url,
+                method: Method::Post,
+                body: Some(prepared.body),
+                headers: prepared.headers,
+                api_key: endpoint.api_key.clone(),
+                stream: prepared.stream,
+                timeout_ms: endpoint.timeout_ms,
+                endpoint: endpoint.name.clone(),
+                proxy: endpoint.proxy.clone(),
+            };
+            let stream: ChunkStream = match wire(call).await {
+                Ok(WireResponse::Json(_)) => crate::adapter::error_stream(ModelError::new(
+                    format!(
+                        "'{}' answered the publisher route without a stream",
+                        endpoint.name
+                    ),
+                    endpoint.name.clone(),
+                    crate::error::code::BAD_BODY,
+                )),
+                Ok(WireResponse::Stream { body, .. }) => {
+                    fold_sse(body, Box::new(AnthropicFold::new(endpoint.name.clone())))
+                }
+                Err(error) => crate::adapter::error_stream(error),
+            };
+            stream
+        });
+        Box::pin(lazy.flatten())
     }
 }
 
@@ -52,8 +86,143 @@ pub fn anthropic_call(
     endpoint: &EndpointConfig,
     request: &GenerateRequest,
 ) -> Result<PreparedCall, ModelError> {
-    let _ = (endpoint, request);
-    todo!("port anthropicCall")
+    let project = endpoint
+        .project
+        .as_deref()
+        .filter(|project| !project.is_empty())
+        .ok_or_else(|| {
+            ModelError::new(
+                format!(
+                    "'{}' has no project, and the publisher route is addressed under one",
+                    endpoint.name
+                ),
+                endpoint.name.clone(),
+                crate::error::code::NO_PROJECT,
+            )
+        })?;
+    let region = endpoint
+        .region
+        .as_deref()
+        .filter(|region| !region.is_empty())
+        .ok_or_else(|| {
+            ModelError::new(
+                format!(
+                    "'{}' has no region, and the publisher route is addressed in one",
+                    endpoint.name
+                ),
+                endpoint.name.clone(),
+                crate::error::code::NO_REGION,
+            )
+        })?;
+    let model = request
+        .model
+        .as_deref()
+        .or(endpoint.model.as_deref())
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            ModelError::new(
+                format!("'{}' names no model", endpoint.name),
+                endpoint.name.clone(),
+                crate::error::code::NO_MODEL,
+            )
+        })?;
+
+    // The system prompt is a top-level field, not a message.
+    let system = request
+        .messages
+        .iter()
+        .filter(|message| message.role == crate::types::Role::System)
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "anthropic_version".into(),
+        Value::String(ANTHROPIC_VERTEX_VERSION.to_string()),
+    );
+    body.insert(
+        "messages".into(),
+        Value::Array(to_anthropic_messages(&request.messages)),
+    );
+    body.insert(
+        "max_tokens".into(),
+        Value::from(
+            request
+                .max_output_tokens
+                .or(endpoint.max_output_tokens)
+                .unwrap_or(DEFAULT_MAX_TOKENS),
+        ),
+    );
+    body.insert("stream".into(), Value::Bool(true));
+    if !system.is_empty() {
+        body.insert("system".into(), Value::String(system));
+    }
+    if !request.tools.is_empty() {
+        body.insert(
+            "tools".into(),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "input_schema": tool.parameters
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(temperature) = request.temperature {
+        body.insert(
+            "temperature".into(),
+            serde_json::Number::from_f64(temperature)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+        );
+    }
+    // The publisher route for these models refuses `thinking.type: enabled`; adaptive thinking plus an effort is
+    // the form it names, and `display: explained` is what makes the reasoning visible.
+    if let Some(value) = crate::adapter::reasoning_value(endpoint, request)? {
+        body.insert(
+            "thinking".into(),
+            serde_json::json!({ "type": "adaptive", "display": "summarized" }),
+        );
+        body.insert(
+            "output_config".into(),
+            serde_json::json!({ "effort": serde_json::to_value(value).unwrap_or(Value::Null) }),
+        );
+    }
+
+    Ok(PreparedCall {
+        url: format!(
+            "{}/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
+            endpoint.base_url_for(request.model.as_deref())
+        ),
+        body: Value::Object(body),
+        headers: crate::http::title_case_headers(
+            &endpoint
+                .headers
+                .iter()
+                .flatten()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>(),
+        ),
+        stream: true,
+    })
 }
 
 /// One message's content (`toAnthropicContent`): text blocks and base64 image blocks.
@@ -610,5 +779,140 @@ mod tests {
                 { "type": "text", "text": "two" }
             ])
         );
+    }
+
+    fn base_endpoint() -> EndpointConfig {
+        EndpointConfig {
+            name: "claude".into(),
+            kind: heddle_config::EndpointKind::AnthropicVertex,
+            base_url: "http://gateway.example:443/v1".into(),
+            model: Some("claude-model".into()),
+            models: None,
+            reasoning: None,
+            project: Some("a-project".into()),
+            region: Some("global".into()),
+            api_key: None,
+            api_key_file: None,
+            headers: Some(std::collections::BTreeMap::from([(
+                "x-enterprise-inject".to_string(),
+                "descriptor".to_string(),
+            )])),
+            stream: None,
+            max_output_tokens: Some(64),
+            context_window: None,
+            capabilities: None,
+            input_modalities: None,
+            proxy: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn request() -> GenerateRequest {
+        GenerateRequest {
+            endpoint: "claude".into(),
+            messages: vec![
+                Message::new(
+                    crate::types::Role::System,
+                    vec![ContentPart::text("be brief")],
+                ),
+                Message::new(
+                    crate::types::Role::User,
+                    vec![ContentPart::text("what is here?")],
+                ),
+            ],
+            ..GenerateRequest::default()
+        }
+    }
+
+    #[test]
+    fn the_call_is_addressed_to_the_publisher_route() {
+        let call = anthropic_call(&base_endpoint(), &request()).expect("builds");
+        assert_eq!(
+            call.url,
+            "http://gateway.example:443/v1/projects/a-project/locations/global/publishers/anthropic/models/claude-model:streamRawPredict"
+        );
+        assert_eq!(
+            call.body["anthropic_version"],
+            serde_json::json!("vertex-2023-10-16")
+        );
+        assert_eq!(call.body["stream"], serde_json::json!(true));
+        assert_eq!(
+            call.body["max_tokens"],
+            serde_json::json!(64),
+            "the endpoint's cap is the default"
+        );
+        assert_eq!(call.body["system"], serde_json::json!("be brief"));
+        assert_eq!(
+            call.headers,
+            vec![("X-Enterprise-Inject".to_string(), "descriptor".to_string())],
+            "configured headers are Title-Cased for the wire"
+        );
+    }
+
+    #[test]
+    fn a_call_with_no_cap_gets_the_conservative_one_and_the_tool_blocks_are_translated() {
+        let mut endpoint = base_endpoint();
+        endpoint.max_output_tokens = None;
+        let mut request = request();
+        request.tools = vec![crate::types::ToolSpec {
+            name: "bash".into(),
+            description: "run a command".into(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }];
+        let call = anthropic_call(&endpoint, &request).expect("builds");
+        assert_eq!(
+            call.body["max_tokens"],
+            serde_json::json!(DEFAULT_MAX_TOKENS)
+        );
+        assert_eq!(
+            call.body["tools"],
+            serde_json::json!([{
+                "name": "bash",
+                "description": "run a command",
+                "input_schema": { "type": "object", "properties": {} }
+            }])
+        );
+    }
+
+    #[test]
+    fn a_declared_reasoning_level_opens_adaptive_thinking_with_its_effort() {
+        let mut endpoint = base_endpoint();
+        endpoint.reasoning = Some(heddle_config::ReasoningLevels {
+            default: None,
+            levels: vec![heddle_config::ReasoningLevel {
+                id: "high".into(),
+                name: "High".into(),
+                value: Some(heddle_config::ReasoningValue::Text("high".into())),
+            }],
+        });
+        let mut request = request();
+        request.reasoning_effort = Some("high".into());
+        let call = anthropic_call(&endpoint, &request).expect("builds");
+        assert_eq!(
+            call.body["thinking"],
+            serde_json::json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(
+            call.body["output_config"],
+            serde_json::json!({ "effort": "high" })
+        );
+    }
+
+    #[test]
+    fn a_missing_project_region_or_model_is_refused_by_name() {
+        let mut endpoint = base_endpoint();
+        endpoint.project = None;
+        let error = anthropic_call(&endpoint, &request()).expect_err("no project");
+        assert_eq!(error.code, crate::error::code::NO_PROJECT);
+
+        let mut endpoint = base_endpoint();
+        endpoint.region = None;
+        let error = anthropic_call(&endpoint, &request()).expect_err("no region");
+        assert_eq!(error.code, crate::error::code::NO_REGION);
+
+        let mut endpoint = base_endpoint();
+        endpoint.model = None;
+        let error = anthropic_call(&endpoint, &request()).expect_err("no model");
+        assert_eq!(error.code, crate::error::code::NO_MODEL);
     }
 }

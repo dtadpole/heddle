@@ -582,6 +582,61 @@ mod tests {
     }
 
     #[test]
+    fn a_config_written_as_null_reads_as_no_config() {
+        // The loader hands a component `{}` for a row with no config; it can only do that if absent
+        // and `null` compose to the same thing, so both are `None` here.
+        let alpha = LayerValue::Mapping(vec![
+            ("id".into(), LayerValue::String("alpha".into())),
+            ("name".into(), LayerValue::String("./alpha".into())),
+            ("config".into(), LayerValue::Null),
+        ]);
+        let layers = vec![
+            NamedLayer {
+                layer: "base.yml".into(),
+                file: "/p/base.yml".into(),
+                entries: vec![crate::layer::Layer {
+                    insert: vec![
+                        alpha,
+                        LayerValue::from(
+                            json!({ "id": "beta", "name": "./beta", "config": { "x": 1 } }),
+                        ),
+                    ],
+                    ..crate::layer::Layer::default()
+                }],
+            },
+            named(
+                "clear.yml",
+                "/p/clear.yml",
+                vec![LayerValue::from(
+                    json!({ "patch": [{ "id": "beta", "config": null }] }),
+                )],
+            ),
+        ];
+        let rows = compose(&layers, &env()).unwrap();
+        assert_eq!(
+            rows[0].row.config, None,
+            "an inserted `config: null` is no config"
+        );
+        assert_eq!(
+            rows[1].row.config, None,
+            "a patched `config: null` clears the config"
+        );
+        assert!(
+            rows[1].to_report().get("config").is_none(),
+            "`config --json` prints no config key for it"
+        );
+        assert_eq!(
+            origin_of(&rows, "beta", "config").map(|p| p.layer.as_str()),
+            Some("clear.yml"),
+            "the patch that cleared it is where the config came from"
+        );
+        assert!(
+            origin_of(&rows, "beta", "config.x").is_none(),
+            "the replaced field's old provenance is gone"
+        );
+    }
+
+    #[test]
     fn an_inserted_row_may_have_no_id_and_is_then_unaddressable() {
         let layers = vec![named(
             "base.yml",

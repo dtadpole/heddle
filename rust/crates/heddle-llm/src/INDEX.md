@@ -28,6 +28,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`model_info.rs`](model_info.rs) | `llm/model-info.ts` | the provider's model list: context window and input modalities |
 | [`service.rs`](service.rs) | `llm/service.ts`, `plugins/model.ts` | `ModelService`, the `ModelHooks` seam, `generate`, `probe` |
 | [`printer.rs`](printer.rs) | `stream/printer.ts` | the live stream view on standard error and its summary |
+| [`command.rs`](command.rs) | `cli.ts` | the `models` command and the turn's endpoint and `--stream` view, behind the binary's D-043 entry-point convention |
 
 ## Read next
 

@@ -649,6 +649,14 @@ impl TeamService {
         Ok(report)
     }
 
+    /// Recover every team in the store this service was built over: [`Self::recover_all`] over the store's
+    /// whole session listing, which is what the TypeScript `web` command passes (`ctx.session.list()`,
+    /// unfiltered). The startup edge of the `web` command, and nothing else, calls this.
+    pub async fn recover_store(&self) -> RecoverAllReport {
+        let sessions = self.deps.store.list();
+        self.recover_all(&sessions).await
+    }
+
     /// Recover every given session that carries team events. A team whose log the fold refuses is reported
     /// through `warn`, counted as failed, and skipped; the others are still recovered.
     pub async fn recover_all(&self, leads: &[SessionId]) -> RecoverAllReport {

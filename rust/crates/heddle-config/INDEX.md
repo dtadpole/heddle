@@ -58,9 +58,11 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 ## The config-boot contract
 
 What a caller does to turn command-line flags into rows, and what it may rely on afterwards. The binary follows it
-today (`rust/crates/heddle/src/cli.rs` `layer_options` and `config_args`, `boot.rs` `boot`). **`web` boots exactly as
-a run does** — the TypeScript `runWeb` calls `bootFromArgs` — so wiring `web` needs nothing new from this crate:
-steps 1–5 below, then the server reads what step 7 lists.
+today: every command that boots goes through `rust/crates/heddle/src/commands.rs` `boot_then`, which builds
+`cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `profiles` and `config` pass
+`cli::config_args` to `command::run`. **`web` boots exactly as a run does** — the TypeScript `runWeb` calls
+`bootFromArgs` — so wiring it needs nothing new from this crate: boot through the same path as `boot_then` (steps 1–5
+below), then hand the server what step 7 lists. As of main `480d9b8`, the binary's `web` is still `todo!()`.
 
 ### 1. One environment, built once
 
@@ -121,6 +123,9 @@ as `runConfigCommand` did not.
 - **The last write wins per top-level field**, and a patch replaces that field whole: a restated `config` is the
   entire `config`.
 - **A removed row stays**, with `disabled: Some(true)`; the binary's loader gives it no entry.
+- **No config is `None`.** A row that writes no `config`, or writes `config: null`, composes to `config: None`, and
+  a patch writing `config: null` clears it. Validation checks `None` as `{}`; a caller starting a component hands it
+  `{}`, as a Cordis plugin received, so its schema's defaults apply — never `null`, which every typed config refuses.
 - **Provenance** is one entry per leaf field, naming only the layer that won; `origin_of` answers a parent field
   (`config`) with the first leaf beneath it.
 - **Every problem is collected** before it fails (a duplicate insert, a patch or remove naming a row no earlier layer
@@ -197,6 +202,8 @@ coordinator before any other work. Each check leans on the steps above:
 |---|---|---|---|
 | 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | lane release build, and a debug build of exactly `abdf20c` | 10 pass, verdict 0, both |
 | 2026-10-22 | main `0a10ceb` (the binary on main) | a debug build of main, and the lane release build | 10 pass, verdict 0, both |
+| 2026-10-22 | main `480d9b8` (a served command routes through the boot) | a debug build of main, and the lane release build of `480d9b8` | 10 pass, verdict 0, both |
+| 2026-10-22 | main `cc09a59`, lane `a819f5f` (a context-verifier fix and status docs; no Rust source, 05 verifier or runner changed since `480d9b8`) | the `480d9b8` builds above, source-identical | 10 pass, verdict 0, both |
 
 ## Decisions the contract makes
 
@@ -225,6 +232,7 @@ coordinator before any other work. Each check leans on the steps above:
 | `insert:` written as a mapping or string | a `TypeError`, or one problem per character | `{file}: layer {n}: insert must be a list` |
 | a row `id` that is not a string | accepted, never addressable | a problem naming the file and field |
 | `heddle.json` `endpoints` as a mapping | a `TypeError` in the model plugin | a sentence naming the file |
+| a row written with `config: null`, in `config --json` | prints `"config": null` | prints no `config` key, as for an absent config; no verifier reads the difference |
 
 Kept as the TypeScript build has it, though inconsistent: `heddle --config X config` does not apply the project
 patch beside `X`, while `heddle --config X --turn …` does (`LayerOptions::for_inspection` vs `for_run`).

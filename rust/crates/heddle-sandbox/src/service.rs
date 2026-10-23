@@ -439,6 +439,7 @@ mod tests {
 
         assert_eq!(service.workspace_root(), canonical(&real));
         assert_eq!(service.extra_writable_roots(), &[canonical(&real)]);
+
         assert_eq!(service.mode(), SandboxMode::WorkspaceWrite);
     }
 
@@ -461,6 +462,57 @@ mod tests {
             service.resolve_path("/etc/../tmp"),
             canonical(Path::new("/tmp")),
             "an absolute path ignores the workspace and is canonicalised"
+        );
+    }
+
+    #[test]
+    fn an_empty_path_resolves_to_the_workspace() {
+        let dir = TempDir::new("svc-empty-path");
+        let workspace = dir.child("ws");
+        let service = SandboxService::with_backend(
+            &config(SandboxMode::WorkspaceWrite, &workspace),
+            &host(&dir, Platform::Other),
+            None,
+        );
+        assert_eq!(
+            service.resolve_path(""),
+            canonical(&workspace),
+            "Node's path.resolve(workspaceRoot, '') is the workspace root"
+        );
+    }
+
+    #[test]
+    fn a_config_without_a_workspace_root_uses_the_hosts_directory() {
+        let dir = TempDir::new("svc-default-root");
+        let mut cfg = config(SandboxMode::WorkspaceWrite, dir.path());
+        cfg.workspace_root = None;
+        let service = SandboxService::with_backend(&cfg, &host(&dir, Platform::Other), None);
+        assert_eq!(
+            service.workspace_root(),
+            canonical(dir.path()),
+            "the process's directory is the workspace when the profile names none"
+        );
+    }
+
+    #[test]
+    fn a_relative_write_is_resolved_against_the_workspace_before_the_fence() {
+        // Outside the host temp areas: `../escape.txt` must leave the workspace *and* land where the policy
+        // grants nothing, or the temp area's own writability would mask the climb.
+        let dir = TempDir::outside_host_temp("svc-relative-write");
+        let workspace = dir.child("ws");
+        let service = SandboxService::with_backend(
+            &config(SandboxMode::WorkspaceWrite, &workspace),
+            &host(&dir, Platform::Other),
+            None,
+        );
+        assert_eq!(
+            service.assert_writable("notes/a.txt", SandboxMode::WorkspaceWrite),
+            Ok(canonical(&workspace).join("notes/a.txt")),
+            "a tool's relative path is a path inside the workspace"
+        );
+        assert!(
+            !service.writable("../escape.txt", SandboxMode::WorkspaceWrite),
+            "and .. is resolved before the fence, so it cannot climb out"
         );
     }
 
