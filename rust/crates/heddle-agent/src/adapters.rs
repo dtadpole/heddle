@@ -278,12 +278,7 @@ impl SubagentStore for SessionSubagents {
         match self.service.events(session) {
             Ok(events) => events
                 .iter()
-                .map(|event| SessionEvent {
-                    seq: event.seq,
-                    at: event.at.clone(),
-                    kind: event.kind.clone(),
-                    fields: event.fields.clone(),
-                })
+                .map(|event| SessionEvent::clone(event))
                 .collect(),
             Err(error) => {
                 read_failed(session, "reading the child's log", error);

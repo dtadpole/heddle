@@ -22,21 +22,9 @@ pub use heddle_llm::{
     TokenUsage, ToolCall,
 };
 
-/// One entry in a session log. Mirror of `heddle_session::SessionEvent`: `seq`, `at`, `type`, and the
-/// type's own fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionEvent {
-    /// Monotonic within a session.
-    pub seq: u64,
-    /// ISO-8601 time it was written.
-    pub at: String,
-    /// The event type, e.g. `message`, `assistant/chunk`, `model/request`, `assistant/completed`.
-    #[serde(rename = "type")]
-    pub kind: String,
-    /// Every other field.
-    #[serde(flatten)]
-    pub fields: serde_json::Map<String, serde_json::Value>,
-}
+/// One entry in a session log: `heddle-session`'s own event (`seq`, `at`, `type`, and the type's own fields in
+/// written order).
+pub use heddle_session::SessionEvent;
 
 /// The parts of a session's metadata the loop and delegation read. Mirror of a subset of
 /// `heddle_session::SessionMeta`; fields this crate does not read are kept in `rest`.

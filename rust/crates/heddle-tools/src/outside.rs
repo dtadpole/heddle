@@ -583,6 +583,33 @@ impl OutsideComponent {
             .await
     }
 
+    /// Send one notification: a message that expects no answer, such as an `emit` hook point (`session/event`)
+    /// delivered to an outside listener over this connection.
+    ///
+    /// Fails, naming the row, when the process is gone or the line cannot be written.
+    pub async fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), OutsideError> {
+        if let Some(error) = self.connection.exited_error() {
+            return Err(error);
+        }
+        let message = Message::Notification(Notification {
+            jsonrpc: JSONRPC.to_owned(),
+            method: method.to_owned(),
+            params,
+        });
+        if let Err(error) = self.connection.write_message(message).await {
+            self.connection.close(error.to_string());
+            return Err(OutsideError::Exited {
+                row: self.row.clone(),
+                status: error.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// `shutdown`, then `exit`, then a kill after [`SHUTDOWN_GRACE`].
     pub async fn shutdown(&self) -> Result<(), OutsideError> {
         let _ = tokio::time::timeout(
@@ -831,9 +858,18 @@ mod tests {
             let _ = stdout.flush();
         };
 
+        let mut notified = 0usize;
         while let Some(Ok(line)) = lines.next() {
-            let Ok(Message::Request(request)) = protocol::decode_line(&line) else {
-                continue;
+            let request = match protocol::decode_line(&line) {
+                Ok(Message::Request(request)) => request,
+                Ok(Message::Notification(notification)) => {
+                    if notification.method == methods::EXIT {
+                        return;
+                    }
+                    notified += 1;
+                    continue;
+                }
+                _ => continue,
             };
             match request.method.as_str() {
                 methods::INITIALIZE => {
@@ -902,12 +938,17 @@ mod tests {
                         }
                         continue;
                     }
+                    let output = if mode == "count" {
+                        format!("notified: {notified}")
+                    } else {
+                        "wrote shout.txt".to_owned()
+                    };
                     reply(
                         &mut stdout,
                         Message::Response(Response {
                             jsonrpc: JSONRPC.to_owned(),
                             id: request.id,
-                            result: Some(json!({ "output": "wrote shout.txt" })),
+                            result: Some(json!({ "output": output })),
                             error: None,
                         }),
                     );
@@ -1085,5 +1126,49 @@ mod tests {
             OutsideError::InitTimeout { row, .. } => assert_eq!(row, "fixture"),
             other => panic!("expected an initialize timeout, got {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_notification_reaches_the_component_and_expects_no_answer() {
+        let root = workspace("notify");
+        let component = OutsideComponent::start(spec("count"), sandbox_at(root.clone()))
+            .await
+            .unwrap();
+        component
+            .notify(
+                "hooks/call",
+                json!({ "point": "session/event", "mode": "emit" }),
+            )
+            .await
+            .unwrap();
+        component
+            .notify(
+                "hooks/call",
+                json!({ "point": "session/event", "mode": "emit" }),
+            )
+            .await
+            .unwrap();
+        // A request after the notifications is answered after them: the component read both lines first.
+        let tools = component.tools();
+        let result = tools[0]
+            .run(
+                ToolArgs::new(),
+                ToolRunContext::new(ToolContext::new(&root), SandboxMode::WorkspaceWrite),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.output, "notified: 2");
+        component.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_notification_to_a_dead_process_fails_naming_the_row() {
+        let root = workspace("notify-dead");
+        let component = OutsideComponent::start(spec("dead"), sandbox_at(root.clone()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let error = component.notify("hooks/call", json!({})).await.unwrap_err();
+        assert!(error.to_string().contains("fixture"), "{error}");
     }
 }

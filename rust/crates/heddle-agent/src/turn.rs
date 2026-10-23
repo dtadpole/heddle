@@ -580,7 +580,20 @@ async fn run_turn_body(
                     cancel: cancel.clone(),
                     log: turn_log(),
                 };
-                runtime.tools.call(&name, args, context).await
+                // A call that escapes the registry (a failing `tools/pre-execute` listener) is still answered,
+                // as the TypeScript catch answers it: the stop's sentence when the turn was stopped, else the
+                // failure's own.
+                match runtime.tools.try_call(&name, args, context).await {
+                    Ok(result) => result,
+                    Err(failure) => ToolResult::refused(
+                        codes::INTERRUPTED,
+                        if stopped() {
+                            "the turn was stopped while this call ran".to_owned()
+                        } else {
+                            failure.message
+                        },
+                    ),
+                }
             };
             tool_calls.push(ToolCallRecord {
                 name: name.clone(),
@@ -2272,5 +2285,60 @@ mod tests {
             first_user.fields["message"]["content"][0]["text"],
             "write a file then read it"
         );
+    }
+
+    struct BrokenToolHook;
+
+    impl heddle_tools::ToolHooks for BrokenToolHook {
+        fn pre_execute(
+            &self,
+            _: &heddle_tools::ToolCall<'_>,
+        ) -> Result<heddle_tools::PreExecute, heddle_tools::ToolHookError> {
+            Err(heddle_tools::ToolHookError::new(
+                "a hook failed at tools/pre-execute (policy) — typo",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_pre_execute_listener_is_answered_as_interrupted_and_the_turn_goes_on() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "read_file", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "carried on".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let tools = ToolRegistry::new(ToolGates {
+            approvals: Arc::new(AllowAll),
+            sandbox: Arc::new(FlatSandbox),
+            modes: Arc::new(DefaultModes),
+            hooks: Arc::new(BrokenToolHook),
+        });
+        tools
+            .register(answering_tool("read_file", "never"))
+            .unwrap();
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            Arc::new(tools),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "carried on");
+        assert_eq!(result.denials.len(), 1);
+        assert_eq!(result.denials[0].code, "INTERRUPTED");
+        assert!(result.denials[0].message.contains("tools/pre-execute"));
     }
 }

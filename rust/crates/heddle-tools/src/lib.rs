@@ -37,7 +37,7 @@ pub use builtin::{BuiltinOptions, builtin_tools, escalation_fields};
 pub use config::ToolsConfig;
 pub use gates::{
     ApprovalGate, DefaultModes, EscalationError, EscalationRequest, ModeResolver, NoToolHooks,
-    PreExecute, SandboxGate, ToolCall, ToolGates, ToolHooks,
+    PreExecute, SandboxGate, ToolCall, ToolGates, ToolHookError, ToolHooks,
 };
 pub use outside::{OutsideComponent, OutsideComponentSpec, OutsideError, ProcessTool};
 pub use registry::{CommandSummary, RegistrationError, ToolRegistry};
