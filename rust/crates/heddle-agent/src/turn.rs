@@ -2188,4 +2188,136 @@ mod tests {
         let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
         assert_eq!(completed.fields["text"], "finished the task");
     }
+
+    /// A context double over the real session service: the request is the session's own derived messages.
+    struct SessionMessages {
+        sessions: Arc<heddle_session::SessionService>,
+    }
+
+    impl SessionMessages {
+        fn report(&self, session: &SessionHandle) -> Result<ContextReport, PortError> {
+            let messages = self
+                .sessions
+                .messages(session)
+                .map_err(|error| PortError(error.to_string()))?;
+            Ok(ContextReport {
+                estimated_tokens: messages.len() as u64 * 10,
+                context_window: 200_000,
+                threshold_tokens: 160_000,
+                messages,
+                ..ContextReport::default()
+            })
+        }
+    }
+
+    impl ContextPort for SessionMessages {
+        fn record_runtime_context(
+            &self,
+            _: &SessionHandle,
+            _: &[RuntimeContextSection],
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        fn prepare<'a>(
+            &'a self,
+            session: &'a SessionHandle,
+            _: PrepareOptions,
+        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+            Box::pin(async move { self.report(session) })
+        }
+
+        fn assemble(
+            &self,
+            session: &SessionHandle,
+            _: PrepareOptions,
+        ) -> Result<ContextReport, PortError> {
+            self.report(session)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_recorded_through_the_real_session_store_writes_what_the_loop_verifier_reads() {
+        let sessions = crate::adapters::tests::sessions_at("verifier");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let service = crate::adapters::tests::scripted_service(
+            "verifier",
+            serde_json::json!([
+                { "toolCall": { "name": "write_file", "arguments": { "path": "one.txt", "content": "first" } } },
+                { "toolCall": { "name": "read_file", "arguments": { "path": "one.txt" } } },
+                { "text": "finished the task" }
+            ]),
+        );
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(service)),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(&sessions))),
+            context: Arc::new(SessionMessages {
+                sessions: Arc::clone(&sessions),
+            }),
+            tools: registry_with(vec![
+                answering_tool("write_file", "wrote 5 bytes to one.txt"),
+                answering_tool("read_file", "first"),
+            ]),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+        };
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "write a file then read it"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "finished the task");
+        assert_eq!(result.rounds, 3);
+
+        // What `_verifiers_/50-agentic-loop/check.mjs` reads from the transcript.
+        let events = sessions.events(&handle).unwrap();
+        let of = |kind: &str| events.iter().filter(|event| event.kind == kind).count();
+        assert!(of("model/request") >= 3, "one model/request per round");
+        let tool_texts: Vec<String> = events
+            .iter()
+            .filter(|event| event.kind == "message" && event.fields["message"]["role"] == "tool")
+            .map(|event| {
+                event.fields["message"]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(tool_texts.len(), 2, "both tool calls produced a result");
+        assert!(
+            tool_texts.join("\n").contains("first"),
+            "the read came back with what the write wrote"
+        );
+        let last_request = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "model/request")
+            .unwrap();
+        assert!(
+            last_request.fields["messages"].as_u64().unwrap() >= 5,
+            "the later request carried the conversation and the tool results: {}",
+            last_request.fields["messages"]
+        );
+        assert!(last_request.fields["estimatedTokens"].as_u64().is_some());
+        let completed = events
+            .iter()
+            .find(|event| event.kind == "assistant/completed")
+            .expect("the turn was recorded as finished");
+        assert_eq!(completed.fields["text"], "finished the task");
+        assert_eq!(of("turn/completed"), 1);
+        let first_user = events
+            .iter()
+            .find(|event| event.kind == "message" && event.fields["message"]["role"] == "user")
+            .unwrap();
+        assert_eq!(
+            first_user.fields["message"]["content"][0]["text"],
+            "write a file then read it"
+        );
+    }
 }
