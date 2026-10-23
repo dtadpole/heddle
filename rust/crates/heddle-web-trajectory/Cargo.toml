@@ -10,3 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+axum.workspace = true
+# The tool catalog and the shared answer shapes (`http`) are the composer crate's.
+heddle-web-composer.workspace = true
+serde.workspace = true
+# `preserve_order`: the log download and the ledger's fallback rows re-serialise events in their written order.
+serde_json = { workspace = true, features = ["preserve_order"] }
