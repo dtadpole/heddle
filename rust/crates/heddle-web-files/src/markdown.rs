@@ -144,6 +144,530 @@ mod tests {
             "NEXT LINE is not white space to JavaScript"
         );
     }
+
+    fn render(source: &str) -> String {
+        render_markdown(source, MarkdownOptions::default())
+    }
+
+    fn render_at(path: &str, source: &str) -> String {
+        // `base` is the document's own **folder**, which is what `render_source` passes.
+        render_markdown(
+            source,
+            MarkdownOptions {
+                base: Path::new(path).parent(),
+            },
+        )
+    }
+
+    /// Remove every tag, leaving the text a reader would see (entities still encoded).
+    fn strip_tags(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut in_tag = false;
+        for character in html.chars() {
+            match character {
+                '<' => in_tag = true,
+                '>' if in_tag => in_tag = false,
+                other if !in_tag => out.push(other),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_document_cannot_inject_markup() {
+        let html = render("Hello <script>alert(1)</script> and <img src=x onerror=alert(1)>");
+        assert!(!html.contains("<script"), "no script tag survives: {html}");
+        assert!(
+            !html.contains("alert(1)"),
+            "and its content is dropped: {html}"
+        );
+        assert!(
+            !html.contains("onerror"),
+            "an event handler cannot survive: {html}"
+        );
+        assert!(
+            html.contains("<img src=\"x\">"),
+            "the allowed attribute stays: {html}"
+        );
+    }
+
+    #[test]
+    fn a_link_that_would_run_script_is_refused_and_the_label_survives() {
+        let html = render("[click](javascript:alert(1))");
+        assert!(!html.contains("<a "), "no anchor is produced: {html}");
+        assert!(
+            html.contains("click (link refused)"),
+            "the label and the reason: {html}"
+        );
+        assert!(
+            !render("[x](data:text/html,<script>alert(1)</script>)").contains("<a "),
+            "a data URL is refused too"
+        );
+        for url in [
+            "https://example.com/a",
+            "http://example.com",
+            "mailto:someone@example.com",
+            "docs/INDEX.md",
+            "#a-heading",
+        ] {
+            assert!(
+                render(&format!("[label]({url})")).contains("<a href="),
+                "{url} is followed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_link_keeps_its_rendered_label() {
+        let html = render("[**danger**](javascript:alert(1))");
+        assert!(!html.contains("<a "), "no anchor is produced: {html}");
+        assert!(
+            html.contains("<strong>danger</strong> (link refused)"),
+            "the label is rendered, with the reason: {html}"
+        );
+    }
+
+    #[test]
+    fn headings_paragraphs_and_rules() {
+        let html = render("# Title\n\nA paragraph.\n\n---\n\n## Second\n");
+        assert!(html.contains("<h1>Title</h1>"), "{html}");
+        assert!(html.contains("<p>A paragraph.</p>"), "{html}");
+        assert!(html.contains("<hr />") || html.contains("<hr>"), "{html}");
+        assert!(html.contains("<h2>Second</h2>"), "{html}");
+    }
+
+    #[test]
+    fn emphasis_code_spans_and_strikethrough() {
+        let html = render("Use **bold**, *italic*, `code`, and ~~gone~~.");
+        assert!(html.contains("<strong>bold</strong>"), "{html}");
+        assert!(html.contains("<em>italic</em>"), "{html}");
+        assert!(html.contains("<code>code</code>"), "{html}");
+        assert!(html.contains("<del>gone</del>"), "{html}");
+    }
+
+    #[test]
+    fn emphasis_inside_a_code_span_stays_literal() {
+        let html = render("The literal `a ** b` is multiplication.");
+        assert!(
+            html.contains("<code>a ** b</code>"),
+            "the asterisks survive: {html}"
+        );
+        assert!(!html.contains("<strong>"), "and nothing is bolded: {html}");
+    }
+
+    #[test]
+    fn a_fenced_block_keeps_its_language_and_its_text_exactly() {
+        let html = render("```ts\nconst x: number = 1 < 2 ? a : b\n```");
+        assert!(
+            html.contains("<pre><code class=\"language-ts\">"),
+            "the language is carried: {html}"
+        );
+        assert!(
+            !html.contains("&amp;lt;"),
+            "and the escaping is not applied twice: {html}"
+        );
+        let text = strip_tags(&html);
+        assert!(
+            text.trim() == "const x: number = 1 &lt; 2 ? a : b",
+            "the code reads as it was written: {text:?} from {html}"
+        );
+    }
+
+    #[test]
+    fn a_fence_is_coloured_and_its_class_survives_the_allow_list() {
+        let html = render("```python\ndef f(x):\n    return x if x else None\n```");
+        assert!(
+            html.contains("<pre><code class=\"language-python\">"),
+            "{html}"
+        );
+        assert!(
+            html.contains("hljs-keyword"),
+            "the highlighter's spans survive: {html}"
+        );
+        assert!(
+            !html.contains("<span onclick"),
+            "and nothing forbidden gets through: {html}"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_fence_still_renders_its_content() {
+        let html = render("```\nno closing fence\n");
+        assert!(html.contains("no closing fence"), "{html}");
+        assert!(html.contains("<pre><code>"), "{html}");
+    }
+
+    #[test]
+    fn consecutive_items_join_one_list() {
+        let html = render("- one\n- two\n\n1. first\n2. second\n");
+        assert_eq!(html.matches("<ul>").count(), 1, "{html}");
+        assert_eq!(html.matches("<ol>").count(), 1, "{html}");
+        assert_eq!(html.matches("<li>").count(), 4, "{html}");
+    }
+
+    #[test]
+    fn a_table_renders_as_a_table_with_alignment() {
+        let html = render(
+            "| Part | Claims | State |\n| --- | ---: | :---: |\n| 1 | 10 | holds |\n| 2 | 6 | holds |\n",
+        );
+        assert_eq!(html.matches("<table>").count(), 1, "{html}");
+        assert_eq!(
+            html.matches("<th").count() - html.matches("<thead>").count(),
+            3,
+            "{html}"
+        );
+        assert_eq!(html.matches("<td").count(), 6, "{html}");
+        assert!(html.contains("<th>Part</th>"), "{html}");
+        assert!(
+            html.contains("align=\"right\"") && html.contains(">Claims<"),
+            "a right-aligned column says so: {html}"
+        );
+        assert!(
+            html.contains("align=\"center\"") && html.contains(">State<"),
+            "and a centred one: {html}"
+        );
+        assert!(!html.contains('|'), "no pipe is left as text: {html}");
+    }
+
+    #[test]
+    fn a_table_is_not_read_where_there_is_no_delimiter_row() {
+        let html = render("| a | b |\n| c | d |\n");
+        assert!(!html.contains("<table>"), "no table is invented: {html}");
+        assert!(
+            html.contains("| a | b |"),
+            "the text is shown as written: {html}"
+        );
+    }
+
+    #[test]
+    fn a_bolded_tag_does_not_become_a_tag() {
+        let html = render("**<b>not bold</b>**");
+        assert!(html.contains("<strong>not bold</strong>"), "{html}");
+        assert!(
+            !html.contains("<b>"),
+            "the element the document wrote does not survive: {html}"
+        );
+    }
+
+    #[test]
+    fn a_documents_frontmatter_is_shown_as_metadata() {
+        let html = render("---\ntitle: A Document\nversion: 1.0.0\n---\n\n# Heading\n\nBody.\n");
+        assert!(
+            html.contains("<section class=\"frontmatter\"><h2>frontmatter</h2><pre><code>"),
+            "{html}"
+        );
+        assert!(html.contains("title: A Document"), "{html}");
+        assert!(
+            !html.contains("<p>title:"),
+            "not rendered as a paragraph: {html}"
+        );
+        assert!(html.contains("<h1>Heading</h1>"), "{html}");
+        assert!(
+            !render("# Plain\n").contains("frontmatter"),
+            "no frontmatter, no section"
+        );
+        assert!(
+            render("text\n\n---\n\nmore").contains("<hr"),
+            "a rule later is still a rule"
+        );
+    }
+
+    #[test]
+    fn a_name_that_begins_with_an_underscore_keeps_its_underscores() {
+        assert!(
+            render("# _tools_").contains("<h1>_tools_</h1>"),
+            "a heading keeps the name"
+        );
+        assert!(
+            render("See _verifiers_ for that.").contains("_verifiers_"),
+            "and so does a sentence"
+        );
+        assert!(!render("_tools_").contains("<em>"), "nothing is emphasised");
+        assert!(
+            render("*italic* and **bold**").contains("<em>italic</em>"),
+            "asterisks still emphasise"
+        );
+        assert!(
+            render("a_b_c").contains("a_b_c"),
+            "an underscore in a word was never at risk"
+        );
+    }
+
+    #[test]
+    fn an_escape_for_a_name_never_becomes_visible_inside_code() {
+        let fenced = render("```python\nx = _a_b_\n```");
+        assert!(
+            !fenced.contains("\\_"),
+            "no backslash reaches the fence: {fenced}"
+        );
+        assert!(fenced.contains("_a_b_"), "{fenced}");
+        let span = render("the `_tools_` folder");
+        assert!(!span.contains("\\_"), "{span}");
+        assert!(span.contains("<code>_tools_</code>"), "{span}");
+    }
+
+    #[test]
+    fn a_code_span_inside_link_text_is_code_not_literal_backticks() {
+        let html = render("See [`_verifiers_/`](_verifiers_/INDEX.md) here.");
+        assert!(
+            html.contains("<code>_verifiers_/</code>"),
+            "the label is a code element: {html}"
+        );
+        assert!(
+            !html.contains("`"),
+            "and no backtick survives as text: {html}"
+        );
+        assert!(
+            render("[**bold** label](a.md)").contains("<strong>bold</strong> label"),
+            "emphasis in a label"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_workspace_file_is_served_and_marked_for_the_panel() {
+        // Measured in the TypeScript build: `[x](DEPLOY.md)` asked for `/DEPLOY.md`, which answered 404.
+        let html = render_at("/w/docs/notes.md", "See [the index](../INDEX.md#part-two).");
+        assert!(
+            html.contains("href=\"/api/raw?path=%2Fw%2FINDEX.md#part-two\""),
+            "the address is the route that serves the file: {html}"
+        );
+        assert!(
+            html.contains("data-heddle-path=\"/w/INDEX.md\""),
+            "with the absolute path for the panel to follow: {html}"
+        );
+        assert!(html.contains("rel=\"noreferrer noopener\""), "{html}");
+    }
+
+    #[test]
+    fn a_remote_link_opens_beside_the_document() {
+        let html = render_at("/w/a.md", "[out](https://example.com/x)");
+        assert!(html.contains("href=\"https://example.com/x\""), "{html}");
+        assert!(
+            html.contains("target=\"_blank\""),
+            "it opens in a new tab: {html}"
+        );
+        assert!(html.contains("rel=\"noreferrer noopener\""), "{html}");
+    }
+
+    #[test]
+    fn an_image_is_resolved_beside_the_document() {
+        let html = render_at("/w/_context_/notes.md", "![icon](heddle.svg)");
+        assert!(
+            html.contains("src=\"/api/raw?path=%2Fw%2F_context_%2Fheddle.svg\""),
+            "the image is fetched from the route that serves it: {html}"
+        );
+        assert!(html.contains("alt=\"icon\""), "{html}");
+        // A remote image is the author's choice and is left as written.
+        assert!(
+            render_at("/w/a.md", "![x](https://example.com/a.png)")
+                .contains("src=\"https://example.com/a.png\""),
+            "a remote image is untouched"
+        );
+    }
+
+    #[test]
+    fn a_raw_html_image_is_resolved_by_the_allow_lists_policy() {
+        // Raw HTML goes around the renderer, so the sanitiser's policy is the one that resolves it.
+        let html = render_at(
+            "/w/docs/notes.md",
+            "<p align=\"center\"><img src=\"heddle.svg\" width=\"160\"></p>",
+        );
+        assert!(
+            html.contains("src=\"/api/raw?path=%2Fw%2Fdocs%2Fheddle.svg\""),
+            "a hand-written image is resolved too: {html}"
+        );
+        assert!(
+            html.contains("width=\"160\""),
+            "and keeps a count of pixels: {html}"
+        );
+    }
+
+    #[test]
+    fn an_image_with_a_refused_source_becomes_its_alt_text() {
+        let html = render_at("/w/a.md", "![the icon](javascript:alert(1))");
+        assert!(!html.contains("<img"), "nothing is fetched: {html}");
+        assert!(
+            html.contains("the icon"),
+            "and the author's words still read: {html}"
+        );
+    }
+
+    #[test]
+    fn a_bare_url_is_an_autolink() {
+        // The GFM behaviour the library choice was made for: a document's bare URL is a link, as GitHub renders it.
+        let html = render("See https://example.com/x for that.");
+        assert!(html.contains("href=\"https://example.com/x\""), "{html}");
+    }
+
+    #[test]
+    fn a_task_list_is_a_list_with_boxes() {
+        let html = render("- [x] done\n- [ ] todo\n");
+        assert!(html.contains("<ul>"), "{html}");
+        assert!(
+            html.contains("type=\"checkbox\""),
+            "a task list has boxes: {html}"
+        );
+        assert!(
+            html.contains("checked"),
+            "and a done item is checked: {html}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_is_a_reference_and_its_definition() {
+        let html = render("A claim[^1].\n\n[^1]: the source\n");
+        assert!(
+            html.contains("footnote"),
+            "a footnote keeps its machinery: {html}"
+        );
+        assert!(html.contains("the source"), "{html}");
+    }
+
+    #[test]
+    fn a_reference_link_is_followed_and_rewritten() {
+        let html = render_at(
+            "/w/docs/a.md",
+            "See [the index][ref].\n\n[ref]: ../INDEX.md\n",
+        );
+        assert!(
+            html.contains("href=\"/api/raw?path=%2Fw%2FINDEX.md\""),
+            "a reference link resolves like an inline one: {html}"
+        );
+        assert!(html.contains("data-heddle-path=\"/w/INDEX.md\""), "{html}");
+    }
+
+    #[test]
+    fn a_link_title_survives_as_an_attribute() {
+        let html = render_at("/w/a.md", "[x](https://e.example \"the title\")");
+        assert!(html.contains("title=\"the title\""), "{html}");
+        assert!(html.contains("target=\"_blank\""), "{html}");
+    }
+
+    #[test]
+    fn an_image_inside_a_link_keeps_both_resolutions() {
+        let html = render_at("/w/docs/a.md", "[![diagram](shot.png)](../INDEX.md)");
+        assert!(
+            html.contains("src=\"/api/raw?path=%2Fw%2Fdocs%2Fshot.png\""),
+            "the image is served beside the document: {html}"
+        );
+        assert!(
+            html.contains("href=\"/api/raw?path=%2Fw%2FINDEX.md\""),
+            "and the link it sits in is served too: {html}"
+        );
+        assert!(html.contains("data-heddle-path=\"/w/INDEX.md\""), "{html}");
+    }
+
+    #[test]
+    fn a_title_holding_a_greater_than_sign_does_not_end_its_tag_early() {
+        // `tag_end` and `attribute_value` scan the tag rather than splitting on '>', which is what this pins.
+        let html = render_at("/w/a.md", "[x](https://e.example \"a > b\")");
+        assert!(html.contains("title=\"a &gt; b\""), "{html}");
+        assert!(
+            html.contains("rel=\"noreferrer noopener\""),
+            "the tag is still annotated: {html}"
+        );
+    }
+
+    #[test]
+    fn nested_emphasis_and_strikethrough_inside_a_heading() {
+        let html = render("# **bold _and_ `code`**\n");
+        assert!(html.contains("<h1>"), "{html}");
+        assert!(html.contains("<strong>"), "{html}");
+        assert!(html.contains("<code>code</code>"), "{html}");
+    }
+
+    #[test]
+    fn a_blockquote_holding_code_keeps_both() {
+        let html = render("> quoted\n>\n> ```py\n> x = 1\n> ```\n");
+        assert!(html.contains("<blockquote>"), "{html}");
+        assert!(html.contains("<pre><code"), "{html}");
+        assert!(html.contains("language-py"), "{html}");
+    }
+
+    #[test]
+    fn a_hard_break_and_a_soft_break_are_not_confused() {
+        // `breaks` stays off, as in the TypeScript build: a soft break is a space, a two-space break is a `<br>`.
+        let soft = render("one\ntwo\n");
+        assert!(
+            soft.contains("one two") || soft.contains("one\ntwo"),
+            "{soft}"
+        );
+        assert!(
+            !soft.contains("<br"),
+            "a soft break is not a line break: {soft}"
+        );
+        let hard = render("one  \ntwo\n");
+        assert!(
+            hard.contains("<br"),
+            "two trailing spaces are a line break: {hard}"
+        );
+    }
+
+    #[test]
+    fn render_inline_answers_spans_only() {
+        let html = render_inline("Use **bold** and `code`");
+        assert!(!html.contains("<p>"), "no paragraph wrapper: {html}");
+        assert!(html.contains("<strong>bold</strong>"), "{html}");
+        assert!(html.contains("<code>code</code>"), "{html}");
+        assert_eq!(render_inline("plain"), "plain");
+        assert_eq!(
+            render_inline("[x](javascript:alert(1))"),
+            "<a>x</a>",
+            "an inline link loses its refused address, as the TypeScript build's does"
+        );
+    }
+
+    #[test]
+    fn rendering_is_repeatable_and_empty_input_is_empty_output() {
+        let source = "# A\n\ntext with `code`\n";
+        assert_eq!(render(source), render(source), "no state to drift");
+        assert_eq!(render(""), "", "nothing in gives nothing out");
+    }
+
+    #[test]
+    fn resolve_against_normalises_and_never_climbs_above_the_root() {
+        assert_eq!(
+            resolve_against(Path::new("/w/docs"), "../INDEX.md"),
+            "/w/INDEX.md"
+        );
+        assert_eq!(resolve_against(Path::new("/w"), "../../x"), "/x");
+        assert_eq!(resolve_against(Path::new("/w"), "./a/./b"), "/w/a/b");
+        assert_eq!(resolve_against(Path::new("/"), "a"), "/a");
+    }
+
+    #[test]
+    fn percent_encoding_matches_encode_uri_component() {
+        assert_eq!(
+            percent_encode("/w/a b/文字.md"),
+            "%2Fw%2Fa%20b%2F%E6%96%87%E5%AD%97.md"
+        );
+        assert_eq!(percent_encode("-_.!~*'()"), "-_.!~*'()");
+        assert_eq!(percent_decode("%2Fw%2Fa%20b"), "/w/a b");
+        assert_eq!(
+            percent_decode("100%"),
+            "100%",
+            "a stray percent is left as written"
+        );
+    }
+
+    #[test]
+    fn split_frontmatter_matches_the_typescript_expression() {
+        assert_eq!(
+            split_frontmatter("---\na: 1\n---\nbody"),
+            (Some("a: 1"), "body")
+        );
+        assert_eq!(split_frontmatter("---\na: 1\n---"), (Some("a: 1"), ""));
+        assert_eq!(
+            split_frontmatter("no frontmatter"),
+            (None, "no frontmatter")
+        );
+        assert_eq!(
+            split_frontmatter("---\nnot closed\n"),
+            (None, "---\nnot closed\n"),
+            "an unclosed block is left to the parser"
+        );
+    }
 }
 
 /// Per-document rendering options.

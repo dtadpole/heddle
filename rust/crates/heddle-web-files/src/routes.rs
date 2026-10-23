@@ -1181,6 +1181,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_router_answers_real_http_over_a_listener() {
+        // `oneshot` proves the routes; this proves they work behind hyper, with the percent-encoded query a browser
+        // sends, which is what the panel and the verifier do.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (base, host) = scratch("http");
+        let document = host.root.join("AGENTS.md");
+        let app = routes_of(host);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n",
+            query(&document.to_string_lossy())
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(text.contains("\"renderer\""), "{text}");
+        assert!(text.contains("markdown"), "{text}");
+        assert!(text.contains("cache-control: no-store"), "{text}");
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn an_upload_whose_name_needs_encoding_is_served_by_its_encoded_leaf() {
+        let (base, host) = scratch("upload-encoded");
+        let directory = host.home.join("uploads");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("a b.png"), b"png").unwrap();
+        let (status, headers, bytes) =
+            call(routes_of(host), "GET", "/api/uploads/a%20b.png", None).await;
+        assert_eq!(status, Status::OK, "{}", body_text(&bytes));
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "image/png"
+        );
+        assert_eq!(bytes, b"png");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
     async fn a_path_that_walks_out_with_dot_dot_is_refused_even_by_a_host_that_judges_the_string() {
         // The route resolves the path before asking, so `..` is decided by where it leads. A host that compares the
         // raw string would otherwise answer "owned" for `<root>/../outside.txt` and the bytes would be served.
