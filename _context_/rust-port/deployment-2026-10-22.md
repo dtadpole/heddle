@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T05:32:35Z
+modified: 2026-10-23T05:47:19Z
 level: L3
 version: 2.0.0
 description: What serves the owner's page on loopback port 8082, how it is redeployed, rehearsed and restored, who acts on it, and what is still open.
@@ -23,7 +23,7 @@ The owner's page is `http://127.0.0.1:8082/`, the TypeScript build as the oracle
 | gate | dsh-web-ops' agent `ai.reflection.heddle-web-gate`, 8082 → 3082, token read from `~/.heddle/web.log` (mode 600) |
 | endpoint | D-030 offline fixture: `~/.heddle/heddle.json` points `scripted` at `~/.heddle/deployment-scripted.json`; replies open `scripted endpoint: offline fixture reply, not a model` |
 | page marker | `dd6d45d28567`, unchanged through every redeploy so far |
-| Rust preview (separate) | agent `com.dtadpole.heddle-web-rust-preview` on 3097, the web branch's binary (`b6995b6`), own `HEDDLE_HOME` `~/.heddle-rust-preview`; no gate, so a token link; stop with `launchctl bootout` of its label |
+| Rust preview (separate) | agent `com.dtadpole.heddle-web-rust-preview` on 3097, rendered by the repository installer; main's release binary (`5b02a4a`, byte-identical to the `6be6ccd` + `51c7bf4` build it first ran); own `HEDDLE_HOME` `~/.heddle-rust-preview`; no gate, so a token link; stop with `launchctl bootout` of its label |
 
 ## Operating it
 
