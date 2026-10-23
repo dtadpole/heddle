@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:23:32Z
-version: 0.6.3
+modified: 2026-10-23T05:36:39Z
+version: 0.6.4
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -61,7 +61,8 @@ the loop reads), and the session-meta and create-session records, converted at t
   `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
   `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
 - **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule — a scratch worktree at main
-  `cfa6a2b`, whose turn hooks chain the context service's overflow recovery after the event bus, with this branch
+  `cfa6a2b` and again at main `db3d76d` (after the context report became the context crate's own and the goal
+  driver moved to a pinned runtime), whose turn hooks chain the context service's overflow recovery after the event bus, with this branch
   merged and only `usage::SERVED` edited to add Tools and Turn, a debug build, the verifiers through `HEDDLE_BIN`):**
   `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs` **1/1** pass with the binary's own rows;
   `check-teams.mjs` is unjudged (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed
