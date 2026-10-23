@@ -69,6 +69,7 @@ Who uses what, from the TypeScript importers:
 | [`model_info`](src/model_info.rs) | `ModelListCache::{context_window, input_modalities}`, `InputModality`, `has_model_list`, `input_modalities_of_row`, `row_of` |
 | [`service`](src/service.rs) | `ModelService`, `ModelHooks`, `HooksId`, `Generated`, `ProbeOptions`, `ProbeResult`, `with_discovered_modalities`, `last_assistant_text` |
 | [`printer`](src/printer.rs) | `StreamPrinter`, `StreamPrinterOptions`, `StreamSummary` |
+| [`command`](src/command.rs) | the D-043 entry point: `Command::Models`, `Args`, `Context`, `run`; and for `--turn`'s owner, `turn_endpoint` and `print_stream` → `StreamView::{observe, dispose, summary_json}` |
 
 ## Decisions in the API
 

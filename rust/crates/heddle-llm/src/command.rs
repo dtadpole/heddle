@@ -1,25 +1,140 @@
-//! The turn's `--endpoint` and `--stream`: which endpoint answers, and the live view of what it says.
+//! The commands this crate answers, behind the binary's D-043 entry-point convention.
 //!
-//! Ported from the turn path of `main()` in `src/cli.ts` (the two endpoint sentences, `printStream` started before
-//! `runTurn` and disposed after it, and the summary under `stream` in `--json`). Per D-043 the behaviour lives in
-//! the crate that owns it and the binary only dispatches to it, so every public signature here uses **std types
-//! only** — strings, slices, `std::io::Write` — and nothing from the binary crate.
+//! Ported from `src/cli.ts`: the `models` command, and the two pieces of the turn path this crate owns — the
+//! endpoint a turn runs on and the `--stream` view (`printStream`, started before `runTurn`, disposed after it, its
+//! summary under `stream` in `--json`). The convention is `rust/crates/heddle/INDEX.md`, "Command entry points in
+//! the owning crate": no dependency on the binary, no process-global reads or effects, exit `0` or `1` with
+//! `heddle: <sentence>` on `err` (never `2`), text byte for byte as the TypeScript build prints it, `--json` as
+//! `JSON.stringify(value, null, 2)` plus a newline.
 //!
-//! Both are modifiers of `--turn`, not commands of their own: the turn's driver asks [`turn_endpoint`] before it
-//! opens the session, starts a [`StreamView`] before the turn so nothing that arrives is missed, feeds it every
-//! `session/event` of that session, and disposes it after the turn (and the goal driver) finish.
+//! - [`run`] with [`Command::Models`] answers `models` from the model row's [`ModelService`].
+//! - `--turn` is `heddle-agent`'s command; its entry point calls [`turn_endpoint`] before it opens the session and,
+//!   with `--stream`, starts [`print_stream`] before the turn and feeds it every `session/event` of that session.
 //!
 //! What the verifiers judge, and where it is pinned in the tests below:
 //!
-//! - `10-llm-backends` — the named endpoint answers; with none named, the configuration's default answers even when
-//!   it is not first; `--json`'s `endpoint` is the endpoint that answered.
+//! - `10-llm-backends` — `models --json` is the endpoint list, the built-in offline endpoint included, and makes no
+//!   request; the named endpoint answers a turn; with none named, the configuration's default answers even when it
+//!   is not first.
 //! - `20-streaming` — reasoning and content reach stderr as separate deltas, reasoning first, the first one before
 //!   the turn ends; `--json` carries `stream` with `textDeltas`, `reasoningDeltas` and `completed`.
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use serde_json::Value;
+
 use crate::printer::{StreamPrinter, StreamPrinterOptions};
+use crate::service::ModelService;
+
+/// The command words this crate answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// `models`: the configured endpoints, without calling any.
+    Models,
+}
+
+/// The flags this crate's commands read, named after the TypeScript `Args` fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Args {
+    /// `--json`.
+    pub json: bool,
+}
+
+/// What a command runs against: the model row's service, and the working directory the binary resolved.
+pub struct Context<'a> {
+    pub cwd: PathBuf,
+    pub service: &'a ModelService,
+}
+
+/// Run one command: the answer goes to `out`, a failure to `err`; the result is the process exit code.
+pub fn run(
+    command: Command,
+    args: &Args,
+    context: &Context<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let result = match command {
+        Command::Models => models(args, context, out),
+    };
+    match result {
+        Ok(()) => 0,
+        Err(sentence) => {
+            let _ = writeln!(err, "heddle: {sentence}");
+            1
+        }
+    }
+}
+
+/// `models`: each endpoint as `describeEndpoint` prints it, credential-free. A listing is not a call, so nothing
+/// here reaches a provider.
+fn models(args: &Args, context: &Context<'_>, out: &mut dyn Write) -> Result<(), String> {
+    let endpoints: Vec<Value> = context
+        .service
+        .list()
+        .iter()
+        .map(heddle_config::describe_endpoint)
+        .collect();
+    let text = if args.json {
+        let json = serde_json::to_string_pretty(&endpoints)
+            .map_err(|error| format!("the endpoint list could not be written — {error}"))?;
+        format!("{json}\n")
+    } else {
+        let mut text = format!("heddle: {} endpoint(s)\n", endpoints.len());
+        for endpoint in &endpoints {
+            text.push_str(&format!(
+                "  {:<18} {:<16} {}{}\n",
+                display(endpoint.get("name")),
+                display(endpoint.get("kind")),
+                endpoint
+                    .get("model")
+                    .filter(|model| !model.is_null())
+                    .map(|model| display(Some(model)))
+                    .unwrap_or_else(|| "-".to_string()),
+                if has_credential(endpoint) {
+                    " credential"
+                } else {
+                    ""
+                },
+            ));
+        }
+        text
+    };
+    out.write_all(text.as_bytes())
+        .map_err(|error| format!("the endpoint list could not be printed — {error}"))
+}
+
+/// `String(value)` for a described field: a string as itself, anything else as its JSON.
+fn display(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+        None => "undefined".to_string(),
+    }
+}
+
+/// The TypeScript build's `endpoint.credential ?? endpoint.credentialFile ? ' credential' : ''`: the first of the
+/// two that is present decides, by JavaScript truthiness.
+fn has_credential(endpoint: &Value) -> bool {
+    let decisive = endpoint
+        .get("credential")
+        .filter(|value| !value.is_null())
+        .or_else(|| endpoint.get("credentialFile"));
+    decisive.is_some_and(truthy)
+}
+
+/// JavaScript truthiness of a JSON value.
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0 && !n.is_nan()),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
 
 /// The sentence a turn fails with when no endpoint is configured at all.
 pub const NO_ENDPOINT_CONFIGURED: &str = "no endpoint is configured; write ~/.heddle/heddle.json or pass --endpoint after configuring one";
@@ -110,6 +225,153 @@ impl StreamView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use heddle_config::{EndpointConfig, EndpointKind};
+
+    fn configured(name: &str, kind: EndpointKind, base_url: &str) -> EndpointConfig {
+        EndpointConfig {
+            name: name.to_string(),
+            kind,
+            base_url: base_url.to_string(),
+            ..EndpointConfig::default()
+        }
+    }
+
+    /// Run `models` against a service holding `endpoints`; the exit code, stdout and stderr.
+    fn models_run(endpoints: Vec<EndpointConfig>, json: bool) -> (i32, String, String) {
+        let service = ModelService::new(endpoints).expect("registers the endpoints");
+        let context = Context {
+            cwd: PathBuf::from("/work"),
+            service: &service,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(
+            Command::Models,
+            &Args { json },
+            &context,
+            &mut out,
+            &mut err,
+        );
+        (
+            code,
+            String::from_utf8(out).expect("utf-8"),
+            String::from_utf8(err).expect("utf-8"),
+        )
+    }
+
+    #[test]
+    fn models_json_is_the_configured_list_with_the_offline_endpoint() {
+        // 10-llm-backends: the configured endpoint is listed with its kind and URL, and the built-in offline
+        // endpoint is there for a fresh clone.
+        let mut chat = configured(
+            "not-the-first",
+            EndpointKind::OpenaiChat,
+            "http://127.0.0.1:9/ds",
+        );
+        chat.model = Some("double".into());
+        let mut scripted = configured("scripted", EndpointKind::Scripted, "scripted.json");
+        scripted.model = Some("scripted".into());
+        let (code, stdout, stderr) = models_run(vec![scripted, chat], true);
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stderr, "");
+        let listed: Value = serde_json::from_str(&stdout).expect("it printed JSON");
+        let listed = listed.as_array().expect("it printed a list");
+        let names: Vec<&str> = listed
+            .iter()
+            .filter_map(|endpoint| endpoint["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["scripted", "not-the-first"]);
+        let chat = &listed[1];
+        assert_eq!(chat["kind"], Value::from("openai-chat"));
+        assert_eq!(chat["baseUrl"], Value::from("http://127.0.0.1:9/ds"));
+        // JSON.stringify(value, null, 2) plus a newline.
+        assert!(
+            stdout.starts_with("[\n  {\n    \"name\": \"scripted\","),
+            "{stdout}"
+        );
+        assert!(stdout.ends_with("\n]\n"), "{stdout}");
+    }
+
+    #[test]
+    fn models_text_is_the_typescript_table() {
+        let mut fast = configured("fast", EndpointKind::OpenaiChat, "http://h");
+        fast.model = Some("m-1".into());
+        let mut local = configured("local", EndpointKind::Scripted, "scripted.json");
+        local.api_key = Some("a-secret".into());
+        let (code, stdout, _) = models_run(vec![fast, local], false);
+        assert_eq!(code, 0);
+        assert_eq!(
+            stdout,
+            "heddle: 2 endpoint(s)\n  fast               openai-chat      m-1\n  local              scripted         - credential\n"
+        );
+        assert!(
+            !stdout.contains("a-secret"),
+            "a credential value never appears"
+        );
+    }
+
+    #[test]
+    fn a_key_file_marks_the_credential_and_nothing_marks_nothing() {
+        let mut keyed = configured("keyed", EndpointKind::OpenaiChat, "http://h");
+        keyed.api_key_file = Some("~/.keys/k".into());
+        let plain = configured("plain", EndpointKind::OpenaiChat, "http://h");
+        let (_, stdout, _) = models_run(vec![keyed, plain], false);
+        assert_eq!(
+            stdout,
+            "heddle: 2 endpoint(s)\n  keyed              openai-chat      - credential\n  plain              openai-chat      -\n"
+        );
+        assert!(
+            !stdout.contains(".keys"),
+            "the key file's path is not printed in the table"
+        );
+    }
+
+    #[test]
+    fn an_empty_configuration_lists_nothing() {
+        let (code, stdout, _) = models_run(Vec::new(), false);
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "heddle: 0 endpoint(s)\n");
+        let (_, json, _) = models_run(Vec::new(), true);
+        assert_eq!(json, "[]\n");
+    }
+
+    #[test]
+    fn listing_the_endpoints_reaches_no_provider() {
+        // 10-llm-backends points an endpoint at a recording double and requires the listing to leave it empty.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds a loopback port");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let address = listener.local_addr().expect("has an address");
+        let mut double = configured(
+            "double",
+            EndpointKind::OpenaiChat,
+            &format!("http://{address}/ds"),
+        );
+        double.model = Some("double".into());
+        let (code, _, _) = models_run(vec![double.clone()], true);
+        assert_eq!(code, 0);
+        let (code, _, _) = models_run(vec![double], false);
+        assert_eq!(code, 0);
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "listing the endpoints made no request"
+        );
+    }
+
+    #[test]
+    fn javascript_truthiness_decides_the_credential_mark() {
+        assert!(has_credential(&serde_json::json!({ "credential": "set" })));
+        assert!(has_credential(
+            &serde_json::json!({ "credentialFile": "/k" })
+        ));
+        assert!(!has_credential(
+            &serde_json::json!({ "credentialFile": "" })
+        ));
+        assert!(!has_credential(&serde_json::json!({})));
+        // `??` takes the first present value, even when it is falsy.
+        assert!(!has_credential(
+            &serde_json::json!({ "credential": "", "credentialFile": "/k" })
+        ));
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|name| (*name).to_string()).collect()
