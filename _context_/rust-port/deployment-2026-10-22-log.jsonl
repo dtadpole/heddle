@@ -49,3 +49,7 @@
 {"at": "2026-10-23T01:17-07:00", "deployed": "e6a9ba8", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (records, tests and docs only)"}
 {"at": "2026-10-23T01:23-07:00", "deployed": "6f33ad3", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (records, tests and docs only)"}
 {"at": "2026-10-23T01:27-07:00", "deployed": "2c9641f", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (records, tests and docs only)"}
+{"at": "2026-10-23T01:31-07:00", "deployed": "33407a4", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt from 33407a4 (heddle-server)"}
+{"at": "2026-10-23T01:36-07:00", "deployed": "d53dcf9", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T01:40-07:00", "deployed": "58a49b8", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T01:42-07:00", "deployed": "709bee6", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
