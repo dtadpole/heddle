@@ -1,0 +1,46 @@
+# The heddle Web UI as a systemd user service — the Linux counterpart of heddle-web.plist.template.
+#
+# A **user** unit rather than a system unit, for the reason the launchd agent is an agent: it needs no root, and
+# ~/.config/systemd/user is owned by the account it runs as, so installing, inspecting and removing it needs no
+# sudo. A user unit outlives the login session only when the account lingers, so install.sh refuses an account
+# that does not (`loginctl enable-linger`).
+#
+# The paths below are placeholders. install.sh fills them in from the machine it runs on, because the program and
+# the checkout are not in the same place on every host. The program is either node running the checkout's built
+# CLI or the binary named by HEDDLE_BIN; the arguments after it are the same for both builds.
+
+[Unit]
+Description=heddle Web UI (@REPO@ on 127.0.0.1:@PORT@)
+# Never give up. systemd's default start limit stops restarting after five starts in ten seconds and leaves the
+# service dead, which turns a port that was briefly taken into an outage. launchd keeps retrying at a bounded rate,
+# and so does this unit: RestartSec is the bound.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The harness's own launcher, bound to loopback as the server itself requires, with the profile named explicitly.
+ExecStart=@PROGRAM@ web --host 127.0.0.1 --port @PORT@ --config @REPO@/cordis.yml
+# The checkout is the working directory, which is what makes the default profile load: a server started
+# elsewhere boots an empty tree.
+WorkingDirectory=@REPO@
+
+# The supervisor half: restart on every exit, a kill included, at most once every RestartSec seconds. A fixed delay,
+# not RestartSteps: systemd counts restarts for the unit's lifetime, so a growing delay would make a service that
+# was killed a few times over a week slow to come back for good.
+Restart=always
+RestartSec=5
+# The whole control group is stopped with the service, so no child outlives it.
+KillMode=control-group
+
+# Logs, never /dev/null: a service that discards its output cannot be audited. The launch token is printed here
+# once per start.
+StandardOutput=append:@LOG@
+StandardError=append:@LOG@
+
+# The session store, the cookie secret and the local endpoint configuration all live under HEDDLE_HOME.
+Environment=HEDDLE_HOME=@HOME@
+Environment=HOME=@HOME_DIR@
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:@PROGRAM_DIR@
+
+[Install]
+WantedBy=default.target
