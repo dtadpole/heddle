@@ -161,6 +161,9 @@ pub fn booted_command(
     // healthy answer and exited 0.
     let failed = crate::boot::failed_entries(boot);
     if !failed.is_empty() {
+        for line in crate::boot::failure_lines(boot) {
+            out.err(&format!("{line}\n"));
+        }
         let names: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
         return out.fail(&format!(
             "{} row(s) failed to load: {}",
@@ -303,6 +306,9 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
             let _ = workspace.ensure_owner(folder);
         }
     };
+    for line in crate::boot::failure_lines(boot) {
+        out.err(&format!("{line}\n"));
+    }
     let failed_rows = crate::boot::failed_entries(boot)
         .into_iter()
         .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))
@@ -905,9 +911,11 @@ mod tests {
             )
         };
         assert_eq!(exit, Exit::Failure);
+        // The row's own error first, as the loader logs it, then the summary that refuses the command.
         assert_eq!(
             captured.stderr_text(),
-            "heddle: 1 row(s) failed to load: session\n"
+            "session: nothing answers for './no-such-component.ts'; it is neither a built-in nor a \
+             component this binary knows\nheddle: 1 row(s) failed to load: session\n"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
