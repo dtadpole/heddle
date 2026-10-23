@@ -47,13 +47,17 @@ manifest — the port's part-0 shape, where a row names a built-in or an outside
 
 ```yaml
 # alpha.component.yml, beside the profile; the row is `name: ./alpha.component.yml`
-command: ./alpha.ts          # what would start it; --validate never starts or connects to it
+program: ./alpha.ts          # what would start it; --validate never starts or connects to it
+args: []
 config:                      # the same schema the .ts plugin declares, as JSON Schema
   type: object
   properties:
     label: { type: string }
     count: { type: number }
 ```
+
+The component shape is `program` + `args` + `config` (D-031), the same shape an outside tool's spec uses, so one
+manifest can later serve both validation and the tool's own declaration.
 
 The manifest's `config` is the schema validation reads, so the bad-value check still asks the same question — the
 failure names the row and the field — and the `.ts` fixtures and their verdicts on the TypeScript build are
