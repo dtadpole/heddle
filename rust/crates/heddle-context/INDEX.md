@@ -1,6 +1,8 @@
 ---
 title: The heddle-context crate
-version: 0.7.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:01:07Z
+version: 0.7.1
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md

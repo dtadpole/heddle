@@ -737,7 +737,7 @@ pub fn is_abnormal_finish(finish_reason: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
 
     use super::*;
@@ -1298,7 +1298,7 @@ mod tests {
         }
     }
 
-    fn registry_with(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
+    pub(crate) fn registry_with(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
         let registry = ToolRegistry::new(ToolGates {
             approvals: Arc::new(AllowAll),
             sandbox: Arc::new(FlatSandbox),

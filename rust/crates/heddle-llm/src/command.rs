@@ -21,7 +21,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 
@@ -239,6 +239,70 @@ impl StreamView {
     /// [`StreamView::summary`] as JSON text.
     pub fn summary_json(&self) -> String {
         self.summary().to_string()
+    }
+}
+
+/// Where the session store's listener meets the views `--stream` starts.
+///
+/// The TypeScript `printStream` subscribes to the bus's `session/event`. Here the session service takes one
+/// listener when it is built, before any turn exists, while each turn starts its own view once its session is
+/// open; the hub sits between them. The boot builds one hub, gives the session service a listener that calls
+/// [`StreamHub::observe`] with every appended event, and the turn's starter calls [`StreamHub::start`].
+///
+/// It holds its views weakly: a view the turn drops is pruned on the next event, so a long-lived process (`web`)
+/// does not accumulate them. Events are forwarded outside the hub's lock.
+#[derive(Default)]
+pub struct StreamHub {
+    views: Mutex<Vec<(String, Weak<StreamView>)>>,
+}
+
+impl StreamHub {
+    /// An empty hub.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start a view for `session` that the hub feeds from now on ([`print_stream`] plus the subscription).
+    pub fn start(&self, session: &str, stderr: Box<dyn Write + Send>) -> Arc<StreamView> {
+        let view = Arc::new(print_stream(session, stderr));
+        self.views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((session.to_string(), Arc::downgrade(&view)));
+        view
+    }
+
+    /// One appended event of `session` — the whole event object (`SessionEvent::to_value` in heddle-session:
+    /// `{"seq","at","type",…}`). Every live view of that session receives it; dropped views are pruned.
+    pub fn observe(&self, session: &str, event: &Value) {
+        let live: Vec<Arc<StreamView>> = {
+            let mut views = self
+                .views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            views.retain(|(_, view)| view.strong_count() > 0);
+            views
+                .iter()
+                .filter(|(owner, _)| owner == session)
+                .filter_map(|(_, view)| view.upgrade())
+                .collect()
+        };
+        for view in live {
+            view.observe_value(session, event);
+        }
+    }
+
+    /// How many views the hub still holds, dropped ones not yet pruned included.
+    pub fn len(&self) -> usize {
+        self.views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Whether the hub holds no views.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -587,6 +651,76 @@ mod tests {
         assert_eq!(summary["reasoningDeltas"], serde_json::json!(1));
         assert_eq!(summary["completed"], serde_json::json!(true));
         assert!(stderr.text().contains("[reasoning] r"), "{}", stderr.text());
+    }
+
+    fn event(kind: &str, text: &str) -> Value {
+        serde_json::json!({
+            "seq": 7,
+            "at": "2026-10-22T00:00:00.000Z",
+            "type": "assistant/chunk",
+            "chunk": { "type": kind, "text": text }
+        })
+    }
+
+    #[test]
+    fn the_hub_feeds_a_started_view_every_event_of_its_session_and_no_other() {
+        let hub = StreamHub::new();
+        let mine = Captured::default();
+        let other = Captured::default();
+        let view = hub.start("s1", Box::new(mine.clone()));
+        let _elsewhere = hub.start("s2", Box::new(other.clone()));
+        hub.observe("s1", &event("reasoning-delta", "thinking"));
+        hub.observe("s1", &event("text-delta", "answer"));
+        hub.observe(
+            "s1",
+            &serde_json::json!({ "seq": 9, "at": "x", "type": "assistant/completed" }),
+        );
+        assert!(
+            mine.text().contains("[reasoning] thinking"),
+            "{}",
+            mine.text()
+        );
+        assert!(mine.text().contains("answer"));
+        assert_eq!(other.text(), "", "another session's view saw nothing");
+        view.dispose();
+        let summary = view.summary();
+        assert_eq!(summary["textDeltas"], serde_json::json!(1));
+        assert_eq!(summary["reasoningDeltas"], serde_json::json!(1));
+        assert_eq!(summary["completed"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_hub_prunes_a_dropped_view_and_a_disposed_view_prints_nothing_more() {
+        let hub = StreamHub::new();
+        let printed = Captured::default();
+        let view = hub.start("s1", Box::new(printed.clone()));
+        view.dispose();
+        hub.observe("s1", &event("text-delta", "after dispose"));
+        assert_eq!(printed.text(), "", "a disposed view prints nothing");
+        drop(view);
+        assert_eq!(hub.len(), 1, "not pruned until the next event");
+        hub.observe("s1", &event("text-delta", "after drop"));
+        assert!(hub.is_empty(), "a dropped view is pruned");
+    }
+
+    #[test]
+    fn the_hub_is_fed_from_the_listeners_thread_while_the_turn_holds_the_view() {
+        fn assert_shareable<T: Send + Sync>() {}
+        assert_shareable::<StreamHub>();
+        let hub = Arc::new(StreamHub::new());
+        let printed = Captured::default();
+        let view = hub.start("s1", Box::new(printed.clone()));
+        let listener = {
+            let hub = Arc::clone(&hub);
+            std::thread::spawn(move || {
+                hub.observe("s1", &event("reasoning-delta", "r"));
+                hub.observe("s1", &event("text-delta", "t"));
+            })
+        };
+        listener.join().expect("the listener ran");
+        view.dispose();
+        assert_eq!(view.summary()["textDeltas"], serde_json::json!(1));
+        assert!(printed.text().contains("[reasoning] r"));
     }
 
     #[test]

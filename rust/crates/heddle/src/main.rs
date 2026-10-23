@@ -66,6 +66,15 @@ mod tests {
             "      --profile <name>       boot a named profile from $HEDDLE_HOME/profiles\n"
         ));
         assert!(!stdout.contains("  web "));
+        // The session, workspace and goal commands answer through their crates, so the help lists them.
+        for line in [
+            "  sessions ",
+            "  workspaces ",
+            "  tree [<path>] ",
+            "  goal [<session-id>] ",
+        ] {
+            assert!(stdout.contains(line), "{line} in the help");
+        }
     }
 
     #[test]
