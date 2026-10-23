@@ -10,8 +10,6 @@ use heddle_web_composer::catalog::schema_for;
 use heddle_web_composer::js;
 use serde::{Deserialize, Serialize};
 
-use crate::js_json;
-
 /// The code renderer, as the inspector needs it: `renderCode(source, "json", { gutter: false })`, which escapes
 /// every byte and highlights it. Implemented over `heddle-web-files` by the host.
 pub trait JsonHighlighter {
@@ -68,7 +66,7 @@ pub fn render_payload(
         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed)
     {
         return RenderedPayload {
-            html: highlighter.render_json(&js_json::stringify_pretty(&parsed)),
+            html: highlighter.render_json(&js::stringify_pretty(&parsed)),
             is_json: true,
         };
     }
@@ -100,7 +98,7 @@ pub fn inspect_tool(
         .map(|tool| SchemaInspection {
             name: tool.name.clone(),
             description: tool.description.clone(),
-            parameters: highlighter.render_json(&js_json::stringify_pretty(&tool.parameters)),
+            parameters: highlighter.render_json(&js::stringify_pretty(&tool.parameters)),
         });
     ToolInspection {
         payload: payload.html,

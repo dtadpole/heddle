@@ -1,11 +1,11 @@
 ---
 title: The heddle-team crate
-version: 0.3.0
+version: 0.5.0
 description: The Rust port crate for durable teams, their policy, state and tool — its public API, the seams it needs from other crates, and the port plan.
 grounded_in:
-  - source: rust/ULTIMATE_GOAL.md
-  - source: src/team/ (INDEX.md, state.ts, service.ts, tool.ts, policy.ts), src/plugins/team.ts, the /api/team branch of src/server/web.ts and the team boot edge of src/cli.ts
-  - source: _verifiers_/50-agentic-loop/check-teams.mjs and _verifiers_/80-web-ui/check-team-view.mjs
+  - source: rust/ULTIMATE_GOAL.md@0.1.0
+  - source: src/team/@ed183ea (INDEX.md, state.ts, service.ts, tool.ts, policy.ts), src/plugins/team.ts@fc8d929, the /api/team branch of src/server/web.ts@a8bf162 and the team boot edge of src/cli.ts@a8bf162
+  - source: _verifiers_/50-agentic-loop/check-teams.mjs@d649349 with its fixtures/team-recover@81c5915, and _verifiers_/80-web-ui/check-team-view.mjs@5ed8deb
 ---
 
 # `rust/crates/heddle-team`
@@ -18,8 +18,8 @@ The Rust port of durable teams, their policy, state and tool.
 | Judged by | `_verifiers_/50-agentic-loop` (check-teams), `_verifiers_/80-web-ui` (check-team-view), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-team --all-features` |
-| Integration tests | [`tests/session_store.rs`](tests/session_store.rs): the team layer over the real `heddle-session` store (dev-dependency only) — check-teams' recorded store recovered byte for byte; its first check's journal driven through the nine tools and read back from disk, restart included; and check-team-view's fixture served through `team_view` with the panel text derived as `page.html` derives it (roster, `1 teammate(s)`, `task-1 write the thing`, `0 queued`, `1 delivered`, no panel without a team) |
-| State | **ported and on `main`** (merged as `d5956c5`, 2026-10-22): `state`, `service`, `tool`, `plugin` and `api` behind the declared API; 84 unit and 3 integration tests pass, and `fmt`, `clippy -D warnings` and `rustdoc -D warnings` are clean. M5 — the binary composing the `team` row and `heddle-server`'s route — is the binary's and the server's |
+| Integration tests | [`tests/`](tests/INDEX.md): the team layer over the real crates — the session store, and (feature `compose`) the runtime the binary builds, with a real Lead turn running check-teams' first script |
+| State | **ported and on `main`** (merged as `d5956c5`, 2026-10-22): `state`, `service`, `tool`, `plugin` and `api` behind the declared API; 86 unit and 7 integration tests pass, and `fmt`, `clippy -D warnings` and `rustdoc -D warnings` are clean. M5 — the `team` row composed over the real crates — is `compose::start_row`; what remains is the binary's one-line dispatch and `web`'s boot note |
 
 **A team is the Lead's session**; every teammate is a session of its own; everything the team shares is a
 `team/*` event in the Lead's log, folded on demand. The design decisions are the TypeScript build's, recorded
@@ -39,12 +39,16 @@ in `src/team/INDEX.md`; this crate keeps them and adds only the Rust shapes list
 | `command` | `src/cli.ts` (the `app.ctx.team` block of `web`) | the D-043 entry point: `Command::RecoverAtWebStart`, `Args` (no flags), `Context { cwd, team: &TeamService }`, `async run(command, &args, &context, out, err) -> i32` and `async web_start_note(&TeamService) -> Option<String>` (the same recovery, answered as the server's boot note) — recovers every team in the store and writes `heddle web: recovered N team(s) (S settled, D delivered[, F failed])` when there was one; exit 0, or 1 with `heddle: <sentence>` when the line cannot be written |
 | `ports` | — | the seams below |
 | `testing` | — | `MemoryStore`, `RecordingRunner`, `FakeLive`, `SequentialIds` (feature `test-doubles`) |
+| `compose` | `plugins/team.ts`'s `apply` | the `team` row over the real crates (feature `compose`): `start_row(TeamRow { config, sessions, models, runtime, emit_changed, warn }) -> Result<TeamPlugin, String>` — `runtime` the run's `Arc<AgentRuntime>`, held weakly because its registry holds the team's tools — `register_tools`, `SessionTeamStore`, and `ServerTeam` — `heddle-server`'s `TeamService` port over `team_view` |
 
 ## The seams, and who implements them
 
-The crate depends on no other heddle crate: it owns traits for what it needs, and the binary composes thin
-adapters over the crates that own each capability. Until those crates land, the crate is built and tested
-against the doubles in `testing`.
+Without the `compose` feature the crate depends on no other heddle crate: it owns traits for what it needs and is
+tested against the doubles in `testing`. The adapters over the crates that own each capability live in `compose`
+(the coordinator's ruling of 2026-10-22: the team row is drafted in this crate, not in the binary), so the binary
+starts the row with one call — `compose::start_row`, given the row's config, the `session` and `model` services and
+the `AgentRuntime` its `agent_runtime` builds — and provides `team` from the result. The table says what each seam
+must do; `compose` is where each is done.
 
 | Seam | Implemented over | What it must do |
 |---|---|---|

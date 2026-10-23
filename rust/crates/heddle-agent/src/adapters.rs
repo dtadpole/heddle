@@ -10,7 +10,8 @@
 //! over its store as that crate is. The hook adapter lands when the binary attaches the event bus; until then
 //! [`NoTurnHooks`](crate::NoTurnHooks) is the composition without listeners.
 //!
-//! The session and context crates keep their own record types; each adapter converts only at the seam, and
+//! The context port speaks the context crate's own records (its report, summary and sections), so nothing is
+//! converted there. The session crate keeps its own record types and that adapter converts only at the seam, and
 //! the records it writes keep the TypeScript field order (the session crate's `ModelRequestRecord` is built in
 //! the loop's order, so `model/request` reads the same from either binary).
 
@@ -34,9 +35,9 @@ use crate::ports::{
 };
 use crate::subagent::SubagentStore;
 use crate::upstream::{
-    Chunk, ContentPart, ContextBreakdown, ContextReport, CreateSession, GenerateRequest, Message,
-    PrepareOptions, Role, RuntimeContextSection, SandboxMode, SessionEvent, SessionHandle,
-    SessionMeta, SurfaceView,
+    Chunk, ContentPart, ContextReport, CreateSession, GenerateRequest, Message, PrepareOptions,
+    Role, RuntimeContextSection, SandboxMode, SessionEvent, SessionHandle, SessionMeta,
+    SurfaceView,
 };
 
 /// The [`ModelPort`] over a [`ModelService`].
@@ -334,43 +335,15 @@ where
     }
 }
 
-/// The context service's report, as the loop's record reads it.
-fn report_of(report: heddle_context::ContextReport) -> ContextReport {
-    ContextReport {
-        messages: report.messages,
-        estimated_tokens: report.estimated_tokens,
-        context_window: report.context_window,
-        threshold_tokens: report.threshold_tokens,
-        pruned: report.pruned,
-        compacted: report.compacted,
-        instructions: report
-            .instructions
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect(),
-        breakdown: ContextBreakdown {
-            system: report.breakdown.system,
-            tools: report.breakdown.tools,
-            messages: report.breakdown.messages,
-        },
-    }
-}
-
 impl<S: ContextStore + 'static> ContextPort for Context<S> {
     fn record_runtime_context(
         &self,
         session: &SessionHandle,
         sections: &[RuntimeContextSection],
     ) -> Result<(), PortError> {
-        let sections: Vec<heddle_context::RuntimeContextSection> = sections
-            .iter()
-            .map(|section| heddle_context::RuntimeContextSection {
-                name: section.name.clone(),
-                text: section.text.clone(),
-            })
-            .collect();
+        // The section is the context crate's own type: nothing to convert.
         self.service
-            .record_runtime_context(&(self.handle)(session), &sections)
+            .record_runtime_context(&(self.handle)(session), sections)
             .map_err(port_error)
     }
 
@@ -395,7 +368,6 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
             self.service
                 .prepare(&handle, &prepared)
                 .await
-                .map(report_of)
                 .map_err(port_error)
         })
     }
@@ -414,7 +386,6 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
         };
         self.service
             .assemble(&(self.handle)(session), &assembled)
-            .map(report_of)
             .map_err(port_error)
     }
 }
@@ -488,6 +459,7 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::upstream::ContextBreakdown;
     use crate::upstream::{ContentPart, Message, Role, ToolCall};
 
     /// A scratch folder holding one scripted endpoint's step file.
@@ -857,7 +829,10 @@ pub(crate) mod tests {
                 context_window: 200_000,
                 threshold_tokens: 160_000,
                 messages,
-                ..ContextReport::default()
+                pruned: 0,
+                compacted: false,
+                instructions: Vec::new(),
+                breakdown: Default::default(),
             })
         }
     }
