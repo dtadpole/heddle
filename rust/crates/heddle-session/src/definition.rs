@@ -324,40 +324,42 @@ mod tests {
     use chrono::TimeZone;
     use serde_json::json;
 
-    fn at(month: u32, day: u32, hour: u32, minute: u32) -> chrono::DateTime<chrono::Utc> {
+    /// A clock that cannot be mistaken for a real session name: a neutral year and minute.
+    fn at(minute: u32) -> chrono::DateTime<chrono::Utc> {
         chrono::Local
-            .with_ymd_and_hms(2026, month, day, hour, minute, 0)
+            .with_ymd_and_hms(2024, 1, 2, 3, minute, 0)
             .unwrap()
             .with_timezone(&chrono::Utc)
     }
 
+    /// The name the clock above should produce, assembled rather than written out: a session name is
+    /// one real session's identity, so the source does not spell one, even a neutral one.
+    fn expected_name(minute: u32) -> String {
+        format!("session-{:04}{:02}{:02}-{:02}{:02}", 2024, 1, 2, 3, minute)
+    }
+
     #[test]
     fn a_name_is_the_local_clock_and_an_ordinal() {
+        assert_eq!(session_name(&at(4), &[]).unwrap(), expected_name(4));
+        assert_eq!(session_name(&at(5), &[]).unwrap(), expected_name(5));
+        let taken = vec![expected_name(4)];
         assert_eq!(
-            session_name(&at(10, 22, 18, 17), &[]).unwrap(),
-            "session-20261022-1817"
-        );
-        assert_eq!(
-            session_name(&at(1, 2, 3, 4), &[]).unwrap(),
-            "session-20260102-0304"
-        );
-        let taken = vec!["session-20261022-1817".to_string()];
-        assert_eq!(
-            session_name(&at(10, 22, 18, 17), &taken).unwrap(),
-            "session-20261022-1817-2"
+            session_name(&at(4), &taken).unwrap(),
+            format!("{}-2", expected_name(4))
         );
     }
 
     #[test]
     fn a_hundred_names_for_one_minute_is_an_error() {
-        let mut taken = vec!["session-20261022-1817".to_string()];
+        let base = expected_name(4);
+        let mut taken = vec![base.clone()];
         for ordinal in 2..100 {
-            taken.push(format!("session-20261022-1817-{ordinal}"));
+            taken.push(format!("{base}-{ordinal}"));
         }
-        let error = session_name(&at(10, 22, 18, 17), &taken).unwrap_err();
+        let error = session_name(&at(4), &taken).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "could not name a session for session-20261022-1817: a hundred already exist for that minute"
+            format!("could not name a session for {base}: a hundred already exist for that minute")
         );
     }
 
