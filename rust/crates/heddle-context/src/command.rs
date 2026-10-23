@@ -20,9 +20,10 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use heddle_session::{SessionService, SessionStore, StartOptions};
+use heddle_session::{SessionHandle, SessionService, SessionStore, StartOptions};
 
 use crate::service::{AssembleOptions, ContextService};
+use crate::store::ContextStore;
 use crate::types::ToolSpec;
 
 /// The command words this crate answers.
@@ -46,13 +47,17 @@ pub struct Args {
 }
 
 /// What the command runs against: the composed services and the process facts the binary resolved.
-pub struct Context<'a> {
+///
+/// The context service is generic over its store so a composition may hand over any store whose
+/// sessions are `heddle-session`'s; the store this crate binds, `heddle_session::SessionStore`, is the
+/// default and the one a composition should use.
+pub struct Context<'a, S: ContextStore<Handle = SessionHandle> = SessionStore> {
     /// The process's working directory: where a fresh session is filed when no target is named.
     pub cwd: PathBuf,
     /// The session service (`ctx.session`).
     pub sessions: &'a SessionService,
     /// The context service over the same store (`ctx.context`).
-    pub context: &'a ContextService<SessionStore>,
+    pub context: &'a ContextService<S>,
     /// Every tool's schema (`ctx.tools.describe()`), so the estimate prices what a turn would send.
     pub tools: &'a [ToolSpec],
     /// The sandbox root (`ctx.sandbox.workspaceRoot`): the instruction root for a session record that
@@ -61,10 +66,10 @@ pub struct Context<'a> {
 }
 
 /// Run one command: the answer on `out`, a failure on `err`, and the process exit code.
-pub fn run(
+pub fn run<S: ContextStore<Handle = SessionHandle>>(
     command: Command,
     args: &Args,
-    context: &Context<'_>,
+    context: &Context<'_, S>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -80,7 +85,10 @@ pub fn run(
 }
 
 /// The answer's text, or the failure's message.
-fn context_command(args: &Args, context: &Context<'_>) -> Result<String, String> {
+fn context_command<S: ContextStore<Handle = SessionHandle>>(
+    args: &Args,
+    context: &Context<'_, S>,
+) -> Result<String, String> {
     let target = args.target.as_deref().filter(|target| !target.is_empty());
     let handle = context
         .sessions

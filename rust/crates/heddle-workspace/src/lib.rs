@@ -25,6 +25,7 @@
 //! `_verifiers_/80-web-ui` (`check-workspaces`) judge this crate through the `heddle` binary.
 
 pub mod collate;
+pub mod command;
 pub mod error;
 pub mod file;
 pub mod record;

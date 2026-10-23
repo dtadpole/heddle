@@ -18,7 +18,10 @@ heddle-llm.workspace = true
 # meta record and a definition byte-identical to what the TypeScript store writes with
 # `JSON.stringify`. Cargo unifies features, so every crate in the build sees an ordered `Map`.
 serde.workspace = true
-serde_json = { workspace = true, features = ["preserve_order"] }
+# `float_roundtrip`: serde_json's default float parser is not correctly rounded (0.9999551342447491
+# re-serializes as …492), and `JSON.parse` is, so without it a line the TypeScript build wrote would not
+# print back byte for byte. Pinned by `event::tests::a_float_the_typescript_build_wrote_prints_back_unchanged`.
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
 thiserror.workspace = true
 zstd.workspace = true
 # Not yet in `[workspace.dependencies]`; the integrator is asked to hoist them.
