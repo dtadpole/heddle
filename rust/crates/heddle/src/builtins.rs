@@ -391,6 +391,12 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Approvals) => {
                 Some(Box::new(crate::adapters::ApprovalsComponent))
             }
+            ComponentRef::Builtin(Builtin::Session) => Some(Box::new(
+                crate::adapters::SessionComponent::new(self.env.clone()),
+            )),
+            ComponentRef::Builtin(Builtin::Workspace) => Some(Box::new(
+                crate::adapters::WorkspaceComponent::new(self.env.clone()),
+            )),
             // The rest land with their crate's API: a built-in with no adapter answers `None`, so its
             // row fails naming itself rather than starting nothing.
             ComponentRef::Builtin(_) | ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => {

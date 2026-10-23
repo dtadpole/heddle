@@ -24,7 +24,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::builtins::Component;
-use crate::ports::{ModelPort, Record, SandboxPort};
+use crate::ports::{
+    CreateAt, ModelPort, OpenAt, PortError, PortResult, Record, SandboxPort, SessionDefinition,
+    SessionHandle, SessionPort, TreeRoot, WorkspacePort,
+};
 use crate::services::Services;
 
 /// `src/plugins/model.ts`: one model service over the endpoints the layers and the machine declare.
@@ -249,6 +252,335 @@ impl Component for ApprovalsComponent {
             .map_err(|error| format!("approvals: {error}"))?;
         services.provide("approvals", Arc::new(ApprovalService::new(config)));
         Ok(())
+    }
+}
+
+/// `src/plugins/session.ts`: the session store and its service.
+pub struct SessionComponent {
+    env: Env,
+}
+
+impl SessionComponent {
+    /// The adapter for a run whose environment is this one.
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+}
+
+fn session_schema() -> Option<heddle_config::Schema> {
+    heddle_config::Schema::from_json(serde_json::json!({
+        "type": "object",
+        "properties": { "root": { "type": "string" } },
+    }))
+    .ok()
+}
+
+impl Component for SessionComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        session_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_session::SessionConfig =
+            serde_json::from_value(config.clone()).map_err(|error| format!("session: {error}"))?;
+        let service = Arc::new(heddle_session::SessionService::new(
+            &config, &self.env, None,
+        ));
+        services.provide("session", Arc::clone(&service));
+        services.provide(
+            "session",
+            Arc::new(SessionView {
+                service: Arc::clone(&service),
+            }) as Arc<dyn SessionPort>,
+        );
+        Ok(())
+    }
+}
+
+/// A session handle as the commands pass it, over the crate's own handle.
+fn handle_of(handle: heddle_session::SessionHandle) -> SessionHandle {
+    SessionHandle {
+        id: handle.id.to_string(),
+        transcript: PathBuf::from(&handle.transcript),
+        inner: Arc::new(handle),
+    }
+}
+
+/// The crate's own handle back out of one the commands passed.
+fn inner_of(handle: &SessionHandle) -> PortResult<&heddle_session::SessionHandle> {
+    handle
+        .inner
+        .downcast_ref::<heddle_session::SessionHandle>()
+        .ok_or_else(|| PortError::new("a session handle from another store"))
+}
+
+fn port_error(error: impl std::fmt::Display) -> PortError {
+    PortError::new(error.to_string())
+}
+
+/// `ctx.session` over `heddle-session`'s service: the commands' narrow view.
+struct SessionView {
+    service: Arc<heddle_session::SessionService>,
+}
+
+impl SessionPort for SessionView {
+    fn root(&self) -> PathBuf {
+        PathBuf::from(self.service.store().root())
+    }
+
+    fn list(&self) -> Vec<Record> {
+        self.service
+            .list()
+            .iter()
+            .map(|meta| meta.to_value())
+            .collect()
+    }
+
+    fn open(&self, id: &str) -> Option<SessionHandle> {
+        self.service.open(id).map(handle_of)
+    }
+
+    fn resume(&self, id: &str) -> PortResult<SessionHandle> {
+        self.service
+            .start(heddle_session::StartOptions {
+                resume: Some(id.to_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .map(handle_of)
+            .map_err(port_error)
+    }
+
+    fn current(&self, cwd: &std::path::Path) -> PortResult<SessionHandle> {
+        self.service
+            .start(heddle_session::StartOptions {
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .map(handle_of)
+            .map_err(port_error)
+    }
+
+    fn open_at(&self, folder: &std::path::Path, options: OpenAt) -> PortResult<SessionHandle> {
+        self.service
+            .open_at(
+                &folder.to_string_lossy(),
+                heddle_session::OpenAtOptions {
+                    fresh: options.fresh,
+                    endpoint: Some(options.endpoint),
+                    model: options.model,
+                    reasoning_effort: None,
+                    title: Some(options.title),
+                },
+            )
+            .map(handle_of)
+            .map_err(port_error)
+    }
+
+    fn create_at(
+        &self,
+        branch: &std::path::Path,
+        options: CreateAt,
+    ) -> PortResult<(SessionHandle, SessionDefinition)> {
+        let created = self
+            .service
+            .create_at(
+                &branch.to_string_lossy(),
+                heddle_session::CreateAtOptions {
+                    title: options.title,
+                    endpoint: options.endpoint,
+                    model: options.model,
+                    reasoning_effort: None,
+                },
+            )
+            .map_err(port_error)?;
+        let definition = SessionDefinition {
+            name: created.definition.name.clone(),
+            dir: PathBuf::from(&created.definition.dir),
+            file: PathBuf::from(&created.definition.file),
+            log: PathBuf::from(&created.definition.log),
+        };
+        Ok((handle_of(created.handle), definition))
+    }
+
+    fn events(&self, handle: &SessionHandle) -> PortResult<Vec<Record>> {
+        let events = self.service.events(inner_of(handle)?).map_err(port_error)?;
+        Ok(events.iter().map(|event| event.to_value()).collect())
+    }
+
+    fn folder(&self, handle: &SessionHandle) -> Option<PathBuf> {
+        inner_of(handle)
+            .ok()
+            .and_then(|inner| self.service.folder(inner))
+            .map(PathBuf::from)
+    }
+
+    fn tree(
+        &self,
+        wanted: Option<&std::path::Path>,
+        roots: &[TreeRoot],
+        _sessions: &[Record],
+        generated: &[String],
+    ) -> PortResult<Record> {
+        let roots = roots
+            .iter()
+            .map(|root| heddle_workspace::TreeRoot {
+                path: root.path.to_string_lossy().into_owned(),
+                title: root.title.clone(),
+                origin: root
+                    .origin
+                    .as_ref()
+                    .and_then(|origin| serde_json::from_value(Value::String(origin.clone())).ok()),
+            })
+            .collect();
+        let input = heddle_workspace::TreeInput {
+            roots,
+            // The crate's own metadata, not the records the command printed: the tree reads fields
+            // (the folder binding, the archive flag) the commands never name.
+            sessions: self.service.list(),
+            generated: generated.to_vec(),
+            archived: heddle_workspace::ArchivedFilter::default(),
+        };
+        let wanted = wanted.map(|path| path.to_string_lossy().into_owned());
+        serde_json::to_value(heddle_workspace::tree(wanted.as_deref(), &input)).map_err(port_error)
+    }
+
+    fn read_file_text(&self, path: &std::path::Path) -> PortResult<Record> {
+        let reading =
+            heddle_workspace::read_file_text(&path.to_string_lossy(), None).map_err(port_error)?;
+        serde_json::to_value(reading).map_err(port_error)
+    }
+}
+
+/// `src/workspace/service.ts`: the registered roots.
+pub struct WorkspaceComponent {
+    env: Env,
+}
+
+impl WorkspaceComponent {
+    /// The adapter for a run whose environment is this one.
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+}
+
+fn workspace_schema() -> Option<heddle_config::Schema> {
+    heddle_config::Schema::from_json(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "file": { "type": "string" },
+            "generated": { "type": "array", "items": { "type": "string" } },
+        },
+    }))
+    .ok()
+}
+
+impl Component for WorkspaceComponent {
+    fn requires(&self) -> Vec<String> {
+        // `src/workspace/service.ts` injects the session service.
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        workspace_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_workspace::WorkspaceConfig = serde_json::from_value(config.clone())
+            .map_err(|error| format!("workspace: {error}"))?;
+        let service = Arc::new(heddle_workspace::WorkspaceService::new(&config, &self.env));
+        services.provide("workspace", Arc::clone(&service));
+        services.provide(
+            "workspace",
+            Arc::new(WorkspaceView { service }) as Arc<dyn WorkspacePort>,
+        );
+        Ok(())
+    }
+}
+
+/// `ctx.workspace` over `heddle-workspace`'s service.
+struct WorkspaceView {
+    service: Arc<heddle_workspace::WorkspaceService>,
+}
+
+impl WorkspaceView {
+    /// The crate's own metadata for the records a command passed, by id.
+    fn metas(&self, all: &[Record]) -> Vec<heddle_session::SessionMeta> {
+        all.iter()
+            .filter_map(|record| heddle_session::SessionMeta::from_value(record.clone()))
+            .collect()
+    }
+
+    fn record(&self, record: &Record) -> Option<heddle_workspace::WorkspaceRecord> {
+        serde_json::from_value(record.clone()).ok()
+    }
+}
+
+impl WorkspacePort for WorkspaceView {
+    fn file(&self) -> PathBuf {
+        PathBuf::from(self.service.file())
+    }
+
+    fn list(&self) -> Vec<Record> {
+        self.service
+            .list()
+            .iter()
+            .filter_map(|record| serde_json::to_value(record).ok())
+            .collect()
+    }
+
+    fn sessions(&self, record: &Record, all: &[Record]) -> Vec<Record> {
+        let Some(record) = self.record(record) else {
+            return Vec::new();
+        };
+        self.service
+            .sessions(&record, &self.metas(all))
+            .iter()
+            .map(|meta| meta.to_value())
+            .collect()
+    }
+
+    fn add(&self, path: &str, name: Option<&str>) -> PortResult<(Record, bool)> {
+        let added = self.service.add(path, name).map_err(port_error)?;
+        Ok((
+            serde_json::to_value(&added.record).map_err(port_error)?,
+            added.created,
+        ))
+    }
+
+    fn rename(&self, target: &str, name: &str) -> PortResult<Option<Record>> {
+        let renamed = self.service.rename(target, name).map_err(port_error)?;
+        renamed
+            .map(|record| serde_json::to_value(record).map_err(port_error))
+            .transpose()
+    }
+
+    fn remove(&self, target: &str, all: &[Record], force: bool) -> PortResult<Record> {
+        let removal = self
+            .service
+            .remove(target, &self.metas(all), force)
+            .map_err(port_error)?;
+        serde_json::to_value(removal).map_err(port_error)
+    }
+
+    fn owner(&self, path: &std::path::Path) -> Option<Record> {
+        self.service
+            .owner(&path.to_string_lossy())
+            .and_then(|record| serde_json::to_value(record).ok())
+    }
+
+    fn ensure_owner(&self, path: &std::path::Path) -> PortResult<()> {
+        self.service
+            .ensure_owner(&path.to_string_lossy())
+            .map(|_| ())
+            .map_err(port_error)
+    }
+
+    fn generated(&self) -> Vec<String> {
+        self.service.generated().to_vec()
     }
 }
 
@@ -538,6 +870,62 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn the_session_and_workspace_rows_answer_sessions_workspaces_tree_and_file() {
+        let home = scratch("session");
+        let sessions_root = home.join("sessions");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).expect("the project folder");
+        std::fs::write(project.join("notes.md"), "hello\n").expect("a file");
+        let project = std::fs::canonicalize(&project).expect("canonical");
+        let mut services = Services::new();
+        SessionComponent::new(env_at(&home))
+            .start(&json!({ "root": sessions_root }), &mut services)
+            .expect("the session row starts");
+        WorkspaceComponent::new(env_at(&home))
+            .start(&json!({ "generated": ["dist"] }), &mut services)
+            .expect("the workspace row starts");
+        let session = services.session().expect("ctx.session");
+        let workspace = services.workspace().expect("ctx.workspace");
+
+        assert!(session.list().is_empty());
+        let (record, created) = workspace
+            .add(&project.to_string_lossy(), Some("Project"))
+            .expect("the root registers");
+        assert!(created);
+        assert_eq!(record["title"], "Project");
+        assert_eq!(workspace.list().len(), 1);
+        assert_eq!(workspace.generated(), vec!["dist".to_owned()]);
+
+        let (handle, definition) = session
+            .create_at(&project, CreateAt::default())
+            .expect("session new writes a definition");
+        assert!(definition.file.starts_with(&project), "{definition:?}");
+        assert_eq!(session.list().len(), 1);
+        assert_eq!(session.list()[0]["id"], handle.id.as_str());
+        let resumed = session.resume(&handle.id).expect("the session resumes");
+        assert_eq!(resumed.id, handle.id);
+        assert!(session.resume("no-such-session").is_err());
+        assert!(session.events(&resumed).is_ok());
+
+        assert!(workspace.owner(&project.join("notes.md")).is_some());
+        assert!(workspace.owner(std::path::Path::new("/nowhere")).is_none());
+        let reading = session
+            .read_file_text(&project.join("notes.md"))
+            .expect("the file reads");
+        assert_eq!(reading["text"], "hello\n");
+        let roots = vec![TreeRoot {
+            path: project.clone(),
+            title: "Project".to_owned(),
+            origin: None,
+        }];
+        let node = session
+            .tree(Some(&project), &roots, &[], &workspace.generated())
+            .expect("the tree answers");
+        assert!(node["children"].is_array(), "{node}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
