@@ -27,6 +27,8 @@ export const THRESHOLDS = {
   diskWarnGb: 26, // working model: remove release artifacts below 26 GB free
   loadWarnPerCore: 1.5,
   loadStopPerCore: 2.0,
+  teamWarnPerCore: 1.0,
+  teamStopPerCore: 1.3,
   swapWarnPct: 75,
   swapStopPct: 95,
   slots: 3,
@@ -44,6 +46,8 @@ export function thresholdsFrom(env = process.env) {
     diskWarnGb: number('LOAD_CHECK_DISK_WARN_GB', THRESHOLDS.diskWarnGb),
     loadWarnPerCore: number('LOAD_CHECK_LOAD_WARN_PER_CORE', THRESHOLDS.loadWarnPerCore),
     loadStopPerCore: number('LOAD_CHECK_LOAD_STOP_PER_CORE', THRESHOLDS.loadStopPerCore),
+    teamWarnPerCore: number('LOAD_CHECK_TEAM_WARN_PER_CORE', THRESHOLDS.teamWarnPerCore),
+    teamStopPerCore: number('LOAD_CHECK_TEAM_STOP_PER_CORE', THRESHOLDS.teamStopPerCore),
     swapWarnPct: number('LOAD_CHECK_SWAP_WARN_PCT', THRESHOLDS.swapWarnPct),
     swapStopPct: number('LOAD_CHECK_SWAP_STOP_PCT', THRESHOLDS.swapStopPct),
     slots: number('LOAD_CHECK_SLOTS', THRESHOLDS.slots),
@@ -198,15 +202,46 @@ const pct = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0)
 
 const word = (l) => ['ok', 'warn', 'stop'][l]
 
-export function assess({ disk, load, ncpu, swap, slots, processes, thresholds = THRESHOLDS }) {
+// A build process is team work even when its cwd is not visible to lsof; everything
+// else the team runs has a cwd under a seat worktree and is already in `processes`.
+export const TEAM_PROCESS = /^(cargo|rustc|rustdoc|cargo-clippy|clippy-driver)$/
+
+// The Mac is shared with the desktop. `ps` gives every process' cpu share, so the
+// team's own share can be told apart from Spotlight, Chrome and WindowServer — which is
+// what decides whether the coordinator should throttle the team or leave the desktop be.
+export function splitLoad({ processes = [], allProcesses = [], ncpu = 1, home = homedir() }) {
+  const byPid = new Map(allProcesses.map((proc) => [proc.pid, proc]))
+  const prefix = `${home}/heddle--`
+  const team = new Map()
+  // Only a process whose working directory is a seat worktree is the team's; `processes`
+  // carries every process lsof could read, the desktop's included.
+  for (const proc of processes) {
+    if (proc.cwd && proc.cwd.startsWith(prefix)) team.set(proc.pid, byPid.get(proc.pid) ?? proc)
+  }
+  for (const proc of allProcesses) {
+    if (TEAM_PROCESS.test(basename(proc.command ?? ''))) team.set(proc.pid, proc)
+  }
+  const teamCpu = [...team.values()].reduce((sum, proc) => sum + (proc.cpu ?? 0), 0)
+  const teamPids = new Set(team.keys())
+  const other = allProcesses
+    .filter((proc) => !teamPids.has(proc.pid))
+    .sort((a, b) => (b.cpu ?? 0) - (a.cpu ?? 0) || a.pid - b.pid)
+    .slice(0, 5)
+  return { teamCpu, teamPerCore: teamCpu / 100 / ncpu, teamCount: team.size, other }
+}
+
+export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses = processes, home = homedir(), thresholds = THRESHOLDS }) {
   const findings = []
   const diskFreeGb = gib(disk.availKb)
   const diskVerdict =
     diskFreeGb < thresholds.diskStopGb ? STOP : diskFreeGb < thresholds.diskWarnGb ? WARN : OK
 
-  const loadPerCore = load[0] / ncpu
+  const systemLoadPerCore = load[0] / ncpu
+  const split = splitLoad({ processes, allProcesses, ncpu, home })
+  // The verdict follows the team's share; the system load average is context, because
+  // the desktop's Spotlight or Chrome must not throttle the team.
   const loadVerdict =
-    loadPerCore >= thresholds.loadStopPerCore ? STOP : loadPerCore >= thresholds.loadWarnPerCore ? WARN : OK
+    split.teamPerCore >= thresholds.teamStopPerCore ? STOP : split.teamPerCore >= thresholds.teamWarnPerCore ? WARN : OK
 
   const swapPct = pct(swap.usedMb, swap.totalMb)
   const swapVerdict =
@@ -222,9 +257,10 @@ export function assess({ disk, load, ncpu, swap, slots, processes, thresholds = 
   // outside the runner; cargo parents and linkers are counted for the report, not the cap.
   const buildVerdict = builds.rustc > cap ? WARN : OK
 
+  const topOther = split.other[0] ? ` (${basename(split.other[0].command ?? '?')})` : ''
   for (const [name, verdict, detail] of [
     ['disk', diskVerdict, `${diskFreeGb.toFixed(1)} GB free`],
-    ['load', loadVerdict, `${loadPerCore.toFixed(2)}/core`],
+    ['load', loadVerdict, `team ${split.teamPerCore.toFixed(2)}/core, system ${systemLoadPerCore.toFixed(2)}/core${topOther}`],
     ['swap', swapVerdict, `${swapPct}% used`],
     ['slots', slotVerdict, stale.length ? `${stale.length} stale` : `${busy} busy`],
     ['builds', buildVerdict, `${builds.rustc} rustc > ${cap}`],
@@ -238,7 +274,11 @@ export function assess({ disk, load, ncpu, swap, slots, processes, thresholds = 
     findings,
     diskFreeGb,
     diskVerdict,
-    loadPerCore,
+    systemLoadPerCore,
+    teamPerCore: split.teamPerCore,
+    teamCpu: split.teamCpu,
+    teamCount: split.teamCount,
+    other: split.other,
     loadVerdict,
     swapPct,
     swapVerdict,
@@ -261,9 +301,17 @@ export function format({ at, disk, load, ncpu, swap, slots, processes, threshold
       ` (warn < ${thresholds.diskWarnGb} GB, stop < ${thresholds.diskStopGb} GB)`,
   )
   lines.push(
-    `load     ${load.map((n) => n.toFixed(2)).join(' ')} = ${a.loadPerCore.toFixed(2)}/core ${mark(a.loadVerdict)}` +
-      ` (warn >= ${thresholds.loadWarnPerCore}/core, stop >= ${thresholds.loadStopPerCore}/core)`,
+    `load     ${load.map((n) => n.toFixed(2)).join(' ')} = ${a.systemLoadPerCore.toFixed(2)}/core [context]` +
+      ` (system warn >= ${thresholds.loadWarnPerCore}/core, stop >= ${thresholds.loadStopPerCore}/core; verdict follows team)`,
   )
+  lines.push(
+    `team     ${(a.teamCpu / 100).toFixed(1)} core(s) = ${a.teamPerCore.toFixed(2)}/core ${mark(a.loadVerdict)}` +
+      ` (warn >= ${thresholds.teamWarnPerCore}/core, stop >= ${thresholds.teamStopPerCore}/core; ${a.teamCount} process(es))`,
+  )
+  const otherText = a.other.length
+    ? a.other.map((proc) => `${basename(proc.command ?? '?')} ${Math.round(proc.cpu ?? 0)}%`).join(', ')
+    : 'none'
+  lines.push(`other    ${otherText}`)
   lines.push(
     `swap     ${Math.round(swap.usedMb)}M used of ${Math.round(swap.totalMb)}M = ${a.swapPct}% ${mark(a.swapVerdict)}` +
       ` (warn >= ${thresholds.swapWarnPct}%, stop >= ${thresholds.swapStopPct}%)`,
@@ -304,10 +352,13 @@ function collect({ home = homedir(), slotRoot = join(home, '.hd-build-slots'), t
   if (swapOut.status !== 0) throw new Error(`sysctl vm.swapusage failed: ${swapOut.stderr}`)
   const user = run('id', ['-un']).stdout.trim()
   const lsof = run('lsof', ['-a', '-d', 'cwd', '-u', user, '-F', 'pcn'])
-  const ps = run('ps', ['-axo', 'pid=,pcpu=,pmem=,etime=,command='])
+  // comm is the executable path with no arguments, spaces preserved: the display name
+  // and the build test both need the executable, not the flags.
+  const ps = run('ps', ['-axo', 'pid=,pcpu=,pmem=,etime=,comm='])
   if (ps.status !== 0) throw new Error(`ps failed: ${ps.stderr}`)
   const byPid = parsePs(ps.stdout)
   const processes = parseLsof(lsof.stdout ?? '').map((proc) => ({ ...byPid.get(proc.pid), ...proc }))
+  const allProcesses = [...byPid.values()]
   const at = run('date', ['+%Y-%m-%dT%H:%M:%S%z']).stdout.trim()
   return {
     at,
@@ -317,6 +368,8 @@ function collect({ home = homedir(), slotRoot = join(home, '.hd-build-slots'), t
     swap: parseSwap(swapOut.stdout),
     slots: readSlots({ root: slotRoot, slots: thresholds.slots }),
     processes,
+    allProcesses,
+    home,
   }
 }
 

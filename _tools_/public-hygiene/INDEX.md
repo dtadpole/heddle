@@ -62,6 +62,26 @@ Two built-in rules hold whatever the list says: a **private IPv4 address** (10/8
 generic `/Users/<name>` rule is not built in, because a fixture or a placeholder legitimately carries one; the
 name belongs in the private list. `--no-builtin` removes the built-in rule for a deliberate exception.
 
+The list stays outside the checkout, and its contents never go into a record or a message: add a term by line,
+then report only the rule number the gate prints. A missing, empty or inside-the-repository list is exit 2, never
+a silent pass.
+
+## A pinned run
+
+```text
+$ git rev-parse --short HEAD
+e6122fd
+$ node _tools_/public-hygiene/gate.mjs
+public-hygiene: range origin/main..HEAD, 3 commit(s), 9 file(s), 10 private rule(s), 1 built-in rule(s)
+ok: nothing to flag; main can take this
+```
+
+Run on 2026-10-23T03:34Z on branch `hd/tool-developer` at e6122fd, ahead of `origin/main` by the cap file and
+the reflection sync. The same commit's `--tree HEAD` found 189 findings across 602 files in content already
+published on main — names in paths, session ids, internal aliases, devserver names and private tree paths. Those
+are not this range's work and a range push is judged by the default mode; cleaning published history is the
+owner's decision, not an integrator's.
+
 ## Exit codes
 
 | Code | Meaning |
