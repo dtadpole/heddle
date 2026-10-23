@@ -29,6 +29,7 @@ pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> E
         return match command {
             CommandWord::Web => web(args, invocation, out),
             CommandWord::Profiles | CommandWord::Config => config_command(args, invocation, out),
+            CommandWord::AdapterCall => adapter_call(out),
             _ => boot_then(args, invocation, out),
         };
     }
@@ -47,6 +48,7 @@ pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> E
 pub fn capability_of(command: CommandWord) -> Capability {
     match command {
         CommandWord::Profiles | CommandWord::Config => Capability::Config,
+        CommandWord::AdapterCall => Capability::Always,
         CommandWord::Models => Capability::Models,
         CommandWord::Tools | CommandWord::Commands => Capability::Tools,
         CommandWord::Sessions | CommandWord::Transcript | CommandWord::Session => {
@@ -301,6 +303,20 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         .into_iter()
         .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))
         .collect();
+    // `--stream`: the live view of the turn's session, fed by the store's listener (the boot's stream hub).
+    let stream_hub = boot
+        .services
+        .get::<std::sync::Arc<heddle_llm::command::StreamHub>>("stream-hub")
+        .unwrap_or_default();
+    let starter = move |handle: &heddle_session::SessionHandle| {
+        stream_hub.start(&handle.id, Box::new(std::io::stderr()))
+            as std::sync::Arc<dyn heddle_agent::command::StreamView>
+    };
+    // The goal driver, when the profile has one: the one-shot process joins the chain its turn started.
+    let goal_advance = boot
+        .services
+        .get::<std::sync::Arc<heddle_goal::GoalDriver>>("goalDriver")
+        .map(|driver| GoalJoin { driver });
     let turn_args = heddle_agent::command::Args {
         turn: args.turn.clone(),
         endpoint: args.endpoint.clone(),
@@ -319,8 +335,12 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         sessions: &sessions,
         failed_rows,
         ensure_workspace: Some(&ensure),
-        stream: None,
-        goal: None,
+        stream: args
+            .stream
+            .then_some(&starter as heddle_agent::command::StreamStarter<'_>),
+        goal: goal_advance
+            .as_ref()
+            .map(|advance| advance as &dyn heddle_agent::command::GoalAdvance),
     };
     let (stdout, stderr) = out.writers();
     let code = crate::runtime::tokio().block_on(heddle_agent::command::run(
@@ -401,6 +421,42 @@ fn owned_workspaces(
         stdout,
         stderr,
     ))
+}
+
+/// The goal driver as the turn joins it: `goalDriver.advance(handle)` in the TypeScript `--turn`.
+struct GoalJoin {
+    driver: std::sync::Arc<heddle_goal::GoalDriver>,
+}
+
+impl heddle_agent::command::GoalAdvance for GoalJoin {
+    fn advance<'a>(
+        &'a self,
+        session: &'a heddle_session::SessionHandle,
+    ) -> futures::future::BoxFuture<'a, heddle_agent::command::GoalAdvanced> {
+        Box::pin(async move {
+            let outcome = self.driver.advance(&session.id).await;
+            heddle_agent::command::GoalAdvanced {
+                rounds: outcome.rounds,
+                stopped: outcome.stopped,
+            }
+        })
+    }
+}
+
+/// `adapter-call`: standard input whole as the `{endpoint, request}` value, answered by heddle-llm's entry
+/// point on the process runtime. It needs no boot and no service: the endpoint arrives in the input.
+fn adapter_call(out: &mut Output<'_>) -> Exit {
+    use std::io::Read;
+    let mut input = String::new();
+    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+        return out.fail(&format!(
+            "adapter-call could not read standard input: {error}"
+        ));
+    }
+    let (stdout, stderr) = out.writers();
+    exit_code(
+        crate::runtime::tokio().block_on(heddle_llm::command::adapter_call(&input, stdout, stderr)),
+    )
 }
 
 /// `models`: `heddle-llm`'s entry point over the model row's service.
