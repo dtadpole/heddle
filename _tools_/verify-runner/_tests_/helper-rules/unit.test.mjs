@@ -19,6 +19,8 @@ import {
   skipUnless,
   transcriptFile,
   sessionsUnder,
+  run,
+  EXIT_GRACE_MS,
 } from '../../lib.mjs'
 
 /**
@@ -210,3 +212,32 @@ test('an in-process check judges the TypeScript build and is unjudged under HEDD
   assert.match(skipped[0], /a cut keeps a pair/, 'and names the claim left unjudged')
 })
 
+
+test('a harness run returns its exit code and both streams', async () => {
+  const result = await run('/bin/sh', ['-c', 'echo out; echo err >&2; exit 3'])
+  assert.equal(result.code, 3)
+  assert.equal(result.stdout, 'out\n')
+  assert.equal(result.stderr, 'err\n')
+  assert.equal(result.failed, true)
+  assert.equal(result.timedOut, false)
+})
+
+test('a harness that leaves a process holding its output still returns once it has exited', async () => {
+  // Measured before the fix: `close` waited for the backgrounded sleep, so a check hung for as long as any process the
+  // harness started kept its stdout. Now the run returns shortly after the harness itself exits.
+  const started = Date.now()
+  const result = await run('/bin/sh', ['-c', 'sleep 8 & echo started'])
+  const elapsed = Date.now() - started
+  assert.equal(result.code, 0)
+  assert.equal(result.stdout, 'started\n')
+  assert.ok(elapsed < EXIT_GRACE_MS + 3000, `returned in ${elapsed}ms, not after the 8 s sleep`)
+})
+
+test('a harness killed at its timeout returns even when a child of it holds the output', async () => {
+  const started = Date.now()
+  const result = await run('/bin/sh', ['-c', 'sleep 8 & sleep 30'], { timeoutMs: 300 })
+  const elapsed = Date.now() - started
+  assert.equal(result.timedOut, true)
+  assert.equal(result.failed, true)
+  assert.ok(elapsed < 300 + EXIT_GRACE_MS + 3000, `returned in ${elapsed}ms, not after the 8 s sleep`)
+})
