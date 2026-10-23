@@ -38,8 +38,28 @@ pub trait Adapter: Send + Sync {
 /// The adapter for an endpoint's declared kind (`adapterFor`). An [`crate::EndpointKind::Other`] kind is refused
 /// with `UNKNOWN_KIND`.
 pub fn adapter_for(endpoint: EndpointConfig) -> Result<Arc<dyn Adapter>, ModelError> {
-    let _ = endpoint;
-    todo!("port adapterFor")
+    let adapter: Arc<dyn Adapter> = match endpoint.kind {
+        heddle_config::EndpointKind::OpenaiChat => {
+            Arc::new(crate::chat::ChatAdapter::new(endpoint))
+        }
+        heddle_config::EndpointKind::OpenaiResponses => {
+            Arc::new(crate::responses::ResponsesAdapter::new(endpoint))
+        }
+        heddle_config::EndpointKind::AnthropicVertex => {
+            Arc::new(crate::anthropic::AnthropicVertexAdapter::new(endpoint))
+        }
+        heddle_config::EndpointKind::Scripted => {
+            Arc::new(crate::scripted::ScriptedAdapter::new(endpoint))
+        }
+        heddle_config::EndpointKind::Other(ref kind) => {
+            return Err(ModelError::new(
+                format!("unknown endpoint kind '{kind}'"),
+                endpoint.name.clone(),
+                crate::error::code::UNKNOWN_KIND,
+            ));
+        }
+    };
+    Ok(adapter)
 }
 
 /// A request translated for one wire shape, before it is sent.
@@ -180,5 +200,44 @@ mod tests {
         tools_only.capabilities = Some(vec!["tools".into(), "offline".into()]);
         tools_only.models = Some(vec![ModelEntry::Id("plain".into())]);
         assert!(!reasoning_configured(&tools_only));
+    }
+
+    #[test]
+    fn the_adapter_is_chosen_by_the_endpoints_declared_kind() {
+        let scripted = adapter_for(EndpointConfig {
+            name: "offline".into(),
+            kind: EndpointKind::Scripted,
+            base_url: "/tmp/script.json".into(),
+            ..endpoint()
+        })
+        .expect("scripted is a known kind");
+        assert_eq!(scripted.endpoint().name, "offline");
+
+        for kind in [
+            EndpointKind::OpenaiChat,
+            EndpointKind::OpenaiResponses,
+            EndpointKind::AnthropicVertex,
+        ] {
+            let adapter = adapter_for(EndpointConfig {
+                kind: kind.clone(),
+                ..endpoint()
+            })
+            .unwrap_or_else(|error| panic!("{kind:?} is a known kind: {error}"));
+            assert_eq!(adapter.endpoint().name, "responses");
+        }
+    }
+
+    #[test]
+    fn a_kind_no_adapter_speaks_is_refused_by_name() {
+        let error = match adapter_for(EndpointConfig {
+            kind: EndpointKind::Other("mystery".into()),
+            ..endpoint()
+        }) {
+            Ok(_) => panic!("an unknown kind has no adapter"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, crate::error::code::UNKNOWN_KIND);
+        assert_eq!(error.endpoint, "responses");
+        assert!(error.to_string().contains("mystery"), "{error}");
     }
 }
