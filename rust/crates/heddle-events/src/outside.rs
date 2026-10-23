@@ -656,6 +656,8 @@ pub struct StdioListener {
     timeout: Duration,
     /// What the process declared in its `initialize` answer.
     declared: Mutex<Vec<ListenerDeclaration>>,
+    /// Set by the reader before its final drain: no answer can arrive any more.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StdioListener {
@@ -705,6 +707,7 @@ impl StdioListener {
             .take()
             .expect("a piped child stderr is always present");
         let pending: Arc<Mutex<PendingCalls>> = Arc::default();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (outbox, outbox_rx) = mpsc::unbounded_channel::<String>();
         let outbox_for_reader = outbox.clone();
         let listener = Arc::new(StdioListener {
@@ -714,6 +717,7 @@ impl StdioListener {
             next_id: AtomicU64::new(1),
             timeout: Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
             declared: Mutex::new(Vec::new()),
+            closed: closed.clone(),
         });
 
         // Writes are queued so a caller never blocks on the pipe; one task owns the child's stdin.
@@ -828,6 +832,8 @@ impl StdioListener {
                     }
                 }
             }
+            // Closed first, drained second: a request that registers after the drain sees the flag.
+            closed.store(true, Ordering::SeqCst);
             fail_pending(
                 &pending_for_reader,
                 "the outside listener exited before answering",
@@ -918,6 +924,13 @@ impl StdioListener {
                 .map_err(|_| "the outside listener is not running: its input is closed".to_owned()),
             Err(error) => Err(format!("the request does not serialize: {error}")),
         };
+        let outcome = outcome.and_then(|()| {
+            if self.closed.load(Ordering::SeqCst) {
+                Err("the outside listener has exited".to_owned())
+            } else {
+                Ok(())
+            }
+        });
         if let Err(message) = outcome {
             self.pending
                 .lock()
@@ -1809,5 +1822,30 @@ cat > /dev/null
             error.to_string(),
             "a hook failed at test/json-post (hook-1) — this hook is broken"
         );
+    }
+
+    #[tokio::test]
+    async fn a_call_after_the_child_exited_fails_at_once_instead_of_waiting_for_the_timeout() {
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"next"}}\n'
+"#;
+        let mut config = script_config(script, &[Echoed::NAME]);
+        config.timeout_ms = Some(30_000);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        assert_eq!(
+            listener.call(waterfall_call("base")).await.unwrap(),
+            HookReply::Next
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = std::time::Instant::now();
+        let error = listener.call(waterfall_call("base")).await.unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "failed in {:?}, not at the 30s timeout",
+            started.elapsed()
+        );
+        assert_eq!(error.kind(), HookErrorKind::Failed);
     }
 }
