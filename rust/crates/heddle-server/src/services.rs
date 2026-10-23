@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
@@ -375,6 +376,18 @@ pub trait ApprovalService: Send + Sync {
 
     /// Settle one question exactly once; `false` when it is no longer waiting.
     fn answer(&self, id: &str, outcome: ApprovalOutcome) -> bool;
+
+    /// Every question published from now on, as its JSON (`{id, tool, reason, displayReason, session?,
+    /// at}`). While the server runs it relays each one to `/api/events` as an `approval` frame, which is
+    /// how a card appears without a reload.
+    ///
+    /// `heddle-sandbox` publishes questions on a broadcast channel (`ApprovalService::subscribe`), so
+    /// its adapter returns that receiver as a stream here. `None`, the default, means the questions
+    /// reach the server some other way — the binary forwards the bus's `approval/request` with
+    /// [`crate::stream::approval_request_forwarder`] — and the server relays nothing itself.
+    fn subscribe(&self) -> Option<BoxStream<'static, Value>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
