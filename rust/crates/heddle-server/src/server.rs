@@ -402,6 +402,9 @@ impl ServerBuilder {
         }
         let router = router
             .fallback(fallback_route)
+            // web.ts has no method table: a request whose path matches but whose method does not
+            // falls through to the same `404 not found`, so a wrong method is not a 405 here either.
+            .method_not_allowed_fallback(fallback_route)
             .layer(middleware::from_fn_with_state(state.clone(), door));
         Ok((router, state))
     }
@@ -2676,6 +2679,79 @@ mod tests {
                 assert!(message.contains("/healthz"), "{message}");
             }
             other => panic!("expected a route conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_method_is_the_typescript_not_found() {
+        let (router, _) = app("method");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/turn")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body_text(&bytes), "not found\n");
+    }
+
+    /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.
+    ///
+    /// The table is what feature crates and the binary consult; a typo in it would otherwise be
+    /// invisible until a verifier asked. A service route may legitimately answer 404 with a JSON
+    /// body (`no session …`), so the assertion is that the answer is not the plain-text fallback.
+    #[tokio::test]
+    async fn every_core_route_is_registered() {
+        let (router, _) = app("core-routes");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        for (method, path) in CORE_ROUTES {
+            if *path == "/api/events" {
+                // An SSE response stays open by design, so it is not read to its end here; its
+                // presence is covered by the door and stream tests.
+                continue;
+            }
+            let path = if *path == "/api/approvals/{id}" {
+                path.replace("{id}", "approval-00000000-0000-0000-0000-000000000000")
+            } else if *path == "/api/workspaces/{id}" {
+                path.replace("{id}", "workspace")
+            } else {
+                path.replace("{id}", session)
+            };
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::from_bytes(method.as_bytes()).unwrap())
+                        .uri(&path)
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body = body_text(&bytes);
+            assert_ne!(
+                status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path} is not registered"
+            );
+            assert_ne!(
+                body, "not found\n",
+                "{method} {path} fell through to the fallback"
+            );
         }
     }
 
