@@ -316,6 +316,14 @@ test('a malformed vector made only of placeholder digits is a placeholder near-U
   assert.equal(isPlaceholderNearUuid('3f9c2a71-5b4e-4d2a-9c1f-7e8b6a5d4c3'), false, 'a truncated real id is not')
   assert.equal(isPlaceholderNearUuid('gggggggg-gggg-gggg-gggg-gggggggggggg'), false, 'the repeated character must be a hex digit')
   assert.equal(isPlaceholderNearUuid(SIX_SHAPES[0]), false, 'a valid UUID is judged by D-046, not here')
+  // The ruling's wording, precisely: every hex digit the same, so no stray hex digit (a
+  // valid UUID may carry one counter digit under D-046; a near-UUID may not) ...
+  assert.equal(isPlaceholderNearUuid('00000000-0000-0000-0000-00000000001'), false, 'one stray hex digit in a near-UUID is caught')
+  // ... and any group may be one character short or long, not only the last.
+  assert.equal(isPlaceholderNearUuid('0000000-0000-0000-0000-000000000000'), true, 'a first group one short is a placeholder near-UUID')
+  assert.equal(isPlaceholderNearUuid('000000000-00000-0000-0000-000000000000'), true, 'groups one long are too')
+  assert.equal(isPlaceholderNearUuid('000000-0000-0000-0000-000000000000'), false, 'two short is not near')
+  assert.equal(isPlaceholderNearUuid('8c1e4f0-2b9d-4a7e-9f3c-61d0b5a2e8c4'), false, 'a near-UUID of random digits is caught')
 })
 
 test('the gate exempts the three malformed placeholder vectors and still catches the sequential id', () => {
@@ -326,5 +334,7 @@ test('the gate exempts the three malformed placeholder vectors and still catches
   assert.equal(liveMatches('example-token-01234567-89ab-cdef-0123-456789abcdef', rule).length, 1, 'a sequential id is not a placeholder')
   assert.equal(liveMatches('example-token-00000000-0000-4000-8000-0000000000gg', rule).length, 1, 'two strays are caught')
   assert.equal(liveMatches('example-token-3f9c2a71-5b4e-4d2a-9c1f-7e8b6a5d4c3', rule).length, 1, 'a truncated real id is caught')
+  assert.equal(liveMatches(`example-token-${RANDOM_V4}`, rule).length, 1, 'a random v4 is caught')
+  assert.equal(liveMatches('example-token-8c1e4f07-2b9d-4a7e-9f3c-61d0b5a2e8c', rule).length, 1, 'a random-digit near-UUID the rule matches is caught')
   for (const shape of SIX_SHAPES) assert.equal(liveMatches(`"example-token-${shape}"`, rule).length, 0, 'the D-046 shapes stay exempt')
 })
