@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Whether a path is inside a registered workspace root — `ctx.workspace?.owner(path)` in `src/server/web.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub enum WorkspaceAnswer {
 
 /// One file's text, as `readFileText` of `src/session/tree.ts` answers it, and as the first half of the
 /// `GET /api/file` body: `{"path","name","bytes","lines","text","truncated"}`, in that order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileReading {
     /// The canonical path that was read.
     pub path: String,
