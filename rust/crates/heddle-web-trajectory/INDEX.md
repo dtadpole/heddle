@@ -94,13 +94,13 @@ key order kept), so it depends on no session type.
   adversarial case (float and exponent arguments, non-JSON arguments, markup in results, a quoted CJK title) —
   were compared with the same answers built from `src/server/web.ts`: `stats`, the `/log` body,
   `content-disposition` and `content-length` **identical in 27/27**; `?view=ledger` **identical as text in
-  27/27**, and byte-identical in 22/27. The five that differ do so only in the highlight classes
-  `render_code` emits (highlight.js marks JSON punctuation and `true`/`null` differently), which is
-  heddle-web-files' renderer, not this crate. The refusals answer `400 {"error":"not a session id"}` and
+  27/27**, and byte-identical in 22/27. The five that differed did so only in the highlight classes
+  `render_code` emitted for JSON; with heddle-web-files' JSON classifier fix (9b68230) the same probe gives
+  **27/27 identical, inspection HTML included** (re-run 2026-10-22). The refusals answer `400 {"error":"not a session id"}` and
   `404 {"error":"no session <id>"}` on both routes.
 - **Two divergences this probe found and fixed**: `serde_json` reads a float one ulp off without its
-  `float_roundtrip` feature (a logged `0.9999551342447491` downloaded as `…492`), now enabled on this crate's
-  dependency and therefore across the binary; and `serde_json` prints an integral double as `1.0` where
+  `float_roundtrip` feature (a logged `0.9999551342447491` downloaded as `…492`), now carried by the workspace's
+  `serde_json` entry and pinned by a test here; and `serde_json` prints an integral double as `1.0` where
   `JSON.stringify` prints `1`, so the inspector payload, the schema parameters, an unknown event's body and the
   `/log` lines now go through [`js_json`](src/js_json.rs), which formats numbers by `Number#toString`.
 
