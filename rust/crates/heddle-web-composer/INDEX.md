@@ -20,7 +20,7 @@ trait declared here, so it builds and is tested against doubles before the crate
 | Ported from | `src/server/tool-catalog.ts`, the composer routes of `src/server/web.ts` |
 | Judged by | `_verifiers_/80-web-ui` (check-composer, check-context-view, check-runtime-context, check-model-switcher), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and unit-tested — 36 tests; mounting by `heddle-server` and the binary is the remaining step** |
+| Status | **implemented and tested — 37 unit tests, 7 integration tests behind a door double; mounting by the binary is the remaining step** |
 | Owner | `developer-twelve` since 2026-10-22 (D-037, from `developer-eleven`, whose `10a0bd5` is the base of this tree); `heddle-web-trajectory` stays `developer-eleven`'s |
 
 ## Routes
@@ -92,19 +92,31 @@ handles. Until then the server can implement the traits itself.
    `validate_model_switch`, `validate_steer`, each with tests of every refusal and of the validation order.
 4. **Routes** — in-process tests through `tower::ServiceExt::oneshot` with host doubles: every row of each
    module's answer table, headers and bytes.
-5. **`ROUTES` and the merge** — landed with the takeover: the six pairs, and a test that a caller's own router and
-   layer merge with these routes and cover them.
-6. **Through the binary** (pending, not this crate's alone): `heddle-server` mounts [`router`](src/lib.rs) and the
+5. **`ROUTES` and the merge** — landed with the takeover, then cut to the three composer-owned pairs by D-039, with a
+   test that a caller's own router and layer merge with these routes and cover them.
+6. **Behind the door** — the integration test serves the router the way `heddle-server` will: core routes, the
+   composer merged after them, the 404 fallback, and the door around all of it (below).
+7. **Through the binary** (pending, not this crate's alone): `heddle-server` mounts [`router`](src/lib.rs) and the
    binary (or the server) implements the four host traits; then `80-web-ui` check-composer, check-context-view,
    check-runtime-context and check-model-switcher run through `HEDDLE_BIN`. The traits' shapes are fixed and each
    route is judged against a host double, so the adapter work is a mapping over the crates' own APIs – the four
    host crates (`heddle-context`, `heddle-config`, `heddle-llm`, `heddle-session`) are still `todo!()` on `main`.
 
-## The routes against the checks' API expectations
+## The routes against the checks' API expectations, behind the server's door
 
-Committed as [`tests/check_expectations.rs`](tests/check_expectations.rs): it mounts `router` on a real listener over
-a fixed in-memory host and speaks HTTP to it, so the contract the four checks read is a regression test in the crate
-rather than a manual run. **13 of 13 hold**, each the exact status, sentence or body a check asserts —
+[`tests/check_expectations.rs`](tests/check_expectations.rs) serves the composer the way the binary will, through a
+**door double** in [`tests/support/mod.rs`](tests/support/mod.rs) read from `heddle-server` at developer-ten's
+`72fdb4f` (`door` and `ServerBuilder::build` in `server.rs`, `fence.rs`, `token::authorize`, `respond.rs`), in the
+server's order: the Host/Origin fence (`403`, before any credential), the decision (cookie first, then `?token=`),
+the cross-site write rule (`403` when a state-changing request *offered* a cookie that failed), `401 unauthorized`
+for `/api`, then the routes — the server's core, the composer merged after them through the same caught-panic merge
+the server turns into `ServerError::Route`, and `404 not found` for an unclaimed path **and** a wrong method, inside
+the door. Not reproduced, because no composer route meets them: favicon/`/healthz`, the `/?token=` handshake, the
+page, and the cookie's HMAC (the double verifies one fixed value).
+
+**The 13 expectations the four checks read hold behind the door**, each the exact status, sentence or body a check
+asserts (`/api/status`, steer and stop are the server's since D-039, and the double's core serves them from this
+crate's modules):
 
 | Expectation (and the check that needs it) | Answer |
 |---|---|
@@ -118,11 +130,28 @@ rather than a manual run. **13 of 13 hold**, each the exact status, sentence or 
 | `POST /api/sessions/<malformed>/steer` is `400`, and a steer with no running turn is `409 session/steer-unavailable`, with `a prompt is required` decided first (composer) | holds |
 | `POST /api/sessions/<id>/stop` answers `{"stopped":0,"session":…}` (composer) | holds |
 
-The same expectations were first checked by hand through a throwaway stand-in host, and are now the test above. What is
-left for the four checks to run through `HEDDLE_BIN` is not in these routes: a binary that answers
-`heddle web`, the server mounting `router` behind its token and fence layers, and a host implementation over the
-session/context/model/turn crates (their APIs are still `todo!()` on `main`, so the adapters are a mapping that
-cannot be written against them yet).
+**And what the door adds — the merge risk the lane cannot see until `heddle web` boots** — six more tests:
+
+| Test | What it would catch |
+|---|---|
+| the runtime-context check's `?token=` opens the door, and the routes ignore the extra query key | a stricter query extractor answering `400` to every request that check makes |
+| the fence refuses a foreign `Host`, a `null` Origin and a foreign Origin with the server's sentences, even with a valid cookie; a loopback Origin on another port passes | composer routes reachable around the fence |
+| an unauthenticated request gets `401 unauthorized`, not the route's own `400`/`200` | the composer mounted outside the token layer |
+| a stale cookie on a switch is the cross-site write refusal (`403`); on a read it is `401`; beside the launch token it passes | the decision's order (cookie, then token) or the write rule drifting |
+| an unclaimed path and a wrong method on a composer path are `404 not found`, and both are `401` without a credential | axum's default `405` from a mounted method router, or the fallback outside the door |
+| `ROUTES` is disjoint from the server's `CORE_ROUTES` (copied at `72fdb4f`); mounting succeeds; re-adding `/api/status` (the pre-D-039 router) is a start-up error naming the path | a regression of the D-039 split |
+
+**The tests can fail, and fail for the right reason** — measured by mutating the double: dropping the method fallback
+turns exactly the wrong-method test red (`405` for `404`); applying the door to the core before the composer is
+merged (the composer's routes outside it) turns five of the seven red, leaving only the authorized 13 and the
+collision test green. The client reads each answer by its `Content-Length` over a kept-alive connection: with
+`Connection: close`, a `POST` the door refused before reading its body was closed with the body unread, the kernel
+reset the socket, and the client lost the `401` — a test that passed or failed by timing. After the fix, 30
+consecutive runs passed.
+
+What is left for the four checks to run through `HEDDLE_BIN` is not in these routes: a binary that answers
+`heddle web`, its `mount_router(heddle_web_composer::router(..))`, and a host implementation over the
+session/context/model crates.
 
 ## Read next
 
