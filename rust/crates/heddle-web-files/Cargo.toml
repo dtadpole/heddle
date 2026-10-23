@@ -9,8 +9,8 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# The contract needs only these. The renderer libraries (a GFM markdown parser and a grammar-based highlighter),
-# the process runner and the clock arrive with the bodies that use them; see INDEX.md, "Port plan".
+# The contract needed the first four. The renderer libraries arrived with the bodies that use them; see INDEX.md,
+# "Port plan". Their versions live here rather than in the workspace table because only this crate renders.
 [dependencies]
 axum.workspace = true
 serde.workspace = true

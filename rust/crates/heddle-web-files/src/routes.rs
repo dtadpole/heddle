@@ -33,7 +33,9 @@
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
 //! | `POST /api/workspaces/pick` | `501 {error: reason}` when unavailable · `200` pretty [`PickerOutcome`] (`picked` or `cancelled`) |
-//! | `GET /api/html?path=` (proposed, see [`crate::html_preview`]) | `400 {error: "a path is required"}` · `404 {error: "that path is not under any workspace root"}` (also when the plugin is absent) · `404 {error: "not a file"}` · `413 {error: "the document is larger than 4MB"}` · `200` pretty `{"path","html","csp","bytes"}` · `404 {error: "no such document"}` |
+//!
+//! `GET /api/html` is **not** here: it belongs to `heddle-server`, which also serves `/vendor/purify.js`, so the
+//! server registers it and this router must not (`Router::merge` rejects an overlapping path with a panic).
 //!
 //! [`FileReading`]: crate::host::FileReading
 //! [`Rendered`]: crate::code::Rendered
@@ -65,7 +67,6 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/uploads"),
     ("POST", "/api/markdown"),
     ("POST", "/api/workspaces/pick"),
-    ("GET", "/api/html"),
 ];
 
 /// The file routes, configured: the host they read from and the folder picker they open.
@@ -104,7 +105,6 @@ impl FilesRoutes {
             .route("/api/uploads", post(store))
             .route("/api/markdown", post(markdown))
             .route("/api/workspaces/pick", post(pick))
-            .route("/api/html", get(html))
             .with_state(self)
     }
 }
@@ -167,15 +167,6 @@ pub struct FileAnswer {
     pub reading: FileReading,
     #[serde(flatten)]
     pub rendered: Rendered,
-}
-
-/// `GET /api/html`'s answer.
-#[derive(Debug, Serialize)]
-struct HtmlAnswer {
-    path: String,
-    html: String,
-    csp: String,
-    bytes: u64,
 }
 
 /// The largest body `POST /api/markdown` accepts.
@@ -338,53 +329,6 @@ async fn pick(State(files): State<FilesRoutes>) -> Response {
             ),
         ),
     }
-}
-
-/// `GET /api/html`: an HTML document prepared to be shown as a page — its resources rewritten, its policy named.
-async fn html(State(files): State<FilesRoutes>, Query(params): Query<Params>) -> Response {
-    let Some(path) = params.path.filter(|path| !path.is_empty()) else {
-        return json_error(StatusCode::BAD_REQUEST, "a path is required");
-    };
-    if files.host.workspace_owner(Path::new(&path)) != WorkspaceAnswer::Owned {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "that path is not under any workspace root",
-        );
-    }
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => return json_error(StatusCode::NOT_FOUND, "not a file"),
-        Err(_) => return json_error(StatusCode::NOT_FOUND, "no such document"),
-    };
-    if metadata.len() > crate::html_preview::MAX_HTML_PREVIEW_BYTES {
-        return json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "the document is larger than 4MB",
-        );
-    }
-    let Ok(source) = std::fs::read_to_string(&path) else {
-        return json_error(StatusCode::NOT_FOUND, "no such document");
-    };
-    let wanted = Path::new(&path);
-    let base = wanted
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let serve = |target: &str| format!("/api/raw?path={}", crate::markdown::percent_encode(target));
-    let html = crate::html_preview::rewrite_resources(&source, &base, &serve);
-    let answer = HtmlAnswer {
-        path,
-        html,
-        csp: crate::html_preview::PREVIEW_CSP.to_string(),
-        bytes: metadata.len(),
-    };
-    json(
-        StatusCode::OK,
-        &format!(
-            "{}\n",
-            serde_json::to_string_pretty(&answer).unwrap_or_default()
-        ),
-    )
 }
 
 /// Whether `path` is a file inside a registered workspace root.

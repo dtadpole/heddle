@@ -23,6 +23,8 @@
 
 use std::path::Path;
 
+use crate::sanitize::UrlSite;
+
 /// The attribute a link to a workspace file carries the absolute path in, so the page can open it in the panel.
 pub const LINK_DATA_ATTRIBUTE: &str = "data-heddle-path";
 
@@ -688,7 +690,33 @@ pub struct MarkdownOptions<'a> {
 /// passes through [`crate::sanitize::sanitize_html`] with a URL policy that applies [`safe_url`] and resolves
 /// relative references against `options.base` — for raw HTML tags as well as for markdown links and images.
 pub fn render_markdown(source: &str, options: MarkdownOptions<'_>) -> String {
-    todo!("port renderMarkdown from src/server/markdown.ts")
+    let text = source.replace("\r\n", "\n").replace('\r', "\n");
+    let (front, body) = split_frontmatter(&text);
+    let prepared = escape_leading_underscores(body);
+    let comrak_options = comrak_options();
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, &prepared, &comrak_options);
+    rewrite_destinations(root, options.base);
+    let highlighter = FilesHighlighter;
+    let mut plugins = comrak::Plugins::default();
+    plugins.render.codefence_syntax_highlighter = Some(&highlighter);
+    let mut bytes: Vec<u8> = Vec::new();
+    // Writing into a byte vector cannot fail; a failure would leave the part already written, which is still HTML.
+    let _ = comrak::html::format_document_with_plugins(root, &comrak_options, &mut bytes, &plugins);
+    let rendered = rewrite_anchors(&String::from_utf8_lossy(&bytes));
+    let front_html = match front {
+        Some(yaml) => format!(
+            "<section class=\"frontmatter\"><h2>frontmatter</h2><pre><code>{}</code></pre></section>\n",
+            escape_html(trim_js(yaml))
+        ),
+        None => String::new(),
+    };
+    let base = options.base;
+    let policy = move |value: &str, _site: UrlSite<'_>| url_for(value, base);
+    crate::sanitize::sanitize_html(
+        &(front_html + &rendered),
+        crate::sanitize::SanitizeOptions { url: Some(&policy) },
+    )
 }
 
 /// Render inline spans only — a title, a table cell, a label — through the same parser and the same allow-list.

@@ -15,7 +15,7 @@ HTTP routes the File panel, the composer's `+ → File` and the workspace column
 
 | | |
 |---|---|
-| Ported from | `src/server/attachments.ts`, `src/server/uploads.ts`, `src/server/picker.ts`, `src/server/code.ts`, `src/server/docs.ts`, `src/server/markdown.ts`, `src/server/highlight.ts`, `src/server/sanitize.ts`; the file routes of `src/server/web.ts`; **proposed**: `src/server/html.ts` (see "Open questions") |
+| Ported from | `src/server/attachments.ts`, `src/server/uploads.ts`, `src/server/picker.ts`, `src/server/code.ts`, `src/server/docs.ts`, `src/server/markdown.ts`, `src/server/highlight.ts`, `src/server/sanitize.ts`; the file routes of `src/server/web.ts` (not `html.ts`, which stayed with `heddle-server`) |
 | Judged by | `_verifiers_/88-file-preview`, `_verifiers_/80-web-ui` (check-file-view), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-web-files` |
@@ -98,7 +98,6 @@ JSON the TypeScript build writes; the tests assert the strings.
 | [`highlight`](src/highlight.rs) | `highlight.ts` | `highlight_code(code, Option<&str>) -> String` (inner HTML, `hljs-*` classes), `supports_language(&str) -> bool` |
 | [`markdown`](src/markdown.rs) | `markdown.ts` | `render_markdown(source, MarkdownOptions { base }) -> String`, `render_inline(text) -> String`, `escape_html`, `safe_url`, `LINK_DATA_ATTRIBUTE` |
 | [`code`](src/code.rs) | `code.ts` | `renderer_for(&Path) -> RendererDecision`, `language_for`, `render_code(source, language, CodeOptions { gutter }) -> String`, `render_source(&Path, text) -> Rendered`, `RendererName`, `Rendered` |
-| [`html_preview`](src/html_preview.rs) | `html.ts` (proposed) | `rewrite_resources(html, base, serve) -> String`, `PREVIEW_CSP`, `ALLOWED_TAGS`, `ALLOWED_ATTRS`, `ALLOWED_URI`, `MAX_HTML_PREVIEW_BYTES` |
 | [`uploads`](src/uploads.rs) | `uploads.ts` | `save_upload(home, name, data, now) -> io::Result<SavedUpload>`, `safe_upload_name`, `upload_stamp`, `upload_directory`, `MAX_UPLOAD_BYTES`, `SavedUpload` |
 | [`attachments`](src/attachments.rs) | `attachments.ts`; `attachmentsOf` of `web.ts` | `read_attachments(upload_dir, Option<&Value>) -> Result<Vec<AttachmentPart>, AttachmentInputError>`, `read_attachment`, `display_name_for_stored`, `attachments_of(&[Value]) -> Vec<TurnAttachment>`, `AttachmentPart`, `ImageMediaType`, `TurnAttachment`, `MAX_ATTACHMENTS` |
 | [`picker`](src/picker.rs) | `picker.ts` | `pick_folder(&Platform, &dyn CommandRunner) -> PickerOutcome`, `PickerOutcome`, `CommandRunner`, `CommandResult`, `SystemRunner`, `Platform`, `PICK_TIMEOUT` |
@@ -109,7 +108,8 @@ JSON the TypeScript build writes; the tests assert the strings.
 ### The routes
 
 `FilesRoutes::router()` answers `GET /api/file`, `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`,
-`POST /api/markdown`, `POST /api/workspaces/pick` and (proposed) `GET /api/html`. Each status, body and header is
+`POST /api/markdown` and `POST /api/workspaces/pick` — not `GET /api/html`, which is `heddle-server`'s. Each status,
+body and header is
 tabled in [`src/routes.rs`](src/routes.rs). The router does no authentication and has no fallback: the server merges
 it and puts its token layer over the result, exactly as every one of these routes sits after the token decision in
 `web.ts`.
@@ -167,18 +167,17 @@ are done; step 10 is blocked on other seats and is named there.
 | 4 ✅ | `render_markdown`, `render_inline` | `test/markdown.test.ts`, `test/render.test.ts` (markdown half) | frontmatter section; `_tools_` keeps its underscores outside code; refused links and images; relative links → `/api/raw?path=…` + `data-heddle-path`; raw `<img>` resolved; fences carry `language-*` and `hljs-*` |
 | 5 ✅ | `uploads`, `attachments` | `test/uploads.test.ts`, `test/attachments.test.ts`, `test/server-attachments.test.ts` | safe names; collision suffixes; `0600`; symlink escape refused; batch limit; sha256 |
 | 6 ✅ | `pick_folder`, `SystemRunner` | `test/picker.test.ts` | every platform branch through a fake runner: picked, cancelled, missing command, failure reason |
-| 7 ✅ | `rewrite_resources` | `test/html.test.ts` | quoted `src`/`href`/`srcset`, fragments, `..` above the root, absolute and remote untouched |
+| 7 ↔️ | `rewrite_resources` | `test/html.test.ts` | **moved** to `heddle-server/src/preview.rs` with `GET /api/html`: the server owner had already ported and tested it there, and two implementations of one rewrite is worse than one. The eight tests written here went with it (developer-ten has the equivalent in-process tests) |
 | 8 ✅ | `FilesRoutes::router` | the route rows of `test/web.test.ts` | one `tower::ServiceExt::oneshot` test per row of the routes table, over a `FilesHost` double |
 | 9 ✅ | `docs` | — (no TypeScript test; no caller) | ported rather than deleted: no one has ruled it dead, and it is 4 tests |
 | 10 ⛔ | verifiers | — | blocked: `88-file-preview` fails before it reaches any route — `spawn …/rust/target/release/heddle ENOENT` (no release binary; `heddle web` is unported, developer-two) — and its `startCli` still spawns `node dist/cli.js`, so even a built binary would not be the server under test until integrator-two moves it to `heddleCommand`; the server mount is developer-ten's |
 
 ## Open questions
 
-1. **`/api/html` and `html.ts`** (the server crate's owner): proposed here, since `88-file-preview` is its only
-   judge. If the server keeps it, [`src/html_preview.rs`](src/html_preview.rs) and the route move there unchanged.
-2. **`/vendor/purify.js`** (the server crate's owner): the browser-side sanitiser the html preview loads. Left with
-   the server as a page asset beside the embedded `page.html`; the Rust build has to vendor the DOMPurify bundle,
-   since the TypeScript build reads it from `node_modules` at request time.
+1. **`/api/html` and `html.ts` — resolved** (2026-10-22): they stay in `heddle-server`
+   (`src/preview.rs`, registered in its `CORE_ROUTES`). `GET /api/html` is removed from this crate's `ROUTES` and
+   `src/html_preview.rs` is deleted, since `Router::merge` rejects an overlap and the server route is live.
+2. **`/vendor/purify.js` — resolved**: a server page asset, served from `ServerOptions::asset_roots`; no route here.
 3. **`FileReading`** (the session crate's owner): declared in [`src/host.rs`](src/host.rs) with the TypeScript field
    order. When the session tree's `read_file_text` lands, this crate re-exports that type if its JSON is identical.
 4. **`docs.ts`**: ported, since no one ruled it dead; it still has no caller and can be deleted in one commit if the

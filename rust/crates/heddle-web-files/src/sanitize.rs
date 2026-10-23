@@ -9,6 +9,15 @@
 //! The scanner walks the string once and is **total**: text between tags passes through unchanged (the parser
 //! already escaped it), a `<` that does not begin a tag becomes `&lt;`, comments and declarations vanish, and the
 //! content of `script`, `style`, `iframe`, `object`, `embed`, `template` and `noscript` vanishes with the tag.
+//!
+//! # One divergence, deliberate
+//!
+//! `sanitize.ts` reads a tag closed by `/>` as *unterminated* and writes the rest of the input back as text, so
+//! `<img src="x" onerror="alert(1)"/>` reached the page with its handler intact — the allow-list never saw it.
+//! Rather than port that, this scanner treats a `/>` that ends the tag as the tag's end: the tag is reduced like any
+//! other and the handler is dropped ([`tests::a_self_closed_tag_is_reduced_and_never_passed_through_whole`]). The
+//! TypeScript build's output for every other input is unchanged; this is the one case where the port is stricter,
+//! not different in what it renders.
 
 /// Elements a document view renders. Anything else is dropped, with its text kept.
 pub(crate) const ALLOWED_ELEMENTS: &[&str] = &[
