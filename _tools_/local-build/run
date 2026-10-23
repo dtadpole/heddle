@@ -36,6 +36,37 @@ usage() {
 
 mkdir -p "$ROOT"
 
+# The coordinator can cut the Mac to fewer usable slots in one write:
+#   echo 2 > $LOCAL_BUILD_SLOT_ROOT/cap
+# The default is every slot. A cap that is not a whole number between 1 and $SLOTS is
+# ignored with a warning rather than silently stopping work.
+CAP=$SLOTS
+CAP_SOURCE=default
+read_cap() {
+    capfile="$ROOT/cap"
+    CAP=$SLOTS
+    CAP_SOURCE=default
+    if [ ! -f "$capfile" ]; then
+        return 0
+    fi
+    cap_raw=
+    read -r cap_raw < "$capfile" 2>/dev/null || true
+    cap_raw=$(printf '%s' "${cap_raw:-}" | tr -d '[:space:]')
+    case "$cap_raw" in
+        '' | *[!0-9]*) ;;
+        *)
+            if [ "$cap_raw" -ge 1 ] && [ "$cap_raw" -le "$SLOTS" ]; then
+                CAP=$cap_raw
+                CAP_SOURCE=file
+                return 0
+            fi
+            ;;
+    esac
+    CAP_SOURCE=ignored
+    echo "local-build: ignoring $capfile: it must hold a whole number from 1 to $SLOTS" >&2
+}
+read_cap
+
 # An owner file is "<pid> <epoch> <cargo> <cwd>": the run shell, when it took the slot,
 # the cargo process (0 until it starts) and the caller's directory. It is rewritten once
 # cargo starts, so a killed shell whose cargo still builds is a busy slot, not a free
@@ -147,14 +178,14 @@ try_acquire() {
         i=$((i + 1))
     done
     i=0
-    while [ "$i" -lt "$SLOTS" ]; do
+    while [ "$i" -lt "$CAP" ]; do
         if take "$i"; then
             return 0
         fi
         i=$((i + 1))
     done
     i=0
-    while [ "$i" -lt "$SLOTS" ]; do
+    while [ "$i" -lt "$CAP" ]; do
         d="$ROOT/slot-$i"
         if is_old "$d"; then
             if reclaim "$d"; then
@@ -170,11 +201,16 @@ try_acquire() {
 
 show_status() {
     printf 'root: %s\nslots: %s  jobs: %s\n' "$ROOT" "$SLOTS" "$JOBS"
+    case "$CAP_SOURCE" in
+        file) printf 'cap: %s of %s slots (set by %s/cap)\n' "$CAP" "$SLOTS" "$ROOT" ;;
+        ignored) printf 'cap: %s of %s slots (cap file ignored; see the warning)\n' "$CAP" "$SLOTS" ;;
+        *) printf 'cap: %s of %s slots (default; no cap file)\n' "$CAP" "$SLOTS" ;;
+    esac
     busy=0; stale=0; free=0; i=0
     while [ "$i" -lt "$SLOTS" ]; do
         d="$ROOT/slot-$i"
         if [ ! -d "$d" ]; then
-            printf 'slot %s: free\n' "$i"
+            printf 'slot %s: free%s\n' "$i" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
             free=$((free + 1))
         elif [ ! -f "$d/owner" ]; then
             printf 'slot %s: unclaimed (no owner file)\n' "$i"
@@ -184,10 +220,10 @@ show_status() {
             now=$(stamp)
             age=$((now - o_ts))
             if owner_alive && [ "$age" -le "$STALE" ]; then
-                printf 'slot %s: busy pid=%s cargo=%s age=%ss cwd=%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}"
+                printf 'slot %s: busy pid=%s cargo=%s age=%ss cwd=%s%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
                 busy=$((busy + 1))
             else
-                printf 'slot %s: stale pid=%s cargo=%s age=%ss cwd=%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}"
+                printf 'slot %s: stale pid=%s cargo=%s age=%ss cwd=%s%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
                 stale=$((stale + 1))
             fi
         fi
@@ -252,7 +288,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "local-build: slot $SLOT/$SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
+echo "local-build: slot $SLOT, cap $CAP of $SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
 
 if [ "$has_jobs" = 1 ]; then
     set -- "$@"

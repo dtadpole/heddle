@@ -251,6 +251,48 @@ test('an owner file from the earlier three-field runner is read as pid, stamp an
   assert.equal(check.status, 0, check.stderr)
 })
 
+test('the coordinator caps the machine with one file, and status says which cap is in force', async (t) => {
+  const sb = sandbox(t)
+  mkdirSync(sb.root, { recursive: true })
+  writeFileSync(join(sb.root, 'cap'), '2\n')
+
+  const status = run(sb, ['status'])
+  assert.equal(status.status, 0, status.stderr)
+  assert.match(status.stdout, /cap: 2 of 3 slots \(set by .*cap\)/)
+
+  const runs = Array.from({ length: 4 }, () => start(sb, ['check'], { FAKE_SLEEP: '0.4' }))
+  const results = await Promise.all(runs.map((r) => r.done))
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  const events = logLines(sb).filter((l) => l.startsWith('+') || l.startsWith('-'))
+  let current = 0
+  let peak = 0
+  for (const e of events) {
+    current += e.startsWith('+') ? 1 : -1
+    peak = Math.max(peak, current)
+  }
+  assert.equal(peak, 2, 'a cap of two means two commands at most')
+})
+
+test('a cap of one leaves the other slots alone, and a cap file it cannot read is ignored', async (t) => {
+  const sb = sandbox(t)
+  mkdirSync(sb.root, { recursive: true })
+  writeFileSync(join(sb.root, 'cap'), '1\n')
+  const a = start(sb, ['check'], { FAKE_SLEEP: '0.5' })
+  const b = start(sb, ['check'], { FAKE_SLEEP: '0.5' })
+  await waitForStatus(sb, 'slot 0: busy')
+  const during = run(sb, ['status'])
+  assert.match(during.stdout, /slot 1: free/)
+  assert.match(during.stdout, /slot 2: free/)
+  const results = await Promise.all([a.done, b.done])
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+
+  writeFileSync(join(sb.root, 'cap'), '99\n')
+  const ignored = run(sb, ['status'])
+  assert.equal(ignored.status, 0)
+  assert.match(ignored.stderr, /ignoring .*cap/)
+  assert.match(ignored.stdout, /cap: 3 of 3 slots \(cap file ignored/)
+})
+
 test('usage is a distinct failure, and a missing cargo takes no slot', (t) => {
   const sb = sandbox(t)
   assert.equal(run(sb, []).status, 64)
