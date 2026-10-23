@@ -88,9 +88,10 @@ function redact(line, rule) {
 // meets that. Tests must still carry well-formed ids, and building one at runtime to slip
 // past the gate is not allowed (D-044), so the gate tells the two apart instead.
 // A token shaped like a UUID, including the malformed vectors a parser test needs (a
-// last group of 10 to 14 characters, a non-hex character): one regex finds both, and
+// group one character short or long, a non-hex character): one regex finds both, and
 // each token is then judged as a UUID or as a near-UUID.
-const UUID_LIKE = /(?<![0-9a-z])[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{10,14}(?![0-9a-z])/gi
+const UUID_LIKE = /(?<![0-9a-z])[0-9a-z]{7,9}-[0-9a-z]{3,5}-[0-9a-z]{3,5}-[0-9a-z]{3,5}-[0-9a-z]{11,13}(?![0-9a-z])/gi
+const NEAR_SHAPE = /^([0-9a-z]{7,9})-([0-9a-z]{3,5})-([0-9a-z]{3,5})-([0-9a-z]{3,5})-([0-9a-z]{11,13})$/
 const VALID_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function isPlaceholderUuid(text) {
@@ -102,23 +103,27 @@ export function isPlaceholderUuid(text) {
   return Math.max(...counts.values()) >= 29
 }
 
-// The coordinator's ruling after D-046 (21:18): a malformed negative vector made only of
-// placeholder digits is a placeholder too, and that is the only widening. A near-UUID is
-// a UUID-shaped token that is not a valid UUID; ignoring the version and variant
-// positions, it is a placeholder when every character but at most one is the same hex
-// digit: session-00000000-0000-0000-0000-00000000000 (eleven zeros), its thirteen-digit
-// twin, and 00000000-0000-4000-8000-00000000000g. Two strays, or a truncated real id, are
-// not.
+// The coordinator's rule-22 ruling (21:18, applied 21:27) allows one widening beyond
+// D-046: a near-UUID. It is a token shaped like a session id that is not a valid UUID,
+// whose groups may each be one character short or long and which may carry one non-hex
+// character; it is a placeholder when every hex digit, apart from the version nibble
+// (the first character of the third group) and the variant nibble (the first of the
+// fourth), is one and the same digit. That covers a parser's negative vectors: the nil
+// form with eleven or thirteen digits in its last group, and the v4-shaped zeros ending
+// in a deliberate non-hex letter. Unlike a valid UUID, no stray hex digit is allowed, and
+// a near-UUID of random digits is never a placeholder. (Shapes are described in words
+// here: a literal would itself be judged by the gate on main.)
 export function isPlaceholderNearUuid(text) {
   const token = String(text).toLowerCase()
   if (VALID_UUID.test(token)) return false
-  if (!/^[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{10,14}$/.test(token)) return false
-  const chars = token.replace(/-/g, '')
-  const rest = chars.slice(0, 12) + chars.slice(13, 16) + chars.slice(17)
-  const counts = new Map()
-  for (const ch of rest) counts.set(ch, (counts.get(ch) ?? 0) + 1)
-  const [top, count] = [...counts].sort((a, b) => b[1] - a[1])[0]
-  return /[0-9a-f]/.test(top) && count >= rest.length - 1
+  const match = NEAR_SHAPE.exec(token)
+  if (!match) return false
+  const [first, second, third, fourth, fifth] = match.slice(1)
+  const rest = [...(first + second + third.slice(1) + fourth.slice(1) + fifth)]
+  const nonHex = rest.filter((ch) => !/[0-9a-f]/.test(ch))
+  if (nonHex.length > 1) return false
+  const hex = rest.filter((ch) => /[0-9a-f]/.test(ch))
+  return hex.length > 0 && new Set(hex).size === 1
 }
 
 export function isPlaceholderToken(text) {
