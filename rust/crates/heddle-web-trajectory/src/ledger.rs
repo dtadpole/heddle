@@ -1513,6 +1513,44 @@ mod tests {
     }
 
     #[test]
+    fn a_runtime_context_note_is_a_context_row_that_says_where_it_came_from() {
+        // The 80-web-ui runtime-context check reads the ledger's rows for this: each snapshot must be one
+        // attributed row whose text carries the policy, so a mode change is legible after the fact.
+        let ledger = project_ledger(&[event(
+            1,
+            "2026-10-23T03:21:46.186Z",
+            json!({
+                "type": "context/note",
+                "origin": "runtime-context",
+                "identity": "Current runtime context",
+                "surfaceOp": "append",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Current runtime context.\n\nCurrent heddle file policy: workspace-write."}]},
+            }),
+        )]);
+        let note = &ledger.loose[0];
+        assert_eq!(
+            note.kind,
+            LedgerKind::Context,
+            "a runtime-context snapshot is a CONTEXT row, as DSH tags it"
+        );
+        assert_eq!(note.origin.as_deref(), Some("runtime-context"));
+        assert_eq!(
+            note.label, "runtime-context",
+            "attributed to the harness, not to a person"
+        );
+        assert!(
+            note.text
+                .contains("Current heddle file policy: workspace-write"),
+            "and the policy is in its text"
+        );
+        assert_eq!(
+            crate::rows::preview_of(note),
+            "Current runtime context.",
+            "the table's one-line preview names the snapshot"
+        );
+    }
+
+    #[test]
     fn a_streamed_answer_and_its_completion_are_one_record_with_the_done_chunk_between() {
         let ledger = project_ledger(&[
             message(1, "2026-10-17T10:00:00.000Z", "user", "list it"),

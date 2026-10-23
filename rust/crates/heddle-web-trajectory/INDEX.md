@@ -20,7 +20,7 @@ key order kept), so it depends on no session type.
 | Ported from | `src/server/ledger.ts`, `src/server/log-download.ts`, `src/server/tool-inspector.ts` |
 | Judged by | `_verifiers_/85-trajectory-view`, `_verifiers_/80-web-ui` (check-trajectory-view; the ledger half of check-runtime-context; the dock of check-composer), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and unit-tested — 95 tests across the two crates (61 here); the routes are mounted by `heddle-server` and the binary, which is the remaining step** |
+| Status | **implemented and unit-tested — 96 tests across the two crates (62 here); the routes are mounted by `heddle-server` and the binary, which is the remaining step** |
 
 ## Public API
 
@@ -71,7 +71,7 @@ key order kept), so it depends on no session type.
 
 ## Verification so far
 
-- **Unit tests**: 61 here (95 with `heddle-web-composer`). `cargo test -p heddle-web-trajectory -p
+- **Unit tests**: 62 here (96 with `heddle-web-composer`). `cargo test -p heddle-web-trajectory -p
   heddle-web-composer` is green; every case of `test/ledger.test.ts`, `test/usage.test.ts`,
   `test/tool-catalog.test.ts`, `test/log-download.test.ts` and `test/tool-inspector.test.ts` is ported.
   `cargo fmt --check` and `cargo clippy --all-targets` are clean; `cargo check --workspace` is green.
