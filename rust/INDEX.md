@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.5.8
+version: 0.6.0
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `8ffc4a3`, judged with `_tools_/verify-runner/lane.mjs`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `e3f9d91`, judged with `_tools_/verify-runner/lane.mjs`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -69,8 +69,9 @@ Behind the binary, every backend library crate on `main` carries its port: `git 
 the ui lane at `a2d4ae4` — `heddle-server`, `heddle-web-files`, `heddle-web-composer` and `heddle-web-trajectory` carry
 their implementations (407 unit tests between them; `heddle-web-files` has two `todo!(` left). The binary dispatches
 the owners' entry points and the turn and composes an adapter for every built-in row; it advertises a command once
-that command's checks pass (configuration, sessions, workspaces and goal so far), and two `todo!(` remain in it: the
-bare boot and `web`. No backend verifier imports `dist/`, so a lane
+that command's checks pass (configuration, sessions, workspaces and goal so far). One `todo!(` remains in it, the bare
+boot. Since `e3f9d91` `heddle web` serves the page over `heddle-server` (it prints its URL and token and binds the
+port), but `web` is not advertised yet, so every check that starts it still skips at its probe. No backend verifier imports `dist/`, so a lane
 with no TypeScript build judges every one of them. Each check's capability probe asks for every command the check
 runs, matched as a command line in `--help`, so a binary that advertises one command before another leaves the
 dependent checks unjudged instead of failing them.
@@ -86,9 +87,9 @@ dependent checks unjudged instead of failing them.
 | 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged; under `HEDDLE_BIN` each hook is a process (that verifier's INDEX) |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — **11 pass**, 0 fail, 34 unjudged (they need `--turn` or `web`) |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | 17 checks — unjudged |
-| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |
-| 10 token | `_verifiers_/90-web-ui-token` | not judged in the backend lane; `web` exits 2 |
-| 11 Web UI daemon | `_verifiers_/95-web-daemon` | not judged in the backend lane; `web` exits 2 |
+| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); `web` serves but is not advertised, so these checks skip at their probe |
+| 10 token | `_verifiers_/90-web-ui-token` | not judged in the backend lane; `web` serves, not advertised |
+| 11 Web UI daemon | `_verifiers_/95-web-daemon` | not judged in the backend lane; `web` serves, not advertised |
 | model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged on this machine, on either build: both need a machine-local endpoint configuration, which it does not have |
 
 What is **in place** is the toolchain and the seam, not a part: rust 1.99.1 from rustup, the workspace, and the

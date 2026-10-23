@@ -23,23 +23,11 @@ use crate::{Exit, Invocation};
 /// A command whose capability is not served yet exits [`Exit::Unported`] naming itself, which is what
 /// keeps a verifier from judging a part that does not exist.
 pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    dispatch_serving(args, invocation, out, crate::usage::SERVED)
-}
-
-/// [`dispatch`] for a build that serves `served`: the routing itself, separate from what this build
-/// serves, so a test can judge a command's whole path before its capability is advertised.
-pub fn dispatch_serving(
-    args: &Args,
-    invocation: &Invocation,
-    out: &mut Output<'_>,
-    served: &[Capability],
-) -> Exit {
     if let Some(command) = args.command {
         // A command that answers is routed whether or not the help advertises it yet: SERVED decides
-        // what a verifier may judge, not what the binary does. Only `web` waits for its crate.
+        // what a verifier may judge, not what the binary does.
         return match command {
-            CommandWord::Web if served.contains(&Capability::Web) => web(args, invocation, out),
-            CommandWord::Web => unported(command.as_str(), out),
+            CommandWord::Web => web(args, invocation, out),
             CommandWord::Profiles | CommandWord::Config => config_command(args, invocation, out),
             _ => boot_then(args, invocation, out),
         };
@@ -563,8 +551,11 @@ fn owned_context(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Ou
 /// recover teams, print `heddle web: <url>` and `heddle web: serving on <host>:<port>; pass --port to
 /// change it` (and the `--json` line), and serve until SIGINT or SIGTERM.
 pub fn web(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    let _ = (args, invocation, out);
-    todo!("port runWeb from src/cli.ts over heddle-server")
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    crate::web::web(args, invocation, boot, out)
 }
 
 #[cfg(test)]
@@ -587,21 +578,6 @@ mod tests {
             env: Env::from_pairs(Vec::<(String, String)>::new()),
             cwd: PathBuf::from(cwd),
         }
-    }
-
-    #[test]
-    fn web_says_it_is_not_ported_until_its_crate_is_on_this_branch() {
-        let mut captured = Captured::default();
-        let exit = {
-            let mut out = captured.output();
-            dispatch(&parsed(&["web"]), &invocation("/nonexistent"), &mut out)
-        };
-        assert_eq!(exit, Exit::Unported);
-        assert_eq!(
-            captured.stderr_text(),
-            "heddle: not ported to Rust yet: web\n"
-        );
-        assert!(captured.stdout.is_empty());
     }
 
     #[test]
@@ -864,15 +840,13 @@ mod tests {
             env,
             cwd: home.clone(),
         };
-        let served = [Capability::Always, Capability::Config, Capability::Models];
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
-            dispatch_serving(
+            dispatch(
                 &parsed(&["--profile", "dev", "models", "--json"]),
                 &invocation,
                 &mut out,
-                &served,
             )
         };
         assert_eq!(exit, Exit::Success, "{}", captured.stderr_text());
@@ -915,11 +889,10 @@ mod tests {
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
-            dispatch_serving(
+            dispatch(
                 &parsed(&["--profile", "dev", "sessions"]),
                 &invocation,
                 &mut out,
-                &[Capability::Always, Capability::Config, Capability::Sessions],
             )
         };
         assert_eq!(exit, Exit::Failure);

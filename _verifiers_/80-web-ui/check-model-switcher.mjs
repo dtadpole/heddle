@@ -270,7 +270,7 @@ function startCli(args, options) {
           child.kill('SIGKILL')
           reject(new Error(`the server printed no URL within 20s\n${output}`))
         }
-      }, 20_000)
+      }, 20_000).unref()
     })()
   })
 }

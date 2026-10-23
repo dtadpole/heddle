@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-23T05:06:41Z
+modified: 2026-10-23T05:36:13Z
 level: L3
-version: 1.0.0
+version: 1.1.0
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -21,6 +21,8 @@ grounded_in:
 | about 21:20 | check-team-view, against a harness that exits after the browser opens | before `c4c9292` it ran past a 45 s alarm; after, it fails in 5 s with "the server did not start" |
 | about 21:58 | the TypeScript build, with the `web` probe (`5ed8deb`) | the eight probed files pass in full: access 4, approval 3, composer 25, goal 4, model-switcher 5, runtime-context 1, team-view 1, todo 2 |
 | about 22:00 | main's binary at `a871aae`, by the lane gate | 14 files, every check unjudged, none failed |
+| 22:10 to 22:24 | developer-two's `web` (22bd865) in the ui lane at `6910c6e`, release binary, by the lane gate — not on main | 14 files: 14 checks pass, 61 fail (chat-view 4 of 18, composer 6 of 25, check.mjs 4 of 5; the other eleven files pass none). Every argument shape the checks use printed its URL; the failures are in the served app |
+| about 22:40 | the TypeScript build, with the start timer unref'd (`cb6b392`) | same verdicts; check-context-view finishes in 0.5 s instead of 15 s |
 
 **Part 9 through `HEDDLE_BIN` is not met.** Unjudged is not passing; the part cannot be judged until the binary
 serves `web`.
