@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:30:58Z
+modified: 2026-10-23T04:32:14Z
 level: L3
 version: 1.7.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
@@ -326,6 +326,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 21:21 | `b0ef8ab` (Rust status run on `ea1028b`) | `b0ef8ab`, clean | 96 **3/3** from the deployment; 95 judged on the scratch service instead (4/4, rehearsal run 3), so the owner's server was not killed |
 | 21:24 | `b89ad37` (Rust status run on `4aca3b1`; the hygiene gate judges from the merge base) | `b89ad37`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567`; 95 not run against the live agent |
 | 21:27 | `c4c9292` (check-team-view fails instead of hanging) | `c4c9292`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567` |
+| 21:34 | `1157d4e` (30 commits; the bus adapts to the tools and agent ports) | `1157d4e`, clean | **first redeploy by `redeploy.sh`**: 3.8 s end to end, longest silence at 3082 300 ms; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
