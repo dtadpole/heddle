@@ -30,6 +30,7 @@
 //! on another crate, and the crate's `INDEX.md` names it.
 
 pub mod budget;
+pub mod command;
 pub mod compaction;
 mod error;
 pub mod events;

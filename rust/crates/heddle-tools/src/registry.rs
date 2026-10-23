@@ -25,7 +25,7 @@ use serde::Serialize;
 use crate::builtin::{BuiltinOptions, builtin_tools};
 use crate::config::ToolsConfig;
 use crate::gates::{
-    EscalationError, EscalationRequest, PreExecute, SandboxGate, ToolCall, ToolGates,
+    EscalationError, EscalationRequest, PreExecute, SandboxGate, ToolCall, ToolGates, ToolHookError,
 };
 use crate::tool::{
     Command, Tool, ToolArgs, ToolContext, ToolFailure, ToolResult, ToolRunContext, codes,
@@ -221,8 +221,24 @@ impl ToolRegistry {
     /// Run one tool call through every gate, in the order the module documentation states.
     ///
     /// Never fails: a refusal, a sandbox denial and a tool's own failure all come back as a [`ToolResult`]
-    /// with `error` set.
+    /// with `error` set. A failing `tools/pre-execute` listener comes back as `INTERRUPTED` with its sentence,
+    /// which is what the TypeScript loop's catch answers; [`Self::try_call`] keeps it apart for a caller
+    /// that words it differently.
     pub async fn call(&self, name: &str, args: ToolArgs, context: ToolContext) -> ToolResult {
+        match self.try_call(name, args, context).await {
+            Ok(result) => result,
+            Err(failure) => ToolResult::refused(codes::INTERRUPTED, failure.message),
+        }
+    }
+
+    /// [`Self::call`], with a failing `tools/pre-execute` listener as an error rather than a result — the
+    /// TypeScript `call`'s one throw, which escapes before the tool's own `try`.
+    pub async fn try_call(
+        &self,
+        name: &str,
+        args: ToolArgs,
+        context: ToolContext,
+    ) -> Result<ToolResult, ToolHookError> {
         let Some(tool) = self.get(name) else {
             let known = self.names();
             let known = if known.is_empty() {
@@ -230,10 +246,10 @@ impl ToolRegistry {
             } else {
                 known.join(", ")
             };
-            return ToolResult::refused(
+            return Ok(ToolResult::refused(
                 codes::UNKNOWN_TOOL,
                 format!("no tool named '{name}'; known: {known}"),
-            );
+            ));
         };
 
         let decision = self.gates.approvals.check(name);
@@ -242,27 +258,27 @@ impl ToolRegistry {
                 "denied {name}: {}",
                 decision.reason.as_deref().unwrap_or("no reason given")
             ));
-            return ToolResult::refused(
+            return Ok(ToolResult::refused(
                 codes::DENIED,
                 decision
                     .reason
                     .unwrap_or_else(|| format!("the approval policy refused '{name}'")),
-            );
+            ));
         }
 
         if let PreExecute::Refused { reason } = self
             .gates
             .hooks
-            .pre_execute(&ToolCall { name, args: &args })
+            .pre_execute(&ToolCall { name, args: &args })?
         {
             context.log(&format!(
                 "hooked {name}: {}",
                 reason.as_deref().unwrap_or("refused by a hook")
             ));
-            return ToolResult::refused(
+            return Ok(ToolResult::refused(
                 codes::HOOKED,
                 reason.unwrap_or_else(|| format!("a hook refused '{name}'")),
-            );
+            ));
         }
 
         let mut mode = self.effective_mode(context.session.as_ref());
@@ -285,7 +301,7 @@ impl ToolRegistry {
             match self.gates.approvals.escalate(request).await {
                 Ok(granted) => mode = granted,
                 Err(EscalationError::BadArgs(message)) => {
-                    return ToolResult::refused(codes::BAD_ARGS, message);
+                    return Ok(ToolResult::refused(codes::BAD_ARGS, message));
                 }
                 Err(EscalationError::Refused(refusal)) => {
                     context.log(&format!(
@@ -296,8 +312,10 @@ impl ToolRegistry {
                         "sandbox".to_owned(),
                         serde_json::json!({ "mode": mode, "denied": false }),
                     )]);
-                    return ToolResult::refused(codes::ESCALATION_REFUSED, refusal.message)
-                        .with_data(data);
+                    return Ok(
+                        ToolResult::refused(codes::ESCALATION_REFUSED, refusal.message)
+                            .with_data(data),
+                    );
                 }
             }
         }
@@ -309,15 +327,16 @@ impl ToolRegistry {
             Ok(result) => result,
             Err(ToolFailure::Sandbox(denial)) => {
                 context.log(&format!("denied {name}: {}", denial.message));
-                return ToolResult::refused(codes::SANDBOX, denial.message);
+                return Ok(ToolResult::refused(codes::SANDBOX, denial.message));
             }
             Err(ToolFailure::Failed(message)) => {
-                return ToolResult::refused(codes::TOOL_FAILED, message);
+                return Ok(ToolResult::refused(codes::TOOL_FAILED, message));
             }
         };
-        self.gates
+        Ok(self
+            .gates
             .hooks
-            .post_execute(&ToolCall { name, args: &args }, result)
+            .post_execute(&ToolCall { name, args: &args }, result))
     }
 
     /// Run one command, which shares the approval gate (as `command:<name>`) and the result shape.
@@ -730,9 +749,9 @@ pub(crate) mod tests {
     }
 
     impl ToolHooks for RecordingHooks {
-        fn pre_execute(&self, call: &ToolCall<'_>) -> PreExecute {
+        fn pre_execute(&self, call: &ToolCall<'_>) -> Result<PreExecute, ToolHookError> {
             self.seen.lock().unwrap().push(format!("pre:{}", call.name));
-            self.pre.clone()
+            Ok(self.pre.clone())
         }
 
         fn post_execute(&self, call: &ToolCall<'_>, result: ToolResult) -> ToolResult {
@@ -1207,5 +1226,41 @@ pub(crate) mod tests {
             .await;
         assert_eq!(result.output, "hi there");
         assert_eq!(result.error, None);
+    }
+
+    struct BrokenHook;
+
+    impl ToolHooks for BrokenHook {
+        fn pre_execute(&self, _: &ToolCall<'_>) -> Result<PreExecute, ToolHookError> {
+            Err(ToolHookError::new(
+                "a hook failed at tools/pre-execute (policy) — typo",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_pre_execute_listener_stops_the_call_and_is_kept_apart_by_try_call() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let registry = ToolRegistry::new(with_hooks(Arc::new(BrokenHook)));
+        registry.register(recording_tool(Arc::clone(&ran))).unwrap();
+        let failure = registry
+            .try_call("write_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await
+            .unwrap_err();
+        assert!(failure.message.contains("tools/pre-execute"), "{failure}");
+        let result = registry
+            .call("write_file", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        let error = result.error.unwrap();
+        assert_eq!(
+            error.code,
+            codes::INTERRUPTED,
+            "the TypeScript loop's catch"
+        );
+        assert_eq!(error.message, failure.message);
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the tool never ran"
+        );
     }
 }
