@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
@@ -20,6 +20,28 @@ import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, scriptedCo
  * `aria-checked`, a client-side-only risk gate — the assertions require the better behaviour, deliberately.
  */
 
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
+
 const CAPABILITY = 'a Web UI on localhost with a live stream'
 
 /** Spawn the server and resolve once it prints its URL. */
@@ -35,7 +57,7 @@ function startServer(label, options = {}) {
        * scripted endpoint when the check needs a specific tool call to be refused. Both are local and free.
        */
       const double = options.steps === undefined
-        ? await chatDouble({ content: 'the answer', reasoning: 'thinking', holdOpenMs: options.holdOpenMs ?? 300 })
+        ? held(await chatDouble({ content: 'the answer', reasoning: 'thinking', holdOpenMs: options.holdOpenMs ?? 300 }))
         : null
       const config = options.steps !== undefined
         ? scriptedConfig({ home, steps: options.steps }).config

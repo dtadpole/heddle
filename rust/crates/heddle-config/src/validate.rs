@@ -400,6 +400,35 @@ mod tests {
     }
 
     #[test]
+    fn a_null_config_is_checked_as_an_empty_mapping_too() {
+        let catalog = StaticCatalog::new().with(
+            "alpha",
+            Some(
+                Schema::from_json(json!({
+                    "type": "object",
+                    "required": ["label"],
+                    "properties": { "label": { "type": "string" } }
+                }))
+                .unwrap(),
+            ),
+        );
+        let result = validate_rows(
+            &layers(vec![
+                json!({ "id": "alpha", "name": "alpha", "config": null }),
+            ]),
+            &Env::default(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(result.checked, 1);
+        assert_eq!(
+            result.problems,
+            ["alpha: label is required"],
+            "`config: null` is checked as an empty mapping, not as a null that fails `type: object`"
+        );
+    }
+
+    #[test]
     fn a_composition_failure_is_the_error_rather_than_a_problem() {
         let mut fixture = layers(Vec::new());
         fixture[0].entries[0]
