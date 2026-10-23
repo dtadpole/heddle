@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:39:01Z
+modified: 2026-10-23T05:46:44Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -61,11 +61,12 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 ## The config-boot contract
 
 What a caller does to turn command-line flags into rows, and what it may rely on afterwards. The binary follows it
-today: every command that boots goes through `rust/crates/heddle/src/commands.rs` `boot_then`, which builds
-`cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `profiles` and `config` pass
-`cli::config_args` to `command::run`. **`web` boots exactly as a run does** — the TypeScript `runWeb` calls
-`bootFromArgs` — so wiring it needs nothing new from this crate: boot through the same path as `boot_then` (steps 1–5
-below), then hand the server what step 7 lists. As of main `480d9b8`, the binary's `web` is still `todo!()`.
+today: every command that boots, `web` included, goes through `rust/crates/heddle/src/commands.rs` `boot_tree`, which
+builds `cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `boot_then` answers a booted command from
+it, and `web` hands it to `crate::web::web`. `profiles` and `config` pass `cli::config_args` to `command::run`.
+**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `e3f9d91` it is
+routed but not yet listed in `--help`; it takes the launch secret's directory from `heddle_home(&invocation.env)`
+(step 7), and an unknown `--profile` or a missing `--config` reaches the user as this crate's sentence with exit 1.
 
 ### 1. One environment, built once
 
@@ -282,6 +283,8 @@ it judges.
 | 2026-10-22 | lane `e1d2fc0` (an unanswered escalated retry tested through the real services; `heddle-tools/src/adapters.rs` changed) | `HEDDLE_BIN=<debug build of exactly e1d2fc0> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | lane `b61b4e8` (goal chains run on a pinned runtime so the trigger works from any thread; `heddle-goal` changed) | `HEDDLE_BIN=<debug build of exactly b61b4e8> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | main `6be6ccd` (UI-verifier fixes and readings over `db3d76d`; no Rust changed, so the lane release build, made at 22:37:53 on a clean `db3d76d`, is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `6aee707` (`heddle web` over `heddle-server`, routed and not yet advertised; seven binary files) | `HEDDLE_BIN=<debug build of exactly 6aee707> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots the repository's own profile, and an unknown `--profile` or a missing `--config` through `web` gives this crate's sentence and exit 1 |
+| 2026-10-22 | lane `b71715e`, now main `73bf9f6` (web mounts the files and trajectory routers and the ledger view, in `web.rs`; main adds a lockfile regeneration that moves no version, and a status doc) | `HEDDLE_BIN=<debug build of exactly b71715e> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` still boots the repository's own profile |
 
 ## Decisions the contract makes
 
