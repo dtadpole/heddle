@@ -10,8 +10,8 @@
 //! over its store as that crate is. The hook adapter lands when the binary attaches the event bus; until then
 //! [`NoTurnHooks`](crate::NoTurnHooks) is the composition without listeners.
 //!
-//! The context port speaks the context crate's own records (its report, summary and sections), so nothing is
-//! converted there. The session crate keeps its own record types and that adapter converts only at the seam, and
+//! The context port speaks the context crate's own summary and sections; only its report is still converted, until
+//! that type derives `Default`. The session crate keeps its own record types and that adapter converts only at the seam, and
 //! the records it writes keep the TypeScript field order (the session crate's `ModelRequestRecord` is built in
 //! the loop's order, so `model/request` reads the same from either binary).
 
@@ -335,6 +335,25 @@ where
     }
 }
 
+/// The context service's report, as the loop's record reads it. Kept as this crate's record until the context
+/// crate's report derives `Default`, which other crates' tests construct it with.
+fn report_of(report: heddle_context::ContextReport) -> ContextReport {
+    ContextReport {
+        messages: report.messages,
+        estimated_tokens: report.estimated_tokens,
+        context_window: report.context_window,
+        threshold_tokens: report.threshold_tokens,
+        pruned: report.pruned,
+        compacted: report.compacted,
+        instructions: report
+            .instructions
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        breakdown: report.breakdown,
+    }
+}
+
 impl<S: ContextStore + 'static> ContextPort for Context<S> {
     fn record_runtime_context(
         &self,
@@ -368,6 +387,7 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
             self.service
                 .prepare(&handle, &prepared)
                 .await
+                .map(report_of)
                 .map_err(port_error)
         })
     }
@@ -386,6 +406,7 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
         };
         self.service
             .assemble(&(self.handle)(session), &assembled)
+            .map(report_of)
             .map_err(port_error)
     }
 }

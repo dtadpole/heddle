@@ -51,8 +51,9 @@ included), `assistant/chunk`, the `tool` message (`error (<code>): <message>`, t
 ## Where the port stands
 
 As of 2026-10-22, branch `hd/developer-five-clean`. Every body is ported; no `todo!()` is left. The model types are
-`heddle-llm`'s own, `SessionEvent` is `heddle-session`'s, and the context records (`ContextReport`, `ContextSummary`,
-`RuntimeContextSection`, `ContextBreakdown`) are `heddle-context`'s. Three shapes stay this crate's on purpose:
+`heddle-llm`'s own, `SessionEvent` is `heddle-session`'s, and the context records `ContextSummary`, `RuntimeContextSection`
+and `ContextBreakdown` are `heddle-context`'s. `ContextReport` stays a mirror until the context crate's report derives
+`Default`, which `heddle-goal`'s tests construct it with. Three more shapes stay this crate's on purpose:
 `PrepareOptions` (owned, where the context crate's borrows), `SurfaceView` (the two generations and the node list
 the loop reads), and the session-meta and create-session records, converted at the session seam. Unit tests: 74, green, with the workspace gate.
 

@@ -26,9 +26,8 @@ pub use heddle_llm::{
 /// written order).
 pub use heddle_session::SessionEvent;
 
-/// The context service's own records: a named runtime-context section, a request's estimate split three ways, and
-/// one assembly's report.
-pub use heddle_context::{Breakdown as ContextBreakdown, ContextReport, RuntimeContextSection};
+/// The context service's own records: a named runtime-context section and a request's estimate split three ways.
+pub use heddle_context::{Breakdown as ContextBreakdown, RuntimeContextSection};
 
 /// The parts of a session's metadata the loop and delegation read. Mirror of a subset of
 /// `heddle_session::SessionMeta`; fields this crate does not read are kept in `rest`.
@@ -123,6 +122,27 @@ pub struct PrepareOptions {
     pub tools: Vec<ToolSpec>,
     /// A system prompt for a session that has none.
     pub system: Option<String>,
+}
+
+/// What a context preparation answered. Mirror of `heddle_context::ContextReport` (TypeScript `ContextReport`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ContextReport {
+    /// What to send.
+    pub messages: Vec<Message>,
+    /// Its estimated size.
+    pub estimated_tokens: u64,
+    /// The window it is priced against.
+    pub context_window: u64,
+    /// The size that triggers a reduction.
+    pub threshold_tokens: u64,
+    /// How many oversized tool results this call rewrote.
+    pub pruned: u64,
+    /// Whether a summary replaced part of the conversation.
+    pub compacted: bool,
+    /// The instruction files the baseline carried.
+    pub instructions: Vec<String>,
+    /// The size split.
+    pub breakdown: ContextBreakdown,
 }
 
 #[cfg(test)]
