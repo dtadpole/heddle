@@ -1,6 +1,6 @@
 ---
 title: The heddle binary crate
-version: 0.3.0
+version: 0.4.0
 description: The Rust port's binary and composition root — the command line the verifiers run through HEDDLE_BIN, the boot that starts every crate behind its API, its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -135,16 +135,21 @@ The library shape is complete and every module below compiles with its unit test
 | `usage` (the gated help) and `main` | implemented: `--help` prints `usage(SERVED)`, a usage error exits 1, an unported request exits 2 naming itself |
 | `boot::boot`, `load`, `settle`, `failed_entries`, `dispose` | implemented; `load` makes one `heddle-events` bus per run and exposes its catalog before any row starts |
 | every command word | dispatched to its owner's D-043 entry point: `profiles`/`config` (`heddle-config`), `models` (`heddle-llm`), `tools`/`commands` (`heddle-tools`), `hooks` (`heddle-events`), `goal` (`heddle-goal`), `context` (`heddle-context`), `sessions`/`transcript` (`heddle-session`), `workspaces`, `workspace …`, `tree`, `file`, `session new` (`heddle-workspace`) |
-| `--turn` | dispatched to `heddle_agent::command::run` on `runtime::tokio()`, after the pending check and the allow list; `--stream` not wired yet |
+| `--turn` | dispatched to `heddle_agent::command::run` on `runtime::tokio()`, after the pending check and the allow list; `--stream` through `heddle-llm`'s `StreamHub`, fed by the session store's listener; a goal's chain joined through `GoalAdvance` |
+| `adapter-call` | hidden (no help line, no capability): `heddle_llm::command::adapter_call` over standard input, for `_tools_/model-validation` and 98 |
 | every built-in row of the repository profile | composes through `adapters.rs`; the hook points (`model/request`, `tools/pre-execute`/`post-execute`, `agent/pre-step`, `session/event`) reach the bus |
 | an outside component (`./x.component.yml`) | starts through `heddle_tools::OutsideComponent`; its tools join the registry, its listeners attach to the bus |
-| `web` | on `hd/developer-two-web`: `heddle_server::command::run` over a harness from the boot (sessions, turns, models, sandbox); 90 passes 9/9 there |
-| `bare_application` | declared; the three-plugin application of `src/app.ts` is the last unported request |
+| `web` | `commands::web` boots the tree and calls `web.rs` (developer-ten's file under D-047): `heddle_server::command::run` over a harness from the boot; the boot makes the server's `EventHub` and the `StreamHub` before any row, and the session store's listener feeds both and the bus |
+| a bare `heddle`, and a run that only names a tree | the three-plugin application of `src/app.ts` (its tree, then `announce hello, <target><punctuation>`), and the configured tree printed by row id — the same lines as `node dist/cli.js`; nothing in the crate is unported |
 
-`usage::SERVED` is the one line that says which capabilities the help advertises: today `Always`,
-`Config`, `Sessions`, `Workspaces` and `Goal`. A command that answers is routed whether or not it is
-advertised; a capability joins `SERVED` only when every verifier its gate words open runs with no
-failure (measured: 05 10/10, 70 11 pass / 0 fail / 34 unjudged).
+`usage::SERVED` is the one line that says which capabilities the help advertises: `Always`, `Config`,
+`Sessions`, `Workspaces`, `Goal`, `Web`, `Turn`, `Context`, `Tools`, `Hooks`, `Models` and `Streaming`.
+A command that answers is routed whether or not it is advertised. Under D-048 a capability is advertised
+once its command answers, provided at least one check turns into a pass and no passing check turns into a
+failure; the failing ones are listed with their owners in `rust/INDEX.md`. Measured through this tree's
+binary (every verifier but 95, which kills the installed service's port and is read on live-deploy's
+scratch agent): 196 pass, 10 fail, 4 unjudged — 05, 20, 30, 40, 50, 60, 75, 85, 87, 90 and 96 all
+green, 10 with its two real-endpoint checks unjudged; 95 4 of 4 on the scratch agent.
 
 ## Command entry points in the owning crate (D-043)
 

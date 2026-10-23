@@ -38,10 +38,60 @@ pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> E
     }
     let project_base = invocation.cwd.join(heddle_config::PROJECT_BASE).exists();
     if crate::cli::names_a_tree(args, project_base) {
-        unported("the configured tree", out)
+        configured_tree(args, invocation, out)
     } else {
-        unported("the bare application", out)
+        bare_application(args, out)
     }
+}
+
+/// A run that names a tree and asks for nothing else: boot it, refuse a pending entry or an unmet
+/// configuration as the turn does, and print the tree (`printTree` in `src/cli.ts`).
+fn configured_tree(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
+    let boot = match boot_tree(args, invocation) {
+        Ok(boot) => boot,
+        Err(message) => return out.fail(&message),
+    };
+    let exit = print_configured_tree(&boot, out);
+    boot.dispose();
+    exit
+}
+
+fn print_configured_tree(boot: &Boot, out: &mut Output<'_>) -> Exit {
+    let pending = crate::boot::settle(boot);
+    if !pending.is_empty() {
+        out.out(&format!(
+            "heddle: {} entry(ies) still pending: {}\n",
+            pending.len(),
+            pending.join(", ")
+        ));
+        return Exit::Failure;
+    }
+    if let Some(tools) = boot.services.tools() {
+        tools.filter_to(&tools.allow_list());
+    }
+    for line in crate::boot::failure_lines(boot) {
+        out.err(&format!("{line}\n"));
+    }
+    let mut problems: Vec<String> = crate::boot::failed_entries(boot)
+        .into_iter()
+        .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))
+        .collect();
+    if let Some(tools) = boot.services.tools() {
+        problems.extend(tools.missing());
+    }
+    if !problems.is_empty() {
+        return out.fail(&format!(
+            "the configuration names {}, which nothing registered",
+            problems.join(", ")
+        ));
+    }
+    let entries: Vec<(String, crate::boot::FiberState)> = boot
+        .entries
+        .iter()
+        .map(|entry| (entry.id.clone(), entry.state))
+        .collect();
+    out.out(&crate::boot::describe_entries(&entries));
+    Exit::Success
 }
 
 /// The capability a command word belongs to, as the help groups them.
@@ -230,16 +280,30 @@ pub fn booted_command(
         Some(CommandWord::Goal) => owned_goal(args, invocation, boot, out),
         Some(CommandWord::Context) => owned_context(args, invocation, boot, out),
         Some(other) => unported(other.as_str(), out),
-        None => unported("the configured tree", out),
+        None => print_configured_tree(boot, out),
     }
 }
 
 /// A bare `heddle` with no tree named: the three-plugin application of `src/app.ts` (`console-exporter`
-/// unless `-q`, `Greeting`, `announce`), its tree printed, then `heddle/ready` announced, which prints
-/// `announce hello, <target><punctuation>` through the console exporter.
+/// unless `-q`, `Greeting`, `announce`), its tree printed, then `heddle/ready` announced, which logs
+/// `announce hello, <target><punctuation>` through the console exporter — so `-q` prints no announcement.
 pub fn bare_application(args: &Args, out: &mut Output<'_>) -> Exit {
-    let _ = (args, out);
-    todo!("port createApp from src/app.ts and the bare branch of main()")
+    let mut entries = Vec::new();
+    if !args.quiet {
+        entries.push((
+            "console-exporter".to_owned(),
+            crate::boot::FiberState::Active,
+        ));
+    }
+    entries.push(("Greeting".to_owned(), crate::boot::FiberState::Active));
+    entries.push(("announce".to_owned(), crate::boot::FiberState::Active));
+    out.out(&crate::boot::describe_entries(&entries));
+    if !args.quiet {
+        let target = args.target.as_deref().unwrap_or("heddle");
+        let punctuation = args.punctuation.as_deref().unwrap_or("!");
+        out.out(&format!("announce hello, {target}{punctuation}\n"));
+    }
+    Exit::Success
 }
 
 /// `--turn <text>`: the folder's session (or `--resume`'s), its workspace ensured, the turn run, and the
@@ -672,29 +736,69 @@ mod tests {
             let mut out = captured.output();
             dispatch(&Args::default(), &invocation("/nonexistent"), &mut out)
         };
-        assert_eq!(exit, Exit::Unported);
+        assert_eq!(exit, Exit::Success);
         assert_eq!(
-            captured.stderr_text(),
-            "heddle: not ported to Rust yet: the bare application\n"
+            captured.stdout_text(),
+            "heddle: 3 plugin(s) loaded\n  console-exporter 1 fiber(s)  active\n  Greeting         \
+             1 fiber(s)  active\n  announce         1 fiber(s)  active\nannounce hello, heddle!\n"
         );
     }
 
     #[test]
-    fn a_run_that_names_a_tree_says_the_tree_is_what_is_unported() {
+    fn a_quiet_bare_run_has_no_exporter_so_nothing_is_announced() {
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
             dispatch(
-                &parsed(&["--profile", "dev"]),
+                &parsed(&["-q", "--punctuation", "?"]),
                 &invocation("/nonexistent"),
                 &mut out,
             )
         };
-        assert_eq!(exit, Exit::Unported);
+        assert_eq!(exit, Exit::Success);
         assert_eq!(
-            captured.stderr_text(),
-            "heddle: not ported to Rust yet: the configured tree\n"
+            captured.stdout_text(),
+            "heddle: 2 plugin(s) loaded\n  Greeting         1 fiber(s)  active\n  announce         \
+             1 fiber(s)  active\n"
         );
+        let mut captured = Captured::default();
+        {
+            let mut out = captured.output();
+            dispatch(
+                &parsed(&["--punctuation", "?"]),
+                &invocation("/nonexistent"),
+                &mut out,
+            );
+        }
+        assert!(
+            captured
+                .stdout_text()
+                .ends_with("announce hello, heddle?\n")
+        );
+    }
+
+    #[test]
+    fn a_run_that_names_a_tree_prints_the_loaded_rows() {
+        let (home, env) = profile_with(
+            "tree-print",
+            "- insert:\n    - id: approvals\n      name: ./src/approvals/service.ts\n",
+        );
+        let invocation = Invocation {
+            argv: Vec::new(),
+            env,
+            cwd: home.clone(),
+        };
+        let mut captured = Captured::default();
+        let exit = {
+            let mut out = captured.output();
+            dispatch(&parsed(&["--profile", "dev"]), &invocation, &mut out)
+        };
+        assert_eq!(exit, Exit::Success, "{}", captured.stderr_text());
+        assert_eq!(
+            captured.stdout_text(),
+            "heddle: 1 plugin(s) loaded\n  approvals        1 fiber(s)  active\n"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     use crate::boot::{Entry, FiberState};
