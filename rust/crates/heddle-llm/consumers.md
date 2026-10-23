@@ -1,9 +1,9 @@
 ---
 title: Where heddle-llm sits
 created: 2026-10-23T05:07:53Z
-modified: 2026-10-23T05:09:31Z
+modified: 2026-10-23T05:21:53Z
 level: L1
-version: 1.0.0
+version: 1.1.0
 description: The one heddle dependency of heddle-llm, why it has no other, and what each crate uses from it.
 status: unverified
 grounded_in:
@@ -27,7 +27,7 @@ configuration is the boot's: the binary resolves the endpoint list with `heddle_
 
 | Crate | Uses |
 |---|---|
-| `heddle` (boot, dispatch) | `ModelService::from_configuration`, `command::run` for `models`, `command::StreamHub` for `--stream` |
+| `heddle` (boot, dispatch) | `ModelService::from_configuration`, `command::run` for `models`, `command::adapter_call`, `command::StreamHub` for `--stream` |
 | `heddle-agent` | `ModelService::{stream, names, nominated}`, `GenerateRequest`, `Chunk`, `ModelError`, `command::{turn_endpoint, StreamView}` |
 | `heddle-tools` | `ToolSpec` |
 | `heddle-context` | `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, `ModelService::generate` for summaries |
