@@ -1,0 +1,491 @@
+//! The seam to the harness: what the server calls instead of a Cordis context.
+//!
+//! The TypeScript routes reach into `ctx.session`, `ctx.workspace`, `ctx.model`, `ctx.sandbox`, `ctx.goal`,
+//! `ctx.todo`, `ctx.team`, `ctx.get('approvals')` and `runTurn`. Each is a trait here, sized to what the
+//! routes actually use, so this crate builds and is tested with doubles while the crates that own those
+//! services are written. The binary (or an adapter module, once a service crate's API lands) implements
+//! them over the real services.
+//!
+//! **Data the server only passes through is JSON** ([`serde_json::Value`]): a session event, a tree node, a
+//! workspace record, a goal view. The server reads a handful of fields and forwards the rest unchanged,
+//! which is what `{ ...entry, running }` did. Fields the routes *read* are typed.
+//!
+//! A service the boot did not load is `None` in [`Harness`], and its routes answer
+//! `503 this profile does not load the <name> plugin`, as the TypeScript routes did.
+//!
+//! Implementors in other crates:
+//!
+//! | Trait | Implemented over | Owner |
+//! |---|---|---|
+//! | [`SessionService`] | the session store and its definitions | `heddle-session` |
+//! | [`WorkspaceService`] | the workspace registry and the session tree | `heddle-workspace`, `heddle-session` |
+//! | [`ModelService`] | the configured endpoints and their models' levels | `heddle-llm`, `heddle-config` |
+//! | [`TurnRunner`] | the agentic loop | `heddle-agent` |
+//! | [`SandboxService`] | the deployment's mode and the permission transition | `heddle-sandbox` |
+//! | [`ApprovalService`] | the approval service | `heddle-sandbox` |
+//! | [`GoalService`], [`TodoService`] | the goal and todo services | `heddle-goal`, `heddle-todo` |
+//! | [`TeamService`] | the team service | `heddle-team` |
+//! | [`AttachmentReader`], [`MarkdownRenderer`] | attachments and the markdown renderer | `heddle-web-files` |
+//! | [`SessionStatsProjector`] | the ledger's session statistics | `heddle-web-trajectory` |
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use tokio_util::sync::CancellationToken;
+
+use crate::selection::SessionSelection;
+
+/// A failure a service reports, with an optional stable code a route maps to a status.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ServiceError {
+    pub message: String,
+    pub code: Option<String>,
+}
+
+impl ServiceError {
+    pub fn new(message: impl Into<String>) -> Self {
+        todo!()
+    }
+
+    pub fn with_code(message: impl Into<String>, code: impl Into<String>) -> Self {
+        todo!()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Sessions
+
+/// A session's meta record as the store lists it.
+///
+/// The fields the routes read are typed; every other field (`created`, `updated`, `pinned`, `archived`,
+/// `parentSession`, …) is kept in `rest` and serialized back unchanged, so a listing carries whatever the
+/// store wrote.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMeta {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub turns: u64,
+    #[serde(flatten)]
+    pub rest: Map<String, Value>,
+}
+
+impl SessionMeta {
+    /// The selection this record carries.
+    pub fn selection(&self) -> SessionSelection {
+        todo!()
+    }
+}
+
+/// How `/api/turn` opens the session a turn runs in, when it names no folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartSession {
+    /// Continue this session (`body.session`).
+    pub resume: Option<String>,
+    /// Start a fresh session here (the server's working directory).
+    pub cwd: Option<PathBuf>,
+    /// The first 60 characters of the prompt.
+    pub title: Option<String>,
+    /// What a session created by this request is born with.
+    pub selection: SessionSelection,
+}
+
+/// How a folder's session is opened (`openAt`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenAt {
+    /// Start another session for the folder instead of continuing its current one.
+    pub fresh: bool,
+    pub title: Option<String>,
+    pub selection: SessionSelection,
+}
+
+/// A session created at a branch with its definition written there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedSession {
+    pub session: String,
+    /// The definition's name.
+    pub name: String,
+    /// The definition file.
+    pub definition: String,
+    /// The log the definition points at.
+    pub log: String,
+}
+
+/// What forking a session came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkOutcome {
+    NotFound,
+    /// Refused — a session with no completed turn to cut at. Answered `409` with the code.
+    Unavailable {
+        code: String,
+    },
+    Forked(CreatedSession),
+}
+
+/// A change to a session's reading flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlagPatch {
+    pub pinned: Option<bool>,
+    pub archived: Option<bool>,
+}
+
+/// What writing a session's mode did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeWrite {
+    pub mode: String,
+    pub changed: bool,
+    /// The sequence number of the mode event, when one was written.
+    pub seq: Option<u64>,
+}
+
+/// The session store, as the routes use it. Ids are strings the routes have already validated.
+pub trait SessionService: Send + Sync {
+    /// Every session's meta, in the store's order.
+    fn list(&self) -> Vec<SessionMeta>;
+
+    /// One session's meta.
+    fn meta(&self, id: &str) -> Option<SessionMeta> {
+        self.list().into_iter().find(|meta| meta.id == id)
+    }
+
+    /// Whether the store holds the session (`store.open(id) !== null`).
+    fn exists(&self, id: &str) -> bool;
+
+    /// The session's recorded events, in order; `None` when there is no such session.
+    fn events(&self, id: &str) -> Option<Vec<Value>>;
+
+    /// Open the session a turn runs in when it names no folder: resume one, or start a fresh one.
+    fn start(&self, options: StartSession) -> Result<String, ServiceError>;
+
+    /// The session a folder is bound to, created when it has none (or when `fresh`).
+    fn open_at(&self, folder: &Path, options: OpenAt) -> Result<String, ServiceError>;
+
+    /// Start a session at a branch and write its definition there.
+    fn create_at(&self, branch: &Path, title: Option<&str>)
+    -> Result<CreatedSession, ServiceError>;
+
+    /// Fork a session at its last completed turn.
+    fn fork(&self, id: &str) -> ForkOutcome;
+
+    /// Pin, unpin, archive or unarchive. `Ok(None)` is an unknown session; `Err` is a refusal answered
+    /// `409` with its code (`archived` when the store gave none).
+    fn set_flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError>;
+
+    /// Retitle; the empty string clears the title. `None` is an unknown session.
+    fn rename(&self, id: &str, title: &str) -> Option<SessionMeta>;
+
+    /// The id of the session whose definition lives in `folder`, if any.
+    fn definition_id(&self, folder: &Path) -> Option<String>;
+
+    /// Rewrite the title in the definition that lives in `folder`.
+    fn update_definition_title(&self, folder: &Path, title: &str) -> Result<(), ServiceError>;
+
+    /// Record how the session is run, replacing the previous selection. `None` is an unknown session.
+    fn set_model(&self, id: &str, selection: &SessionSelection) -> Option<SessionMeta>;
+
+    /// The session's effective access mode: its own record over `fallback`, the deployment default.
+    fn effective_mode(&self, id: &str, fallback: &str) -> String;
+
+    /// Write the session's mode as one append-only event.
+    fn set_mode(&self, id: &str, mode: &str, fallback: &str) -> Result<ModeWrite, ServiceError>;
+
+    /// Append a user message with the given content parts — the delivery of a steer.
+    fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError>;
+
+    /// The folder the session belongs to, if it has one.
+    fn folder(&self, id: &str) -> Option<PathBuf>;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Workspaces
+
+/// The `archived` filter of `/api/tree`: `only`, `show` (or the legacy `1`), else `hide`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchivedFilter {
+    #[default]
+    Hide,
+    Show,
+    Only,
+}
+
+impl ArchivedFilter {
+    /// Read the query parameter.
+    pub fn from_query(value: Option<&str>) -> Self {
+        todo!()
+    }
+}
+
+/// The workspace registry and the tree, as the routes use them. Paths are canonical when they arrive.
+pub trait WorkspaceService: Send + Sync {
+    /// Whether some registered root owns `path` (is it under a workspace root).
+    fn owns(&self, path: &Path) -> bool;
+
+    /// One level of the folder tree: the roots when `path` is `None`, else the children of `path`.
+    fn tree(
+        &self,
+        path: Option<&Path>,
+        archived: ArchivedFilter,
+        sessions: &[SessionMeta],
+    ) -> Result<Value, ServiceError>;
+
+    /// Register a folder as a root. Answers the record and whether it was created (idempotent).
+    fn add(&self, path: &Path, name: Option<&str>) -> Result<(Value, bool), ServiceError>;
+
+    /// Whether a root with this id exists.
+    fn find(&self, id: &str) -> bool;
+
+    /// Unregister a root; a refusal (it still holds sessions nobody else can adopt) is answered `409`.
+    fn remove(&self, id: &str, sessions: &[SessionMeta]) -> Result<Value, ServiceError>;
+
+    /// Retitle a root. `Ok(None)` is an unknown id; `Err` (an empty title) is answered `400`.
+    fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError>;
+
+    /// Make sure the folder a turn ran in has an owner, adopting it when none does.
+    fn ensure_owner(&self, folder: &Path);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Models
+
+/// The configured endpoints, as far as the server's selection rules need them.
+pub trait ModelService: Send + Sync {
+    /// The configured endpoint names.
+    fn names(&self) -> Vec<String>;
+
+    /// The configuration's nominated default endpoint.
+    fn default_endpoint(&self) -> Option<String>;
+
+    /// Whether `effort` is a reasoning level the endpoint's `model` (or its configured model when `None`)
+    /// declares — `reasoningLevelFor(...) !== undefined`.
+    fn declares_level(&self, endpoint: &str, model: Option<&str>, effort: &str) -> bool;
+
+    fn has(&self, endpoint: &str) -> bool {
+        self.names().iter().any(|name| name == endpoint)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Turns
+
+/// One interactive turn, as `/api/turn` asks for it.
+#[derive(Debug, Clone)]
+pub struct TurnRequest {
+    pub session: String,
+    pub endpoint: String,
+    pub prompt: String,
+    /// Content parts the attachment reader produced, recorded with the user message.
+    pub attachments: Vec<Value>,
+    /// Cancelled by a stop; the runner ends the provider request rather than waiting it out.
+    pub cancel: CancellationToken,
+    /// Rounds the turn may take; `None` is unbounded, the interactive default.
+    pub max_rounds: Option<u32>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
+/// What a finished turn reports on its `done` frame.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnOutcome {
+    pub text: String,
+    pub finish_reason: String,
+    pub rounds: u64,
+    /// The refusals, `{tool, code, message}` each.
+    pub denials: Vec<Value>,
+    /// Why the turn stopped early, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended: Option<Vec<String>>,
+    /// What the provider said the turn cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+}
+
+/// The agentic loop. The turn's session events reach readers through the event bus and the
+/// [`crate::stream::EventHub`] it is bridged into, not through this call.
+pub trait TurnRunner: Send + Sync {
+    fn run_turn(
+        &self,
+        request: TurnRequest,
+    ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>>;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Sandbox and approvals
+
+/// The deployment's access mode and the rule for changing a session's.
+pub trait SandboxService: Send + Sync {
+    /// The deployment default mode (`read-only`, `workspace-write` or `danger-full-access`).
+    fn default_mode(&self) -> String;
+
+    /// The sandbox's workspace root, reported by `/api/status` as `cwd`.
+    fn workspace_root(&self) -> String;
+
+    /// `permissionTransition(current, requested, confirm)`: the mode to write, or the refusal reason
+    /// (an unknown mode, or an escalation to full access without `confirm: "full-access"`).
+    fn transition(
+        &self,
+        current: &str,
+        requested: &Value,
+        confirm: &Value,
+    ) -> Result<String, String>;
+}
+
+/// How a person answered an approval question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalOutcome {
+    AllowedOnce,
+    Rejected,
+    Cancelled,
+}
+
+/// The approval service. While the server runs it is attached as the answerer, which turns an `ask`
+/// policy from "nobody can answer, so deny" into a card a person can answer.
+pub trait ApprovalService: Send + Sync {
+    /// Attach the Web UI as the answerer; the returned function detaches it.
+    fn attach_answerer(&self) -> Box<dyn FnOnce() + Send>;
+
+    /// The questions waiting for a person.
+    fn pending_requests(&self) -> Vec<Value>;
+
+    /// Settle one question exactly once; `false` when it is no longer waiting.
+    fn answer(&self, id: &str, outcome: ApprovalOutcome) -> bool;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Goals, todos, teams
+
+/// Which goal a verb acts on, and the revision the caller saw.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalRef {
+    pub id: String,
+    pub revision: u64,
+}
+
+/// The person's side of the goal verbs, from `POST /api/goal`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GoalAction {
+    Create {
+        objective: String,
+        max_goal_rounds: Option<u64>,
+    },
+    Edit {
+        goal: GoalRef,
+        objective: Option<String>,
+        max_goal_rounds: Option<u64>,
+    },
+    Pause(GoalRef),
+    /// Only a person may resume; the model's tool refuses.
+    Resume(GoalRef),
+    Complete(GoalRef),
+    Blocked {
+        goal: GoalRef,
+        reason: Value,
+    },
+    Clear(GoalRef),
+}
+
+/// What a goal verb answered: `{goal: view}`, or `{cleared}` for a clear.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GoalAnswer {
+    Goal(Value),
+    Cleared(Value),
+}
+
+/// The goal service. Errors carry its stable code: `GOAL_NOT_FOUND` is a `404`, `GOAL_STALE_REVISION` a
+/// `409`, anything else a `400`.
+pub trait GoalService: Send + Sync {
+    fn get(&self, session: &str) -> Option<Value>;
+    fn act(&self, session: &str, action: GoalAction) -> Result<GoalAnswer, ServiceError>;
+}
+
+/// The todo service: the session's list as its current fold, `None` when never written.
+pub trait TodoService: Send + Sync {
+    fn get(&self, session: &str) -> Option<Value>;
+}
+
+/// One Lead session's team as the view shows it — the same state the tools see.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TeamView {
+    pub lead: Value,
+    pub members: Value,
+    pub tasks: Value,
+    pub messages: Value,
+    pub delivered: Value,
+}
+
+pub trait TeamService: Send + Sync {
+    fn view(&self, session: &str) -> TeamView;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Pieces other ui-lane crates provide
+
+/// `readAttachments`: the composer's attachment references (paths into the upload directory) read into
+/// typed content parts; `Err` carries the sentence a `400` answers with.
+pub trait AttachmentReader: Send + Sync {
+    fn read(&self, raw: Option<&Value>) -> Result<Vec<Value>, String>;
+}
+
+/// `renderMarkdown`: an answer's text as an allow-listed document.
+pub trait MarkdownRenderer: Send + Sync {
+    fn render(&self, text: &str) -> String;
+}
+
+/// The composer's bottom statistics for one session, projected from its events (with the context
+/// breakdown fallback), as the `stats` field of `GET /api/sessions/<id>`.
+pub trait SessionStatsProjector: Send + Sync {
+    fn stats(&self, session: &str, events: &[Value]) -> Value;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The harness
+
+/// Every service the server calls. The four required ones are always present; the rest are `None` when the
+/// boot did not load them.
+#[derive(Clone)]
+pub struct Harness {
+    pub sessions: Arc<dyn SessionService>,
+    pub models: Arc<dyn ModelService>,
+    pub turns: Arc<dyn TurnRunner>,
+    pub sandbox: Arc<dyn SandboxService>,
+    pub workspaces: Option<Arc<dyn WorkspaceService>>,
+    pub approvals: Option<Arc<dyn ApprovalService>>,
+    pub goals: Option<Arc<dyn GoalService>>,
+    pub todos: Option<Arc<dyn TodoService>>,
+    pub team: Option<Arc<dyn TeamService>>,
+    pub attachments: Option<Arc<dyn AttachmentReader>>,
+    pub markdown: Option<Arc<dyn MarkdownRenderer>>,
+    pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// The server process's working directory: where a turn with no folder starts its session, and where
+    /// `POST /api/sessions` creates one when no branch is named.
+    pub cwd: PathBuf,
+}
+
+impl Harness {
+    /// A harness with the four required services and nothing optional.
+    pub fn new(
+        sessions: Arc<dyn SessionService>,
+        models: Arc<dyn ModelService>,
+        turns: Arc<dyn TurnRunner>,
+        sandbox: Arc<dyn SandboxService>,
+        cwd: PathBuf,
+    ) -> Self {
+        todo!()
+    }
+}
