@@ -26,10 +26,15 @@
 // refused on that ground and never replaced: origin's lines are kept and the new lines
 // are added, and every line of both is verified present in what was pushed.
 //
+// A record commit carries every file it is given, or none. A given file that would not
+// change origin/main (its content already equal, or every one of its log lines already
+// there) refuses the whole run before anything is committed: silently committing the
+// rest is how two of three files once went missing with an exit 0.
+//
 //   0  committed, read back, live tree synced (or --no-sync)
-//   1  refused or failed before the commit: stale base, validator, nothing to commit,
-//      bad arguments
-//   2  the commit was pushed but origin/main does not carry it as expected
+//   1  refused before the commit: stale base, validator, bad arguments
+//   2  the record would not carry every given file (refused, nothing committed), or the
+//      pushed commit does not carry it as expected
 //   3  committed and read back, but the live tree could not be synced
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -40,11 +45,36 @@ import { fileURLToPath } from 'node:url'
 export const OK = 0
 export const REFUSED = 1
 export const READ_BACK_FAILED = 2
+export const INCOMPLETE = 2
 export const SYNC_REFUSED = 3
 
 export const IDENTITY = { name: 'D.Tadpole', email: 'gsk390@gmail.com' }
 export const LOG_PATTERN = /(^|\/)_logs_\/.*\.jsonl$|(^|\/)execution-review-log\.jsonl$/i
 export const VALIDATOR_PATH = 'shared/_tools_/frontmatter-validator/validate-frontmatter.py'
+
+// shared/_conventions_/core-conventions/commit-messages.md: the types, and a commit that
+// only appends to _logs_/ is log(...). No gate reads messages, so the tool warns.
+export const COMMIT_TYPES = ['feat', 'fix', 'docs', 'test', 'refactor', 'perf', 'ci', 'chore', 'revert', 'log']
+
+export function messageWarnings(message, paths = []) {
+  const subject = String(message ?? '').split('\n')[0]
+  const match = /^([a-z]+)(\([^)]+\))?!?: \S/.exec(subject)
+  if (!match) {
+    const loose = /^([A-Za-z]+)(\([^)]*\))?:/.exec(subject)
+    const hint = loose && ['record', 'logs'].includes(loose[1].toLowerCase()) ? ` ('${loose[1]}' is spelled ${loose[1].toLowerCase() === 'logs' ? 'log' : 'docs or log'})` : ''
+    return [`the message is not <type>(<scope>): <subject>${hint}`]
+  }
+  const warnings = []
+  const type = match[1]
+  if (!COMMIT_TYPES.includes(type)) {
+    const hint = type === 'record' ? ': a record edit is docs(<scope>), a log-only commit is log(<scope>)' : type === 'logs' ? ': spelled log' : ''
+    warnings.push(`'${type}' is not a commit type (${COMMIT_TYPES.join(', ')})${hint}`)
+  }
+  const logOnly = paths.length > 0 && paths.every((path) => /(^|\/)_logs_\//.test(path))
+  if (logOnly && type !== 'log') warnings.push(`every path is under _logs_/, so the type is log(<scope>), not ${type}`)
+  if (type === 'log' && !logOnly && paths.length > 0) warnings.push('log(<scope>) is for a commit that only appends to _logs_/; this one touches more')
+  return warnings
+}
 
 export function isLogPath(path, extra = []) {
   return LOG_PATTERN.test(path) || extra.includes(path)
@@ -85,8 +115,14 @@ export function baseCheck({ path, base, origin }) {
 // After the push: origin/main must be the commit, and every file must carry what was
 // staged — byte-for-byte for a file, line-for-line (origin's and the staged ones) for
 // an append-only log.
-export function verifyLanded({ commit, originMain, files, readOrigin }) {
+export function verifyLanded({ commit, originMain, files, readOrigin, committedPaths = null }) {
   const problems = []
+  if (committedPaths !== null) {
+    const missing = files.map((file) => file.path).filter((path) => !committedPaths.includes(path))
+    if (missing.length > 0) {
+      problems.push(`the commit carries ${files.length - missing.length} of the ${files.length} given file(s); not carried: ${missing.join(', ')}`)
+    }
+  }
   if (originMain !== commit) {
     problems.push(`origin/main is ${String(originMain).slice(0, 12)}, not the committed ${String(commit).slice(0, 12)}`)
   }
@@ -199,17 +235,35 @@ function attempt({ config, report }) {
   const prepared = config.files.map((file) => {
     const origin = show(repo, originMain, file.path)
     const log = isLogPath(file.path, config.append)
-    if (!log) {
-      const check = baseCheck({ path: file.path, base: file.base, origin })
-      if (!check.ok) return { ...file, refused: check.reason }
-    }
     const expected = log ? unionLines(origin, file.content) : file.content
-    return { ...file, kind: log ? 'log' : 'file', origin, expected }
+    // Equal to origin is checked before the base: if another writer already landed the
+    // same bytes, the file is not stale, it is simply not this commit's to carry.
+    const unchanged = origin !== null && expected.equals(origin)
+    if (!log && !unchanged) {
+      const check = baseCheck({ path: file.path, base: file.base, origin })
+      if (!check.ok) return { ...file, kind: 'file', refused: check.reason }
+    }
+    return { ...file, kind: log ? 'log' : 'file', origin, expected, unchanged }
   })
   const refused = prepared.filter((file) => file.refused)
   if (refused.length > 0) {
     for (const file of refused) report.push(`  REFUSED ${file.path}: ${file.refused}`)
     return { code: REFUSED, files: prepared, report }
+  }
+  const unchanged = prepared.filter((file) => file.unchanged)
+  if (unchanged.length > 0) {
+    for (const file of unchanged) {
+      const why =
+        file.kind === 'log'
+          ? 'every given line is already in origin/main'
+          : 'its content already equals origin/main'
+      report.push(`  UNCHANGED ${file.path}: ${why}, so the commit would not carry it (was the edit saved in ${repo}, or did another writer land it?)`)
+    }
+    report.push(
+      `  refusing: ${unchanged.length} of ${prepared.length} given file(s) would not change; a record commit carries every file it is given or none. ` +
+        'Nothing was committed; rerun without them if that is what you mean.',
+    )
+    return { code: INCOMPLETE, files: prepared, report }
   }
   for (const file of prepared) {
     const detail =
@@ -281,9 +335,12 @@ function attempt({ config, report }) {
     const paths = prepared.map((file) => file.path)
     git(tmp, ['add', '--', ...paths])
     const stagedDiff = git(tmp, ['diff', '--cached', '--name-only'], { allowFailure: true })
-    if (!stagedDiff.stdout.trim()) {
-      report.push('  nothing to commit: the staged content already equals origin/main')
-      return { code: REFUSED, files: prepared, report }
+    const stagedPaths = stagedDiff.stdout.split('\n').filter(Boolean)
+    const notStaged = paths.filter((path) => !stagedPaths.includes(path))
+    if (notStaged.length > 0) {
+      // A safety net behind the unchanged check: git itself saw no change for these.
+      report.push(`  refusing: git staged ${stagedPaths.length} of the ${paths.length} given file(s); not staged: ${notStaged.join(', ')}. Nothing was committed.`)
+      return { code: INCOMPLETE, files: prepared, report }
     }
     git(tmp, ['-c', `user.name=${config.identity.name}`, '-c', `user.email=${config.identity.email}`, 'commit', '-q', '-m', message])
     const commit = git(tmp, ['rev-parse', 'HEAD']).stdout.trim()
@@ -304,17 +361,19 @@ function attempt({ config, report }) {
     }
     git(tmp, ['fetch', '-q', remote])
     const landedMain = git(tmp, ['rev-parse', mainRef]).stdout.trim()
+    const committedPaths = git(tmp, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', commit]).stdout.split('\0').filter(Boolean)
     const problems = verifyLanded({
       commit,
       originMain: landedMain,
       files: prepared,
       readOrigin: (path) => show(tmp, mainRef, path),
+      committedPaths,
     })
     if (problems.length > 0) {
       for (const problem of problems) report.push(`  READ-BACK ${problem}`)
       return { code: READ_BACK_FAILED, commit, files: prepared, report }
     }
-    report.push(`  read back: ${mainRef} ${landedMain.slice(0, 7)} carries all ${prepared.length} file(s)`)
+    report.push(`  read back: ${mainRef} ${landedMain.slice(0, 7)} is the commit, and it carries all ${prepared.length} given file(s)`)
     return { code: OK, commit, files: prepared, report }
   } finally {
     cleanupWorktree(repo, root)
@@ -459,6 +518,9 @@ if (invokedAsScript()) {
         console.error('record-commit: no files to commit')
         process.exitCode = REFUSED
       } else {
+        for (const warning of messageWarnings(args.message, files.map((file) => file.path))) {
+          console.error(`record-commit: warning: ${warning}`)
+        }
         const result = recordCommit({ ...args, files, sync: !args.noSync })
         for (const line of result.lines) console.log(line)
         process.exitCode = result.code

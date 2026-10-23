@@ -17,11 +17,15 @@ checkout.
 ```bash
 # a live-checkout edit, the common case
 node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
-  --message "record: ..." --file _projects_/heddle/_context_/team-operations/decision-log.yaml
+  --message "docs(<team>): record the decision" --file _projects_/<team>/_context_/<record>.yaml
+
+# a commit that only appends to logs is log(<scope>)
+node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
+  --message "log(<team>): two step lines" --file _logs_/repo-actions/action-log.jsonl
 
 # an edit kept in a staging tree, with the pre-edit original beside it
 node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
-  --message "record: ..." --staged /tmp/record-edits --base /tmp/record-base
+  --message "docs(<team>): ..." --staged /tmp/record-edits --base /tmp/record-base
 ```
 
 ## What it does, in order
@@ -46,13 +50,29 @@ re-union, re-check — up to `--retries` times (default 2). It never rebases and
 commits but the live tree cannot be fast-forwarded, that is exit 3: the record is safe and the live tree is
 retried next pass.
 
+## Every file or none
+
+A record commit carries every file it is given, or none. A given file that would not change `origin/main` — its
+content already equal, or every one of its log lines already there — refuses the whole run before anything is
+committed, naming the file (`UNCHANGED path: ... was the edit saved in <repo>, or did another writer land it?`).
+Behind that, git's own staged list must name every given path, and the read-back checks that the pushed commit's
+file list contains every given path, not only that each file's bytes match. A run that once committed one of
+three files with exit 0 now stops at the first of those three checks, and each check alone is enough.
+
+## The message
+
+The subject should be `<type>(<scope>): <subject>` with a type from the shared convention (`feat`, `fix`, `docs`,
+`test`, `refactor`, `perf`, `ci`, `chore`, `revert`, `log`). A record edit is `docs(<scope>)`; a commit that only
+appends to `_logs_/` is `log(<scope>)`; `record:` is not a type. The tool warns on stderr and still commits, since no
+gate reads messages.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | committed, read back, live tree synced (or `--no-sync`) |
-| `1` | refused or failed before the commit: stale base, validator error, nothing to commit, bad arguments |
-| `2` | the commit was pushed but `origin/main` does not carry it as expected |
+| `1` | refused before the commit: stale base, validator error, bad arguments |
+| `2` | the record would not carry every given file (refused, nothing committed), or the pushed commit does not carry it as expected |
 | `3` | committed and read back, but the live tree was not fast-forwarded |
 
 ## Options that matter
@@ -72,7 +92,10 @@ retried next pass.
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
-Sixteen tests against a scratch bare origin and clones: the happy path landing and syncing the live tree, a
+Twenty-two tests against a scratch bare origin and clones: the happy path landing and syncing the live tree, three
+given files with two unchanged refused together, a log whose lines another writer already landed, a staged file
+another writer lands mid-run with the same bytes (exit 2) and with different bytes (exit 1), the read-back counting
+given files, the message warnings, a
 stale base refused with origin untouched, two writers' log lines both kept, a log edit that deletes an origin
 line unable to delete it from the commit, the validator seeing the whole tree and a failing validator refusing,
 a staging tree with `--base`, nothing-to-commit, a dry run that commits nothing, a simulated push race rebuilt
