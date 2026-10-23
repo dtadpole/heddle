@@ -10,3 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The driver's chains: one spawned task per session lane, joined through a shared future.
+futures.workspace = true
+serde.workspace = true
+# `preserve_order`: a `goal/change` body and a tool answer are written with the TypeScript build's key order,
+# so the session log stays byte-compatible. Proposed for the workspace entry; enabled here meanwhile.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
