@@ -302,6 +302,15 @@ test('a fenced multi-line command and the counted result below it are one record
   )
 })
 
+test('a backticked verify-runner line with its result on one line is a recorded run', (t) => {
+  const w = world(t)
+  write(w.seat, 'rust/crates/fake-crate/INDEX.md', '# fake\n\n| 05 | `HEDDLE_BIN=<bin> node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json` | 10/10 passed, 2026-10-22 |\n')
+  const runs = recordedRuns({ worktree: w.seat, scopes: parseScopes({ write_scopes: ['heddle rust/crates/fake-crate/'] }) })
+  assert.equal(runs.recordedTotal, 1)
+  assert.equal(runs.recorded[0].command, 'HEDDLE_BIN=<bin> node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json')
+  assert.equal(runs.recorded[0].date, '2026-10-22')
+})
+
 test('the page carries every section a review needs', (t) => {
   const w = world(t)
   const r = cli(w)

@@ -93,9 +93,9 @@ page, `1` when the seat, the team file or the reviewer's checkout is missing. No
 node --test _tools_/review-collect/_tests_/page/unit.test.mjs
 ```
 
-Last run 2026-10-22 21:22 PDT, on 203cfff with main 4aca3b1 merged: `node --test _tools_/review-collect/_tests_/page/unit.test.mjs`, 19 passed, 0 failed.
+Last run 2026-10-22 21:30 PDT, on hd/tool-developer with main c4c9292 merged: `node --test _tools_/review-collect/_tests_/page/unit.test.mjs`, 20 passed, 0 failed.
 
-Nineteen tests against a scratch bare origin, a reviewer clone, a fake seat with commits ahead and uncommitted edits,
+Twenty tests against a scratch bare origin, a reviewer clone, a fake seat with commits ahead and uncommitted edits,
 a fake inbox, action log and review log: the roster reader, the pushed branch beside local HEAD, the defaults derived from the record (and the refusal
 without one), scope parsing and the four verdicts, porcelain parsing,
 the report-versus-peer-message rule, the ledger cutoff, run detection on one line and across a fenced multi-line

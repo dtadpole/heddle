@@ -325,7 +325,9 @@ const COUNTED_RESULT = /\b\d+\s*(tests?|checks?|passed|failed|unjudged|cases?)\b
 // A recorded run carries a result: a count, a ratio, a pass word or a date. A usage line
 // ("sh verify.sh --list  # why any was unjudged") does not, and is not a run.
 const RESULT_HINT = /\b\d+\s*(tests?|checks?|passed|failed|unjudged|cases?)\b|\b\d+\/\d+\b|\b(green|passed|passes|all pass)\b|20\d\d-\d\d-\d\d/i
-const COMMAND_IN_LINE = /`([^`]*(?:cargo (?:test|check|clippy)|verify\.sh|node --test)[^`]*)`/
+// The same commands RUN_HINT names, so a backticked runner line is captured too
+// (developer-one: `HEDDLE_BIN=... node _tools_/verify-runner/run.mjs ...` was missed).
+const COMMAND_IN_LINE = /`([^`]*(?:cargo (?:test|check|clippy|build)|verify\.sh|node --test|verify-runner\/(?:run|all)\.mjs|local-build\/run\s+(?:test|check|build|clippy))[^`]*)`/
 
 // The INDEX of the unit a path belongs to: a crate, a verifier, a tool, a context folder.
 export function unitIndex(path) {
