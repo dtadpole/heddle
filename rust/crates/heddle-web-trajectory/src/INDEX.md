@@ -1,6 +1,6 @@
 ---
 title: The heddle-web-trajectory sources
-version: 0.2.0
+version: 0.3.0
 description: The sources of the heddle-web-trajectory crate, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -21,7 +21,8 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`inspector.rs`](inspector.rs) | a tool row's inspector blocks |
 | [`log_download.rs`](log_download.rs) | the downloaded log's name, header and body |
 | [`view.rs`](view.rs) | the `?view=ledger` body |
-| [`routes.rs`](routes.rs) | the host trait, `ledger_response` and the `/log` router |
+| [`routes.rs`](routes.rs) | the host trait, `ledger_response`, `log_response` and the `/log` router |
+| [`test_support.rs`](test_support.rs) | the in-memory host the route and view tests run against (`#[cfg(test)]` only) |
 
 ## Read next
 

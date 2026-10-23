@@ -32,10 +32,14 @@
 pub mod catalog;
 pub mod context_view;
 pub mod http;
+pub mod js;
 pub mod model_switcher;
 pub mod session;
 pub mod status;
 pub mod turn_control;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::sync::Arc;
 

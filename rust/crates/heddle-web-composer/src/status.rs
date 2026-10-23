@@ -6,7 +6,12 @@
 
 use std::sync::Arc;
 
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::get;
 use serde::Serialize;
+
+use crate::http::json_compact;
 
 /// What `/api/status` reads from the running harness.
 pub trait StatusHost: Send + Sync + 'static {
@@ -31,12 +36,56 @@ pub struct SandboxStatus {
 
 /// The status a host reports, shaped for the page.
 pub fn status_view<H: StatusHost + ?Sized>(host: &H) -> StatusView {
-    let _ = host;
-    todo!("status_view")
+    StatusView {
+        sandbox: SandboxStatus {
+            mode: host.sandbox_mode(),
+        },
+        cwd: host.workspace_root(),
+    }
 }
 
 /// `GET /api/status`.
 pub fn routes<H: StatusHost>(host: Arc<H>) -> axum::Router {
-    let _ = host;
-    todo!("status::routes")
+    axum::Router::new()
+        .route(
+            "/api/status",
+            get(move |State(host): State<Arc<H>>| async move {
+                json_compact(StatusCode::OK, &status_view(&*host))
+            }),
+        )
+        .with_state(host)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Method;
+
+    use crate::test_support::{Host, assert_answer_headers, body_text, call};
+
+    #[tokio::test]
+    async fn the_status_answers_the_deployment_mode_and_the_workspace_root() {
+        let router = routes(Arc::new(Host::default()));
+        let response = call(router, Method::GET, "/api/status", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_answer_headers(&response, crate::http::JSON_CONTENT_TYPE);
+        assert_eq!(
+            body_text(response).await,
+            "{\"sandbox\":{\"mode\":\"workspace-write\"},\"cwd\":\"/tmp/workspace\"}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_without_a_workspace_root_says_null_rather_than_inventing_one() {
+        let host = Host {
+            workspace_root: None,
+            ..Host::default()
+        };
+        let router = routes(Arc::new(host));
+        let response = call(router, Method::GET, "/api/status", None).await;
+        assert_eq!(
+            body_text(response).await,
+            "{\"sandbox\":{\"mode\":\"workspace-write\"},\"cwd\":null}\n"
+        );
+    }
 }

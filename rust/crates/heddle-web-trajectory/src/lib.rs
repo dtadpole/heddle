@@ -48,6 +48,9 @@ pub mod timeline;
 pub mod usage;
 pub mod view;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use inspector::{JsonHighlighter, ToolInspection, inspect_tool, render_payload};
 pub use ledger::{
     Ledger, LedgerKind, LedgerRecord, LedgerStep, LedgerTokens, LedgerTurn, ToolState, UsageSource,

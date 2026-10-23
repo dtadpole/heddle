@@ -1,6 +1,6 @@
 ---
 title: The heddle-web-trajectory crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for the trajectory view routes, the ledger and log download — its public API, what it needs from other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -20,7 +20,7 @@ key order kept), so it depends on no session type.
 | Ported from | `src/server/ledger.ts`, `src/server/log-download.ts`, `src/server/tool-inspector.ts` |
 | Judged by | `_verifiers_/85-trajectory-view`, `_verifiers_/80-web-ui` (check-trajectory-view; the ledger half of check-runtime-context; the dock of check-composer), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **public API landed, bodies are `todo!()`** — implementation follows in the port plan below |
+| Status | **implemented and unit-tested — 95 tests across the two crates (61 here); the routes are mounted by `heddle-server` and the binary, which is the remaining step** |
 
 ## Public API
 
@@ -37,6 +37,7 @@ key order kept), so it depends on no session type.
 | `ledger_response(&H, id) -> Response` | the `?view=ledger` answer, for the **server's** `GET /api/sessions/{id}` handler to return |
 | `router(Arc<H>) -> axum::Router` | mounts `GET /api/sessions/{id}/log` (state applied; merges into any `Router<()>`) |
 | `TokenUsage`, `merge_token_usage`, `billed_input_tokens` | **temporary** copies of `heddle-llm`'s usage type and helpers, to become re-exports with the same shape |
+| `js` (from `heddle-web-composer`) | the JavaScript behaviours the projections reproduce; private to the crates, not a route |
 
 ## What it needs from other crates
 
@@ -54,18 +55,19 @@ key order kept), so it depends on no session type.
 
 ## Port plan
 
-1. **API** (this commit): types, traits, signatures, docs; `todo!()` bodies.
-2. **JS-compatible helpers**, private: `Date.parse` of ISO-8601 to epoch milliseconds and `Date#toISOString`
-   back; UTF-16 slicing for `slice(0, n)`; JavaScript's `\s` set; `JSON.stringify(v, null, 2)`;
-   `encodeURIComponent`. Each with tests, because each is a place a port silently differs.
-3. **Usage, ledger, rows, timeline, stats**, porting every case of `test/ledger.test.ts` as a Rust unit test
-   beside the code, plus the in-flight, absent-not-zero and prompt-folded-once rules as separate tests.
-4. **Inspector and log download**, porting `test/tool-inspector.test.ts` and `test/log-download.test.ts`.
-5. **View and routes**: `ledger_view`, `ledger_response`, `router`, tested in-process with a host double
-   through `tower::ServiceExt::oneshot` — status codes, error sentences, headers, body bytes.
-6. **Through the binary**: once `heddle-server` mounts the routes, `85-trajectory-view` and
-   `80-web-ui check-trajectory-view` through `HEDDLE_BIN`, and a byte comparison of `?view=ledger` and `/log`
-   with the TypeScript build on the same session log.
+1. **API** — types, traits, signatures, docs; `todo!()` bodies. Landed in `0e487cf`, rebased as `2e2e530`.
+2. **JS-compatible helpers** — `Date.parse`/`Date#toISOString`, UTF-16 slicing, JavaScript's `\s`, JSON
+   stringification and `encodeURIComponent`. They live in `heddle-web-composer`'s `js` module (the crate this
+   one already depends on), each with its own tests.
+3. **Usage, ledger, rows, timeline, stats** — every case of `test/ledger.test.ts` (and the usage cases of
+   `test/usage.test.ts`) is a Rust unit test beside the code, including the in-flight, absent-not-zero and
+   prompt-folded-once rules.
+4. **Inspector and log download** — `test/tool-inspector.test.ts` and `test/log-download.test.ts` ported.
+5. **View and routes** — `ledger_view`, `ledger_response`, `log_response` and `router`, tested in-process with
+   a host double through `tower::ServiceExt::oneshot`: status codes, error sentences, headers, body bytes.
+6. **Through the binary** (pending): once `heddle-server` mounts the routes and the binary implements
+   `TrajectoryHost`, `85-trajectory-view` and `80-web-ui check-trajectory-view` through `HEDDLE_BIN`, and a
+   byte comparison of `?view=ledger` and `/log` with the TypeScript build on the same session log.
 
 ## Known divergences
 
@@ -73,6 +75,9 @@ key order kept), so it depends on no session type.
   `toISOString()`, which always carries `Z`.
 - Slicing at 2000 / 80 UTF-16 units never splits a surrogate pair (JavaScript can leave a lone half).
 - Token counts are unsigned integers; a non-integer count in a log is treated as absent.
+- `JSON.stringify(v, null, 2)` is `serde_json`'s pretty printer: the indentation and key order agree, while a
+  control character outside the escape shorthand is written `\u00XX` by both, and a non-ASCII string stays
+  unescaped by both.
 
 ## Read next
 

@@ -1,6 +1,6 @@
 ---
 title: The heddle-web-composer crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for the composer routes — runtime context, the context view, the model switcher and the tool catalog — its public API, what it needs from other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -20,7 +20,7 @@ trait declared here, so it builds and is tested against doubles before the crate
 | Ported from | `src/server/tool-catalog.ts`, the composer routes of `src/server/web.ts` |
 | Judged by | `_verifiers_/80-web-ui` (check-composer, check-context-view, check-runtime-context, check-model-switcher), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **public API landed, bodies are `todo!()`** — implementation follows in the port plan below |
+| Status | **implemented and unit-tested — 34 tests; mounting by `heddle-server` and the binary is the remaining step** |
 
 ## Routes
 
@@ -49,6 +49,7 @@ module also has its own `routes`. Status codes, error sentences and body bytes a
 | trait `TurnControlHost`, `validate_steer`, `Steer::content` | what runs, abort, attachments, recording the steer |
 | `ToolSpec`, `ToolSchema`, `catalog_of`, `schema_for` | the tool catalog the Trajectory details pane shows (`ToolSpec` is temporary until `heddle-llm` publishes its own) |
 | `http::{respond, json_pretty, json_compact, error, is_session_id, read_json, BodyRefusal, trimmed_field}` | the TypeScript server's answer shapes, shared with `heddle-web-trajectory` |
+| `js` | the JavaScript behaviours the answer shapes and projections must reproduce (`Date.parse`/`toISOString`, UTF-16 slicing, `\s`, JSON stringification, `encodeURIComponent`, HTML escaping) |
 
 ## What it needs from other crates
 
@@ -68,15 +69,16 @@ handles. Until then the server can implement the traits itself.
 
 ## Port plan
 
-1. **API** (this commit): types, traits, signatures, docs; `todo!()` bodies.
-2. **`http` and `catalog`**: answer helpers, `read_json`'s 10 MiB / empty / invalid rules, `is_session_id`,
-   `catalog_of` with `localeCompare`-compatible ordering; port `test/tool-catalog.test.ts`.
-3. **Pure route logic**: `status_view`, `context_notes`, `context_view`, `with_discovered_windows`,
-   `validate_model_switch`, `validate_steer` — each with tests of every refusal and of the validation order.
-4. **Routes**: in-process tests through `tower::ServiceExt::oneshot` with host doubles — every row of each
+1. **API** — types, traits, signatures, docs; `todo!()` bodies. Landed in `0e487cf`, rebased as `2e2e530`.
+2. **`http` and `catalog`** — answer helpers, `read_json`'s 10 MiB / empty / invalid rules, `is_session_id`,
+   `catalog_of` with `localeCompare`-compatible ordering; `test/tool-catalog.test.ts` ported.
+3. **Pure route logic** — `status_view`, `context_notes`, `context_view`, `with_discovered_windows`,
+   `validate_model_switch`, `validate_steer`, each with tests of every refusal and of the validation order.
+4. **Routes** — in-process tests through `tower::ServiceExt::oneshot` with host doubles: every row of each
    module's answer table, headers and bytes.
-5. **Through the binary**: once mounted, `80-web-ui` check-composer, check-context-view, check-runtime-context
-   and check-model-switcher through `HEDDLE_BIN`.
+5. **Through the binary** (pending): once `heddle-server` mounts [`router`](src/lib.rs) and the binary
+   implements the four host traits, `80-web-ui` check-composer, check-context-view, check-runtime-context and
+   check-model-switcher through `HEDDLE_BIN`.
 
 ## Read next
 

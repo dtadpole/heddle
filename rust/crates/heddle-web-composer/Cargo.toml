@@ -16,3 +16,9 @@ serde.workspace = true
 # `preserve_order`: a session event is re-serialised in the order it was written, as `JSON.stringify` does.
 # Cargo unifies features, so this applies to every crate of the binary — which the byte-compatible log wants.
 serde_json = { workspace = true, features = ["preserve_order"] }
+# A projection that cannot be serialised is a server bug; say so rather than answering a silent `null`.
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower = { version = "0.5", features = ["util"] }
