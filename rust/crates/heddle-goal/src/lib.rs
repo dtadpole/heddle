@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod command;
 mod driver;
 pub mod http;
 mod log;
