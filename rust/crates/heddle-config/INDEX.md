@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:02:56Z
+modified: 2026-10-23T06:09:34Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -287,6 +287,7 @@ it judges.
 | 2026-10-22 | lane `b71715e`, now main `73bf9f6` (web mounts the files and trajectory routers and the ledger view, in `web.rs`; main adds a lockfile regeneration that moves no version, and a status doc) | `HEDDLE_BIN=<debug build of exactly b71715e> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` still boots the repository's own profile |
 | 2026-10-22 | lane `a3e1ad5`, re-made on main as `6fbf0f8` with identical binary inputs (web mounts the composer and composes the workspace and approvals rows; the standalone `web.rs` is retired in favour of main's) | `HEDDLE_BIN=<debug build of exactly a3e1ad5> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web.rs` takes every home directory from `heddle_home` on the invocation's `Env` |
 | 2026-10-22 | lane `d212c1a`, now main `d836e5b` (web composes the goal, todo and team rows and recovers teams at start; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly d212c1a> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, home directories still from `heddle_home` on the invocation's `Env` |
+| 2026-10-22 | lane `74fccb4`, now main `5d9d0f9` (web drives goals, following session events and resuming at start; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 74fccb4> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, made after the candidate on a clean lane; the lane gate with each | 10/10 passed, verdict 0, both binaries; lane gate green; `web --dry-run` boots |
 
 ## Decisions the contract makes
 
