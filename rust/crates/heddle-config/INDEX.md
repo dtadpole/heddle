@@ -163,6 +163,12 @@ optional `args`, an inline `config` JSON Schema) without starting anything; and 
 `Unresolvable`. **Keep the path arm delegating to `ManifestCatalog`**: answering `Unresolvable` there makes check 7 of
 `05-config-system` fail, with the row named but not the field.
 
+To answer a built-in, the catalog constructs that built-in's component and asks `schema()`; it never calls `start`.
+`--validate` therefore starts nothing only while **a component's constructor merely stores its inputs and its
+`schema()` is a pure value** — no file, directory, process or network touched. A new adapter keeps both, or
+`config --validate` begins doing work on a tree it was only asked to describe. As of lane `1221b3e`, every built-in
+constructor stores `env` and `cwd` only, and none of the 13 `schema()` bodies does I/O.
+
 ### 7. What the server reads after boot
 
 | Call | What to know |
@@ -211,6 +217,7 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | lane `a66e662` (eleven merges: the binary's `boot.rs`, `float_roundtrip` workspace-wide, and this crate's null-config tests) | `HEDDLE_BIN=<debug build of exactly a66e662> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; this crate's 118 unit tests passed on the same tree under `float_roundtrip` |
 | 2026-10-22 | main `d28625d` (UI-verifier fixes only; no Rust source, 05 verifier or runner changed since `a819f5f`) | `HEDDLE_BIN=<lane release build of the 480d9b8 sources, identical here> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0 |
 | 2026-10-22 | main `b0ef8ab` (the lane's merges re-made on main: the binary's `boot.rs`, `float_roundtrip`, a `heddle-tools` that differs from `a66e662`) | `HEDDLE_BIN=<debug build of exactly b0ef8ab> sh _verifiers_/05-config-system/verify.sh --json`; this crate's code and the workspace manifest are identical to `a66e662`, where its 118 unit tests passed | 10/10 passed, verdict 0 |
+| 2026-10-22 | lane `1221b3e` (the binary composes the session, workspace, tools, todo, goal and turn rows; built-in adapters now supply schemas) | `HEDDLE_BIN=<debug build of exactly 1221b3e> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; `heddle config --validate` on the repository's own profile: 16 rows checked, 0 problems |
 
 ## Decisions the contract makes
 
