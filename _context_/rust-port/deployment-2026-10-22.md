@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:32:50Z
+modified: 2026-10-23T04:33:08Z
 level: L3
 version: 1.7.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
@@ -225,7 +225,7 @@ proxy, installed on this Mac with that project's own installer) listens on 8082 
 is launchd (`ppid 1`; no supervisord runs here), so it has the same defect the server had before `supervisor.mjs`: a
 gate process that dies is not restarted, and 8082 stays down although the server behind it is healthy.
 
-Rehearsed on a scratch pair, 2026-10-22 at about 21:33 PDT, with the gate's unchanged code on 8096 in front of a
+Rehearsed on a scratch pair, 2026-10-22 at about 21:29 PDT (before 21:30:59, when this section was committed), with the gate's unchanged code on 8096 in front of a
 rehearsal heddle on 3096 (own log, mode 600), the live gate untouched (pid 97470 before and after):
 
 | Gate arrangement | SIGKILL of the process owning 8096 |
@@ -326,8 +326,8 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 21:21 | `b0ef8ab` (Rust status run on `ea1028b`) | `b0ef8ab`, clean | 96 **3/3** from the deployment; 95 judged on the scratch service instead (4/4, rehearsal run 3), so the owner's server was not killed |
 | 21:24 | `b89ad37` (Rust status run on `4aca3b1`; the hygiene gate judges from the merge base) | `b89ad37`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567`; 95 not run against the live agent |
 | 21:27 | `c4c9292` (check-team-view fails instead of hanging) | `c4c9292`, clean | 96 **3/3** from the deployment; marker `dd6d45d28567` |
-| 21:34 | `1157d4e` (30 commits; the bus adapts to the tools and agent ports) | `1157d4e`, clean | **first redeploy by `redeploy.sh`**: 3.8 s end to end, longest silence at 3082 300 ms; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
-| 21:36 | `5c87849` | `5c87849`, clean | `redeploy.sh`; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
+| 21:31 | `1157d4e` (30 commits; the bus adapts to the tools and agent ports) | `1157d4e`, clean | **first redeploy by `redeploy.sh`**: 3.8 s end to end, longest silence at 3082 300 ms; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
+| 21:32 | `5c87849` | `5c87849`, clean | `redeploy.sh`; 96 **3/3**; marker `dd6d45d28567`; 8082 `/api/sessions` 200 |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
