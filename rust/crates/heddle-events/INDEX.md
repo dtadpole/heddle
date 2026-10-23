@@ -64,8 +64,8 @@ contract. `cargo doc -p heddle-events` renders it.
 |---|---|---|
 | 1 | Public API, docs, catalog and its tests | landed |
 | 2 | The bus: table, scopes and children, `once`, snapshot dispatch, the five modes, error attribution; unit tests for each Cordis rule (order, prepend, once, snapshot, release with scope and parent, veto, replace, map, attribution, parallel collection, serial and bail stop) | landed |
-| 3 | The JSON bridges and the `expose_*` registry, tested with an in-memory `JsonListener` | next |
-| 4 | `StdioListener`: spawn, correlate by `id`, timeouts, child death, stderr to the log; tested against a small script child | after 3, framing agreed with developer-five |
+| 3 | The JSON bridges and the `expose_*` registry, tested with an in-memory `JsonListener` | landed |
+| 4 | `StdioListener`: spawn, correlate by `id`, timeouts, child death, stderr to the log; tested against a small script child | next |
 | 5 | `60-hooks` through `HEDDLE_BIN`: the `outside-listener` row with developer-one and developer-two, the verifier branch that writes a process listener instead of a `.ts` plugin with integrator-one | with the binary |
 
 ## Read next
