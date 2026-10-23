@@ -9,7 +9,12 @@
 use heddle_context::budget::{
     BudgetInput, BudgetPolicy, BudgetSource, EndpointPolicy, resolve_budget,
 };
-use heddle_context::instructions::instruction_digest;
+use std::path::{Path, PathBuf};
+
+use heddle_context::instructions::{
+    INSTRUCTIONS_MAX_BYTES, InstructionFile, instruction_digest,
+    render_instruction_baseline_with_home,
+};
 use heddle_context::meter::{estimate_message, estimate_part, estimate_tools};
 use heddle_context::prune::{PruneConfig, prune_text};
 use heddle_context::types::{
@@ -143,4 +148,76 @@ fn the_instruction_digest_ignores_the_byte_order_mark_and_keeps_the_next_line_ch
         instruction_digest("\u{0085}abc"),
         "5ee0b2835a6f9cf80e4170f0b1f6f1a72d8d4827"
     );
+}
+
+fn instruction(path: &str, text: &str) -> InstructionFile {
+    InstructionFile {
+        path: PathBuf::from(path),
+        text: text.to_string(),
+    }
+}
+
+/// `renderInstructionBaseline` under Node with `HOME=/home/u`. The identity is what a session
+/// compares to decide whether to re-send the baseline, so a session one build wrote is recognised by
+/// the other only if the rendered text is the same to the byte.
+#[test]
+fn an_instruction_baseline_renders_to_the_typescript_builds_identity() {
+    let home = Some(Path::new("/home/u"));
+
+    // A cut inside a two-byte character: Node decodes the partial byte as one U+FFFD.
+    let cut = render_instruction_baseline_with_home(
+        &[instruction("/p/AGENTS.md", &"é".repeat(300))],
+        401,
+        home,
+    );
+    assert_eq!(cut.identity, "ba57a66c1a715c02ff665db9d4390b965c9b9631");
+    assert_eq!(cut.text.encode_utf16().count(), 336);
+
+    // A cut inside a four-byte character: one U+FFFD as well.
+    let emoji = render_instruction_baseline_with_home(
+        &[instruction("/p/AGENTS.md", &"😀".repeat(100))],
+        402,
+        home,
+    );
+    assert_eq!(emoji.identity, "87ee0dbfc6f164cfec92f7b5bcc5c029b2a0840e");
+
+    // Two files dropped whole, broadest first, the nearest cut, paths under home shown with `~`.
+    let dropped = render_instruction_baseline_with_home(
+        &[
+            instruction(
+                "/home/u/.heddle/AGENTS.md",
+                &format!("global {}", "x".repeat(300)),
+            ),
+            instruction("/home/u/proj/AGENTS.md", "root rules\n"),
+            instruction(
+                "/home/u/proj/sub/AGENTS.md",
+                &format!("narrow {}", "ü".repeat(200)),
+            ),
+        ],
+        600,
+        home,
+    );
+    assert_eq!(dropped.identity, "601e6d6ce33c88d4c424712f16de2e514bfc49b9");
+    assert_eq!(
+        dropped.omitted,
+        vec![
+            PathBuf::from("/home/u/.heddle/AGENTS.md"),
+            PathBuf::from("/home/u/proj/AGENTS.md"),
+        ]
+    );
+    assert!(dropped.truncated);
+    assert_eq!(dropped.text.encode_utf16().count(), 501);
+
+    // Nothing dropped: the guidance notice, each body trimmed the JavaScript way (U+FEFF included).
+    let whole = render_instruction_baseline_with_home(
+        &[
+            instruction("/home/u/.heddle/AGENTS.md", "  global rules  \n"),
+            instruction("/elsewhere/AGENTS.md", "\u{FEFF}outside rules"),
+        ],
+        INSTRUCTIONS_MAX_BYTES,
+        home,
+    );
+    assert_eq!(whole.identity, "464f7234a15376b84069162c4825febe0c78a4de");
+    assert!(!whole.truncated);
+    assert_eq!(whole.text.encode_utf16().count(), 341);
 }
