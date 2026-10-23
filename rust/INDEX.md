@@ -53,11 +53,12 @@ probe because the binary's `--help` does not name the option it needs (`--profil
 every other command exits 2 with `heddle: not ported to Rust yet: <command>`. So no part of the goal was judged, and
 none passed.
 
-The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies — and several now
-carry their implementations: `heddle-config`, `heddle-context`, `heddle-llm`, `heddle-team` and `heddle-sandbox` are
-ported behind their APIs on `main`. The event, session, workspace, tools, agent and binary crates still arrive from
-the lane's branches. A contract is not a port: what has not happened is a **part** passing its verifier on the
-binary, because the binary advertises nothing yet.
+The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies — and three now carry
+their ports behind those APIs: `heddle-config`, `heddle-llm` (one `todo!()` left, the request builders that wait on
+configuration) and `heddle-sandbox` (one). `heddle-context` and `heddle-team` are still contracts. The event, session,
+workspace, tools and agent crates still arrive from the lane's branches, and the binary is still the `--help`/exit-2
+stub. A contract is not a port: what has not happened is a **part** passing its verifier on the binary, because the
+binary advertises nothing yet.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
