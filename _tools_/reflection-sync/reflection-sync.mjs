@@ -290,7 +290,9 @@ export function sync({
 }
 
 function parseArgs(argv) {
-  const args = { repo: join(process.env.HOME ?? '', 'reflection'), branch: 'main', remote: 'origin', dryRun: false, unionLogs: true, backupRoot: null, help: false }
+  // backupRoot is left undefined until --backup is given, so sync() applies its own
+  // default; a null here would reach path.join and fail on the first backup.
+  const args = { repo: join(process.env.HOME ?? '', 'reflection'), branch: 'main', remote: 'origin', dryRun: false, unionLogs: true, backupRoot: undefined, help: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--repo') args.repo = argv[++i]

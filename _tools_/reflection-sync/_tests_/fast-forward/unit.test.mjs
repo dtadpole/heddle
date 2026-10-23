@@ -265,11 +265,18 @@ test('a path that is not a checkout is an error', () => {
 test('the command exits 0 when it fast-forwarded and 2 when it refused', (t) => {
   const w = world(t)
   pushFrom(w, { 'c.md': 'new\n' })
-  const cli = (extra = []) =>
-    spawnSync(process.execPath, [SCRIPT, '--repo', w.shared, '--backup', w.backup, ...extra], {
+  const cli = (extra = [], backup = true) =>
+    spawnSync(process.execPath, [SCRIPT, '--repo', w.shared, ...(backup ? ['--backup', w.backup] : []), ...extra], {
       encoding: 'utf8',
       env: { PATH: process.env.PATH, HOME: w.root },
     })
+  // The command line without --backup must still fast-forward: the default backup
+  // directory is resolved inside sync(), not passed through as null.
+  const noBackup = cli([], false)
+  assert.equal(noBackup.status, OK, noBackup.stdout + noBackup.stderr)
+  assert.match(noBackup.stdout, /fast-forwarded/)
+
+  pushFrom(w, { 'd.md': 'more\n' })
   const ok = cli()
   assert.equal(ok.status, OK, ok.stdout + ok.stderr)
   assert.match(ok.stdout, /fast-forwarded/)
