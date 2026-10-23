@@ -9,4 +9,20 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# A leaf crate: it depends on no other heddle crate. The TypeScript import graph is the evidence — nothing under
+# `src/llm/` or `src/stream/printer.ts` imports configuration, sessions or the event bus; only the composition point
+# `src/plugins/model.ts` does, and that composition is the binary's boot. See INDEX.md, "Where it sits".
 [dependencies]
+bytes.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+# `preserve_order`: a JSON object keeps its insertion order, as `JSON.stringify` does. Tool schemas, raw provider
+# frames and anything re-serialized into the session log must not come back key-sorted. Cargo unifies features, so
+# this applies to every crate in the build — deliberately, for byte compatibility with the TypeScript store.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
