@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.5.6
+version: 0.5.8
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `ee5fa0d`, judged with `_tools_/verify-runner/lane.mjs`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `8ffc4a3`, judged with `_tools_/verify-runner/lane.mjs`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -81,7 +81,7 @@ dependent checks unjudged instead of failing them.
 | 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged; two of them call a real configured endpoint and stay unjudged on a machine without one, on either build |
 | 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
 | 3 context management | `_verifiers_/30-context-management` | 9 checks — unjudged |
-| 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
+| 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged; under `HEDDLE_BIN` each outside tool is a process (that verifier's INDEX) |
 | 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
 | 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged; under `HEDDLE_BIN` each hook is a process (that verifier's INDEX) |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — **11 pass**, 0 fail, 34 unjudged (they need `--turn` or `web`) |
@@ -89,7 +89,7 @@ dependent checks unjudged instead of failing them.
 | 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |
 | 10 token | `_verifiers_/90-web-ui-token` | not judged in the backend lane; `web` exits 2 |
 | 11 Web UI daemon | `_verifiers_/95-web-daemon` | not judged in the backend lane; `web` exits 2 |
-| model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged |
+| model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged on this machine, on either build: both need a machine-local endpoint configuration, which it does not have |
 
 What is **in place** is the toolchain and the seam, not a part: rust 1.99.1 from rustup, the workspace, and the
 `HEDDLE_BIN` path the checks reach the binary through — 13 of 13 `_tools_/verify-runner/_tests_/helper-rules` pass,

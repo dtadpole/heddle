@@ -56,7 +56,7 @@ impl Drop for Scratch {
 struct Booted {
     sessions: Arc<SessionService>,
     models: Arc<ModelService>,
-    runtime: AgentRuntime,
+    runtime: Arc<AgentRuntime>,
 }
 
 fn boot(home: &Path, work: &Path, steps: Value) -> Booted {
@@ -115,7 +115,7 @@ fn boot(home: &Path, work: &Path, steps: Value) -> Booted {
         approvals,
         Arc::clone(&sessions),
     )));
-    let runtime = AgentRuntime {
+    let runtime = Arc::new(AgentRuntime {
         model: Arc::new(heddle_agent::adapters::LlmModel::new(Arc::clone(&models))),
         session: Arc::new(heddle_agent::adapters::Sessions::new(Arc::clone(&sessions))),
         context: Arc::new(heddle_agent::adapters::Context::over_session_handles(
@@ -124,7 +124,7 @@ fn boot(home: &Path, work: &Path, steps: Value) -> Booted {
         tools: registry,
         hooks: Arc::new(heddle_agent::NoTurnHooks),
         turns: Some(TurnRegistry::new()),
-    };
+    });
     Booted {
         sessions,
         models,
@@ -418,4 +418,194 @@ fn a_refused_fold_reaches_the_server_as_its_500_with_the_code() {
         .view(&lead.id)
         .expect_err("the fold refuses the log");
     assert_eq!(refused.code.as_deref(), Some("TEAM_MEMBER_PHASE"));
+}
+
+/// A `TeamAgent` shaped like the binary's first team row (`adapters.rs` at main `59f0b94`): it runs
+/// `heddle_agent::run_turn` *inside* the future it returns, so the member's prompt is written only when the spawned
+/// turn first runs, after `begin_turn` has returned.
+struct DeferredAgent {
+    runtime: AgentRuntime,
+    store: Arc<heddle_session::SessionStore>,
+}
+
+impl heddle_team::plugin::TeamAgent for DeferredAgent {
+    fn begin_turn(
+        &self,
+        request: heddle_team::plugin::TeamTurnRequest,
+    ) -> Result<heddle_team::ports::TurnFuture, String> {
+        let handle = self
+            .store
+            .open(&request.session)
+            .ok_or_else(|| format!("no session {}", request.session))?;
+        let mut options = RunTurnOptions::new(handle, request.endpoint, request.prompt);
+        options.model = request.model;
+        options.purpose = Some(request.purpose.to_owned());
+        options.source = Some(request.source);
+        let runtime = self.runtime.clone();
+        Ok(Box::pin(async move {
+            heddle_agent::run_turn(&runtime, options)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }))
+    }
+
+    fn default_endpoint(&self) -> Option<String> {
+        Some("scripted".to_owned())
+    }
+}
+
+/// **The seam's ordering contract, pinned.** The team proves a delivery by reading the target's own log the moment
+/// `begin_turn` returns, as the TypeScript build can because its `runTurn` appends the prompt before its first
+/// await. A runner that defers the prompt into its future therefore leaves every message `queued`: the message
+/// does reach the member's log once the turn runs, but the journal never learns it, so `team/message/delivered` is
+/// never written — check-teams counts exactly one, and boot recovery would report `0 delivered`.
+/// `compose::start_row` builds its agent on `heddle_agent::begin_turn`, which writes the prompt and registers the
+/// turn before returning; `a_real_lead_turn_runs_the_check_teams_script_through_the_composed_row` delivers.
+#[tokio::test]
+async fn a_runner_that_defers_the_prompt_into_its_future_cannot_prove_delivery() {
+    let home = Scratch::new("deferred-home");
+    let work = Scratch::new("deferred-work");
+    let steps = json!([
+        { "purpose": "team", "text": "alpha is ready" },
+        { "purpose": "team", "text": "alpha read the mail" },
+    ]);
+    let booted = boot(&home.0, &work.0, steps);
+    let store = Arc::clone(booted.sessions.store());
+    let plugin = heddle_team::TeamPlugin::install(heddle_team::TeamPluginDeps {
+        store: Arc::new(heddle_team::compose::SessionTeamStore::new(Arc::clone(
+            &store,
+        ))),
+        agent: Arc::new(DeferredAgent {
+            runtime: (*booted.runtime).clone(),
+            store: Arc::clone(&store),
+        }),
+        live: None,
+        config: heddle_team::TeamConfig::default(),
+        emit_changed: None,
+        warn: None,
+    });
+    let lead = store
+        .create(CreateOptions {
+            cwd: Some(work.0.to_string_lossy().into_owned()),
+            endpoint: Some("scripted".to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the Lead session");
+    let spawned = plugin
+        .tools
+        .call(
+            "spawn_teammate",
+            &json!({ "name": "alpha", "description": "the teammate", "prompt": "get ready" }),
+            Some(&lead.id),
+        )
+        .await;
+    assert!(spawned.error.is_none(), "{:?}", spawned.error);
+    let child_id = spawned.data.as_ref().expect("the spawn reports its member")["id"]
+        .as_str()
+        .expect("the member's id")
+        .to_owned();
+    // Let alpha's first turn run and finish, so the mail finds it idle.
+    wait_for("alpha's first answer", || {
+        events(&booted, &child_id)
+            .iter()
+            .any(|event| event.to_string().contains("alpha is ready"))
+    })
+    .await;
+
+    let sent = plugin
+        .tools
+        .call(
+            "send_message",
+            &json!({ "target": "alpha", "message": "the board is clear" }),
+            Some(&lead.id),
+        )
+        .await;
+    assert_eq!(
+        sent.data.as_ref().map(|data| data["status"].clone()),
+        Some(json!("queued")),
+        "the prompt was not yet in alpha's log when begin_turn returned"
+    );
+    let delivered = |booted: &Booted| {
+        events(booted, &lead.id)
+            .iter()
+            .filter(|event| event["type"] == "team/message/delivered")
+            .count()
+    };
+    assert_eq!(delivered(&booted), 0);
+    // The deferred turn does write the message once it runs; the journal still never records the delivery.
+    wait_for("the mail in alpha's log", || {
+        events(&booted, &child_id)
+            .iter()
+            .any(|event| is_user(event, "the board is clear"))
+    })
+    .await;
+    assert_eq!(
+        delivered(&booted),
+        0,
+        "nothing journals the delivery after the fact"
+    );
+}
+
+/// The team holds the runtime weakly (its registry holds the team's tools, so a strong reference would be a cycle).
+/// Once the run that owned it drops the runtime, a new member's first turn is refused rather than started on a
+/// runtime nobody owns. As in the TypeScript build, a first turn is fire-and-forget: the spawn still answers, and
+/// the refusal lands as `turn/failed` in the member's own log.
+#[tokio::test]
+async fn a_member_turn_after_the_run_has_ended_is_refused_not_leaked() {
+    let home = Scratch::new("ended-home");
+    let work = Scratch::new("ended-work");
+    let booted = boot(&home.0, &work.0, json!([]));
+    let plugin = start(&booted);
+    let lead = booted
+        .sessions
+        .store()
+        .create(CreateOptions {
+            cwd: Some(work.0.to_string_lossy().into_owned()),
+            endpoint: Some("scripted".to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the Lead session");
+    let Booted {
+        sessions, runtime, ..
+    } = booted;
+    let weak = Arc::downgrade(&runtime);
+    drop(runtime);
+    assert!(
+        weak.upgrade().is_none(),
+        "nothing in the team keeps the runtime alive"
+    );
+    let outcome = plugin
+        .tools
+        .call(
+            "spawn_teammate",
+            &json!({ "name": "alpha", "description": "the teammate", "prompt": "go" }),
+            Some(&lead.id),
+        )
+        .await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let child_id = outcome.data.as_ref().expect("the spawn reports its member")["id"]
+        .as_str()
+        .expect("the member's id")
+        .to_owned();
+    let handle = sessions
+        .store()
+        .open(&child_id)
+        .expect("the teammate's session");
+    let refused = sessions
+        .store()
+        .read(&handle)
+        .expect("the teammate's log")
+        .iter()
+        .map(|event| event.to_value())
+        .any(|event| {
+            event["type"] == "turn/failed"
+                && event["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("the run that owned this team has ended"))
+        });
+    assert!(
+        refused,
+        "the refused first turn is recorded in the teammate's own log"
+    );
 }
