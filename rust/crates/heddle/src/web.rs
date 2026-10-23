@@ -67,6 +67,14 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     ) {
         harness.workspaces = Some(Arc::new(Workspaces { service, sessions }));
     }
+    // The renderer a settled answer is drawn with (web.ts: `html: renderMarkdown(turn.text)`). The page
+    // draws a history row's document, its edited-files card and its stop notice only from that `html`.
+    harness.markdown = Some(heddle_server::services::markdown_renderer(|text: &str| {
+        heddle_web_files::markdown::render_markdown(
+            text,
+            heddle_web_files::markdown::MarkdownOptions::default(),
+        )
+    }));
     // The goal, todo and team rows: the page's goal, todo and team panels read them.
     if let Some(service) = boot.services.get::<Arc<heddle_goal::GoalService>>("goal") {
         harness.goals = Some(Arc::new(Goals { service }));
@@ -1027,6 +1035,15 @@ mod tests {
             .unwrap();
         assert!(tree.to_string().contains("project"), "{tree}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_settled_answer_is_rendered_by_the_files_crate_markdown() {
+        let harness = harness(&empty_boot(), PathBuf::from("/work"));
+        let markdown = harness.markdown.expect("the renderer is always composed");
+        let html = markdown.render("# Title\n\nA *settled* answer.");
+        assert!(html.contains("<h1"), "{html}");
+        assert!(html.contains("<em>settled</em>"), "{html}");
     }
 
     #[test]

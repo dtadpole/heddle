@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:40:53Z
-version: 0.6.5
+modified: 2026-10-23T06:10:57Z
+version: 0.6.6
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -67,12 +67,14 @@ the loop reads), and the session-meta and create-session records, converted at t
   `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs` **1/1** pass with the binary's own rows;
   `check-teams.mjs` is unjudged (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed
   the delegation limit (`maxActive` never triggered, so a child's replayed `delegate` made a grandchild session).
-- **`check-teams.mjs` with web served (2026-10-22, the same rule, at the binary owner's web tip `51c7bf4` with main
-  merged and Tools, Turn and Web added to `SERVED`):** 0/2. The Lead's `POST /api/turn` answers `503 this profile does
-  not load the workspace plugin` (the server's turn route, `heddle-server` `plugin_missing("workspace")`), because the
-  binary's web composition gives the server no workspace service; and the boot never logs `recovered 1 team(s)`,
-  because that composition runs no team recovery (`notes` stays empty). Both are on the web path, not in this crate;
-  `check.mjs` and `check-subagents.mjs` still pass in the same run.
+- **`check-teams.mjs` with web served (2026-10-22, the same rule, Tools, Turn and Web added to `SERVED` in a scratch
+  copy only):** 0/2 at the binary owner's web tip `51c7bf4` (the server had no workspace service; no team recovery
+  at web start), and still 0/2 at the web-file owner's `c4c14ce`, which fixed both. There the Lead's turn runs and
+  spawns the teammate, the tasks move through their revisions, and the mailed message lands in the teammate's log
+  and starts its second turn, which completes — but `send_message` answers `queued`, so the Lead's log never gets
+  `team/message/delivered`; and the boot still logs no `recovered N team(s)` line. Both are in the team service's
+  delivery and web-start recovery, not in this crate: `begin_turn` writes the prompt before it returns, and the
+  live-turn registry's clones share one table. `check.mjs` and `check-subagents.mjs` pass in the same runs.
 - **Open, not in this crate:** serving `Capability::Turn` in the binary, and the web composition above for
   `check-teams.mjs`.
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
