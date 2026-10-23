@@ -20,6 +20,7 @@ import {
   parsePs,
   parseSwap,
   readSlots,
+  splitLoad,
   thresholdsFrom,
 } from '../../load-check.mjs'
 
@@ -40,7 +41,7 @@ const base = {
     { index: 2, state: 'free' },
   ],
   processes: [],
-  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, swapWarnPct: 75, swapStopPct: 95, slots: 3 },
+  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, swapWarnPct: 75, swapStopPct: 95, slots: 3 },
 }
 
 test('the machine sources are parsed from the commands a Mac answers with', () => {
@@ -132,8 +133,17 @@ test('the assessment warns and stops at the working model\'s lines', () => {
   const diskStop = assess({ ...base, disk: { ...base.disk, availKb: 19 * 1024 * 1024 } })
   assert.equal(diskStop.diskVerdict, STOP)
 
-  assert.equal(assess({ ...base, load: [15, 9, 6] }).loadVerdict, WARN)
-  assert.equal(assess({ ...base, load: [20, 9, 6] }).loadVerdict, STOP)
+  // The system load average is context now: the desktop's Spotlight or Chrome must not
+  // make the team's verdict warn. The team's own cpu share decides.
+  const systemBusy = assess({ ...base, load: [22, 18, 12] })
+  assert.equal(systemBusy.loadVerdict, OK, 'system 2.2/core with no team processes is not a team problem')
+  assert.equal(systemBusy.systemLoadPerCore, 2.2)
+
+  const teamWarn = assess({ ...base, processes: [{ pid: 7, cpu: 1100, command: '/x/rustc' }] })
+  assert.equal(teamWarn.teamPerCore, 1.1)
+  assert.equal(teamWarn.loadVerdict, WARN)
+  const teamStop = assess({ ...base, processes: [{ pid: 7, cpu: 1400, command: '/x/rustc' }] })
+  assert.equal(teamStop.loadVerdict, STOP)
 
   assert.equal(assess({ ...base, swap: { totalMb: 6144, usedMb: 4700, freeMb: 1444 } }).swapVerdict, WARN)
   assert.equal(assess({ ...base, swap: { totalMb: 6144, usedMb: 6000, freeMb: 144 } }).swapVerdict, STOP)
@@ -154,9 +164,44 @@ test('the report is plain lines with a verdict, the slots, the worktrees and the
   const sources = { ...base, at: '2026-10-22T20:30:00-0700' }
   const assessment = assess(sources)
   const text = format({ ...sources, assessment })
-  for (const line of ['load-check 2026-10-22T20:30:00-0700 (10 cores)', 'disk ', 'load ', 'swap ', 'slots ', 'worktrees ', 'builds ', 'verdict  ok']) {
+  for (const line of ['load-check 2026-10-22T20:30:00-0700 (10 cores)', 'disk ', 'load ', 'team ', 'other ', 'swap ', 'slots ', 'worktrees ', 'builds ', 'verdict  ok']) {
     assert.ok(text.includes(line), `missing ${JSON.stringify(line)} in:\n${text}`)
   }
+})
+
+test('the team share and the desktop share are split from one process list, deterministically', () => {
+  const worktreeProcs = [
+    { pid: 10, cpu: 300, command: '/Users/x/.rustup/toolchains/1.99.1/bin/rustc', cwd: '/Users/x/heddle--one/rust' },
+    { pid: 11, cpu: 100, command: 'node', cwd: '/Users/x/heddle--one' },
+    { pid: 19, cpu: 50, command: 'Google Chrome', cwd: '/Applications/Google Chrome.app' },
+  ]
+  const allProcesses = [
+    { pid: 10, cpu: 300, command: '/Users/x/.rustup/toolchains/1.99.1/bin/rustc' },
+    { pid: 11, cpu: 100, command: 'node' },
+    { pid: 12, cpu: 120, command: '/usr/libexec/mds_stores' },
+    { pid: 13, cpu: 123, command: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+    { pid: 14, cpu: 40, command: '/System/Library/WindowServer' },
+    { pid: 15, cpu: 12, command: '/usr/libexec/mobileassetd' },
+    { pid: 16, cpu: 8, command: '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT' },
+    { pid: 17, cpu: 1, command: '/usr/bin/tail' },
+    { pid: 18, cpu: 900, command: '/x/rustc' }, // a build whose cwd is not visible
+  ]
+  const split = splitLoad({ processes: worktreeProcs, allProcesses, ncpu: 10, home: '/Users/x' })
+  assert.equal(split.teamCpu, 1300, 'worktree processes plus any cargo/rustc process')
+  assert.equal(split.teamPerCore, 1.3)
+  assert.equal(split.teamCount, 3)
+  assert.ok(!split.other.some((proc) => proc.pid === 19), 'a desktop process is not team work')
+  assert.deepEqual(split.other.map((proc) => proc.pid), [13, 12, 14, 15, 16], 'top five non-team by cpu, named in order')
+
+  const sources = { ...base, processes: worktreeProcs, allProcesses, home: '/Users/x', load: [22, 18, 12], at: '2026-10-23T03:50:00-0700' }
+  const assessment = assess(sources)
+  assert.equal(assessment.teamPerCore, 1.3)
+  assert.equal(assessment.loadVerdict, STOP)
+  assert.match(assessment.findings.join(','), /load: team 1\.30\/core, system 2\.20\/core \(Google Chrome\)/)
+  const text = format({ ...sources, assessment })
+  assert.match(text, /team     13\.0 core\(s\) = 1\.30\/core \[stop\]/)
+  assert.match(text, /other    Google Chrome 123%, mds_stores 120%, WindowServer 40%, mobileassetd 12%, ChatGPT 8%/)
+  assert.match(text, /verdict  stop: load: team 1\.30\/core, system 2\.20\/core \(Google Chrome\)/)
 })
 
 test('thresholds come from the environment when they are set', () => {
