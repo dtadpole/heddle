@@ -15,8 +15,8 @@
 //! | [`service`] | [`SandboxService`], [`SandboxConfig`], [`SandboxDenial`] | `sandbox/service.ts` |
 //! | [`approvals`] | [`ApprovalService`], [`ApprovalsConfig`], [`ApprovalRequest`] | `approvals/service.ts` |
 //!
-//! A private [`js`] module holds the one thing the refusal sentences need from another language: the
-//! `String()` coercion the TypeScript messages interpolate. [`testfs`] is the test-only scratch directory and
+//! A private `js` module holds the one thing the refusal sentences need from another language: the
+//! `String()` coercion the TypeScript messages interpolate. `testfs` is the test-only scratch directory and
 //! symlink helper.
 //!
 //! The crate depends on no other heddle crate. What it needs from them arrives as values: the profile rows'
