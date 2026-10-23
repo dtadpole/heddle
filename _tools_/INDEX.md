@@ -23,7 +23,8 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 | [`model-validation/`](model-validation/INDEX.md) | drives every configured model through the real adapter and records streaming, declared reasoning levels and tool calls, beside a fingerprint of the configuration it validated |
-| [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port |
+| [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots on this Mac, so the team's sessions share its cores and disk |
+| [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port (not used while the port builds locally) |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
 rather than the harness. The test is the one the conventions give: if the package
