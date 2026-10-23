@@ -186,7 +186,11 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
     let Some(path) = params.path.filter(|path| !path.is_empty()) else {
         return json_error(StatusCode::BAD_REQUEST, "a path is required");
     };
-    match files.host.workspace_owner(Path::new(&path)) {
+    // The path is resolved **before** it is judged, so `..` and a symlink are decided by where they lead rather
+    // than by how they are spelled. The host compares canonical paths too; doing it here means a host that forgot
+    // cannot turn this route into a read of the whole machine.
+    let wanted = canonical_path(Path::new(&path));
+    match files.host.workspace_owner(&wanted) {
         WorkspaceAnswer::NotLoaded => {
             return json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -194,15 +198,14 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
             );
         }
         WorkspaceAnswer::Outside => {
-            let canonical = canonical_path(Path::new(&path));
             return json_error(
                 StatusCode::BAD_REQUEST,
-                &format!("{} is not under any workspace root", canonical.display()),
+                &format!("{} is not under any workspace root", wanted.display()),
             );
         }
         WorkspaceAnswer::Owned => {}
     }
-    match files.host.read_file_text(Path::new(&path)) {
+    match files.host.read_file_text(&wanted) {
         Ok(reading) => {
             let rendered = render_source(Path::new(&reading.path), &reading.text);
             let answer = FileAnswer { reading, rendered };
@@ -232,11 +235,12 @@ async fn raw(State(files): State<FilesRoutes>, Query(params): Query<Params>) -> 
     let Some(path) = params.path.filter(|path| !path.is_empty()) else {
         return text(StatusCode::BAD_REQUEST, "a path is required\n");
     };
-    if !owned(&files.host, &path) {
+    let wanted = canonical_path(Path::new(&path));
+    if !owned(&files.host, &wanted) {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
     }
-    let leaf = crate::node_path::basename(&path).to_string();
-    serve_bytes(Path::new(&path), &leaf)
+    let leaf = crate::node_path::basename(&wanted.to_string_lossy()).to_string();
+    serve_bytes(&wanted, &leaf)
 }
 
 /// `GET /api/uploads/{leaf}`: an uploaded file's bytes, confined to the upload directory.
@@ -384,8 +388,8 @@ async fn html(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
 }
 
 /// Whether `path` is a file inside a registered workspace root.
-fn owned(host: &Arc<dyn FilesHost>, path: &str) -> bool {
-    host.workspace_owner(Path::new(path)) == WorkspaceAnswer::Owned
+fn owned(host: &Arc<dyn FilesHost>, path: &Path) -> bool {
+    host.workspace_owner(path) == WorkspaceAnswer::Owned
 }
 
 /// Serve one file's bytes with the type its extension names, and a download for anything a browser would run.
@@ -470,9 +474,12 @@ fn no_store(response: &mut Response) {
     );
 }
 
-/// The canonical form of a path, or the path as written when it cannot be resolved.
+/// The canonical form of a path — symlinks resolved — or its lexically resolved form when it does not exist.
+///
+/// `realpath` where the file is there, `path.resolve` where it is not, which is `canonicalPath` of `src/paths.ts`
+/// and the order that keeps the refusal sentences stable for a file that has been deleted.
 fn canonical_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path).unwrap_or_else(|_| crate::docs::resolve_lexically(path))
 }
 
 /// Whether `child` is inside `parent` (`..` and symlinks already resolved by the caller).
@@ -553,6 +560,8 @@ mod tests {
         home: PathBuf,
         root: PathBuf,
         loaded: bool,
+        /// Judge containment on the string the request wrote, as a host that forgot to canonicalise would.
+        naive: bool,
         reads: std::sync::Mutex<Vec<String>>,
     }
 
@@ -564,6 +573,15 @@ mod tests {
         fn workspace_owner(&self, path: &Path) -> WorkspaceAnswer {
             if !self.loaded {
                 return WorkspaceAnswer::NotLoaded;
+            }
+            if self.naive {
+                let asked = path.to_string_lossy();
+                let root = self.root.to_string_lossy();
+                return if asked == root || asked.starts_with(&format!("{root}/")) {
+                    WorkspaceAnswer::Owned
+                } else {
+                    WorkspaceAnswer::Outside
+                };
             }
             let canonical = canonical_path(path);
             if is_under(&canonical_path(&self.root), &canonical) {
@@ -653,6 +671,7 @@ mod tests {
             home,
             root: root.clone(),
             loaded: true,
+            naive: false,
             reads: std::sync::Mutex::new(Vec::new()),
         };
         (base, host)
@@ -1158,6 +1177,78 @@ mod tests {
             "{}",
             body_text(&bytes)
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn a_path_that_walks_out_with_dot_dot_is_refused_even_by_a_host_that_judges_the_string() {
+        // The route resolves the path before asking, so `..` is decided by where it leads. A host that compares the
+        // raw string would otherwise answer "owned" for `<root>/../outside.txt` and the bytes would be served.
+        let (base, mut host) = scratch("traversal");
+        host.naive = true;
+        let root = host.root.clone();
+        let outside = base.join("outside.txt");
+        std::fs::write(&outside, b"not in the workspace").unwrap();
+        let sneaky = format!("{}/../outside.txt", root.display());
+
+        let routes = routes_of(host);
+        let (status, _, bytes) = call(
+            routes.clone(),
+            "GET",
+            &format!("/api/raw?path={}", crate::markdown::percent_encode(&sneaky)),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            Status::NOT_FOUND,
+            "no such asset: {}",
+            body_text(&bytes)
+        );
+        let (status, _, bytes) = call(routes, "GET", &query(&sneaky), None).await;
+        assert_eq!(status, Status::BAD_REQUEST, "{}", body_text(&bytes));
+        assert!(
+            body_text(&bytes).contains("is not under any workspace root"),
+            "{}",
+            body_text(&bytes)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_inside_the_workspace_is_judged_by_where_it_leads() {
+        let (base, mut host) = scratch("workspace-symlink");
+        host.naive = true;
+        let root = host.root.clone();
+        let outside = base.join("secret.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+
+        let routes = routes_of(host);
+        let (status, _, _) = call(
+            routes.clone(),
+            "GET",
+            &format!(
+                "/api/raw?path={}",
+                crate::markdown::percent_encode(&root.join("link.txt").to_string_lossy())
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            Status::NOT_FOUND,
+            "the link leads out of the workspace"
+        );
+        let (status, _, _) = call(
+            routes,
+            "GET",
+            &query(&root.join("link.txt").to_string_lossy()),
+            None,
+        )
+        .await;
+        assert_eq!(status, Status::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(&base);
     }
 

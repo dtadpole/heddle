@@ -73,7 +73,7 @@ pub fn is_inside(root: &Path, child: &Path) -> bool {
 }
 
 /// Node's `path.resolve` for one path: absolute, `.` dropped and `..` popped, without touching the filesystem.
-fn resolve_lexically(path: &Path) -> std::path::PathBuf {
+pub(crate) fn resolve_lexically(path: &Path) -> std::path::PathBuf {
     let mut segments: Vec<std::ffi::OsString> = Vec::new();
     let mut absolute = path.has_root();
     let joined = if absolute {
