@@ -116,6 +116,9 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     }
     let harness = harness(&boot, invocation.cwd.clone());
     let runtime = crate::runtime::tokio();
+    // The goal driver follows the sessions' events for as long as the server runs, so a goal keeps
+    // pushing after each turn; then the boot sweep resumes the goals a previous process left active.
+    let goal_edges = drive_goals(&boot);
     let notes = runtime.block_on(boot_notes(&boot));
     let shutdown = heddle_tools::CancellationToken::new();
     let context = heddle_server::command::Context {
@@ -151,6 +154,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         stdout,
         stderr,
     ));
+    drop(goal_edges);
     boot.dispose();
     if code == 0 {
         Exit::Success
@@ -656,6 +660,24 @@ impl heddle_server::services::WorkspaceService for Workspaces {
 /// (`recovered N team(s) (S settled, D delivered[, F failed])`). Each is printed as `heddle web: <note>`.
 async fn boot_notes(boot: &Boot) -> Vec<String> {
     let mut notes = Vec::new();
+    // Goals first, as runWeb prints them: every session whose goal is runnable is requested once, and
+    // its chain runs on this runtime without being awaited here.
+    if let (Some(driver), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_goal::GoalDriver>>("goalDriver"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        let ids: Vec<String> = sessions
+            .list()
+            .iter()
+            .map(|meta| meta.id().to_owned())
+            .collect();
+        let resumed = driver.resume_at_start(&ids);
+        if resumed.requested > 0 {
+            notes.push(format!("resuming {} active goal(s)", resumed.requested));
+        }
+    }
     if let Some(team) = boot
         .services
         .get::<Arc<heddle_team::service::TeamService>>("team")
@@ -664,6 +686,41 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         notes.push(note);
     }
     notes
+}
+
+/// The goal driver's trigger on the run's bus. Dropping it detaches the listener.
+pub struct GoalEdges {
+    _listener: heddle_events::Listener,
+    _scope: heddle_events::Scope,
+}
+
+/// Forward every `session/event` on the bus to the goal driver's trigger, which requests a round on the
+/// edges that can make one due (a completed turn, a goal change). `None` without a driver or a bus.
+pub fn drive_goals(boot: &Boot) -> Option<GoalEdges> {
+    let driver = boot
+        .services
+        .get::<Arc<heddle_goal::GoalDriver>>("goalDriver")?;
+    let bus = boot.services.get::<heddle_events::EventBus>("events")?;
+    let trigger = heddle_goal::DriverTrigger::new(driver);
+    let scope = bus.scope("web-goal-driver");
+    let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+        move |payload: &Value| {
+            let session = payload.get("session").and_then(Value::as_str);
+            let kind = payload
+                .get("event")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str);
+            if let (Some(session), Some(kind)) = (session, kind) {
+                // The chain is not awaited: a turn is not held open by the rounds it starts.
+                drop(trigger.on_session_event(session, kind));
+            }
+        },
+        heddle_events::ListenOptions::default(),
+    );
+    Some(GoalEdges {
+        _listener: listener,
+        _scope: scope,
+    })
 }
 
 fn to_json(value: impl serde::Serialize) -> Value {
@@ -970,6 +1027,15 @@ mod tests {
             .unwrap();
         assert!(tree.to_string().contains("project"), "{tree}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_boot_without_a_goal_driver_attaches_no_goal_edges() {
+        let mut boot = empty_boot();
+        assert!(drive_goals(&boot).is_none());
+        boot.services
+            .provide("events", heddle_events::EventBus::new());
+        assert!(drive_goals(&boot).is_none(), "a bus alone is not a driver");
     }
 
     #[tokio::test]
