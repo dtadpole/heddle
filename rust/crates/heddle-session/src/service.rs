@@ -9,11 +9,11 @@
 //! is the newest one whose `cwd` is that folder), the **title from the first message**, the **fork
 //! name** `<title> (n)`, and the **mode change** that appends nothing when nothing changes.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use heddle_config::Env;
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::definition::CreatedDefinition;
@@ -231,7 +231,7 @@ impl SessionService {
     }
 
     /// The access mode this session recorded; see [`crate::recorded_mode`].
-    pub fn recorded_mode<M: FromStr>(
+    pub fn recorded_mode<M: DeserializeOwned>(
         &self,
         handle: &SessionHandle,
     ) -> Result<Option<M>, SessionError> {
@@ -239,7 +239,7 @@ impl SessionService {
     }
 
     /// The mode a call in this session runs under: its own record, else `fallback`.
-    pub fn effective_mode<M: FromStr>(
+    pub fn effective_mode<M: DeserializeOwned>(
         &self,
         handle: &SessionHandle,
         fallback: M,
@@ -248,7 +248,8 @@ impl SessionService {
     }
 
     /// Record a change of access mode before it takes effect. Choosing the mode already in effect
-    /// appends nothing.
+    /// appends nothing. A typed `M` is a word of the vocabulary by construction, so the TypeScript
+    /// build's `'<word>' is not a sandbox mode` refusal belongs to whoever parses the request.
     pub fn set_mode<M>(
         &self,
         handle: &SessionHandle,
@@ -256,7 +257,7 @@ impl SessionService {
         fallback: M,
     ) -> Result<ModeChange<M>, SessionError>
     where
-        M: FromStr + AsRef<str> + PartialEq + Clone,
+        M: Serialize + DeserializeOwned + PartialEq + Clone,
     {
         todo!()
     }

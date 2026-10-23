@@ -46,7 +46,7 @@ Everything is re-exported at the crate root.
 | `SessionEvent`, `NewEvent`, `Events`, `SessionHandle`, `SurfaceOp`, `AppendOptions` | an event (`seq`, `at`, `kind`, ordered `fields`); what a caller appends (`NewEvent::new("x").field(k, v)` or `json!` via `TryFrom`); a snapshot `Arc<Vec<Arc<SessionEvent>>>`; the four paths of a session; `append` / `replace {start_seq, end_seq}` |
 | `SessionMeta` + `CreateOptions`, `ForkAttribution`, `ModelSelection`, `FlagPatch`, `SessionOrigin` | the meta record as its ordered JSON with getters, and what creates or edits it |
 | `fold_surface`, `derive_message`, `derive_node_message`, `index_by_seq`, `completed_prefix`, `inherits_answer`, `SurfaceState` | the surface, generic over `Borrow<SessionEvent>` |
-| `recorded_mode`, `effective_mode`, `inherit_recorded_mode`, `MODE_EVENT` | the `permission/mode` fold, generic over `M: FromStr + AsRef<str>` — the vocabulary is `heddle-sandbox`'s `SandboxMode` |
+| `recorded_mode`, `effective_mode`, `inherit_recorded_mode`, `MODE_EVENT` | the `permission/mode` fold, generic over `M: Serialize + DeserializeOwned` — the vocabulary is `heddle-sandbox`'s `SandboxMode`, which fits as declared |
 | `write_session_definition`, `read_session_definition`, `update_session_definition`, `existing_session_names`, `ensure_sessions_folder`, `session_name` | `<branch>/_sessions_/<session-yyyymmdd-hhmm>/{session.json, INDEX.md}` |
 | `decode_transcript`, `encode_frame`, `split_frames`, `frame_end`, `looks_compressed` | the frame walk |
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
@@ -59,8 +59,8 @@ Everything is re-exported at the crate root.
 1. **No dependency on `heddle-events`.** The store takes an `EventListener` closure; the boot passes one
    that emits `session/event { session, event }`. A transient `tool-call-delta` reaches the listener and
    never the log.
-2. **No dependency on `heddle-sandbox`.** The mode fold is generic; `SandboxMode` needs `FromStr` (refusing
-   any other word) and `AsRef<str>`.
+2. **No dependency on `heddle-sandbox`.** The mode fold is generic and reads and writes the event's `mode`
+   through serde, so `SandboxMode` (kebab-case `Serialize + Deserialize`) is used as it is.
 3. **Message types move to `heddle-llm`.** Until then they live in `message.rs`. The shape they must keep:
    tagged by `"type"` first, kebab-case variants, camelCase fields, `Message` ordered `role`, `toolCallId?`,
    `content`, absent options omitted.

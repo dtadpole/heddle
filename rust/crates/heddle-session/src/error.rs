@@ -94,14 +94,12 @@ pub enum SessionError {
     #[error(transparent)]
     Flag(#[from] SessionFlagError),
     /// A recorded access mode outside the vocabulary:
-    /// `session event <seq> records access mode '<word>', which is not one of the sandbox modes`
+    /// `session event <seq> records access mode '<word>', which is not one of the sandbox modes`.
+    /// `word` is the field as JavaScript's `String()` would print it (`undefined` when absent).
     #[error(
         "session event {seq} records access mode '{word}', which is not one of the sandbox modes"
     )]
     UnknownRecordedMode { seq: u64, word: String },
-    /// `'<word>' is not a sandbox mode` — a mode handed to `set_mode` that its vocabulary refuses.
-    #[error("'{word}' is not a sandbox mode")]
-    UnknownMode { word: String },
     /// `could not name a session for <base>: a hundred already exist for that minute`
     #[error("could not name a session for {base}: a hundred already exist for that minute")]
     NamesExhausted { base: String },
