@@ -90,8 +90,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         harness: &harness,
         // The hub the session store was given its listener over at boot.
         events: boot.services.get::<heddle_server::EventHub>("event-hub"),
-        routers: Vec::new(),
-        views: Vec::new(),
+        routers: page_routers(&boot, &invocation.env),
+        views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
         notes: Vec::new(),
@@ -192,6 +192,139 @@ impl TurnRunner for Turns {
                 usage: serde_json::to_value(result.usage).ok(),
             })
         })
+    }
+}
+
+/// What the page's feature routers read: the booted session store, the workspace roots and the tools.
+struct PageHost {
+    sessions: Arc<heddle_session::SessionService>,
+    workspaces: Option<Arc<heddle_workspace::WorkspaceService>>,
+    tools: Option<Arc<heddle_tools::ToolRegistry>>,
+    home: PathBuf,
+}
+
+fn page_host(boot: &Boot, env: &heddle_config::Env) -> Option<Arc<PageHost>> {
+    Some(Arc::new(PageHost {
+        sessions: boot
+            .services
+            .get::<Arc<heddle_session::SessionService>>("session")?,
+        workspaces: boot
+            .services
+            .get::<Arc<heddle_workspace::WorkspaceService>>("workspace"),
+        tools: boot
+            .services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools"),
+        home: heddle_config::heddle_home(env),
+    }))
+}
+
+/// The feature routers mounted behind the door: the files panel and the trajectory's log and stats.
+fn page_routers(boot: &Boot, env: &heddle_config::Env) -> Vec<axum::Router> {
+    let Some(host) = page_host(boot, env) else {
+        return Vec::new();
+    };
+    vec![
+        heddle_web_files::routes::mount(axum::Router::new(), host.clone()),
+        heddle_web_trajectory::routes::router(host),
+    ]
+}
+
+/// The `?view=` projections of a session: the trajectory's ledger.
+fn page_views(
+    boot: &Boot,
+    env: &heddle_config::Env,
+) -> Vec<(String, Arc<dyn heddle_server::server::SessionView>)> {
+    match page_host(boot, env) {
+        Some(host) => vec![("ledger".to_owned(), Arc::new(Ledger { host }) as _)],
+        None => Vec::new(),
+    }
+}
+
+impl heddle_web_files::host::FilesHost for PageHost {
+    fn heddle_home(&self) -> PathBuf {
+        self.home.clone()
+    }
+
+    fn workspace_owner(&self, path: &std::path::Path) -> heddle_web_files::host::WorkspaceAnswer {
+        use heddle_web_files::host::WorkspaceAnswer;
+        match &self.workspaces {
+            None => WorkspaceAnswer::NotLoaded,
+            Some(workspaces) => match workspaces.owner(&path.to_string_lossy()) {
+                Some(_) => WorkspaceAnswer::Owned,
+                None => WorkspaceAnswer::Outside,
+            },
+        }
+    }
+
+    fn read_file_text(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<heddle_web_files::host::FileReading, heddle_web_files::host::FileReadError> {
+        use heddle_web_files::host::FileReadError;
+        match heddle_workspace::read_file_text(&path.to_string_lossy(), None) {
+            Ok(reading) => serde_json::to_value(reading)
+                .and_then(serde_json::from_value)
+                .map_err(|error| FileReadError::NotText(error.to_string())),
+            Err(error @ heddle_workspace::FileReadError::NotAFile(_)) => {
+                Err(FileReadError::NotAFile(error.to_string()))
+            }
+            Err(error) => Err(FileReadError::NotText(error.to_string())),
+        }
+    }
+}
+
+impl heddle_web_composer::SessionLookup for PageHost {
+    fn session_events(&self, id: &str) -> Option<Vec<Value>> {
+        let handle = self.sessions.open(id)?;
+        let events = self.sessions.events(&handle).ok()?;
+        Some(events.iter().map(|event| event.to_value()).collect())
+    }
+}
+
+impl heddle_web_trajectory::JsonHighlighter for PageHost {
+    fn render_json(&self, source: &str) -> String {
+        heddle_web_files::highlight::highlight_code(source, Some("json"))
+    }
+}
+
+impl heddle_web_trajectory::routes::TrajectoryHost for PageHost {
+    fn session_title(&self, id: &str) -> Option<String> {
+        self.sessions
+            .meta(id)
+            .and_then(|meta| meta.title().map(str::to_owned))
+    }
+
+    fn tool_specs(&self) -> Vec<heddle_web_composer::ToolSpec> {
+        self.tools
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .describe()
+                    .iter()
+                    .filter_map(|spec| {
+                        serde_json::to_value(spec)
+                            .and_then(serde_json::from_value)
+                            .ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// `GET /api/sessions/{id}?view=ledger`: the trajectory's projection of the session.
+struct Ledger {
+    host: Arc<PageHost>,
+}
+
+impl heddle_server::server::SessionView for Ledger {
+    fn respond(
+        &self,
+        _state: &heddle_server::server::AppState,
+        session: &heddle_server::respond::SessionId,
+        _events: &[Value],
+    ) -> axum::response::Response {
+        heddle_web_trajectory::routes::ledger_response(&*self.host, session.as_str())
     }
 }
 
