@@ -39,8 +39,9 @@
 //!
 //! Contract first: every public item is declared and documented. Implemented, with unit tests:
 //! [`Env`], [`ConfigError`], [`heddle_home`], [`profiles_dir`], [`expand_home`], the [`paths`] rules,
-//! [`LayerValue`], the serde shapes of rows, schemas and endpoints. Every other body is `todo!()` and
-//! lands in the order the crate's `INDEX.md` states.
+//! [`LayerValue`], the serde shapes of rows, schemas and endpoints, and the environment references
+//! ([`references_in`], [`parse_scalar`], [`resolve_env`]). Every other body is `todo!()` and lands in
+//! the order the crate's `INDEX.md` states.
 
 pub mod command;
 mod compose;
