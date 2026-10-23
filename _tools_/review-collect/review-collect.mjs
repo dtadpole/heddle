@@ -15,7 +15,7 @@
 //
 // Nothing here writes: no fetch into the seat's clone, no index refresh, no inbox mark.
 // Exit 0 with the page, 1 when the seat or a required input is missing.
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -694,7 +694,19 @@ const USAGE = `usage: review-collect.mjs --seat NAME --team TEAM.yaml [--repo DI
   the page is read-only; --repo is the clone whose freshly fetched origin/main is the base
   exit 0 with the page, 1 when the seat or a required input is missing`
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Node runs the main module from its real path, so compare real paths: through a symlink
+// such as macOS /tmp the plain comparison was false and the command silently did nothing,
+// which for the hygiene gate meant exit 0 with no judgement at all.
+function invokedAsScript() {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsScript()) {
   try {
     const args = parseArgs(process.argv.slice(2))
     if (args.help) {

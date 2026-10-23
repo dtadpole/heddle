@@ -21,7 +21,7 @@
 //   0  fast-forwarded, or already up to date
 //   1  could not run (not a repository, fetch or merge failed, detached HEAD)
 //   2  refused: local work differs; nothing was changed
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -319,7 +319,19 @@ function parseArgs(argv) {
 const USAGE = `usage: reflection-sync.mjs [--repo DIR] [--branch main] [--remote origin] [--dry-run] [--no-union-logs] [--backup DIR]
   exit 0 fast-forwarded or up to date, 1 could not run, 2 refused because local work differs`
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Node runs the main module from its real path, so compare real paths: through a symlink
+// such as macOS /tmp the plain comparison was false and the command silently did nothing,
+// which for the hygiene gate meant exit 0 with no judgement at all.
+function invokedAsScript() {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsScript()) {
   try {
     const args = parseArgs(process.argv.slice(2))
     if (args.help) {
