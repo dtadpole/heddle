@@ -1,12 +1,13 @@
 ---
 title: The heddle-config crate
-version: 0.3.0
+version: 0.3.1
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
   - source: src/config/schema.ts, src/config/validate.ts, src/local-config.ts, src/paths.ts, src/endpoints.ts, src/llm/types.ts, src/cli.ts and src/boot.ts, read 2026-10-22
   - source: _verifiers_/05-config-system/check.mjs, read 2026-10-22
   - source: rust/crates/heddle/src/cli.rs, boot.rs, builtins.rs and main.rs on lane abdf20c, and src/server/web.ts and runWeb in src/cli.ts, read 2026-10-22 for the config-boot contract
+  - source: src/server/uploads.ts and src/server/token.ts, read 2026-10-22 for what the server takes from configuration
 ---
 
 # `rust/crates/heddle-config`
@@ -175,9 +176,18 @@ constructor stores `env` and `cwd` only, and none of the 13 `schema()` bodies do
 |---|---|
 | `describe_endpoints(&endpoints, nominated)` | `default` is `null` unless the nominated endpoint is in the list; no key value ever appears, only `credential: "set"` and a key file's path |
 | `selection_problem(&endpoint, model, effort)` | the caller finds the endpoint by name first; an unknown endpoint name is the caller's sentence, not this one |
-| `expand_home(path, &env)` | takes the boot's `Env`, unlike the TypeScript `homedir()`; `~user/x` is returned unchanged |
+| `expand_home(path, &env)` | the folder route's `~` (`web.ts`: `statSync(expandHome(path))`); takes the boot's `Env`, unlike the TypeScript `homedir()`; `~user/x` is returned unchanged |
+| `heddle_home(&env)` | the uploads directory, `$HEDDLE_HOME/uploads` (`uploads.ts`: `uploadDirectory(heddleHome())`), and the launch secret's directory; `HEDDLE_HOME=""` is honoured as given, as the TypeScript `??` honoured it |
 | `canonical_path(path)` | `realpath` when the path exists, lexical otherwise; a relative path resolves against the process working directory |
 | `is_under(parent, child)` | segment-wise, so `/a/b-sibling` is not under `/a/b`; pass canonical paths |
+
+These six are everything the TypeScript server took from what this crate ports: `web.ts` imports `describeEndpoints`
+and `selectionProblem` from `src/endpoints.ts`, `expandHome` from `config/schema.ts` and `canonicalPath` and `isUnder`
+from `src/paths.ts`, and `uploads.ts` imports `heddleHome` from `config/schema.ts`. Its `token.ts` kept a private copy
+of both rules (`HEDDLE_HOME ?? ~/.heddle`, and a `~` expansion that looks only at the first character). A port that
+copies `token.ts` faithfully therefore answers `~user/x` as `<home>user/x` where `expand_home` leaves it unchanged —
+the one place this crate's deliberate difference (see *Where it differs on purpose*) shows inside one binary. Call
+`heddle_home` and `expand_home` there too, and the server has one rule for each.
 
 ### Keeping `05-config-system` judged
 
