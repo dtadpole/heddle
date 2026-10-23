@@ -48,6 +48,17 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     ) {
         harness.turns = Arc::new(Turns { runtime, sessions });
     }
+    if let (Some(workspaces), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_workspace::WorkspaceService>>("workspace"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        harness.workspaces = Some(Arc::new(Roots {
+            workspaces,
+            sessions,
+        }));
+    }
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
     }
@@ -192,6 +203,92 @@ impl TurnRunner for Turns {
                 usage: serde_json::to_value(result.usage).ok(),
             })
         })
+    }
+}
+
+/// The registered roots and the tree, as the page's routes use them, over `heddle-workspace`'s service.
+/// The tree is drawn from the crate's own session metadata, which carries the folder binding and the
+/// archive flag the routes' summary does not.
+struct Roots {
+    workspaces: Arc<heddle_workspace::WorkspaceService>,
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+fn service_error(error: impl std::fmt::Display) -> ServiceError {
+    ServiceError::new(error.to_string())
+}
+
+impl heddle_server::services::WorkspaceService for Roots {
+    fn owns(&self, path: &std::path::Path) -> bool {
+        self.workspaces.owner(&path.to_string_lossy()).is_some()
+    }
+
+    fn tree(
+        &self,
+        path: Option<&std::path::Path>,
+        archived: heddle_server::services::ArchivedFilter,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Value, ServiceError> {
+        use heddle_server::services::ArchivedFilter as Wanted;
+        let input = heddle_workspace::TreeInput {
+            roots: self
+                .workspaces
+                .list()
+                .iter()
+                .map(heddle_workspace::TreeRoot::from)
+                .collect(),
+            sessions: self.sessions.list(),
+            generated: self.workspaces.generated().to_vec(),
+            archived: match archived {
+                Wanted::Hide => heddle_workspace::ArchivedFilter::Hide,
+                Wanted::Show => heddle_workspace::ArchivedFilter::Show,
+                Wanted::Only => heddle_workspace::ArchivedFilter::Only,
+            },
+        };
+        let path = path.map(|path| path.to_string_lossy().into_owned());
+        serde_json::to_value(heddle_workspace::tree(path.as_deref(), &input)).map_err(service_error)
+    }
+
+    fn add(
+        &self,
+        path: &std::path::Path,
+        name: Option<&str>,
+    ) -> Result<(Value, bool), ServiceError> {
+        let added = self
+            .workspaces
+            .add(&path.to_string_lossy(), name)
+            .map_err(service_error)?;
+        Ok((
+            serde_json::to_value(&added.record).map_err(service_error)?,
+            added.created,
+        ))
+    }
+
+    fn find(&self, id: &str) -> bool {
+        self.workspaces.list().iter().any(|record| record.id == id)
+    }
+
+    fn remove(
+        &self,
+        id: &str,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Value, ServiceError> {
+        let removal = self
+            .workspaces
+            .remove(id, &self.sessions.list(), false)
+            .map_err(service_error)?;
+        serde_json::to_value(removal).map_err(service_error)
+    }
+
+    fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
+        let renamed = self.workspaces.rename(id, title).map_err(service_error)?;
+        renamed
+            .map(|record| serde_json::to_value(record).map_err(service_error))
+            .transpose()
+    }
+
+    fn ensure_owner(&self, folder: &std::path::Path) {
+        let _ = self.workspaces.ensure_owner(&folder.to_string_lossy());
     }
 }
 
