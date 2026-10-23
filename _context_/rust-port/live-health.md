@@ -58,9 +58,14 @@ deployment checkout clean for `96-deployment`.
 
 ## Pinned passes
 
+**The record is [`live-health.jsonl`](live-health.jsonl)**, appended by the scheduled pass every 20
+minutes. Read it as a table with `node _tools_/live-health/summary.mjs` (`--last=12` for the newest);
+the table is derived from the record, so it cannot fall behind it. The table below is the first evening
+written by hand, kept for its annotations, and it stops at 20:34.
+
 Times are PDT. `pass` = every judged check passed; `fail` = one failed (a dead address is a failure,
 not an unknown); `----` = unjudged, a check that could not be decided although the deployment answered
-(no built page to compare, no token readable). The full record is [`live-health.jsonl`](live-health.jsonl).
+(no built page to compare, no token readable).
 
 | At | Deployment | Gate | Door | Load | Marker | Turn | Console | Verdict |
 |---|---|---|---|---|---|---|---|---|

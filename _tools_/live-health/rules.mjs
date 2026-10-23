@@ -249,6 +249,31 @@ export function classifyOutage({ down, recoveredAfterMs, windowMs }) {
   return 'outage'
 }
 
+/**
+ * One pinned pass as a table row, so the human view is derived from the record rather than kept by
+ * hand. The record is the JSONL; a table written in prose falls behind the first pass after it.
+ */
+export function summaryRow(entry) {
+  const checks = entry?.checks ?? {}
+  const mark = (check) => (check === undefined ? '-' : check.verdict === 'pass' ? 'pass' : check.verdict === 'fail' ? 'FAIL' : '----')
+  const outage = entry?.outage === undefined ? '' : entry.outage.kind === 'restart' ? `restart ${entry.outage.recoveredAfterMs}ms` : 'OUTAGE'
+  const deployment = entry?.deployment ?? {}
+  const stale = typeof deployment.behind === 'number' && deployment.behind > 0 ? ` (behind ${deployment.behind})` : ''
+  return [
+    String(entry?.at ?? '?').replace('T', ' ').slice(0, 19) + 'Z',
+    `${String(deployment.headShort ?? '?').slice(0, 7)}${stale}`,
+    mark(checks.gate),
+    mark(checks.process),
+    mark(checks.door),
+    mark(checks.load),
+    mark(checks.marker),
+    mark(checks.turn),
+    mark(checks.console),
+    outage,
+    String(entry?.verdict ?? '?').toUpperCase(),
+  ]
+}
+
 /** The pass: any failure fails it, any unjudged check leaves it unjudged, only all-pass passes. */
 export function passVerdict(checks) {
   const verdicts = Object.values(checks).map((check) => check.verdict)

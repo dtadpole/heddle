@@ -107,6 +107,7 @@ live-deploy whether the agent is running or gone.
 _tools_/live-health/probe.mjs                 # summary, exit 0/1/3
 _tools_/live-health/probe.mjs --json --pin    # append the pass to _context_/rust-port/live-health.jsonl
 _tools_/live-health/probe.mjs --no-turn       # do not spend a turn; the pass then ends unjudged, so it is not for the record
+_tools_/live-health/summary.mjs --last=12     # the pinned record as a table (read-only)
 ```
 
 It drives `_tools_/browser-use` as a **library** in this seat's own headless session

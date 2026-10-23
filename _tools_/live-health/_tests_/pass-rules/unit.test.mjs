@@ -26,6 +26,7 @@ import {
   processVerdict,
   redactRecord,
   shellVerdict,
+  summaryRow,
   tildePath,
   tildeText,
   turnVerdict,
@@ -181,6 +182,17 @@ test('a down reading that answers again within the window is a restart, not an o
   assert.equal(classifyOutage({ down: true, recoveredAfterMs: 1_200, windowMs: 20_000 }), 'restart')
   assert.equal(classifyOutage({ down: true, recoveredAfterMs: null, windowMs: 20_000 }), 'outage')
   assert.equal(classifyOutage({ down: true, recoveredAfterMs: 25_000, windowMs: 20_000 }), 'outage')
+})
+
+test('a pinned pass renders as a table row that keeps failures, restarts and staleness visible', () => {
+  const row = summaryRow({
+    at: '2026-10-23T04:04:57.979Z',
+    deployment: { headShort: '480d9b83dc9a', behind: 3 },
+    checks: { gate: { verdict: 'pass' }, door: { verdict: 'fail' }, turn: { verdict: 'unjudged' } },
+    outage: { kind: 'restart', recoveredAfterMs: 1200 },
+    verdict: 'fail',
+  })
+  assert.deepEqual(row, ['2026-10-23 04:04:57Z', '480d9b8 (behind 3)', 'pass', '-', 'FAIL', '-', '-', '----', '-', 'restart 1200ms', 'FAIL'])
 })
 
 test('the pass fails on any failure or unknown verdict, is unjudged on any unjudged check, and passes only when all pass', () => {
