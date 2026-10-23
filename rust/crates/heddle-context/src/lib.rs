@@ -39,6 +39,7 @@ pub mod pairing;
 pub mod prune;
 pub mod runtime;
 pub mod service;
+pub mod session_store;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
