@@ -772,6 +772,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_answerer_outranks_an_already_withdrawn_call() {
+        // The order is the rule: a headless run answers from `unanswered` at once, even when the call is already
+        // cancelled, because there is no one to show a card to and nothing would ever settle it otherwise.
+        let deny = ApprovalService::new(ApprovalsConfig::default());
+        assert_eq!(
+            deny.request(ask("bash"), std::future::ready(())).await,
+            ApprovalOutcome::Unavailable,
+            "no answerer: the policy answers, not the cancel"
+        );
+        let allow = ApprovalService::new(ApprovalsConfig {
+            unanswered: Unanswered::Allow,
+            ..ApprovalsConfig::default()
+        });
+        assert_eq!(
+            allow.request(ask("bash"), std::future::ready(())).await,
+            ApprovalOutcome::AllowedOnce
+        );
+        assert!(allow.pending_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_question_without_a_display_reason_falls_back_to_the_audit_reason() {
+        let service = Arc::new(ApprovalService::new(ApprovalsConfig::default()));
+        let _guard = service.attach_answerer();
+        let worker = Arc::clone(&service);
+        let handle = tokio::spawn(async move {
+            worker
+                .request(
+                    ApprovalAsk {
+                        tool: "bash".to_owned(),
+                        reason: "run the command".to_owned(),
+                        display_reason: None,
+                        session: None,
+                    },
+                    std::future::pending::<()>(),
+                )
+                .await
+        });
+        let request = wait_pending(&service).await;
+        assert_eq!(
+            request.display_reason, "run the command",
+            "the page draws displayReason ?? reason, so the fallback must reach the wire"
+        );
+        assert!(service.answer(&request.id, Answer::AllowedOnce));
+        assert_eq!(
+            handle.await.expect("the request task"),
+            ApprovalOutcome::AllowedOnce
+        );
+    }
+
+    #[tokio::test]
     async fn a_published_question_is_answered_once_and_leaves_the_pending_list() {
         let service = Arc::new(ApprovalService::new(ApprovalsConfig::default()));
         let _guard = service.attach_answerer();
