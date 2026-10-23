@@ -485,6 +485,130 @@ mod tests {
         assert_eq!(boot.entries[0].id, "./src/plugins/greeting.ts");
     }
 
+    /// A fresh directory under the system temporary directory, so a test writes nothing in the tree.
+    fn scratch(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("heddle-{label}-{}-{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// A profile named `dev` holding a base layer and a patch layer, and the environment that names it.
+    fn profile_fixture(label: &str, patch: &str) -> (PathBuf, Env) {
+        let home = scratch(label);
+        let dir = home.join("profiles").join("dev");
+        std::fs::create_dir_all(&dir).expect("the profile directory");
+        std::fs::write(dir.join("cordis.yml"), "[]\n").expect("the base layer");
+        std::fs::write(dir.join("heddle.patch.yml"), patch).expect("the patch layer");
+        let env = Env::from_pairs([
+            ("HEDDLE_HOME", home.to_string_lossy().into_owned()),
+            ("HOME", home.to_string_lossy().into_owned()),
+        ]);
+        (home, env)
+    }
+
+    fn options(env: Env) -> BootOptions {
+        BootOptions {
+            layers: LayerOptions {
+                profile: Some("dev".to_owned()),
+                ..LayerOptions::default()
+            },
+            overrides: Vec::new(),
+            target: "heddle".to_owned(),
+            env,
+        }
+    }
+
+    #[test]
+    fn boot_composes_a_profile_and_starts_the_rows_it_names() {
+        let (home, env) = profile_fixture(
+            "boot",
+            "- insert:\n    - id: session\n      name: ./src/plugins/session.ts\n    - id: greeting\n      name: ./src/plugins/greeting.ts\n",
+        );
+        let catalog = Stubs::new(&[
+            (Builtin::Session, Stub::new(&["greeting"], None)),
+            (Builtin::Greeting, Stub::new(&[], Some("greeting"))),
+        ]);
+        let boot = boot(&options(env), &catalog).expect("the profile composes");
+        assert_eq!(boot.rows.len(), 2);
+        assert_eq!(
+            boot.entries
+                .iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![FiberState::Active, FiberState::Active],
+            "the row that waits for greeting starts once it exists"
+        );
+        assert!(boot.services.provides("greeting"));
+        assert_eq!(
+            boot.anchor,
+            home.join("profiles").join("dev"),
+            "relative names resolve against the base layer's own directory"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn boot_refuses_a_patch_against_a_row_no_layer_inserted() {
+        let (home, env) = profile_fixture(
+            "boot-broken",
+            "- insert:\n    - id: greeting\n      name: ./src/plugins/greeting.ts\n- patch:\n    - id: nowhere\n      config: {}\n",
+        );
+        let catalog = Stubs::new(&[(Builtin::Greeting, Stub::new(&[], Some("greeting")))]);
+        let error = boot(&options(env), &catalog).expect_err("the composition is refused");
+        assert!(
+            error.0.contains("nowhere"),
+            "the failure names the row: {}",
+            error.0
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_override_layer_applies_after_the_profile() {
+        let (home, env) = profile_fixture(
+            "boot-override",
+            "- insert:\n    - id: greeting\n      name: ./src/plugins/greeting.ts\n      config:\n        punctuation: '?'\n",
+        );
+        let mut boot_options = options(env);
+        boot_options.overrides = vec![heddle_config::NamedLayer::inline(
+            1,
+            heddle_config::Layer::patching([serde_json::json!({
+                "id": "greeting",
+                "config": { "punctuation": "." },
+            })]),
+        )];
+        let catalog = Stubs::new(&[(Builtin::Greeting, Stub::new(&[], Some("greeting")))]);
+        let boot = boot(&boot_options, &catalog).expect("the override composes");
+        assert_eq!(
+            boot.rows[0].row.config,
+            Some(serde_json::json!({ "punctuation": "." })),
+            "a patch replaces the whole config, and it came last"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_config_error_is_the_boots_own_sentence() {
+        let (home, env) = profile_fixture(
+            "boot-unknown-profile",
+            "- insert:\n    - id: greeting\n      name: ./src/plugins/greeting.ts\n",
+        );
+        let mut boot_options = options(env);
+        boot_options.layers.profile = Some("nowhere".to_owned());
+        let error = boot(&boot_options, &Stubs::new(&[])).expect_err("an unknown profile fails");
+        assert!(
+            error.0.contains("nowhere"),
+            "the config crate's sentence carries through: {}",
+            error.0
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn settle_counts_a_loading_row_as_unsettled_not_only_a_pending_one() {
         let boot = tree_with(&[FiberState::Active, FiberState::Loading, FiberState::Pending]);
