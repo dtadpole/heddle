@@ -78,8 +78,11 @@ against the deployment: no installer, no `bootout`, no edit to the checkout.
 **A reading of "down" is not enough**, and the reason was paid for. At 03:54:07Z on 2026-10-22 a pass
 read the port silent six seconds after the deployment's page had been rebuilt — live-deploy's install
 window — and the `-k` kickstart SIGKILLed the server their install had just started (it had run for
-5,380 ms). So `restoreDecision` in [`rules.mjs`](rules.mjs) requires all three, in this order:
+5,380 ms). So `restoreDecision` in [`rules.mjs`](rules.mjs) requires, in this order:
 
+0. the agent is **not running** according to launchd — while it runs, its supervisor owns restarts,
+   and a server that is still booting (up to ~15 s from process start to listening, measured 03:58)
+   outlasts any grace; a login start changes no deployment file, so only this sees it;
 1. the reads say **down** (`deploymentDown`: the gate's own 5xx with no upstream, or a silent port);
 2. **no recent deployment change** — the newest of `dist/server/page.html`, `dist/cli.js` and the
    agent definition is older than 180 s; inside that window a redeploy is in progress and the restart

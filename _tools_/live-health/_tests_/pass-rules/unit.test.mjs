@@ -192,6 +192,13 @@ test('a kickstart never runs when the port came back during the grace period', (
   assert.match(back.reason, /answered again/)
 })
 
+test('a kickstart never runs while launchd reports the agent running, even after the grace', () => {
+  // The 03:58 case: the agent had just started and its server took ~15 s to listen.
+  const booting = restoreDecision({ down: true, agentRunning: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: true })
+  assert.equal(booting.allowed, false)
+  assert.match(booting.reason, /supervisor owns restarts/)
+})
+
 test('a kickstart runs only when down, outside an install window, and still silent after the grace', () => {
   assert.equal(restoreDecision({ down: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: true }).allowed, true)
   // An unreadable change time does not block the restore on its own: the grace still has to hold.

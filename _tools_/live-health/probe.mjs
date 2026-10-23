@@ -558,15 +558,15 @@ function judgeMarker(load) {
     expected,
     match: served !== null && served === expected,
     pageMatch,
-    servedBytes: servedGateBody === null ? null : servedGateBody.length,
-    expectedBytes: expectedBody === null ? null : expectedBody.length,
+    servedBytes: servedGateBody === null ? null : Buffer.byteLength(servedGateBody, 'utf8'),
+    expectedBytes: expectedBody === null ? null : Buffer.byteLength(expectedBody, 'utf8'),
     deploymentHead: deployment.head,
     mainTip: deployment.mainTip,
     behind: deployment.behind,
     verdict: markerPassed && pageMatch === false ? 'fail' : judged.verdict,
     detail:
       markerPassed && pageMatch === false
-        ? `the marker matches but the served page is not the build byte for byte (${servedGateBody.length} vs ${expectedBody.length} bytes)`
+        ? `the marker matches but the served page is not the build byte for byte (${Buffer.byteLength(servedGateBody, 'utf8')} vs ${Buffer.byteLength(expectedBody, 'utf8')} bytes)`
         : judged.detail,
   }
 }
@@ -787,6 +787,20 @@ function secondsSinceDeployChange() {
   return newest === null ? null : (Date.now() - newest) / 1000
 }
 
+/** Whether launchd reports the deployment's agent as running (its supervisor alive). */
+function agentRunning() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 501
+  try {
+    const text = execFileSync('launchctl', ['print', `gui/${uid}/${DEPLOY_LABEL}`], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] })
+    // The job's own state is the first `state =` line; nested sections carry their own.
+    const match = /^\s*state = (\S+)/m.exec(text)
+    return match !== null && match[1] === 'running'
+  } catch {
+    // Not loaded at all: the agent is gone, which is the case the delegation covers.
+    return false
+  }
+}
+
 /** Does the deployed server answer its health route right now? */
 async function portAnswers() {
   const target = serverOrigin === null ? 'http://127.0.0.1:3082/healthz' : `${serverOrigin}/healthz`
@@ -805,11 +819,12 @@ async function portAnswers() {
  */
 async function guardedRestore() {
   const sinceChange = secondsSinceDeployChange()
-  const early = restoreDecision({ down: true, secondsSinceDeployChange: sinceChange, stillDownAfterGrace: true })
-  if (!early.allowed) return { attempted: false, withheld: true, secondsSinceDeployChange: sinceChange, reason: early.reason }
+  const running = agentRunning()
+  const early = restoreDecision({ down: true, agentRunning: running, secondsSinceDeployChange: sinceChange, stillDownAfterGrace: true })
+  if (!early.allowed) return { attempted: false, withheld: true, agentRunning: running, secondsSinceDeployChange: sinceChange, reason: early.reason }
   await new Promise((done) => setTimeout(done, GRACE_MS))
   const stillDown = !(await portAnswers())
-  const decision = restoreDecision({ down: true, secondsSinceDeployChange: secondsSinceDeployChange(), stillDownAfterGrace: stillDown })
+  const decision = restoreDecision({ down: true, agentRunning: agentRunning(), secondsSinceDeployChange: secondsSinceDeployChange(), stillDownAfterGrace: stillDown })
   if (!decision.allowed) return { attempted: false, withheld: true, secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
   return { ...(await restoreDeployment()), secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
 }

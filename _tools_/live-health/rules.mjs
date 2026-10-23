@@ -247,9 +247,19 @@ export function redactRecord(value, home) {
  * 3. the port is **still silent after a grace period** - the supervisor puts a killed server back in
  *    about a second, so a port that stays silent through the grace means the agent itself is gone,
  *    which is the one case the delegation covers.
+ *
+ * Before all three: the agent must **not be running**. Read from launchd, it is the direct form of
+ * "the agent is gone"; a login start changes no deployment file, so only this sees it.
  */
-export function restoreDecision({ down, secondsSinceDeployChange, stillDownAfterGrace, installWindowSeconds = 180 }) {
+export function restoreDecision({ down, agentRunning = false, secondsSinceDeployChange, stillDownAfterGrace, installWindowSeconds = 180 }) {
   if (down !== true) return { allowed: false, reason: 'the deployment is not down' }
+  /**
+   * A running agent owns its own restarts: its supervisor puts the server back, and a server that is
+   * still booting (measured at up to ~15 s from process start to listening, 03:58 on 2026-10-22)
+   * outlasts any grace. The delegation covers the agent being gone; while launchd reports it running,
+   * a kickstart -k could only kill something that is coming up.
+   */
+  if (agentRunning === true) return { allowed: false, reason: 'the agent is running; its supervisor owns restarts, so a kickstart could only kill a server that is starting' }
   if (typeof secondsSinceDeployChange === 'number' && secondsSinceDeployChange < installWindowSeconds) {
     return { allowed: false, reason: `the deployment changed ${Math.round(secondsSinceDeployChange)} s ago; a redeploy is in progress, so the restart is left to it` }
   }

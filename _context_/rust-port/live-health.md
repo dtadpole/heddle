@@ -176,6 +176,19 @@ any change to the deployment's build or agent definition, and requires the port 
 a 10 s grace before acting. Fed the 03:54 inputs (6 s since the rebuild) it withholds; four tests hold
 it there. And `--restore` is now for the scheduled pass only — never a manual run.
 
+## The install at 03:58, and why the rule now asks launchd first
+
+At 03:58:29Z the gate answered `502 heddle-proxy: the upstream did not answer` and 3082 refused —
+a real outage reading. Its cause was another install: the agent definition was rewritten at 03:57:36Z,
+and launchd showed a fresh supervisor and server eight seconds old. No kickstart was run; the
+deployment answered again at 03:58:47Z by itself, about 70 s after the rewrite, with the new server
+taking up to ~15 s from process start to listening.
+
+That boot time is longer than the 10 s grace, and a login start changes no deployment file, so the
+install-window check alone could still have let a kickstart kill a booting server. The rule now asks
+launchd first: while the agent is running, its supervisor owns restarts and the kickstart is
+withheld. The delegation covers the agent being **gone**, and only then does `-k` have nothing to kill.
+
 ## How often
 
 A `schedule_create` in this seat fires **every 20 minutes**: it runs the pass, pins the entry, and reports
