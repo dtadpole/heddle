@@ -387,3 +387,142 @@ fn a_message_type_is_available_as_the_crate_exports_it() {
     let message: Message = Message::new(Role::User, vec![ContentPart::text("hi")]);
     assert_eq!(message.role, Role::User);
 }
+
+/// A double that writes its answer in two stages, holding the end open, so "printed early" is measurable.
+fn staged_double(first: Vec<u8>, rest: Vec<u8>, pause: std::time::Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds a loopback port");
+    let address = listener.local_addr().expect("has an address");
+    std::thread::spawn(move || {
+        for socket in listener.incoming() {
+            let Ok(mut socket) = socket else { return };
+            let mut head = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match socket.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => head.extend_from_slice(&buffer[..count]),
+                }
+            }
+            let _ = socket.write_all(&first);
+            let _ = socket.flush();
+            std::thread::sleep(pause);
+            let _ = socket.write_all(&rest);
+            let _ = socket.flush();
+        }
+    });
+    format!("http://{address}")
+}
+
+/// The claim 20-streaming makes: a delta is seen before the provider has finished writing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delta_is_printed_while_the_provider_is_still_writing() {
+    let first = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"early\"}}]}\n\n"
+    )
+    .into_bytes();
+    let rest = concat!(
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let base_url = staged_double(first, rest, std::time::Duration::from_millis(400));
+    let service = ModelService::new(vec![endpoint(
+        "chat",
+        EndpointKind::OpenaiChat,
+        &base_url,
+        "m",
+    )])
+    .expect("registers the endpoint");
+
+    let printed: Arc<Mutex<Vec<(std::time::Instant, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = printed.clone();
+    let mut printer = StreamPrinter::with_writer(StreamPrinterOptions::new("s1"), move |text| {
+        sink.lock()
+            .expect("buffer")
+            .push((std::time::Instant::now(), text.to_string()));
+    });
+
+    let started = std::time::Instant::now();
+    let mut stream = service.stream(ask("chat", "go")).expect("streams");
+    while let Some(item) = stream.next().await {
+        let chunk = item.expect("streams");
+        if let Chunk::Done { .. } = chunk {
+            printer.observe("s1", &serde_json::json!({ "type": "assistant/completed" }));
+            continue;
+        }
+        printer.observe(
+            "s1",
+            &serde_json::json!({ "type": "assistant/chunk", "chunk": chunk }),
+        );
+    }
+    let ended = started.elapsed();
+    let printed = printed.lock().expect("buffer").clone();
+    let first_text = printed
+        .iter()
+        .find(|(_, text)| text.contains("early"))
+        .map(|(at, _)| *at)
+        .expect("the first delta was printed");
+    assert!(
+        first_text.duration_since(started) + std::time::Duration::from_millis(200) < ended,
+        "the first delta arrived at {:?} and the run ended at {ended:?}: it did not wait for the end",
+        first_text.duration_since(started)
+    );
+    assert_eq!(printer.summary().text_deltas, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publisher_route_that_answers_without_a_stream_is_a_bad_body() {
+    let double = Double::start(|_| reply("application/json", r#"{"ok":true}"#));
+    let mut endpoint = endpoint(
+        "claude",
+        EndpointKind::AnthropicVertex,
+        &double.base_url,
+        "claude-opus-5-5",
+    );
+    endpoint.project = Some("a-project".into());
+    endpoint.region = Some("global".into());
+    let adapter = adapter_for(endpoint).expect("an anthropic adapter");
+    let error = collect(adapter.stream(ask("claude", "go")))
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .expect("a failure");
+    assert_eq!(error.code, "BAD_BODY");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_failure_inside_the_anthropic_stream_is_remote() {
+    let body = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"try again\"}}\n\n";
+    let double = Double::start(move |_| reply("text/event-stream", body));
+    let mut endpoint = endpoint(
+        "claude",
+        EndpointKind::AnthropicVertex,
+        &double.base_url,
+        "claude-opus-5-5",
+    );
+    endpoint.project = Some("a-project".into());
+    endpoint.region = Some("global".into());
+    let adapter = adapter_for(endpoint).expect("an anthropic adapter");
+    let error = collect(adapter.stream(ask("claude", "go")))
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .expect("a failure");
+    assert_eq!(error.code, "REMOTE");
+    assert!(error.to_string().contains("'claude'"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_json_only_endpoint_still_reaches_the_service_as_deltas() {
+    let body =
+        r#"{"choices":[{"message":{"content":"unstreamed answer"},"finish_reason":"stop"}]}"#;
+    let double = Double::start(move |_| reply("application/json", body));
+    let mut endpoint = endpoint("chat", EndpointKind::OpenaiChat, &double.base_url, "m");
+    endpoint.stream = Some(false);
+    let service = ModelService::new(vec![endpoint]).expect("registers the endpoint");
+    let generated = service.generate(ask("chat", "go")).await.expect("answers");
+    assert_eq!(generated.text, "unstreamed answer");
+    assert_eq!(generated.finish_reason, "stop");
+}
