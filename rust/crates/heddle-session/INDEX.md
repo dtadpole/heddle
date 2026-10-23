@@ -1,6 +1,6 @@
 ---
 title: The heddle-session crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for the append-only session log, its store layouts, transcripts and definitions — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -52,6 +52,7 @@ Everything is re-exported at the crate root.
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
 | `title_from`, `fork_title` | a session's label from its first message; `<title> (n)` |
 | `SessionError`, `SessionFlagError` | failures, with the TypeScript build's messages word for word |
+| `command::{run, Command, Args, Context, refuse, write_pretty}` | `heddle sessions` and `heddle transcript`, answered here (D-043); `session new` is in `heddle_workspace::command` |
 | `Message`, `ContentPart`, `Chunk`, `Role`, `RecordedMessage`, `text_of` | `heddle-llm`'s types, re-exported: `RecordedMessage` is `Message` itself (its `source` names who wrote it), so a caller crossing between the crates needs no conversion; `text_of` stays here until `heddle-llm` re-exports it |
 
 ### Decisions a dependent crate should know
@@ -85,41 +86,44 @@ is pushed to its owner's branch on its own.
 | 8 | `service` | `title_from` (48 UTF-16 units, word cut, punctuation); `fork_title` (ASCII and full-width suffix, taken names); `open_at` one folder one session, `fresh`; `fork` → `Unavailable` without an answer; `set_mode` no-op appends nothing | the CLI and the server |
 | 9 | interop | a log written by the TypeScript build (fixture bytes) reads here; a log written here decodes with `src/session/transcript.ts` on the host | `70-workspaces-sessions` through `HEDDLE_BIN` |
 
-## Where it stands, 2026-10-22
+## Where it stands, 2026-10-22 (evening)
 
-Steps 1–8 are ported, each with the unit tests the table names: **124 unit tests pass** with
-`cargo test --manifest-path rust/Cargo.toml -p heddle-session`, and `rustfmt` and
-`clippy -D warnings` are clean on both crates. Step 9 is green in both directions:
+**Merged.** Steps 1–9 are on `main` (integrator-one, through `b0ef8ab`). Two later commits wait for the
+next candidate on `hd/developer-eight`: `2c63ed5` (floats) and `b51e3a1` (the command entry point).
 
-- **Their bytes read here.** `store.rs` opens a session whose transcript frames were produced by **Node
-  24's `zlib.zstdCompressSync`** with a content checksum, derives its surface, appends to it without
-  touching the earlier bytes, and prints every line back unchanged.
-- **Our bytes read there.** [`tests/typescript_interop.rs`](tests/typescript_interop.rs) runs the
-  TypeScript build's own `decodeTranscript` — `src/session/transcript.ts`, imported by the Node on this
-  machine with its types stripped — over a transcript this crate just wrote, and asserts it sees the same
-  three events, no tear, and the whole file consumed. It reports skipped rather than failing where Node
-  is absent, so a host without the oracle still runs the suite.
-- **The bytes are the oracle's bytes.** [`tests/typescript_bytes.rs`](tests/typescript_bytes.rs) asks the
-  same Node to `JSON.stringify` the values the store writes — event lines, pretty meta records, and
-  `new Date(ms).toISOString()` for six instants — and compares byte for byte, so an escaping or
-  number-formatting drift is caught rather than copied into a fixture. A deterministic batch of forty
-  generated texts adds the code points two writers most often disagree about: the line separators, C1
-  controls, a byte-order mark, combining marks, Hebrew, CJK and astral ranges.
+**Tested.** `cargo test --manifest-path rust/Cargo.toml -p heddle-session`: **129 unit tests**, **5
+byte-oracle tests** and **1 TypeScript-decoder test**; `rustfmt` and `clippy -D warnings` clean. The
+interop is checked three ways:
 
-What remains for `70-workspaces-sessions` is the `heddle` binary composing this crate, which is another
-seat's scope: it is honestly unjudged (exit 3) until then.
+- **Their bytes read here.** `store.rs` opens a session whose frames Node 24's `zlib.zstdCompressSync`
+  wrote, derives its surface, appends without touching the earlier bytes, and prints every line back.
+- **Our bytes read there.** [`tests/typescript_interop.rs`](tests/typescript_interop.rs) runs
+  `src/session/transcript.ts`'s own `decodeTranscript` over a transcript this crate wrote.
+- **The bytes are the oracle's.** [`tests/typescript_bytes.rs`](tests/typescript_bytes.rs) has Node
+  `JSON.stringify` the event lines, meta records and instants the store writes, forty generated texts,
+  and the `model/request` event built exactly as `src/agent/loop.ts` builds it (mutation-checked).
+- **Floats print back.** serde_json's default parser re-prints `0.9999551342447491` as `…492`;
+  `float_roundtrip` is on, and `event::tests` pins it, so `heddle transcript` keeps the bytes.
 
-**Pre-triage, 2026-10-22.** A throwaway probe outside the repository (not committed, not this crate)
-implements only `--help`, `workspace add/remove/rename`, `workspaces --json`, `sessions --json`,
-`tree --json`, `file --json` and `session new` by calling this crate and `heddle-workspace`. Run as
-`HEDDLE_BIN`, **11 of the verifier's 22 checks pass** — every check that needs neither the agent loop nor
-the server/page: the tree's levels, classification and badges, the generated folder, the file reader and
-its refusals, `session new` with its definition, hoisted `_sessions_` rows, and the outside-root refusal.
-The other 11 need `--turn` (9), the server's workspace/tree routes (2) or the page, so they are not this
-crate's to judge. The row stays unjudged until the real binary runs.
+**Answers.** [`src/command.rs`](src/command.rs) answers `sessions` and `transcript` in the convention
+developer-two published (D-043): `run(Command, &Args, &Context, out, err) -> i32`, no binary dependency,
+no process globals, exit `0`/`1`. Dependents on `main` build against this crate and pass:
+`heddle-context`, `heddle-team`.
+
+**Waits on.** The binary's dispatch line and the session row's adapter (developer-two; a tested adapter
+patch is at `~/hd-handoff/developer-eight/`). Then `70-workspaces-sessions` still cannot be judged on its
+own: its invocation boots the whole `heddle.patch.yml` profile, and with session and workspace adapted the
+real binary refuses with `12 row(s) failed to load: console, model, context, goal, goal-driver,
+subagent-tool, goal-tool, todo, todo-tool, turns, team, tools`. The flip is a whole-backend event.
+
+**Next step.** When developer-two dispatches these words and every profile row starts, run
+`HEDDLE_BIN=<binary> node --test _verifiers_/70-workspaces-sessions/check.mjs` from the lane and report the
+counts. A throwaway probe outside the repository (not committed) already passes the 11 of 22 checks that
+need neither the loop nor the server.
 
 **Done** when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through `HEDDLE_BIN` with the
-CLI (`heddle`) and server (`heddle-server`) crates composing this one, and the backend lane's integrator has merged it.
+CLI (`heddle`) and server (`heddle-server`) crates composing this one, and the backend lane's integrator
+has merged it.
 
 ## Read next
 

@@ -124,7 +124,10 @@ function harness(label, options = {}) {
 
 async function supportsContext() {
   const help = await runCli(['--help'])
-  return /context/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /^\s{2}context\b/m.test(help.stdout) && /--turn/.test(help.stdout)
 }
 
 /** The one session a fixture recorded. */

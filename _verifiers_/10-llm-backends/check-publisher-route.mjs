@@ -21,6 +21,12 @@ import { isolatedHome, parseJson, removeDir, runCli, skipUnless, writeJson } fro
  * configured" must never be recorded as "the gateway works".
  */
 
+/** The probe asks for every command these checks run: a turn on a named endpoint, and the model listing. */
+async function supportsRoute() {
+  const help = (await runCli(['--help'])).stdout
+  return /--endpoint/.test(help) && /--turn/.test(help) && /^\s{2}models\b/m.test(help)
+}
+
 const CAPABILITY = 'backend connections with a configured endpoint list'
 
 /** A double that speaks the publisher route: records the call and answers with Anthropic's event stream. */
@@ -61,7 +67,7 @@ async function publisherDouble() {
 }
 
 test('a turn runs over the Anthropic publisher route, streamed', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--endpoint'), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsRoute()), CAPABILITY)) return
   const home = isolatedHome('publisher-route')
   const double = await publisherDouble()
   try {
@@ -113,7 +119,7 @@ test('a turn runs over the Anthropic publisher route, streamed', async (context)
 })
 
 test('a configured publisher gateway answers one short turn, or is unjudged', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--endpoint'), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsRoute()), CAPABILITY)) return
   /**
    * The machine-local half. No endpoint, project or host appears in this file: the check asks the machine's
    * own configuration for an endpoint of this shape and judges whatever it finds, which is what keeps one
