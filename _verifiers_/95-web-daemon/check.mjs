@@ -185,6 +185,19 @@ test('the definition keeps the process alive rather than pretending to', async (
   }
   const { service } = live
   /**
+   * **Not on the owner's page by default.** This check kills the server it judges, and when the service judged is the
+   * deployment, that is a real kill of the page the owner uses. Four seats did exactly that on 2026-10-22, the last
+   * at 22:20 PDT from a verifier loop through HEDDLE_BIN, and the team's rule since is that 95's kill runs on a
+   * scratch service (D-042). So against the deployment it is unjudged unless HEDDLE_95_KILL_DEPLOYMENT=1 says the
+   * kill is meant; a scratch service named by HEDDLE_WEB_LABEL (rehearse.sh) is judged as before.
+   */
+  if (!TARGET.scratch && process.env.HEDDLE_95_KILL_DEPLOYMENT !== '1') {
+    context.skip(
+      `this kill would land on the deployment (${NAME}, port ${service.port}); judge it on a scratch service with _tools_/web-daemon/rehearse.sh, or set HEDDLE_95_KILL_DEPLOYMENT=1 to kill the deployment on purpose (D-042)`,
+    )
+    return
+  }
+  /**
    * The claim is that this is a **daemon**, not a process someone started. Measured: killing the process that
    * owns the port leaves a **different** pid serving it within seconds — systemd on Linux (3 s, 2026-10-22), and
    * on macOS the supervisor `install.sh` puts in front of the server (measured the same day, because launchd on
