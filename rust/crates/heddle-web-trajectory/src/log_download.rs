@@ -9,8 +9,6 @@ use serde_json::Value;
 
 use heddle_web_composer::js;
 
-use crate::js_json;
-
 /// The name a downloaded log is filed under: the trimmed title with control characters as spaces,
 /// `\ / : * ? " < > |` as dashes, whitespace runs collapsed, at most 80 UTF-16 units, leading and trailing dots,
 /// spaces and dashes stripped — or the id when nothing usable is left — plus `.jsonl`.
@@ -66,7 +64,7 @@ pub fn content_disposition(id: &str, file_name: &str) -> String {
 pub fn ndjson(events: &[Value]) -> String {
     let mut body = String::new();
     for event in events {
-        body.push_str(&js_json::stringify_compact(event));
+        body.push_str(&js::stringify_compact(event));
         body.push('\n');
     }
     if events.is_empty() {

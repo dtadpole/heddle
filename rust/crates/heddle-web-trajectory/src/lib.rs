@@ -39,7 +39,6 @@
 //! - **A record's timing comes from its own events**; nothing interpolates a missing timestamp.
 
 pub mod inspector;
-mod js_json;
 pub mod ledger;
 pub mod log_download;
 pub mod routes;

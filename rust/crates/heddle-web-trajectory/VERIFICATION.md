@@ -1,9 +1,9 @@
 ---
 title: heddle-web-trajectory verification
 created: 2026-10-23T05:09:00Z
-modified: 2026-10-23T05:09:00Z
+modified: 2026-10-23T05:25:00Z
 level: L2
-version: 1.0.0
+version: 1.0.1
 description: The evidence that heddle-web-trajectory answers as the TypeScript build does, each item with how to repeat it, and what the binary still lacks.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Every item below was run, not reasoned. Re-run a check rather than trusting a st
 
 | What | Result | Repeat with |
 |---|---|---|
-| Unit tests | 69, including every `ledger.test.ts` case | `_tools_/local-build/run test -p heddle-web-trajectory` |
+| Unit tests | 65, including every `ledger.test.ts` case; the number formatter's own tests are heddle-web-composer's | `_tools_/local-build/run test -p heddle-web-trajectory` |
 | Verifier expectations | 6 tests: every API assertion of `85-trajectory-view`, check-trajectory-view, check-runtime-context and check-composer's dock, on logs the TypeScript CLI recorded for those exact scenarios | the same command; the logs are in [`tests/fixtures/`](tests/fixtures/INDEX.md) |
 | Differential | ledger, rows, timeline and stats equal to `src/server/ledger.ts` on 26 logs (15 synthetic, 8 live, 3 fixtures) | [`examples/`](examples/INDEX.md): `project_log`, then `ts_projection.mjs <log> <rust.json>` |
 | Real server (2026-10-22) | through the real heddle-server router and door, 27 sessions: `?view=ledger`, stats, `/log` and its headers identical to `src/server/web.ts`; refusals `400`, `404`, and `401` without the cookie | a scratch probe outside the repository, not kept |
@@ -25,8 +25,8 @@ Every item below was run, not reasoned. Re-run a check rather than trusting a st
 
 Two divergences were found this way and fixed, each pinned by a unit test: a float read one ulp off without
 `serde_json`'s `float_roundtrip` (now in the workspace entry), and numbers printed `1.0` where JavaScript prints
-`1` (fixed by the crate's `js_json` formatter, which heddle-web-composer's `js` module also carries from its
-25d0902; this crate switches to that copy once it reaches main).
+`1` (fixed by a JavaScript number formatter written here and now kept, with its tests, in heddle-web-composer's
+`js` module, which this crate uses).
 
 ## Through the binary
 
