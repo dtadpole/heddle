@@ -126,10 +126,10 @@ test('a service that never answers fails "started", leaves the rest unjudged wit
   const result = run(f, [], { HEDDLE_REHEARSE_START_MS: '1500' })
   assert.equal(result.status, 1, result.stderr)
   assert.match(result.stdout, /started\s+failed\s+no answer within 1 s/)
-  for (const claim of ['kill', 'guard', 'reinstall', 'agent gone', '95-web-daemon']) {
+  for (const claim of ['kill', 'guard', 'reinstall', 'agent gone', 'supervisor killed', 'server hung', '95-web-daemon']) {
     assert.match(result.stdout, new RegExp(`${claim}\\s+unjudged\\s+no server to judge`), claim)
   }
-  assert.match(result.stdout, /verdict: 0 held, 1 failed, 5 unjudged/)
+  assert.match(result.stdout, /verdict: 0 held, 1 failed, 7 unjudged/)
   const verbs = actions(f).filter((line) => line.startsWith('launchctl ')).map((line) => line.split(' ')[1])
   assert.ok(verbs.includes('bootstrap') && verbs.includes('kickstart'), 'the scratch agent was installed')
   assert.ok(actions(f).every((line) => !line.endsWith('/com.dtadpole.heddle-web')), 'no call named the deployment label')

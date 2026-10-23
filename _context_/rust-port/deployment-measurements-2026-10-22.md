@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment''s measurements, 2026-10-22'
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T04:44:23Z
+modified: 2026-10-23T05:31:53Z
 level: L3
 version: 1.0.0
 description: The readings behind the deployment record — the bring-up proof, restart windows, the scratch rehearsals, the Rust branch and the gate.
@@ -40,9 +40,19 @@ token, and 8082 answered 200.
 
 The first run, before the bootstrap fix, failed the reinstall claim (`5: Input/output error`).
 
+**Recovery paths, 22:0x, scratch agent.** Before the fixes, a SIGKILL or SIGTERM of the supervisor took the server
+down (launchd kills the job's process group) and left the job `not running`; a SIGSTOPped server held its port with
+the job `running`, answering nothing. After them, rehearsal 22:30:25–22:31:36 held all eight claims: the server
+outlived its killed supervisor and was reclaimed in 1,519 ms; a hung one was replaced in 8,172 ms (probes every 2 s;
+the default 5 s gives about 20 s).
+
 **The Rust branch, about 21:20.** The lanes' release binary (sha256 `a355a0aa1fc4…`) through `HEDDLE_BIN`: started
 failed after 20 s — `heddle: not ported to Rust yet: web`, exit 2 after 4 ms — and the other claims were unjudged.
 At 21:43 main's own binary, built at `a2d4ae4` after the heddle-server merge, answered the same.
+
+**The Rust preview, 21:52–21:56**, `b6995b6` on 3097: page and token flow work, a SIGKILL is restarted in 48 ms;
+`/api/endpoints` 404 and `/api/tree` 503, and sessions and turns refuse, because only the model, sandbox and approvals
+components have adapters on that branch.
 
 **The gate, about 21:29**, its unchanged code on 8096 in front of a scratch heddle on 3096: killed under launchd
 alone it stayed down at 2, 5, 10 and 15 s; under `supervisor.mjs` it was back in 400 ms and answered

@@ -1,5 +1,7 @@
 ---
 title: Web daemon redeploy rules
+created: 2026-10-23T04:27:33Z
+modified: 2026-10-23T05:14:51Z
 version: 1.1.0
 description: Component tests for redeploy.sh — the one order of a redeploy (fetch, move, build, install with the new checkout's installer, probe, judge), and what it refuses.
 grounded_in:
