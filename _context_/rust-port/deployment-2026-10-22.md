@@ -104,7 +104,7 @@ the deployment stays clean:
 | File | What it holds |
 |---|---|
 | `~/.heddle/deployment-scripted.json` | the script: one turn step whose text begins **`scripted endpoint: offline fixture reply, not a model`** |
-| `~/.heddle/heddle.json` | `{"endpoints": [{"name": "scripted", "baseUrl": "/Users/zhenchen/.heddle/deployment-scripted.json"}]}` — the machine's endpoint list is an **array** of partial endpoints, merged over the repository defaults by name |
+| `~/.heddle/heddle.json` | `{"endpoints": [{"name": "scripted", "baseUrl": "~/.heddle/deployment-scripted.json"}]}` — the machine's endpoint list is an **array** of partial endpoints, merged over the repository defaults by name |
 
 Measured 2026-10-22 20:30:47 PDT, after a restart (the configuration is read at start): a turn through
 `POST /api/turn` with a session cookie wrote 8 session events, `assistant/chunk` seq 5 as a `text-delta` beginning

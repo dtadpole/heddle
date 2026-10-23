@@ -61,8 +61,7 @@ unobservable deployment is not a verified one, and silently passing would be the
 branch a deployment.
 
 The third check is the owner's 2026-10-17 rule made mechanical: when the main working checkout is not clean, the
-daemon must run from a folder that contains only committed main (the Mac: `/Users/zhenc/heddle-deploy`; the Linux
-deployment host: `~/heddle-live`). The installer refuses a non-main or dirty checkout, and this check fails one if
+daemon must run from a folder that contains only committed main (a checkout outside the main working tree, e.g. `~/heddle-deploy`; the Linux deployment host: `~/heddle-live`). The installer refuses a non-main or dirty checkout, and this check fails one if
 it is nonetheless served.
 
 **Measured on the owner's Mac, 2026-10-22, 20:2x PDT** — the TypeScript build **as the oracle**, `~/heddle-live`
