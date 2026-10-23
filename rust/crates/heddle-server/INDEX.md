@@ -1,6 +1,6 @@
 ---
 title: The heddle-server crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -19,8 +19,16 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-server` |
 
-**State: contract.** The public API is in place with `todo!()` bodies; the port plan below says what is
-implemented next. Build against the API with test doubles until the bodies land.
+**State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
+`page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
+builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
+`cargo test -p heddle-server` is green (101 tests).
+
+The routes answer through the `services` traits, so the crate builds and is tested before the service
+crates exist. **Step 7 is not this crate's to finish**: `heddle web` lives in `rust/crates/heddle/`, and
+that binary must build a `Harness` over the real session, model, turn and sandbox services and start
+`ServerBuilder`. Until it does, `80-web-ui` and `90-web-ui-token` cannot pass through `HEDDLE_BIN`, and
+their checks are judged against the TypeScript build.
 
 ## Public API
 
@@ -97,15 +105,23 @@ refused; nothing else changes.
 
 Each step lands with its unit tests and is pushed; the verifier rows say what it should move.
 
-| Step | What | Judged by |
+| Step | What | State |
 |---|---|---|
-| 1 | `token`, `fence`, `page` (marker, token form, access), `respond`: pure rules, ported line for line, with tests against the TypeScript vectors (cookie name, minted value, `read_cookie`, Origin parsing) | unit tests |
-| 2 | `stream` (`EventHub`, SSE framing) and `runs` (counts, clock, completion, stop) | unit tests |
-| 3 | `server`: the builder, the door middleware, `/healthz`, favicon, `/`, `/api/events`, `/api/status`, `start` and `close` on `--port 0`; driven in tests through `into_router` with a doubled `Harness` | unit tests; `90-web-ui-token` once the binary wires `heddle web` |
-| 4 | `transcript`, `selection`, and the session routes: list, chat view, create, `folders/session`, fork, flags, title, permission, steer, stop, and `/api/turn` streaming | `80-web-ui` check and check-access, `90-web-ui-token` |
-| 5 | workspace routes (`/api/tree`, `/api/workspaces`) | `87-resizable-panels`, `80-web-ui` check-chat-view |
-| 6 | approvals, goal, todo, team, `/api/html`, `/vendor/purify.js` | the 80-web-ui checks of those owners |
-| 7 | adapters over the real session, workspace and events crates as their APIs land; wiring `heddle web` with the binary's owner | all of the above through `HEDDLE_BIN` |
+| 1 | `token`, `fence`, `page` (marker, token form, access), `respond`: pure rules, ported line for line, with tests against the TypeScript vectors (cookie name, minted value, `read_cookie`, Origin parsing) | done, unit-tested |
+| 2 | `stream` (`EventHub`, SSE framing) and `runs` (counts, clock, completion, stop) | done, unit-tested |
+| 3 | `server`: the builder, the door middleware, `/healthz`, favicon, `/`, `/api/events`, `/api/status`, `start` and `close` on `--port 0`; driven in tests through `into_router` with a doubled `Harness` | done, unit-tested (the door's order is tested: fence, handshake, cookie, page, 401) |
+| 4 | `transcript`, `selection`, and the session routes: list, chat view, create, `folders/session`, fork, flags, title, permission, steer, stop, and `/api/turn` streaming | done, unit-tested |
+| 5 | workspace routes (`/api/tree`, `/api/workspaces`) | done, unit-tested through the trait |
+| 6 | approvals, goal, todo, team, `/api/html`, `/vendor/purify.js` | done, unit-tested through the traits |
+| 7 | adapters over the real session, workspace and events crates as their APIs land; wiring `heddle web` with the binary's owner | **not started**: the binary crate owns it, and the server has no real `Harness` until those crates land |
+
+**What the binary must do to make the verifiers pass through `HEDDLE_BIN`:** parse `heddle web --host
+--port --endpoint --session-root --sandbox-root --dry-run --json`, build a `Harness` whose four required
+traits are implemented over the real services, mount the feature crates, bridge the event bus into
+`ServerBuilder::events()` (`session/event` -> `publish_session_event`, `approval/request` ->
+`publish_approval_request`, `model/request` -> `selection::running_turn_selection`), call `start()`, print
+`announce()[0]`, and on shutdown call `close()`. `DryRunPlan::for_options` and `launch_url` are ready for
+the `--dry-run --json` path.
 
 The verifiers named here start the server as `node dist/cli.js` and import `dist/server/web.js` and
 `dist/server/token.js`; they judge the Rust binary once the lane integrator has moved them onto `HEDDLE_BIN`.
