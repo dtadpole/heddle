@@ -24,6 +24,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 | [`model-validation/`](model-validation/INDEX.md) | drives every configured model through the real adapter and records streaming, declared reasoning levels and tool calls, beside a fingerprint of the configuration it validated |
 | [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots on this Mac, so the team's sessions share its cores and disk |
+| [`load-check/`](load-check/INDEX.md) | one plain report of the Mac's disk, load, swap, build-slot owners and worktree processes, with ok/warn/stop exit codes |
 | [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port (not used while the port builds locally) |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
