@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:36:39Z
-version: 0.5.2
+modified: 2026-10-23T07:07:16Z
+version: 0.6.0
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -60,8 +60,10 @@ sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76
   `db3d76d`, which carries this branch, and only `usage::SERVED` edited to add Tools and Turn):** `40-pluggable-tools`' `check-tools.mjs`
   **6/6** — the outside tool plugged in and used, the displacement, and the malformed spec refused at registration
   (the binary prints the row's own error before its failed-row summary, as the TypeScript loader logs it).
-- **Open, not in this crate:** the binary serving `Capability::Tools` and `Capability::Turn`, so the verifier judges
-  through `HEDDLE_BIN` in the lane.
+- **Through the binary owner's own advertising build (2026-10-22, `hd/developer-two` `09a3f14`, unmodified):**
+  `sh _verifiers_/40-pluggable-tools/verify.sh` exits **0**, `check-tools.mjs` 6/6.
+- **Judged on main (2026-10-23):** the binary advertises Tools and Turn on main (`b72cc1a`, D-048). The backend lane's
+  release binary passes part 4 in full, **6/6**; an unmodified debug build of main `d171876` agrees (`verify.sh` exit 0).
 - **Hooks are not this crate's to adapt:** `heddle-events` depends on this crate and implements `ToolHooks` over the
   bus itself (`BusHooks`, with this crate's mapping: a refusal is `PreExecute::Refused`, a failure `ToolHookError`,
   a failing post-execute `TOOL_FAILED`) and attaches an outside component's listeners over its connection
