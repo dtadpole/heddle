@@ -1,6 +1,6 @@
 ---
 title: Web Daemon
-version: 1.2.0
+version: 1.3.0
 description: The supervised user service — a launchd agent on macOS, a systemd user unit on Linux — that keeps the heddle Web UI running at the documented port, with either build.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -83,7 +83,10 @@ So, and each is a rule in this folder:
 - `install.sh` tightens `~/.heddle/web.log` to `600`, because it carries the launch token and the 8082 gate refuses
   to read a log other users can read — a 644 log there looks exactly like a stopped server;
 - [`guard.sh`](guard.sh) is the outer layer, because a job that launchd never starts at login cannot be restarted
-  by the supervisor living inside it. `install.sh --guard` adds one cron line (`* * * * * /bin/sh <checkout>/_tools_/web-daemon/guard.sh`);
+  by the supervisor living inside it. It acts on the **job**, not on the port: a silent port with the job running is
+  a restart in flight by the supervisor, and acting there would kill the fresh server and start the restart over
+  (measured 2026-10-23: three restores 75 s and 15 s apart from a port-only guard); a 20-second cooldown bounds it
+  further. `install.sh --guard` adds one cron line (`* * * * * /bin/sh <checkout>/_tools_/web-daemon/guard.sh`);
   the probe answers on a host where the platform starts the job, so the line is harmless on Linux too. Every action
   it takes is written to `~/.heddle/guard.log` with the reading that caused it. **Installing that line needs the
   account's crontab permission**: measured 2026-10-22, `crontab -` from this repository's automation answered
