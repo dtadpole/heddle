@@ -23,6 +23,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 | [`model-validation/`](model-validation/INDEX.md) | drives every configured model through the real adapter and records streaming, declared reasoning levels and tool calls, beside a fingerprint of the configuration it validated |
+| [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
 rather than the harness. The test is the one the conventions give: if the package
@@ -38,6 +39,5 @@ is judged by [`_verifiers_/`](../_verifiers_/INDEX.md) — three homes for three
 
 ## Read next
 
-[`verify-runner/INDEX.md`](verify-runner/INDEX.md) for the exit contract every verifier keeps and the library its checks import,
-[`browser-use/INDEX.md`](browser-use/INDEX.md) for the browser the page checks drive, and
-[`_verifiers_/INDEX.md`](../_verifiers_/INDEX.md) for the verifications that use them.
+Each tool's own `INDEX.md`, linked above, and [`_verifiers_/INDEX.md`](../_verifiers_/INDEX.md) for the verifications
+the tools serve.

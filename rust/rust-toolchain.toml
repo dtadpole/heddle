@@ -1,0 +1,4 @@
+# Every build host builds with the same compiler; rustup installs it on first use.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

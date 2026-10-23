@@ -1,0 +1,12 @@
+[package]
+name = "heddle-sandbox"
+description = "Heddle in Rust: the permission modes, their enforcement backends, escalation and approvals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

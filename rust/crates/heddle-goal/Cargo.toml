@@ -1,0 +1,12 @@
+[package]
+name = "heddle-goal"
+description = "Heddle in Rust: session goals, their driver and their tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

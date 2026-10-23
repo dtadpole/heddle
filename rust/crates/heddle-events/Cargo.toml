@@ -1,0 +1,12 @@
+[package]
+name = "heddle-events"
+description = "Heddle in Rust: the event bus and the named hook points, with the emit, parallel, bail and waterfall modes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

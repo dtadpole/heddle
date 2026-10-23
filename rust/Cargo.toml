@@ -1,12 +1,61 @@
 [workspace]
 resolver = "2"
-members = ["crates/heddle"]
+members = [
+    "crates/heddle",
+    "crates/heddle-config",
+    "crates/heddle-events",
+    "crates/heddle-session",
+    "crates/heddle-workspace",
+    "crates/heddle-llm",
+    "crates/heddle-context",
+    "crates/heddle-tools",
+    "crates/heddle-agent",
+    "crates/heddle-sandbox",
+    "crates/heddle-goal",
+    "crates/heddle-todo",
+    "crates/heddle-team",
+    "crates/heddle-server",
+    "crates/heddle-web-trajectory",
+    "crates/heddle-web-composer",
+    "crates/heddle-web-files",
+]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/dtadpole/heddle"
+
+# One place for versions, so sixteen crates do not each pick their own. A crate opts in with
+# `name.workspace = true`; an entry nobody uses costs nothing and is not in the lockfile.
+[workspace.dependencies]
+heddle-config = { path = "crates/heddle-config" }
+heddle-events = { path = "crates/heddle-events" }
+heddle-session = { path = "crates/heddle-session" }
+heddle-workspace = { path = "crates/heddle-workspace" }
+heddle-llm = { path = "crates/heddle-llm" }
+heddle-context = { path = "crates/heddle-context" }
+heddle-tools = { path = "crates/heddle-tools" }
+heddle-agent = { path = "crates/heddle-agent" }
+heddle-sandbox = { path = "crates/heddle-sandbox" }
+heddle-goal = { path = "crates/heddle-goal" }
+heddle-todo = { path = "crates/heddle-todo" }
+heddle-team = { path = "crates/heddle-team" }
+heddle-server = { path = "crates/heddle-server" }
+heddle-web-trajectory = { path = "crates/heddle-web-trajectory" }
+heddle-web-composer = { path = "crates/heddle-web-composer" }
+heddle-web-files = { path = "crates/heddle-web-files" }
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+zstd = "0.13"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,0 +1,12 @@
+[package]
+name = "heddle-server"
+description = "Heddle in Rust: the HTTP server, the token, the live stream and the page it serves"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

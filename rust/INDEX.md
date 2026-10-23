@@ -16,23 +16,21 @@ folder, not a type folder. `target/` is cargo's output and is ignored.
 | Path | What it is |
 |---|---|
 | [`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md) | what completes the port |
-| [`Cargo.toml`](Cargo.toml) | the workspace: edition 2024, `unsafe_code` forbidden, clippy at warn |
+| [`Cargo.toml`](Cargo.toml) | the workspace: edition 2024, shared dependency versions, `unsafe_code` forbidden |
 | [`crates/`](crates/INDEX.md) | one folder per crate |
 
 ## Where it builds and runs
 
 **Not on the owner's Mac.** Measured 2026-10-22: its binary-authorization policy kills every binary built
-there on exec (exit 137), a one-line C program as much as Rust; a packaged `cargo` still formats, lints and
-builds. Getting around the policy is not an option. The port builds and is judged on a **Linux build host
-over SSH**; the host's alias is machine configuration, read from `HEDDLE_BUILD_HOST` and never committed. Its
-UI reaches the Mac at `localhost:8081` through a forward added to the existing multiplexed connection:
+there on exec (exit 137), a one-line C program as much as Rust; a packaged `cargo` still checks and lints. Getting
+around the policy is not an option. The port is developed on **Linux build hosts over SSH**, whose aliases are
+machine configuration (`HEDDLE_BUILD_HOST`), never committed.
 
-```bash
-ssh -O forward -L 127.0.0.1:8081:127.0.0.1:8082 "$HEDDLE_BUILD_HOST"
-# on the host
-cargo test --manifest-path rust/Cargo.toml && cargo build --release --manifest-path rust/Cargo.toml
-HEDDLE_BIN="$PWD/rust/target/release/heddle" sh _verifiers_/05-config-system/verify.sh
-```
+**One worktree per team member**, made by [`_tools_/build-host`](../_tools_/build-host/INDEX.md): `~/heddle--<seat>`
+on branch `hd/<seat>`, where its owner writes its crates **and their unit tests** and runs them; `~/heddle--int`,
+where an integrator merges the branches and runs every verifier through `HEDDLE_BIN`; `~/heddle-live`, the
+deployment, whose page the Mac reaches at `localhost:8081` through an SSH forward. One crate is one owner's write
+scope, so parallel work never shares a file; [`rust-toolchain.toml`](rust-toolchain.toml) pins the compiler.
 
 ## Status
 
