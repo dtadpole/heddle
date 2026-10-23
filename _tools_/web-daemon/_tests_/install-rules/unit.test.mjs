@@ -144,6 +144,24 @@ test('macOS renders the supervisor in front of the server, and asks not to only 
   assert.doesNotMatch(unitValue(parseUnit(linux.stdout), 'Service', 'ExecStart'), /supervisor\.mjs/, 'systemd already restarts the process, so Linux gets no extra layer')
 })
 
+test('the Rust branch of part 11 is the same service with the binary in front of the supervisor', () => {
+  // rust/ULTIMATE_GOAL.md part 11: "the same launchd agent, pointed at the binary". So the agent runs the
+  // supervisor, the supervisor runs the binary, and the arguments are the ones the server already takes.
+  const f = fixture()
+  const { status, stdout, stderr } = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_BIN: f.heddleBin })
+  assert.equal(status, 0, stderr)
+  const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
+  const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
+  assert.deepEqual(args, [process.execPath, supervisor, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
+  assert.doesNotMatch(stdout, /dist\/cli\.js/, 'nothing node-runs-a-CLI remains in the definition')
+
+  const described = describeCommand(args, f.repo)
+  assert.equal(described.supervised, true)
+  assert.equal(described.entry, f.heddleBin, 'and the deployment claims the binary, not the supervisor')
+  assert.equal(described.root, f.repo, 'from the checkout the agent runs it in')
+  assert.equal(described.port, 3082)
+})
+
 test('a bad program is refused before anything is written', () => {
   const f = fixture()
   const relative = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'linux', HEDDLE_BIN: 'rust/target/release/heddle' })
