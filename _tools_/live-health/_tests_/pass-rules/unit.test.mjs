@@ -20,8 +20,12 @@ import {
   gateVerdict,
   launchUrlFromLog,
   looksLikeProxyError,
+  FIXTURE_PREFIX,
+  fixtureOnly,
   markerVerdict,
   outageHop,
+  previewTurnVerdict,
+  previewVerdict,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -201,7 +205,10 @@ test('a pinned pass renders as a table row that keeps failures, restarts and sta
     outage: { kind: 'restart', recoveredAfterMs: 1200 },
     verdict: 'fail',
   })
-  assert.deepEqual(row, ['2026-10-23 04:04:57Z', '480d9b8 (behind 3)', 'pass', '-', 'FAIL', '-', '-', '----', '-', 'restart 1200ms', 'FAIL'])
+  // An entry pinned before the preview was a target shows '-' in the Preview column.
+  assert.deepEqual(row, ['2026-10-23 04:04:57Z', '480d9b8 (behind 3)', 'pass', '-', 'FAIL', '-', '-', '----', '-', 'restart 1200ms', 'FAIL', '-'])
+  const withPreview = summaryRow({ at: '2026-10-23T06:20:00Z', deployment: {}, checks: {}, verdict: 'pass', preview: { verdict: 'fail' } })
+  assert.equal(withPreview.at(-1), 'FAIL', "a failing preview stays visible beside a passing deployment")
 })
 
 test('the pass fails on any failure or unknown verdict, is unjudged on any unjudged check, and passes only when all pass', () => {
@@ -219,4 +226,28 @@ test('the pinned record redacts home paths and launch tokens at the boundary', (
   assert.equal(out.detail, 'read ~/.heddle/web.log')
   assert.equal(out.url, 'http://127.0.0.1:3082/?token=<redacted>')
   assert.equal(out.nested[0].note, 'session at ~/x')
+})
+
+test('a turn is spent on the preview only when every endpoint is the fixture', () => {
+  assert.equal(fixtureOnly([{ name: 'scripted', kind: 'scripted' }]), true)
+  assert.equal(fixtureOnly([{ name: 'scripted', kind: 'scripted' }, { name: 'deepseek', kind: 'openai' }]), false)
+  assert.equal(fixtureOnly([]), false, 'no endpoints is not "all fixture"')
+  assert.equal(fixtureOnly(null), false)
+})
+
+test('a preview turn passes only when it completed with the fixture answer', () => {
+  const done = { userAppeared: true, assistantAppeared: true, settled: true, answerHead: `${FIXTURE_PREFIX}, not a model` }
+  assert.equal(previewTurnVerdict(done).verdict, 'pass')
+  assert.equal(previewTurnVerdict({ ...done, assistantAppeared: false }).verdict, 'fail')
+  assert.equal(previewTurnVerdict({ ...done, settled: false }).verdict, 'fail')
+  assert.match(previewTurnVerdict({ ...done, answerHead: 'Hello! How can I help?' }).detail, /not the fixture/)
+})
+
+test("the preview's verdict needs 303, 200, 200 and a completed turn; an unspent turn leaves it unjudged", () => {
+  const ok = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: { verdict: 'pass' } }
+  assert.equal(previewVerdict(ok).verdict, 'pass')
+  assert.equal(previewVerdict({ ...ok, tokenStatus: 401 }).verdict, 'fail')
+  assert.match(previewVerdict({ ...ok, treeStatus: 500 }).detail, /failing: tree/)
+  assert.equal(previewVerdict({ ...ok, turn: { verdict: 'unjudged' } }).verdict, 'unjudged')
+  assert.equal(previewVerdict({ ...ok, tokenStatus: null }).verdict, 'fail', 'a preview that does not answer fails')
 })
