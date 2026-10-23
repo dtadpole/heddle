@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T11:35:45Z
-version: 0.6.0
+modified: 2026-10-23T13:59:45Z
+version: 0.6.1
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -248,6 +248,14 @@ before any other work. Each check leans on the steps above:
 | the composition can say which layer supplied a value | 4 (provenance), `config --origins --json` |
 | a profile that does not exist says which ones do | 3 |
 
+**A change to this crate is judged on the whole backend lane, not on 05 alone** (D-048: no passing check may turn into
+a failure). In one throwaway worktree, build the previous lane head and run `lane.mjs --write-baseline <file>` over the
+backend parts, then check out the candidate in the same tree, rebuild, confirm the binary carries the change, and run
+`lane.mjs --baseline <file>` with the same parts; "0 regressed" is the bar (`46b727a` is a worked example). **Fidelity
+to the TypeScript build is measured, not assumed**: run the same inputs through a checkout's `node dist/cli.js` and the
+Rust binary with a scratch `HEDDLE_HOME` and `HOME`, and compare exit codes, output and the first error line; the three
+measurements so far, and every difference kept on purpose, are in *Known differences* below.
+
 One line per run, oldest first: the candidate, the command as run (with the binary it judged), and the result.
 **Measured and inferred are kept apart** (constitution C5): a row whose command column says *the … run above stands*
 is an **inference** — no Rust source, lockfile version, 05 verifier or runner differed, so the earlier binary was the
@@ -409,8 +417,10 @@ because each later step is checked through the earlier ones.
    heddle-tools's.
 2. **YAML reader.** *Resolved*: `saphyr` 0.0.6 (MIT OR Apache-2.0, YAML 1.2, exposes tagged nodes as
    `Yaml::Tagged(Tag, Box<Yaml>)`), added to `[workspace.dependencies]` by integrator-one (7ea2a3e).
-3. **`serde_json`'s `preserve_order`.** Off here. Features unify across the workspace, so turning it on changes
-   every crate's map order; whichever crate needs byte-compatible JSON (the session log) asks for it workspace-wide.
+3. **`serde_json`'s `preserve_order`.** *Resolved*: on, declared in this crate's `Cargo.toml` since `e31f096`. A
+   row's unknown keys and `config --json` promise the order the layer wrote, and without the feature this crate alone
+   printed sorted keys; the binary already had it through other crates (`heddle-llm`, `heddle-session` and six more),
+   so its output did not change.
 
 ## Read next
 
