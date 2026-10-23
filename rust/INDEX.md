@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.7.5
+version: 0.7.6
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -75,10 +75,11 @@ Its poll for the teammate parsed each session's metadata while the binary could 
 file in place — and a torn read ("Unexpected end of JSON input") escaped the wait. Since the fix the poll treats an
 unreadable file as not yet ready; in the loop that reproduced it, 4 of 22 runs failed before and 14 of 14 passed after.
 
-**Intermittent:** `70-workspaces-sessions` — *the four session shortcuts act on the selected session, and say so when
-there is none* failed once in six full lane runs tonight and passes when its file runs alone; it is a page check
-through the served web (owner to be attributed from its first error). The lane gate re-runs a file whose check
-regresses and names one that passes on the re-run as flaky, so it cannot hold a merge or hide a real regression.
+**Fixed in the check:** `70-workspaces-sessions` — *the four session shortcuts act on the selected session, and say so
+when there is none* failed in some full lane runs: it drives every chord in one in-page script whose fixed sleeps ran
+it to 10.8–11.2 s under load, past the browser protocol's 10 s default for a single call. It now polls for each chord's
+effect, bounded, within a budget that covers those bounds (4.4–4.8 s under the same load). The lane gate also re-runs a
+file whose check regresses and names one that passes on the re-run as flaky.
 
 **Unjudged, and why:** `10-llm-backends`'s two real-endpoint checks and `98-model-endpoints`'s two checks need a
 configured endpoint on the machine, which this one does not have — the same on the TypeScript build. Every other backend
