@@ -152,16 +152,40 @@ pub enum PreExecute {
     },
 }
 
+/// A `tools/pre-execute` listener that failed rather than answered.
+///
+/// In the TypeScript build the waterfall runs before the call's `try`, so a throwing listener escapes
+/// `ToolRegistry.call`, and the agent loop's catch answers the call with `INTERRUPTED` and the listener's
+/// message (`src/agent/loop.ts`): the model is told, and the turn goes on.
+/// [`ToolRegistry::try_call`](crate::ToolRegistry::try_call) surfaces it so the loop can do exactly that.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ToolHookError {
+    /// The listener's sentence, attributed by the bus to the point and the scope.
+    pub message: String,
+}
+
+impl ToolHookError {
+    /// A failure with this sentence.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// The two hook points around a tool call, modelled on DSH's `tools/pre-execute` and `tools/post-execute`.
 ///
 /// Both are waterfalls in the TypeScript build. `pre_execute` may stop a call but cannot rewrite its
-/// arguments (DSH's rule, kept); `post_execute` may replace the result — how a policy redacts a secret or
-/// spills a huge result. The defaults do nothing, so [`NoToolHooks`] is the composition without listeners.
+/// arguments (DSH's rule, kept), and may fail ([`ToolHookError`]); `post_execute` may replace the result —
+/// how a policy redacts a secret or spills a huge result — and, because the TypeScript build runs it inside
+/// the call's `try`, a failing listener there is a `TOOL_FAILED` result its implementation returns. The
+/// defaults do nothing, so [`NoToolHooks`] is the composition without listeners.
 pub trait ToolHooks: Send + Sync {
     /// Before the call runs, after the approval gate.
-    fn pre_execute(&self, call: &ToolCall<'_>) -> PreExecute {
+    fn pre_execute(&self, call: &ToolCall<'_>) -> Result<PreExecute, ToolHookError> {
         let _ = call;
-        PreExecute::Allowed
+        Ok(PreExecute::Allowed)
     }
 
     /// After the call ran; returns what stands in the result's place.

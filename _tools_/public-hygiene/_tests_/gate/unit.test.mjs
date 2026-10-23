@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 
 import {
@@ -12,6 +13,8 @@ import {
   OK,
   checkIdentity,
   describe,
+  isPlaceholderUuid,
+  liveMatches,
   parseDiff,
   parseIdentifiers,
   parseLog,
@@ -206,4 +209,94 @@ test('the gate refuses to run without a list, with an empty list, or with the li
   const refused = gate(dir, ['--range', 'HEAD~1..HEAD', '--identifiers', inside])
   assert.equal(refused.status, CANNOT_RUN)
   assert.match(refused.output, /outside the repository/)
+})
+
+// D-046. The six shapes integrator-two measured in the ui candidate, as UUIDs.
+const SIX_SHAPES = [
+  '00000000-0000-0000-0000-000000000000', // the nil UUID
+  '00000000-0000-0000-0000-000000000001', // the nil UUID ending in 1
+  '00000000-0000-4000-8000-000000000000', // v4-shaped zeros
+  '00000000-0000-4000-8000-000000000001', // v4-shaped zeros ending in 1
+  '11111111-1111-1111-1111-111111111111', // all ones
+  '11111111-1111-4111-8111-111111111111', // v4-shaped ones
+]
+const RANDOM_V4 = '3f9c2a71-5b4e-4d2a-9c1f-7e8b6a5d4c3b'
+const TWO_STRAY = '00000000-0000-4000-8000-000000000012'
+
+test('D-046: a UUID is a placeholder when 29 of its 30 non-version, non-variant digits are one digit', () => {
+  for (const shape of SIX_SHAPES) assert.equal(isPlaceholderUuid(shape), true, `${shape} is a placeholder`)
+  assert.equal(isPlaceholderUuid(SIX_SHAPES[3].toUpperCase()), true, 'case does not matter')
+  assert.equal(isPlaceholderUuid('ffffffff-ffff-4fff-bfff-fffffffffffe'), true, 'any repeated digit, one counter digit')
+  assert.equal(isPlaceholderUuid(RANDOM_V4), false, 'a random v4 id is not')
+  assert.equal(isPlaceholderUuid(TWO_STRAY), false, 'two stray digits are not')
+  assert.equal(isPlaceholderUuid('10000000-0000-4000-8000-000000000001'), false, 'two strays at either end are not')
+  assert.equal(isPlaceholderUuid('00000000-0000-0000-0000-00000000000'), false, 'a short UUID is not a UUID')
+  for (let i = 0; i < 500; i += 1) {
+    const id = randomUUID()
+    assert.equal(isPlaceholderUuid(id), false, `a random UUID is never a placeholder (${id})`)
+  }
+})
+
+test('D-046: a session-id-shaped rule skips placeholder ids and still catches real ones', () => {
+  const [rule] = parseIdentifiers('re:example-token-[0-9a-f]{8}-\n')
+  for (const shape of SIX_SHAPES) {
+    assert.equal(liveMatches(`let id = "example-token-${shape}"`, rule).length, 0, `example-token-${shape} is exempt`)
+  }
+  assert.equal(liveMatches(`let id = "example-token-${RANDOM_V4}"`, rule).length, 1, 'a random v4 id is caught')
+  assert.equal(liveMatches(`let id = "example-token-${TWO_STRAY}"`, rule).length, 1, 'two stray digits are caught')
+  assert.equal(liveMatches(`a "example-token-${SIX_SHAPES[0]}" b "example-token-${RANDOM_V4}"`, rule).length, 1, 'a real id beside a placeholder is still caught')
+  assert.equal(liveMatches('example-token-1234abcd-not-a-uuid', rule).length, 1, 'a match with no full UUID is judged as before')
+
+  const findings = scanText([`ok "example-token-${SIX_SHAPES[2]}"`, `bad "example-token-${RANDOM_V4}"`].join('\n'), [rule])
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].line, 2)
+})
+
+test('D-046: the gate passes a range of placeholder test vectors and fails one real id', (t) => {
+  const sb = sandbox(t)
+  const { dir, identity } = repo(t)
+  writeFileSync(join(dir, 'vectors.rs'), SIX_SHAPES.map((shape) => `const ID: &str = "example-token-${shape}";`).join('\n') + '\n')
+  git(dir, [...identity, 'add', 'vectors.rs'])
+  git(dir, [...identity, 'commit', '-q', '-m', 'test vectors'])
+  const clean = gate(dir, ['--range', 'HEAD~1..HEAD', '--identifiers', sb.list, '--no-identity'])
+  assert.equal(clean.status, OK, clean.output)
+
+  writeFileSync(join(dir, 'real.rs'), `const ID: &str = "example-token-${RANDOM_V4}";\n`)
+  git(dir, [...identity, 'add', 'real.rs'])
+  git(dir, [...identity, 'commit', '-q', '-m', 'a real id'])
+  const caught = gate(dir, ['--range', 'HEAD~1..HEAD', '--identifiers', sb.list, '--no-identity'])
+  assert.equal(caught.status, FOUND, caught.output)
+  assert.match(caught.output, /content\s+real\.rs:1/)
+})
+
+test('a branch behind main is judged on what it adds, not on main changes after it forked', (t) => {
+  const sb = sandbox(t)
+  const { dir, identity } = repo(t)
+  writeFileSync(join(dir, 'leak.md'), 'deployed on example-host-a\n')
+  git(dir, [...identity, 'add', 'leak.md'])
+  git(dir, [...identity, 'commit', '-q', '-m', 'old leak'])
+  git(dir, ['branch', 'seat'])
+  // main removes the leak after the seat branch forked
+  writeFileSync(join(dir, 'leak.md'), 'deployed\n')
+  git(dir, [...identity, 'commit', '-q', '-am', 'main fixes the leak'])
+  git(dir, ['checkout', '-q', 'seat'])
+  writeFileSync(join(dir, 'clean.md'), 'clean work\n')
+  git(dir, [...identity, 'add', 'clean.md'])
+  git(dir, [...identity, 'commit', '-q', '-m', 'seat work'])
+  git(dir, ['checkout', '-q', '-'])
+  const r = gate(dir, ['--range', 'HEAD..seat', '--identifiers', sb.list, '--no-identity'])
+  assert.equal(r.status, OK, `main's fix must not be read back as the seat's leak:\n${r.output}`)
+})
+
+test('the gate judges and fails when it is invoked through a symlinked path', (t) => {
+  const sb = sandbox(t)
+  const { dir, identity } = repo(t)
+  writeFileSync(join(dir, 'notes.md'), 'deployed on example-host-a today\n')
+  git(dir, [...identity, 'add', 'notes.md'])
+  git(dir, [...identity, 'commit', '-q', '-m', 'notes'])
+  const link = join(sb.dir, 'gate-link.mjs')
+  symlinkSync(GATE, link)
+  const r = spawnSync(process.execPath, [link, '--range', 'HEAD~1..HEAD', '--identifiers', sb.list, '--no-identity'], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: dir } })
+  assert.equal(r.status, FOUND, `a symlinked invocation must not silently pass:\n${r.stdout}${r.stderr}`)
+  assert.match(r.stdout, /FAIL 1 finding/)
 })

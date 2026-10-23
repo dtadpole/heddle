@@ -80,11 +80,50 @@ function redact(line, rule) {
   return replaced.length > 160 ? `${replaced.slice(0, 157)}...` : replaced
 }
 
+// D-046: a placeholder UUID identifies nothing. Ignoring the version nibble (the first
+// hex digit of the third group) and the variant nibble (the first of the fourth), a UUID
+// is a placeholder when at least 29 of its remaining 30 hex digits are one and the same
+// digit: the nil UUID, its v4-shaped form 00000000-0000-4000-8000-000000000000, the
+// all-ones forms, each with or without one trailing counter digit. A random UUID never
+// meets that. Tests must still carry well-formed ids, and building one at runtime to slip
+// past the gate is not allowed (D-044), so the gate tells the two apart instead.
+const UUID = /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/gi
+
+export function isPlaceholderUuid(text) {
+  const hex = String(text).replace(/-/g, '').toLowerCase()
+  if (!/^[0-9a-f]{32}$/.test(hex)) return false
+  const rest = hex.slice(0, 12) + hex.slice(13, 16) + hex.slice(17)
+  const counts = new Map()
+  for (const digit of rest) counts.set(digit, (counts.get(digit) ?? 0) + 1)
+  return Math.max(...counts.values()) >= 29
+}
+
+// The matches of a rule that count. A match is exempt only when it overlaps at least one
+// UUID and every UUID it overlaps is a placeholder; a match on a real UUID, or on text
+// with no full UUID in it, is judged exactly as before. The rule is not named by its
+// number, because numbers are lines of the private list and move when it is edited.
+export function liveMatches(text, rule) {
+  const matches = [...text.matchAll(rule.re)]
+  if (matches.length === 0) return matches
+  const spans = [...text.matchAll(UUID)].map((match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+    placeholder: isPlaceholderUuid(match[0]),
+  }))
+  if (spans.length === 0) return matches
+  return matches.filter((match) => {
+    const start = match.index
+    const end = match.index + match[0].length
+    const overlapped = spans.filter((span) => span.start < end && start < span.end)
+    return overlapped.length === 0 || overlapped.some((span) => !span.placeholder)
+  })
+}
+
 export function scanText(text, rules, { path = null, firstLine = 1 } = {}) {
   const findings = []
   text.split(/\r?\n/).forEach((line, index) => {
     for (const rule of rules) {
-      const matches = [...line.matchAll(rule.re)]
+      const matches = liveMatches(line, rule)
       if (matches.length === 0) continue
       findings.push({ kind: 'content', path, line: firstLine + index, rule, excerpt: redact(line, rule) })
     }
@@ -228,13 +267,17 @@ export function readTree(rev, cwd) {
 
 export function scanRange({ cwd, range, rules, expectedIdentity = EXPECTED_IDENTITY }) {
   const commits = parseLog(git(['log', `--format=%H%x00%an <%ae>%x00%cn <%ce>%x00%B%x1e`, range], cwd).stdout)
-  const diffText = git(['diff', '--no-color', '--unified=0', '--find-renames', range, '--'], cwd).stdout
+  // What the range brings in is the change since the merge base (A...B). The tree diff
+  // (A..B) also shows, reversed, every change main made after a behind branch forked, and
+  // reported main's own fixes as lines the branch adds.
+  const diffRange = /\.\.\./.test(range) ? range : range.replace('..', '...')
+  const diffText = git(['diff', '--no-color', '--unified=0', '--find-renames', diffRange, '--'], cwd).stdout
   const diff = parseDiff(diffText)
 
   const findings = []
   for (const path of diff.paths) {
     for (const rule of rules) {
-      if ([...path.matchAll(rule.re)].length > 0) findings.push({ kind: 'path', path, rule })
+      if (liveMatches(path, rule).length > 0) findings.push({ kind: 'path', path, rule })
     }
   }
   for (const line of diff.added) {
@@ -258,7 +301,7 @@ export function scanTree({ cwd, rev, rules }) {
   const entries = readTree(rev, cwd)
   for (const { path, blob } of entries) {
     for (const rule of rules) {
-      if ([...path.matchAll(rule.re)].length > 0) findings.push({ kind: 'path', path, rule })
+      if (liveMatches(path, rule).length > 0) findings.push({ kind: 'path', path, rule })
     }
     if (!blob || blob.includes(0)) continue // binary: its name was judged, its bytes are not text
     findings.push(...scanText(blob.toString('utf8'), rules, { path }))
@@ -357,7 +400,19 @@ export function main(argv, env = process.env, cwd = process.cwd()) {
   return FOUND
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Node runs the main module from its real path, so compare real paths: through a symlink
+// such as macOS /tmp the plain comparison was false and the command silently did nothing,
+// which for the hygiene gate meant exit 0 with no judgement at all.
+function invokedAsScript() {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsScript()) {
   try {
     process.exitCode = main(process.argv.slice(2))
   } catch (error) {

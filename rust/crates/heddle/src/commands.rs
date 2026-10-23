@@ -2018,7 +2018,7 @@ mod tests {
     fn a_profile_naming_a_row_with_no_adapter_fails_before_answering() {
         let (home, env) = profile_with(
             "dispatch-unwired",
-            "- insert:\n    - id: session\n      name: ./src/plugins/session.ts\n",
+            "- insert:\n    - id: session\n      name: ./no-such-component.ts\n",
         );
         let invocation = Invocation {
             argv: Vec::new(),
