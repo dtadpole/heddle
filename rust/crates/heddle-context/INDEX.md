@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.3.0
+version: 0.4.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -18,7 +18,7 @@ the routed endpoint's window, reduced by pruning before it is reduced by compact
 | Ported from | `src/context/` (1,726 lines in seven files) |
 | Judged by | `_verifiers_/30-context-management`, through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each. Step 5 (the real `heddle-llm` types and `heddle-session` store) and step 6 (the verifier through the binary) wait on those crates and the command line |
+| State | the API is declared and implemented behind it: the pure modules, the store double, the pruner, the compaction engine and the service, with unit tests beside each; the message types are `heddle-llm`'s, re-exported. Step 5's remaining half is the `ContextStore` adapter for `heddle-session`'s store, which waits on that store reaching `main`; step 6 waits on the loop and the command line |
 
 ## Public API
 
@@ -36,7 +36,7 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | `service` | `service.ts` | `ContextService<S: ContextStore>::{budget, measure, record_runtime_context, ensure_context, assemble, prepare, recover_overflow}`; `ContextConfig` (the profile row's `config`), `ContextReport` with `summary()` and `view()`, the `ModelAccess` trait |
 | `events` | the log vocabulary | `ContextEvent`: the `context/note` and `compaction/*` events this crate writes, typed |
 | `store` | `PrunableStore` | the `ContextStore` trait this crate needs from the session store; `LogEvent`, `SurfaceState`, `SurfaceOp`, `AppendOptions` |
-| `types` | `src/llm/types.ts` | **provisional** `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED` |
+| `types` | `src/llm/types.ts` | `heddle-llm`'s `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, re-exported under the same names; plus `text_message` for the single-block notes this crate writes |
 | `testing` | — | `MemoryStore`, an in-memory `ContextStore` with the TypeScript fold rules; behind the `testing` feature |
 
 ### How the other crates call it
@@ -55,14 +55,11 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 
 ## What it builds against
 
-No dependency crate has published its API yet, so this crate declares what it needs and builds against
-its own stand-ins:
-
-| Needed from | What | Until then |
+| Needed from | What | State |
 |---|---|---|
-| `heddle-llm` | `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, and `context_window_for` behind `ModelAccess` | `types` mirrors `src/llm/types.ts`; it becomes `pub use heddle_llm::…` under the same names |
-| `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | the `ContextStore` trait; the adapter `impl` for the real store lands here |
-| `heddle-config` | the context row's `config` handed over for deserialising; `heddle_home()` | `ContextConfig: Deserialize`; `ContextDependencies::heddle_home` |
+| `heddle-llm` | `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, and the endpoint window behind `ModelAccess` | **taken**: `types` re-exports `heddle_llm`'s under the same names, plus one helper, `text_message`; the dependency is on `main` |
+| `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | the `ContextStore` trait stays here; the adapter `impl` for the real store lands in this crate once the store is on `main`. It is a **straight pass-through** only if `heddle-session` re-exports `heddle-llm`'s message types; while its stand-ins are its own types, the adapter would have to serialise every node to cross the type boundary, which this crate will not hide |
+| `heddle-config` | the context row's `config` handed over for deserialising; `heddle_home()` | `ContextConfig: Deserialize`; `ContextDependencies::heddle_home`; the profile row is the boot's to hand over |
 | `heddle-events` | registering `recover_overflow` on the `agent/request-error` waterfall | a plain async method; the boot wires it |
 
 ## What `30-context-management` needs, and from whom
@@ -93,8 +90,10 @@ the TypeScript tests named.
    Landed.
 4. **The service** — `test/runtime-context.test.ts`, `test/session-folder.test.ts` (the baseline half), the usage
    anchor, and overflow recovery with a scripted `ModelAccess`. Landed.
-5. **The real dependencies**: swap `types` for `heddle-llm`'s, implement `ContextStore` for `heddle-session`'s
-   store, and run the same tests against it. **Waiting**: neither crate's API is on `main` yet.
+5. **The real dependencies**: the `types` half landed (`heddle-llm` is on `main`; `types` now re-exports it and
+   the same 97 tests pass). The `heddle-session` half — `impl ContextStore for SessionStore` — **waits**: the
+   store is not on `main` yet, and the adapter is written once it is and `heddle-session` re-exports the same
+   message types, so no per-node conversion is needed.
 6. **The verifier**: with the loop and the command line composed, `30-context-management` through `HEDDLE_BIN`,
    reported to the lane integrator with the command and the date. **Waiting** on the loop and the command line.
 
