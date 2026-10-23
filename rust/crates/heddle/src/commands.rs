@@ -301,6 +301,15 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         .into_iter()
         .map(|(id, name)| format!("row '{id}' ({name}) failed to load"))
         .collect();
+    // `--stream`: the live view of the turn's session, fed by the store's listener (the boot's stream hub).
+    let stream_hub = boot
+        .services
+        .get::<std::sync::Arc<heddle_llm::command::StreamHub>>("stream-hub")
+        .unwrap_or_default();
+    let starter = move |handle: &heddle_session::SessionHandle| {
+        stream_hub.start(&handle.id, Box::new(std::io::stderr()))
+            as std::sync::Arc<dyn heddle_agent::command::StreamView>
+    };
     // The goal driver, when the profile has one: the one-shot process joins the chain its turn started.
     let goal_advance = boot
         .services
@@ -324,7 +333,9 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         sessions: &sessions,
         failed_rows,
         ensure_workspace: Some(&ensure),
-        stream: None,
+        stream: args
+            .stream
+            .then_some(&starter as heddle_agent::command::StreamStarter<'_>),
         goal: goal_advance
             .as_ref()
             .map(|advance| advance as &dyn heddle_agent::command::GoalAdvance),

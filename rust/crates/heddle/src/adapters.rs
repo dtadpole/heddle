@@ -298,7 +298,8 @@ impl Component for SessionComponent {
         let hub = services
             .get::<heddle_server::EventHub>("event-hub")
             .map(heddle_server::adapters::session_event_listener);
-        let listener = (bus.is_some() || hub.is_some()).then(|| {
+        let stream = services.get::<Arc<heddle_llm::command::StreamHub>>("stream-hub");
+        let listener = (bus.is_some() || hub.is_some() || stream.is_some()).then(|| {
             Arc::new(
                 move |handle: &heddle_session::SessionHandle,
                       event: &heddle_session::SessionEvent| {
@@ -307,6 +308,9 @@ impl Component for SessionComponent {
                     }
                     if let Some(hub) = &hub {
                         hub(handle, event);
+                    }
+                    if let Some(stream) = &stream {
+                        stream.observe(&handle.id, &event.to_value());
                     }
                 },
             ) as heddle_session::EventListener
