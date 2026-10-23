@@ -1,9 +1,10 @@
 ---
 title: Verifier 11 — Web Daemon
-version: 1.0.0
-description: a launchd agent keeps the Web UI running at the documented port.
+version: 1.1.0
+description: a supervised user service — a launchd agent on macOS, a systemd user unit on Linux — keeps the Web UI running at the documented port, survives a kill, and does not weaken the token.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
+  - source: rust/ULTIMATE_GOAL.md part 11, and the Rust port's deployment work, which asks for a Linux branch of this verifier
 ---
 
 # `95-web-daemon`
@@ -19,22 +20,33 @@ cannot fake.
 
 ## Where it runs
 
-**No browser.** The checks drive the CLI, a scripted endpoint or a local HTTP double; nothing here needs
-a display or a window.
+**No browser.** The checks read the repository, the platform's supervisor and the port; nothing here needs
+a display or a window. On macOS the supervisor is launchd, on Linux the systemd user manager; both are read
+through [`_tools_/web-daemon/service.mjs`](../../_tools_/web-daemon/service.mjs), the reader
+[`96-deployment`](../96-deployment/INDEX.md) uses too.
 
 ## What decides it
 
-`check.mjs` has three checks, and they answer different questions:
+`check.mjs` has four checks, and they answer different questions:
 
-1. **The definition is complete** — a launchd agent with a working directory, `KeepAlive`, a throttle,
+1. **The agent definition is complete** — a launchd agent with a working directory, `KeepAlive`, a throttle,
    real log paths, the loopback host and a port placeholder; an installer that fails loudly, offers
    status/restart/uninstall, works twice, and resolves the real interpreter rather than handing launchd a
    shell shim. Judged from the repository, so it holds anywhere.
-2. **This machine runs it** — read from launchd and from the port, with the answer's service name checked,
-   because something listening is not the same as *this* listening. A host with no agent installed reports
-   **unjudged**.
-3. **It stays up** — the server is killed and required to be answering again within twenty seconds, which
-   is the difference between "it is running" and "it will be running".
+2. **The Linux unit definition is complete** — the same properties in systemd's words, read as values through
+   a unit parser: the harness's launcher on loopback with a port placeholder and the profile named,
+   `WorkingDirectory`, `Restart=always` at a fixed `RestartSec` with no start limit, logs appended to a file,
+   `HEDDLE_HOME`, `WantedBy=default.target`; and an installer that reloads, enables, restarts, uninstalls
+   with `--now` and checks lingering. Also judged from the repository.
+3. **This machine runs it** — read from the supervisor and from the port, with the answer's service name
+   checked, because something listening is not the same as *this* listening. The installed service must be
+   written for the documented port — **3082 on macOS**, behind the 8082 gate, **8082 on Linux**, where the
+   server itself owns the port the owner's SSH forward reaches — and its page and API must still refuse a
+   request without a session. A host with no service installed reports **unjudged**.
+4. **It stays up** — the server is killed and required to be answering again within twenty seconds, from a
+   new pid, which is the difference between "it is running" and "it will be running". The kill is real: on
+   the deployment host it interrupts the live service for a few seconds (3 s measured on the Linux host,
+   2026-10-22).
 
 ## Running it
 
@@ -45,15 +57,18 @@ sh verify.sh --json     # one parseable object
 ```
 
 Exit `0` when the claim holds, `1` when it fails, `3` when it could not be judged. A host without the
-agent installed is the `3` case, and it says how to install it.
+service installed is the `3` case, and it says how to install it.
+
+**Measured** on the Linux deployment host on 2026-10-22, against the hand-written unit `install.sh` now renders
+(TypeScript build, `~/heddle-live`, 127.0.0.1:8082): 4 checks, 4 passed.
 
 ## What it deliberately does not judge
 
 - **That a browser renders the page.** The daemon is judged over HTTP; a browser is still the missing
   check, and the roadmap says so.
-- **A supervisor the platform lacks.** `KeepAlive` is the supervisor half of the convention here, which
-  is enough for one process with no children. The cron-plus-supervisord arrangement the convention
-  describes exists for hosts where launchd is not available, and this repository does not carry it.
+- **A supervisor the platform lacks.** launchd and systemd are the two this repository carries. The
+  cron-plus-supervisord arrangement the convention describes is for hosts with neither, and it is not here.
+- **Which checkout the service runs.** That is [`96-deployment`](../96-deployment/INDEX.md)'s claim.
 - **The token.** Reading data still requires it, and that is [`90-web-ui-token`](../90-web-ui-token/INDEX.md)'s
   claim; this part only asserts that the daemon does not weaken it.
 
