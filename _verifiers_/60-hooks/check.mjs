@@ -27,6 +27,87 @@ import { chatDouble, fixtureDir, parseJson, readTranscript, removeDir, repoRoot,
 
 const CAPABILITY = 'hook points over a model call and a tool call, in Cordis event modes'
 
+/**
+ * Whether the harness under test is a binary named by `HEDDLE_BIN` rather than the TypeScript build.
+ *
+ * The TypeScript build loads a hook as a `.ts` plugin. The Rust binary cannot load TypeScript, so under
+ * `HEDDLE_BIN` a hook is a **process** (rust/ULTIMATE_GOAL.md, part 6: an outside listener uses the part-4
+ * protocol): the row names a component manifest beside the profile — `program` + `args`, the shape D-031 froze
+ * — and the process says which points it listens on when it answers `initialize`, the way the plugin calls
+ * `ctx.on(...)` when it loads. Every hook below carries both forms with the same decisions, so the claim judged
+ * is the same on either build; only the vehicle differs.
+ */
+const binaryUnderTest = typeof process.env.HEDDLE_BIN === 'string' && process.env.HEDDLE_BIN.length > 0
+
+/** The row's `name:` for a hook: the `.ts` plugin, or the manifest the binary reads. */
+const hookFile = (hook) => (binaryUnderTest ? hook.file.replace(/\.ts$/, '.component.yml') : hook.file)
+
+/** A component manifest: the program that starts the hook process, and its script beside the profile. */
+function manifestSource(base) {
+  return `program: ${JSON.stringify(process.execPath)}
+args:
+  - ./${base}.mjs
+`
+}
+
+/**
+ * A hook as a process: line-delimited JSON-RPC 2.0 on stdio. `initialize` is answered with the listeners it
+ * declares; every `hooks/call` with the hook's decision as a part-4 reply — `next`, `replace`, `merge` (run the
+ * rest of the chain, then set keys on its result), `refuse` — or a JSON-RPC error when the hook throws.
+ */
+function componentSource({ listeners, answer }) {
+  return `import { createInterface } from 'node:readline'
+
+const listeners = ${JSON.stringify(listeners)}
+const answer = ${answer}
+const write = (message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\\n')
+createInterface({ input: process.stdin }).on('line', (line) => {
+  if (line.trim() === '') return
+  const message = JSON.parse(line)
+  if (message.method === 'initialize') return write({ id: message.id, result: { tools: [], listeners } })
+  if (message.method === 'shutdown') return write({ id: message.id, result: null })
+  if (message.method === 'exit') return process.exit(0)
+  if (message.id === undefined) return
+  if (message.method !== 'hooks/call') return write({ id: message.id, error: { code: -32601, message: 'method not found: ' + message.method } })
+  try {
+    write({ id: message.id, result: answer(message.params) })
+  } catch (error) {
+    write({ id: message.id, error: { code: -32000, message: error.message } })
+  }
+})
+`
+}
+
+/**
+ * The process form of each hook: the points it declares and its decision, the same as the plugin's.
+ *
+ * `post` answers `merge` rather than `replace` because the plugin calls `next()` first: the rest of the chain and
+ * the tool's own result run, and only then are `output` and `data` set on it — a replacement of a result the tool
+ * actually produced, not an invented answer.
+ */
+const PROCESS_HOOKS = {
+  retarget: {
+    listeners: [{ point: 'model/request' }],
+    answer: `({ payload }) => ({ kind: 'replace', value: { ...payload, endpoint: 'scripted' } })`,
+  },
+  refuse: {
+    listeners: [{ point: 'tools/pre-execute' }],
+    answer: `({ payload }) => payload.name === 'write_file' ? { kind: 'replace', value: { allowed: false, reason: 'this hook refuses writes' } } : { kind: 'next' }`,
+  },
+  post: {
+    listeners: [{ point: 'tools/post-execute' }],
+    answer: `() => ({ kind: 'merge', value: { output: 'redacted by the hook', data: { replacedBy: 'post-hook' } } })`,
+  },
+  stop: {
+    listeners: [{ point: 'agent/pre-step' }],
+    answer: `() => ({ kind: 'refuse', reason: 'refused by hook: this hook refuses to send the request' })`,
+  },
+  broken: {
+    listeners: [{ point: 'tools/pre-execute' }, { point: 'model/request' }],
+    answer: `({ point }) => { throw new Error(point === 'model/request' ? 'this hook is broken too' : 'this hook is broken') }`,
+  },
+}
+
 /** A profile for this check, with the plugin paths relative to the profile directory. */
 function hookProfile(home, options = {}) {
   const dir = fixtureDir('hooks-profile')
@@ -48,7 +129,7 @@ function hookProfile(home, options = {}) {
       // profile directory. Measured: prefixing it the way a repository plugin is prefixed
       // resolved to `/Users/zhenc/heddle/retarget.ts`, which is nowhere.
       (hook, index) => `    - id: hook-${index + 1}
-      name: ./${hook.file}
+      name: ./${hookFile(hook)}
 `,
     )
     .join('')
@@ -85,7 +166,13 @@ function hookProfile(home, options = {}) {
         allow: [write_file, read_file, list_dir]
 ${hookRows}`,
   )
-  for (const hook of options.hooks ?? []) writeFileSync(join(dir, hook.file), hook.source)
+  for (const hook of options.hooks ?? []) {
+    if (binaryUnderTest) {
+      const base = hook.file.replace(/\.ts$/, '')
+      writeFileSync(join(dir, `${base}.component.yml`), manifestSource(base))
+      writeFileSync(join(dir, `${base}.mjs`), componentSource(PROCESS_HOOKS[base]))
+    } else writeFileSync(join(dir, hook.file), hook.source)
+  }
   return dir
 }
 
