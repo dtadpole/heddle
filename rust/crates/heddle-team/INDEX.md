@@ -56,6 +56,13 @@ against the doubles in `testing`.
 | the `team` row | `heddle-config` | deserialize the row into `TeamConfig`; an absent row installs no team |
 | `purpose: 'team'` | `heddle-llm` scripted endpoint | check-teams scripts the teammate's answer with a step whose `purpose` is `team` |
 
+**Runner ordering.** The service reads the target's log immediately after a turn is begun, so `TeamRunner::begin`
+must put the prompt in that log and register the turn live *before* it returns; the same is required of
+`TeamAgent::begin_turn`. The TypeScript build got this from `runTurn` appending before its first await. `heddle-agent`'s
+current `run_turn` performs both inside its async body, so an adapter that only boxes that future cannot satisfy it:
+the agent needs a begin/remainder split that writes the prompt and registers the turn synchronously and returns the
+rest as a future. Raised to the agent owner and the lane integrator, 2026-10-22.
+
 ## Rust shapes beyond the TypeScript build
 
 1. **Per-Lead transactions.** The TypeScript service was single-threaded; here every journal write folds,

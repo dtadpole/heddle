@@ -1713,6 +1713,120 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_recorded_recovery_store_settles_its_members_and_delivers_its_mail() {
+        // The shape of `_verifiers_/50-agentic-loop/fixtures/team-recover`, which is bytes a previous
+        // TypeScript process left behind: two provisioning members (one with a prompt and no source, one with
+        // a log that never accepted one) and one queued message.
+        let store = Arc::new(MemoryStore::new());
+        let lead = "session-recover-lead";
+        store.add_session(SessionMetaView {
+            id: lead.to_owned(),
+            cwd: Some("/work".to_owned()),
+            endpoint: Some("scripted".to_owned()),
+            model: Some("scripted".to_owned()),
+            team_id: None,
+        });
+        store
+            .create(&child_of(lead, "session-recover-active"))
+            .unwrap();
+        store
+            .append(
+                "session-recover-active",
+                json!({ "type": "session/created", "cwd": "/work" }),
+            )
+            .unwrap();
+        store
+            .append(
+                "session-recover-active",
+                json!({ "type": "message", "message": { "role": "user", "content": [{ "type": "text", "text": "the prompt that made it resumable" }] } }),
+            )
+            .unwrap();
+        store
+            .create(&child_of(lead, "session-recover-ghost"))
+            .unwrap();
+        store
+            .append(
+                "session-recover-ghost",
+                json!({ "type": "session/created", "cwd": "/work" }),
+            )
+            .unwrap();
+        store
+            .append(
+                lead,
+                json!({ "type": "team/member", "version": 2, "teamId": lead, "member": { "id": "session-recover-active", "name": "alpha", "description": "left over", "context": "fresh", "phase": "provisioning" } }),
+            )
+            .unwrap();
+        store
+            .append(
+                lead,
+                json!({ "type": "team/member", "version": 2, "teamId": lead, "member": { "id": "session-recover-ghost", "name": "ghost", "description": "left over", "context": "fresh", "phase": "provisioning" } }),
+            )
+            .unwrap();
+        store
+            .append(
+                lead,
+                json!({ "type": "team/message/queued", "version": 2, "teamId": lead, "message": { "id": "team-message-left-1", "senderId": lead, "senderName": "lead", "targetId": "session-recover-active", "content": [{ "type": "text", "text": "left over mail" }] } }),
+            )
+            .unwrap();
+
+        let live = Arc::new(FakeLive::new());
+        let runner = Arc::new(RecordingRunner::new(Arc::clone(&store), None));
+        let store_dependency: Arc<dyn TeamStore> = store.clone();
+        let runner_dependency: Arc<dyn TeamRunner> = runner.clone();
+        let live_dependency: Arc<dyn TeamLive> = live.clone();
+        let service = TeamService::new(TeamDeps {
+            store: store_dependency,
+            runner: runner_dependency,
+            live: Some(live_dependency),
+            limits: TeamLimits::default(),
+            notify: None,
+            warn: None,
+            ids: Arc::new(SequentialIds::new()),
+        });
+
+        let report = service.recover_all(&store.list()).await;
+        assert_eq!(
+            report.boot_line().as_deref(),
+            Some("heddle web: recovered 1 team(s) (2 settled, 1 delivered)")
+        );
+        let phases: Vec<(String, String)> = store
+            .events(lead)
+            .iter()
+            .filter(|event| event["type"] == "team/member")
+            .map(|event| {
+                (
+                    event["member"]["name"].as_str().unwrap().to_owned(),
+                    event["member"]["phase"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, String)> = [
+            ("alpha", "provisioning"),
+            ("ghost", "provisioning"),
+            ("alpha", "active"),
+            ("ghost", "failed"),
+        ]
+        .into_iter()
+        .map(|(name, phase)| (name.to_owned(), phase.to_owned()))
+        .collect();
+        assert_eq!(phases, expected);
+        let delivered: Vec<String> = store
+            .events(lead)
+            .iter()
+            .filter(|event| event["type"] == "team/message/delivered")
+            .map(|event| event["messageId"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(delivered, vec!["team-message-left-1".to_owned()]);
+        assert!(
+            store.events("session-recover-active").iter().any(|event| {
+                event["message"]["source"]["kind"] == "team-message"
+                    && event["message"]["source"]["messageId"] == "team-message-left-1"
+            }),
+            "the queued mail reached the member's own log with its team-message source"
+        );
+    }
+
     #[test]
     fn two_concurrent_task_creations_journal_two_distinct_ids() {
         let h = harness();
