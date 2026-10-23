@@ -1164,6 +1164,86 @@ impl ContextPort for ContextView {
     }
 }
 
+/// An outside component: a process a row declares by a manifest (`program`, `args`, `config` schema),
+/// spoken to as line-delimited JSON-RPC on stdio (part 4). heddle-tools starts it and turns the tools it
+/// declares in `initialize` into registry tools, gated like every other tool.
+pub struct OutsideRow {
+    manifest: PathBuf,
+}
+
+impl OutsideRow {
+    /// The component a row's manifest at `manifest` declares.
+    pub fn new(manifest: PathBuf) -> Self {
+        Self { manifest }
+    }
+
+    /// The process the manifest names: a `.`-relative program resolves against the manifest's folder,
+    /// any other name is looked up as the system would.
+    fn spec(&self, config: &Value) -> Result<heddle_tools::OutsideComponentSpec, String> {
+        let manifest = heddle_config::read_component_manifest(&self.manifest)
+            .map_err(|error| error.to_string())?;
+        let folder = self
+            .manifest
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let program = if manifest.program.starts_with('.') {
+            heddle_config::paths::resolve(&folder, std::path::Path::new(&manifest.program))
+        } else {
+            PathBuf::from(&manifest.program)
+        };
+        let row = self
+            .manifest
+            .file_name()
+            .map(|name| {
+                name.to_string_lossy()
+                    .trim_end_matches(".component.yml")
+                    .to_owned()
+            })
+            .unwrap_or_default();
+        let mut spec = heddle_tools::OutsideComponentSpec::new(row, program, folder);
+        spec.args = manifest.args;
+        spec.config = config.clone();
+        Ok(spec)
+    }
+}
+
+impl Component for OutsideRow {
+    fn requires(&self) -> Vec<String> {
+        // It registers into the registry, and its calls are confined by the same sandbox.
+        vec!["tools".to_owned(), "sandbox".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        // `--validate` reads the manifest through heddle-config's catalog; the component adds nothing.
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let spec = self.spec(config)?;
+        let sandbox = services
+            .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
+            .ok_or_else(|| "the sandbox service is not provided".to_owned())?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "the tool registry is not provided".to_owned())?;
+        let gate: Arc<dyn heddle_tools::SandboxGate> =
+            Arc::new(heddle_tools::adapters::Sandbox::new(sandbox));
+        let component = crate::runtime::tokio()
+            .block_on(heddle_tools::OutsideComponent::start(spec, gate))
+            .map_err(|error| error.to_string())?;
+        component
+            .register_into(&registry)
+            .map_err(|error| error.to_string())?;
+        // The process lives as long as the run: its handle stays registered under its manifest.
+        services.provide(
+            &format!("outside:{}", self.manifest.display()),
+            Arc::new(component),
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1648,6 +1728,46 @@ mod tests {
         assert!(report["messageCount"].is_u64(), "{report}");
         assert!(report["estimatedTokens"].is_u64(), "{report}");
         assert!(report["instructions"].is_array(), "{report}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_outside_row_runs_the_program_its_manifest_names_beside_the_manifest() {
+        let home = scratch("outside");
+        let manifest = home.join("shout.component.yml");
+        std::fs::write(
+            &manifest,
+            "program: ./shout.mjs\nargs: [--loud]\nconfig:\n  type: object\n",
+        )
+        .expect("the manifest");
+        let spec = OutsideRow::new(manifest.clone())
+            .spec(&json!({ "level": 3 }))
+            .expect("the manifest reads");
+        assert_eq!(spec.row, "shout");
+        assert_eq!(spec.program, home.join("shout.mjs"));
+        assert_eq!(spec.args, vec!["--loud".to_owned()]);
+        assert_eq!(spec.cwd, home);
+        assert_eq!(spec.config, json!({ "level": 3 }));
+
+        std::fs::write(&manifest, "program: node\nargs: [./shout.mjs]\n").expect("the manifest");
+        let spec = OutsideRow::new(manifest)
+            .spec(&json!({}))
+            .expect("the manifest reads");
+        assert_eq!(
+            spec.program,
+            PathBuf::from("node"),
+            "a bare program is looked up as the system would"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_outside_row_whose_manifest_is_missing_fails_naming_it() {
+        let home = scratch("outside-missing");
+        let error = OutsideRow::new(home.join("nowhere.component.yml"))
+            .spec(&json!({}))
+            .expect_err("a missing manifest is refused");
+        assert!(error.contains("nowhere.component.yml"), "{error}");
         let _ = std::fs::remove_dir_all(&home);
     }
 

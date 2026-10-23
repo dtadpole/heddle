@@ -304,10 +304,9 @@ pub async fn delegate_subagent(
             SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
         })?;
 
-    let _in_flight = ActiveGuard {
-        active,
-        parent: parent.id.clone(),
-    };
+    // Counted as in flight while the child runs, and released however the delegation ends — the TypeScript
+    // `active.add(parent.id)` with its `finally`.
+    let _in_flight = ActiveGuard::enter(active, &parent.id);
     deps.run.run(&child, prompt.to_owned(), cancel).await?;
 
     let answer = final_assistant_text(&deps.store.read(&child));
@@ -328,6 +327,17 @@ pub async fn delegate_subagent(
 struct ActiveGuard<'a> {
     active: &'a Mutex<HashSet<String>>,
     parent: String,
+}
+
+impl<'a> ActiveGuard<'a> {
+    /// Register `parent` as having a child in flight.
+    fn enter(active: &'a Mutex<HashSet<String>>, parent: &str) -> Self {
+        active.lock().unwrap().insert(parent.to_owned());
+        Self {
+            active,
+            parent: parent.to_owned(),
+        }
+    }
 }
 
 impl Drop for ActiveGuard<'_> {
@@ -1136,5 +1146,90 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, SubagentErrorCode::SubagentFailed);
         assert!(error.message.contains("no endpoint"), "{}", error.message);
+    }
+
+    /// A child run that delegates again through the same tool instance, as the scripted double makes the child
+    /// replay the parent's script — the case `50-agentic-loop`'s check-subagents relies on the limit to refuse.
+    struct DelegatingChild {
+        store: Arc<FakeStore>,
+        nested: Mutex<Option<SubagentError>>,
+        active: Arc<Mutex<HashSet<String>>>,
+    }
+
+    impl SubagentRun for DelegatingChild {
+        fn run<'a>(
+            &'a self,
+            child: &'a SessionHandle,
+            _prompt: String,
+            _cancel: Option<CancellationToken>,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                // While the parent's delegation is in flight, the child asks for its own.
+                let deps = SubagentDeps {
+                    store: Arc::clone(&self.store) as Arc<dyn SubagentStore>,
+                    run: Recorder::new(Arc::clone(&self.store)),
+                };
+                let nested = delegate_subagent(
+                    &deps,
+                    Some(child),
+                    "child task",
+                    SubagentConfig::default().into(),
+                    None,
+                    &self.active,
+                )
+                .await
+                .unwrap_err();
+                *self.nested.lock().unwrap() = Some(nested);
+                let mut events = self.store.child_events.lock().unwrap();
+                events.push(event(1, "model/request", serde_json::json!({})));
+                events.push(event(
+                    2,
+                    "assistant/chunk",
+                    serde_json::json!({ "chunk": { "type": "text-delta", "text": "child answer" } }),
+                ));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_that_delegates_while_its_parents_delegation_runs_is_refused_as_busy() {
+        let store = FakeStore::with(0, None);
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let child_run = Arc::new(DelegatingChild {
+            store: Arc::clone(&store),
+            nested: Mutex::new(None),
+            active: Arc::clone(&active),
+        });
+        let deps = SubagentDeps {
+            store: Arc::clone(&store) as Arc<dyn SubagentStore>,
+            run: Arc::clone(&child_run) as Arc<dyn SubagentRun>,
+        };
+        let result = delegate_subagent(
+            &deps,
+            Some(&parent_handle()),
+            "do it",
+            SubagentConfig::default().into(),
+            None,
+            &active,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "child answer");
+        let nested = child_run.nested.lock().unwrap().clone().unwrap();
+        assert_eq!(nested.code, SubagentErrorCode::SubagentBusy, "{nested:?}");
+        assert_eq!(
+            nested.message,
+            "already running 1 subagent(s); maxActive is 1"
+        );
+        assert_eq!(
+            store.created().len(),
+            1,
+            "exactly one child session was made"
+        );
+        assert!(
+            active.lock().unwrap().is_empty(),
+            "released after the delegation"
+        );
     }
 }
