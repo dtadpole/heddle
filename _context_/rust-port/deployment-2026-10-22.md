@@ -134,6 +134,17 @@ case where launchd never starts the job at login. Both are on `hd/live-deploy`; 
 launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 ```
 
+## Redeploy log
+
+| At (PDT) | main moved to | Deployment | Reading |
+|---|---|---|---|
+| 20:12 | `a5b0c66` | `a5b0c66`, clean | 8082 200, page 533,283 bytes against 533,280, marker `dd6d45d28567`; 96 3/3 with the branch's checks, 2/3 with main's |
+| 20:33 | `b4f8abf` (Rust lockfile chore) | `b4f8abf`, clean | 8082 200, healthz 200, page identical (533,283 / 533,280, same marker); 96 3/3 with the branch's checks, 2/3 with main's |
+
+Both redeploys used main's installer at that commit, which refuses a detached checkout, with
+`HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
+`main` carries it. Neither build changed `dist/server/page.html`, which is why the marker is the same across them.
+
 ## Redeploying, when an integrator moves main
 
 The deployment is one checkout and one agent, so a redeploy is four steps and one reading:
