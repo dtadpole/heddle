@@ -10,3 +10,20 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+axum.workspace = true
+bytes.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Not in the workspace table yet; the integrator who owns rust/Cargo.toml may hoist them there.
+base64 = "0.22"
+getrandom = "0.3"
+sha2 = "0.10"
+tokio-util = "0.7"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
