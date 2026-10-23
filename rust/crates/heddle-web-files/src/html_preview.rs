@@ -206,7 +206,7 @@ fn rewrite_srcset(value: &str, base: &str, serve: &dyn Fn(&str) -> String) -> St
     let candidates: Vec<String> = value
         .split(',')
         .map(|candidate| {
-            let mut parts = candidate.trim().split_whitespace();
+            let mut parts = candidate.split_whitespace();
             let url = parts.next().unwrap_or("");
             let rest: Vec<&str> = parts.collect();
             if rest.is_empty() {

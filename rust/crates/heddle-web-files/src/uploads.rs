@@ -81,7 +81,7 @@ pub fn safe_upload_name(name: &str) -> String {
         _ => String::new(),
     };
     let stem_source = if extension.is_empty() {
-        &cleaned[..]
+        cleaned
     } else {
         &cleaned[..dot.unwrap_or(0)]
     };
