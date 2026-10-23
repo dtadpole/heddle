@@ -306,7 +306,12 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), 200);
-        let asked = host.assembled.lock().expect("the log is not poisoned");
+        // Copied out, so the guard is dropped before the next request is awaited.
+        let asked = host
+            .assembled
+            .lock()
+            .expect("the log is not poisoned")
+            .clone();
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].endpoint.as_deref(), Some("scripted"));
         assert_eq!(asked[0].model.as_deref(), Some("tiny"));
@@ -322,7 +327,11 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), 200);
-        let asked = host.assembled.lock().expect("the log is not poisoned");
+        let asked = host
+            .assembled
+            .lock()
+            .expect("the log is not poisoned")
+            .clone();
         assert_eq!(asked[0].endpoint, None, "an empty name is not a choice");
         assert_eq!(asked[0].model, None);
     }

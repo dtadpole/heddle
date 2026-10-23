@@ -153,7 +153,13 @@ mod tests {
             "session-00000000-0000-4000-8000-000000000000"
         ));
         assert!(
-            is_session_id("session-ABCDEF01-2345-6789-abcd-ef0123456789"),
+            is_session_id("session-00000000-0000-4000-8000-000000000001"),
+            "any hex digits in the shape, not one fixed id"
+        );
+        // Upper-case hex, as a placeholder shape (D-046: one repeated digit, case-blind), so the guard's
+        // case-insensitivity is still judged without a realistic-looking id.
+        assert!(
+            is_session_id("session-AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
             "the guard is case-insensitive"
         );
         assert!(!is_session_id("session-short"), "too short");
