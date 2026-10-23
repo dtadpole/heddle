@@ -58,9 +58,11 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 ## The config-boot contract
 
 What a caller does to turn command-line flags into rows, and what it may rely on afterwards. The binary follows it
-today (`rust/crates/heddle/src/cli.rs` `layer_options` and `config_args`, `boot.rs` `boot`). **`web` boots exactly as
-a run does** — the TypeScript `runWeb` calls `bootFromArgs` — so wiring `web` needs nothing new from this crate:
-steps 1–5 below, then the server reads what step 7 lists.
+today: every command that boots goes through `rust/crates/heddle/src/commands.rs` `boot_then`, which builds
+`cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `profiles` and `config` pass
+`cli::config_args` to `command::run`. **`web` boots exactly as a run does** — the TypeScript `runWeb` calls
+`bootFromArgs` — so wiring it needs nothing new from this crate: boot through the same path as `boot_then` (steps 1–5
+below), then hand the server what step 7 lists. As of main `480d9b8`, the binary's `web` is still `todo!()`.
 
 ### 1. One environment, built once
 
@@ -197,6 +199,7 @@ coordinator before any other work. Each check leans on the steps above:
 |---|---|---|---|
 | 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | lane release build, and a debug build of exactly `abdf20c` | 10 pass, verdict 0, both |
 | 2026-10-22 | main `0a10ceb` (the binary on main) | a debug build of main, and the lane release build | 10 pass, verdict 0, both |
+| 2026-10-22 | main `480d9b8` (a served command routes through the boot) | a debug build of main, and the lane release build of `480d9b8` | 10 pass, verdict 0, both |
 
 ## Decisions the contract makes
 
