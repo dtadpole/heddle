@@ -43,9 +43,15 @@
 //!     points: [model/request]
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, oneshot};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -316,26 +322,257 @@ pub enum OutsideError {
 ///
 /// The child lives as long as the last `Arc` to this value; it is killed when dropped.
 pub struct StdioListener {
-    _private: (),
+    /// The child, kept only so dropping the listener can kill it.
+    child: Mutex<Child>,
+    /// Lines waiting to be written to the child's stdin; `notify` never blocks on the pipe.
+    outbox: mpsc::UnboundedSender<String>,
+    /// Calls waiting for an answer, by the id the caller was given.
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<HookReply, HookError>>>>>,
+    next_id: AtomicU64,
+    timeout: Duration,
+}
+
+/// One request to an outside listener, as the wire framing writes it.
+#[derive(Serialize)]
+struct HookRequest {
+    /// Present for a call that is waited for; absent for an `emit` notification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
+    method: &'static str,
+    params: HookCall,
+}
+
+/// One line the child writes: a result, an error, or neither (which is malformed).
+#[derive(Deserialize)]
+struct ReplyEnvelope {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    result: Option<HookReply>,
+    #[serde(default)]
+    error: Option<ReplyError>,
+}
+
+/// The error arm of a reply.
+#[derive(Deserialize)]
+struct ReplyError {
+    message: String,
+}
+
+/// Fail every pending call — the child died, or it wrote something that is not a reply.
+fn fail_pending(
+    pending: &Mutex<HashMap<u64, oneshot::Sender<Result<HookReply, HookError>>>>,
+    message: &str,
+) {
+    let mut pending = pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (_, sender) in pending.drain() {
+        let _ = sender.send(Err(HookError::fail(message.to_owned())));
+    }
 }
 
 impl StdioListener {
     /// Start the configured process. Must be called inside a Tokio runtime.
     pub async fn spawn(config: &OutsideListenerConfig) -> Result<Arc<StdioListener>, OutsideError> {
-        let _ = config;
-        todo!("heddle-events: StdioListener::spawn")
+        if config.command.is_empty() {
+            return Err(OutsideError::Config("the command is empty".into()));
+        }
+        if config.points.is_empty() {
+            return Err(OutsideError::Config("no points are named".into()));
+        }
+        let mut command = Command::new(&config.command[0]);
+        command.args(&config.command[1..]);
+        if let Some(cwd) = &config.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &config.env {
+            command.env(key, value);
+        }
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|source| OutsideError::Spawn {
+            command: config.command.join(" "),
+            source,
+        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .expect("a piped child stdin is always present");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("a piped child stdout is always present");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("a piped child stderr is always present");
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<HookReply, HookError>>>>> =
+            Arc::default();
+        let (outbox, outbox_rx) = mpsc::unbounded_channel::<String>();
+        let listener = Arc::new(StdioListener {
+            child: Mutex::new(child),
+            outbox,
+            pending: pending.clone(),
+            next_id: AtomicU64::new(1),
+            timeout: Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+        });
+
+        // Writes are queued so a caller never blocks on the pipe; one task owns the child's stdin.
+        let mut outbox_rx = outbox_rx;
+        tokio::spawn(async move {
+            let mut stdin = BufWriter::new(stdin);
+            while let Some(line) = outbox_rx.recv().await {
+                let written = stdin.write_all(format!("{line}\n").as_bytes()).await;
+                if written.is_err() || stdin.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // The child's answers are correlated by id; EOF fails whatever is still waiting.
+        let pending_for_reader = pending.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let envelope: ReplyEnvelope = match serde_json::from_str(trimmed) {
+                            Ok(envelope) => envelope,
+                            Err(error) => {
+                                tracing::error!(
+                                    %error,
+                                    line = trimmed,
+                                    "an outside listener wrote a line that is not a reply"
+                                );
+                                fail_pending(
+                                    &pending_for_reader,
+                                    "the outside listener wrote a line that is not a reply",
+                                );
+                                break;
+                            }
+                        };
+                        let ReplyEnvelope { id, result, error } = envelope;
+                        let Some(id) = id else {
+                            tracing::warn!(
+                                line = trimmed,
+                                "an outside listener wrote a reply without an id"
+                            );
+                            continue;
+                        };
+                        let sender = pending_for_reader
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .remove(&id);
+                        if let Some(sender) = sender {
+                            let outcome = match (result, error) {
+                                (_, Some(error)) => Err(HookError::fail(error.message)),
+                                (Some(result), None) => Ok(result),
+                                (None, None) => Err(HookError::fail(
+                                    "an outside listener reply had neither a result nor an error",
+                                )),
+                            };
+                            let _ = sender.send(outcome);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::error!(%error, "reading an outside listener failed");
+                        break;
+                    }
+                }
+            }
+            fail_pending(
+                &pending_for_reader,
+                "the outside listener exited before answering",
+            );
+        });
+
+        // The child's stderr is the log, never the protocol.
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::warn!(target: "heddle_events::outside", "{line}");
+            }
+        });
+
+        Ok(listener)
     }
 }
 
 impl JsonListener for StdioListener {
     fn call(&self, call: HookCall) -> HookFuture<HookReply> {
-        let _ = call;
-        todo!("heddle-events: StdioListener::call")
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = oneshot::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, sender);
+        let request = HookRequest {
+            id: Some(id),
+            method: "hook",
+            params: call,
+        };
+        let outcome = match serde_json::to_string(&request) {
+            Ok(line) => self
+                .outbox
+                .send(line)
+                .map_err(|_| "the outside listener is not running: its input is closed".to_owned()),
+            Err(error) => Err(format!("the hook call does not serialize: {error}")),
+        };
+        if let Err(message) = outcome {
+            self.pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
+            return Box::pin(async move { Err(HookError::fail(message)) });
+        }
+        let pending = self.pending.clone();
+        let timeout = self.timeout;
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, receiver).await {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(_)) => Err(HookError::fail(
+                    "the outside listener stopped before it answered",
+                )),
+                Err(_) => {
+                    pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&id);
+                    Err(HookError::fail(format!(
+                        "the outside listener did not answer within {}ms",
+                        timeout.as_millis()
+                    )))
+                }
+            }
+        })
     }
 
     fn notify(&self, call: HookCall) {
-        let _ = call;
-        todo!("heddle-events: StdioListener::notify")
+        let request = HookRequest {
+            id: None,
+            method: "hook",
+            params: call,
+        };
+        if let Ok(line) = serde_json::to_string(&request) {
+            let _ = self.outbox.send(line);
+        }
+    }
+}
+
+impl Drop for StdioListener {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -345,8 +582,22 @@ pub async fn attach_outside_listener(
     scope: &Scope,
     config: &OutsideListenerConfig,
 ) -> Result<Vec<Listener>, OutsideError> {
-    let _ = (scope, config);
-    todo!("heddle-events: attach_outside_listener")
+    if config.command.is_empty() {
+        return Err(OutsideError::Config("the command is empty".into()));
+    }
+    if config.points.is_empty() {
+        return Err(OutsideError::Config("no points are named".into()));
+    }
+    // Every point is checked before the process starts, so a bad row attaches nothing.
+    for point in &config.points {
+        scope.bus().inner().attacher(point)?;
+    }
+    let listener = StdioListener::spawn(config).await?;
+    let mut handles = Vec::with_capacity(config.points.len());
+    for point in &config.points {
+        handles.push(scope.on_json(point, listener.clone(), ListenOptions::APPEND)?);
+    }
+    Ok(handles)
 }
 
 #[cfg(test)]
@@ -663,5 +914,141 @@ mod tests {
         assert_eq!(bus.listener_count(Reported::NAME), 1);
         scope.dispose();
         assert_eq!(bus.listener_count(Reported::NAME), 0);
+    }
+
+    fn script_config(script: &str, points: &[&str]) -> OutsideListenerConfig {
+        OutsideListenerConfig {
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            points: points.iter().map(|point| (*point).to_string()).collect(),
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5_000),
+        }
+    }
+
+    fn waterfall_call(payload: &str) -> HookCall {
+        HookCall {
+            point: Echoed::NAME.to_owned(),
+            mode: Mode::Waterfall,
+            payload: serde_json::json!(payload),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stdio_listener_answers_by_correlating_the_id() {
+        let script = r#"read line
+printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
+"#;
+        let config = script_config(script, &[Echoed::NAME]);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        let reply = listener.call(waterfall_call("base")).await.unwrap();
+        assert_eq!(
+            reply,
+            HookReply::Replace {
+                value: serde_json::json!("replaced")
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_without_answering_fails_the_pending_call() {
+        let config = script_config("read line\nexit 0\n", &[Echoed::NAME]);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        let error = listener.call(waterfall_call("base")).await.unwrap_err();
+        assert_eq!(error.kind(), HookErrorKind::Failed);
+        assert!(
+            error.message().contains("exited") || error.message().contains("not running"),
+            "saw: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_never_answers_times_out_with_its_own_message() {
+        let mut config = script_config("read line\nsleep 2\n", &[Echoed::NAME]);
+        config.timeout_ms = Some(150);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        let error = listener.call(waterfall_call("base")).await.unwrap_err();
+        assert_eq!(error.kind(), HookErrorKind::Failed);
+        assert!(
+            error.message().contains("did not answer within"),
+            "saw: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_notification_carries_the_point_but_no_id() {
+        let path = std::env::temp_dir().join(format!(
+            "heddle-events-notify-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = script_config(
+            "read line\nprintf '%s' \"$line\" > \"$OUT\"\n",
+            &[Reported::NAME],
+        );
+        config.env.insert("OUT".into(), path.display().to_string());
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        listener.notify(HookCall {
+            point: Reported::NAME.to_owned(),
+            mode: Mode::Emit,
+            payload: serde_json::json!({"seq": 1}),
+        });
+        let mut recorded = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if !text.is_empty() {
+                    recorded = Some(text);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_file(&path);
+        let text = recorded.expect("the child recorded the notification");
+        assert!(text.contains("\"method\":\"hook\""), "saw: {text}");
+        assert!(text.contains("\"point\":\"test/json-emit\""), "saw: {text}");
+        assert!(
+            !text.contains("\"id\""),
+            "a notification has no id\nsaw: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attaching_checks_every_point_before_the_process_starts() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let scope = bus.scope("outside");
+        let config = script_config("cat > /dev/null\n", &["test/absent"]);
+        match attach_outside_listener(&scope, &config).await {
+            Err(OutsideError::UnknownPoint(error)) => {
+                assert_eq!(error.name, "test/absent");
+                assert_eq!(error.exposed, Echoed::NAME);
+            }
+            other => panic!("expected an unknown point, got {other:?}"),
+        }
+        let empty = script_config("cat > /dev/null\n", &[]);
+        assert!(matches!(
+            attach_outside_listener(&scope, &empty).await,
+            Err(OutsideError::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_outside_listener_attaches_to_every_point_it_names() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let scope = bus.scope("outside");
+        let config = script_config("cat > /dev/null\n", &[Echoed::NAME]);
+        let handles = attach_outside_listener(&scope, &config).await.unwrap();
+        assert_eq!(handles.len(), 1);
+        assert!(handles[0].is_active());
+        assert_eq!(bus.listener_count(Echoed::NAME), 1);
+        scope.dispose();
+        assert_eq!(bus.listener_count(Echoed::NAME), 0);
     }
 }
