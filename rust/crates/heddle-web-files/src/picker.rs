@@ -192,10 +192,10 @@ pub async fn pick_folder(platform: &Platform, runner: &dyn CommandRunner) -> Pic
                     ],
                 )
                 .await;
-            if kdialog.code == 0 {
-                if let Some(path) = as_path(&kdialog.stdout) {
-                    return PickerOutcome::Picked { path };
-                }
+            if kdialog.code == 0
+                && let Some(path) = as_path(&kdialog.stdout)
+            {
+                return PickerOutcome::Picked { path };
             }
             if missing_command(&kdialog) {
                 return PickerOutcome::Unavailable {
