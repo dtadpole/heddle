@@ -14,6 +14,9 @@
 # the port: 3082 on macOS, behind the 8082 gate; 8082 on Linux, where nothing fronts the server.
 # HEDDLE_WEB_LABEL, HEDDLE_WEB_UNIT, HEDDLE_WEB_HOME and HEDDLE_WEB_LOG name a scratch service instead of the
 # deployment's; rehearse.sh uses them, so an experiment never touches the live agent.
+# HEDDLE_WEB_SESSION_ROOT, an absolute folder, adds `--session-root` to the server's arguments. HEDDLE_WEB_HOME alone
+# does not separate sessions: the repository profile pins the session row's root to ~/.heddle/sessions, so a second
+# service without this writes its sessions into the deployment's store (measured 2026-10-22 with the 3097 preview).
 # The file is written under the account's own home, so none of this needs sudo. Every step is idempotent:
 # running it twice leaves one service, and the paths it fills in come from the machine it runs on rather
 # than from the repository.
@@ -28,6 +31,11 @@ unit="${HEDDLE_WEB_UNIT:-heddle-web.service}"
 # rehearsal server that printed its token there would hand the gate a token the live server does not know.
 heddle_home="${HEDDLE_WEB_HOME:-$HOME/.heddle}"
 log="${HEDDLE_WEB_LOG:-$heddle_home/web.log}"
+session_root="${HEDDLE_WEB_SESSION_ROOT:-}"
+case "$session_root" in
+  ''|/*) ;;
+  *) echo "install.sh: HEDDLE_WEB_SESSION_ROOT must be an absolute path, got '$session_root'" >&2; exit 2 ;;
+esac
 
 # The platform decides the supervisor. HEDDLE_WEB_PLATFORM exists for the installer's own tests, which render
 # and drive both branches on one machine with stand-in launchctl, systemctl and loginctl commands.
@@ -160,6 +168,7 @@ render_plist() {
   xml_strings "$exe" >> "$args"
   if [ -n "$cli" ]; then xml_strings "$cli" >> "$args"; fi
   xml_strings web --host 127.0.0.1 --port "$port" --config "$repo/cordis.yml" >> "$args"
+  if [ -n "$session_root" ]; then xml_strings --session-root "$session_root" >> "$args"; fi
   awk -v list="$args" '
     /@PROGRAM_ARGUMENTS@/ { while ((getline line < list) > 0) print line; close(list); next }
     { print }
@@ -184,7 +193,7 @@ xml_strings() {
 
 render_unit() {
   # systemd splits ExecStart on whitespace, so a path with a space would silently become two arguments.
-  case "$exe$cli$repo$HOME" in
+  case "$exe$cli$repo$HOME$session_root" in
     *" "*|*"	"*)
       echo "install.sh: a path contains whitespace, which a systemd ExecStart line would split: $exe $cli $repo" >&2
       exit 2
@@ -200,6 +209,7 @@ render_unit() {
     -e "s|@LOG@|$log|g" \
     -e "s|@HOME@|$heddle_home|g" \
     -e "s|@HOME_DIR@|$HOME|g" \
+    -e "s|--config $repo/cordis.yml\$|--config $repo/cordis.yml${session_root:+ --session-root $session_root}|" \
     "$here/heddle-web.service.template"
 }
 
@@ -308,7 +318,7 @@ stop_leftover() {
   [ -n "$pid" ] || return 0
   cmd=$(ps -o command= -p "$pid" 2>/dev/null)
   case "$cmd" in
-    *" web --host 127.0.0.1 --port $port --config $repo/cordis.yml")
+    *" web --host 127.0.0.1 --port $port --config $repo/cordis.yml${session_root:+ --session-root $session_root}")
       kill "$pid" 2>/dev/null || true
       waited=0
       while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do sleep 0.1; waited=$((waited + 1)); done

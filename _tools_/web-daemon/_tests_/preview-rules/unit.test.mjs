@@ -43,7 +43,7 @@ function fixture({ second = 'heddle' } = {}) {
   // The build runner writes the binary; the binary answers `web --dry-run`; the installer records itself and prints a
   // launch token into the log, as the real server does when the agent starts it.
   put('_tools_/local-build/run', `#!/bin/sh\necho "run $*" >> "${calls}"\n[ "\${FAKE_BUILD_EXIT:-0}" = 0 ] || exit 1\nmkdir -p rust/target/release\nprintf '#!/bin/sh\\necho "heddle $*" >> "${calls}"\\nexit \${FAKE_DRYRUN_EXIT:-0}\\n' > rust/target/release/heddle\nchmod 755 rust/target/release/heddle\n`, 0o755)
-  put('_tools_/web-daemon/install.sh', `#!/bin/sh\necho "install $* port=$HEDDLE_WEB_PORT label=$HEDDLE_WEB_LABEL bin=$HEDDLE_BIN" >> "${calls}"\necho "heddle web: http://127.0.0.1:$HEDDLE_WEB_PORT/?token=tok$$" >> "$HEDDLE_WEB_LOG"\n`, 0o755)
+  put('_tools_/web-daemon/install.sh', `#!/bin/sh\necho "install $* port=$HEDDLE_WEB_PORT label=$HEDDLE_WEB_LABEL bin=$HEDDLE_BIN sessions=$HEDDLE_WEB_SESSION_ROOT" >> "${calls}"\necho "heddle web: http://127.0.0.1:$HEDDLE_WEB_PORT/?token=tok$$" >> "$HEDDLE_WEB_LOG"\n`, 0o755)
   put('rust/crates/heddle/src/main.rs', 'fn main() {}\n')
   put('cordis.yml', '[]\n')
   put('.gitignore', 'rust/target/\n')
@@ -82,7 +82,7 @@ test('with no recorded build it builds main, dry-runs it, swaps the binary, rein
   const seen = calls(f)
   assert.equal(seen[0], 'run build --release --manifest-path rust/Cargo.toml -p heddle')
   assert.match(seen[1], /^heddle web --host 127\.0\.0\.1 --port 3097 --config .*\/cordis\.yml --dry-run$/)
-  assert.match(seen[2], new RegExp(`^install --restart port=3097 label=com\\.dtadpole\\.heddle-web-rust-preview bin=${f.home}/bin/heddle$`))
+  assert.match(seen[2], new RegExp(`^install --restart port=3097 label=com\\.dtadpole\\.heddle-web-rust-preview bin=${f.home}/bin/heddle sessions=${f.home}/sessions$`), 'and its own session store, not the deployment\'s')
   assert.equal(built(f), f.tip, 'the commit it was built from is recorded')
   assert.notEqual(served(f), 'old binary\n', 'the served binary is the new build')
   assert.match(result.stdout, /link: http:\/\/127\.0\.0\.1:3097\/\?token=tok\d+/)

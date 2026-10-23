@@ -1,14 +1,14 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.0.0
-description: What each check of a live-health pass claims, how it decides, and what its verdicts and exit codes mean.
+version: 1.1.0
+description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the 96-deployment and 90-web-ui-token verifiers, whose claims the process, marker and door checks reuse
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-23T05:10:55Z
+modified: 2026-10-23T06:31:08Z
 ---
 
 # The checks
@@ -26,6 +26,13 @@ A pass judges the address the owner uses, `8082`, and the server behind it, `308
 | `turn` | one prompt, typed with trusted input into the reused health session, gets an answer that streamed (two or more recorded chunks) and settled, against a baseline taken before the prompt | `turnVerdict` |
 | `console` | no error-level message on load or after the turn; a reading that cannot be taken stays unjudged | `consoleVerdict` |
 | `dsh` | the DSH reference on `8080` answers; its control counts are recorded beside heddle's | evidence only |
+| `preview` | the Rust preview on `3097` - a second target: it keeps its own session store (no session id also listed by `3082`), its token link answers `303`, `/api/endpoints` and `/api/tree` answer `200`, and a fixture turn completes | `previewVerdict`, `sharedSessions`, `previewTurnVerdict` |
+
+**The preview is read-only and separate.** Its launch link comes from its own log, never as the
+deployment's token; statuses, sizes and counts are pinned, never bodies; its verdict never changes the
+deployment's. A turn is sent only when `/api/endpoints` lists nothing but the offline fixture
+(`fixtureOnly`), so no pass spends a real model call, and only while the stores are separate, so a Rust write
+never lands in the deployment's sessions.
 
 The deployment block records `head`, `branch`, `dirty`, `behind` and `ahead` against a freshly fetched
 `origin/main`. Staleness is recorded, not failed.
