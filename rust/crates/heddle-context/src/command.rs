@@ -670,4 +670,273 @@ mod tests {
             "heddle: no context window for endpoint 'local': the endpoint declares none and none is configured\n"
         );
     }
+
+    /// `PAIR_FILE` of the verifier: 6,000 characters of a repeated sentence.
+    fn pair_file() -> String {
+        "the quick brown fox jumps over the lazy dog, "
+            .repeat(134)
+            .chars()
+            .take(6000)
+            .collect()
+    }
+
+    fn chunk(harness: &Harness, handle: &SessionHandle, chunk: Value) {
+        ContextStore::append(
+            harness.sessions.store().as_ref(),
+            handle,
+            json!({ "type": "assistant/chunk", "chunk": chunk }),
+            AppendOptions::default(),
+        )
+        .expect("the chunk appends");
+    }
+
+    /// The verifier's `pairConversation`, driven the way the loop drives this crate: the prompt, then
+    /// per round the runtime snapshot, `prepare` with `--system 'be brief'`, and the round's answer —
+    /// a `write_file` call, a `read_file` call whose result carries the whole file, then text.
+    fn pair_conversation(harness: &Harness, folder: &Path) -> SessionHandle {
+        let tools = [
+            ToolSpec {
+                name: "write_file".to_string(),
+                description: "Write a file".to_string(),
+                parameters: json!({"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}),
+            },
+            ToolSpec {
+                name: "read_file".to_string(),
+                description: "Read a file".to_string(),
+                parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            },
+            ToolSpec {
+                name: "list_dir".to_string(),
+                description: "List a directory".to_string(),
+                parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            },
+        ];
+        let handle = harness.session_in(folder);
+        harness.message(
+            &handle,
+            text_message(Role::User, format!("write then read {}", "y".repeat(2000))),
+        );
+        let file = pair_file();
+        for round in 0..3 {
+            harness
+                .context
+                .record_runtime_context(
+                    &handle,
+                    &[crate::runtime::RuntimeContextSection {
+                        name: "sandbox:policy".to_string(),
+                        text: "Current heddle file policy: workspace-write.".to_string(),
+                    }],
+                )
+                .expect("the snapshot is recorded");
+            block_on(harness.context.prepare(
+                &handle,
+                &PrepareOptions {
+                    cwd: folder,
+                    endpoint: "scripted",
+                    model: None,
+                    tools: &tools,
+                    system: Some("be brief"),
+                    summarizer: None,
+                    force: false,
+                },
+            ))
+            .expect("the round prepares");
+            match round {
+                0 => {
+                    let arguments =
+                        serde_json::to_string(&json!({"path": "pair.txt", "content": file}))
+                            .expect("arguments serialise");
+                    chunk(
+                        harness,
+                        &handle,
+                        json!({"type": "tool-call", "id": "call-write", "name": "write_file", "arguments": arguments}),
+                    );
+                    chunk(
+                        harness,
+                        &handle,
+                        json!({"type": "done", "finishReason": "tool_calls"}),
+                    );
+                    let mut result = text_message(Role::Tool, "wrote 6000 characters to pair.txt");
+                    result.tool_call_id = Some("call-write".to_string());
+                    harness.message(&handle, result);
+                }
+                1 => {
+                    chunk(
+                        harness,
+                        &handle,
+                        json!({"type": "tool-call", "id": "call-read", "name": "read_file", "arguments": "{\"path\":\"pair.txt\"}"}),
+                    );
+                    chunk(
+                        harness,
+                        &handle,
+                        json!({"type": "done", "finishReason": "tool_calls"}),
+                    );
+                    let mut result = text_message(Role::Tool, file.clone());
+                    result.tool_call_id = Some("call-read".to_string());
+                    harness.message(&handle, result);
+                }
+                _ => {
+                    chunk(
+                        harness,
+                        &handle,
+                        json!({"type": "text-delta", "text": "read it"}),
+                    );
+                    chunk(
+                        harness,
+                        &handle,
+                        json!({"type": "done", "finishReason": "stop"}),
+                    );
+                }
+            }
+        }
+        handle
+    }
+
+    fn pair_config() -> ContextConfig {
+        ContextConfig {
+            context_window: Some(100_000),
+            threshold_tokens: Some(3200),
+            retain_tokens: Some(600),
+            instructions: false,
+            ..ContextConfig::default()
+        }
+    }
+
+    /// The seq of the `read_file` call's chunk and of its result.
+    fn read_pair(harness: &Harness, handle: &SessionHandle) -> (u64, u64) {
+        let events =
+            ContextStore::read(harness.sessions.store().as_ref(), handle).expect("the log");
+        let call = events
+            .iter()
+            .find(|event| {
+                event.kind == "assistant/chunk"
+                    && event.field("chunk").and_then(|chunk| chunk.get("name"))
+                        == Some(&json!("read_file"))
+            })
+            .expect("the read call was recorded")
+            .seq;
+        let result = events
+            .iter()
+            .find(|event| {
+                event.kind == "message"
+                    && event
+                        .field("message")
+                        .and_then(|message| message.get("toolCallId"))
+                        == Some(&json!("call-read"))
+            })
+            .expect("and its result")
+            .seq;
+        (call, result)
+    }
+
+    #[test]
+    fn the_verifiers_cut_pair_scenario_backs_off_before_the_call_and_keeps_the_system_prompt() {
+        let scratch = Scratch::new("cut-pair");
+        let harness = Harness::new(&scratch, pair_config(), Some("the briefing"));
+        let folder = scratch.folder("work");
+        let handle = pair_conversation(&harness, &folder);
+        let (call, result) = read_pair(&harness, &handle);
+
+        let events =
+            ContextStore::read(harness.sessions.store().as_ref(), &handle).expect("the log");
+        let start = events
+            .iter()
+            .find(|event| event.kind == "compaction/start")
+            .expect("a compaction was planned");
+        let shadowed: Vec<u64> = serde_json::from_value(
+            start
+                .field("shadowedSeqs")
+                .cloned()
+                .expect("the span is recorded"),
+        )
+        .expect("seqs");
+        assert!(
+            start.seq > result,
+            "the plan was made with the pair on the surface, so the aim was real"
+        );
+        assert!(!shadowed.is_empty(), "the plan shadowed something");
+        assert_eq!(
+            shadowed.contains(&call),
+            shadowed.contains(&result),
+            "the call and its result were taken together: {shadowed:?}, call {call}, result {result}"
+        );
+        assert!(
+            !shadowed.contains(&result),
+            "the cut backed off before the pair"
+        );
+
+        let (code, stdout, _) = harness.run(&json_args(&handle.id), &folder, None);
+        assert_eq!(code, 0);
+        let view: Value = serde_json::from_str(&stdout).expect("JSON");
+        let messages = view["messages"].as_array().expect("messages");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["role"] == json!("system")
+                    && message["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("be brief")),
+            "the model still reads the system prompt after the rewrite"
+        );
+        for (index, message) in messages.iter().enumerate() {
+            if message["role"] != json!("tool") {
+                continue;
+            }
+            let previous = &messages[index - 1];
+            assert_eq!(
+                previous["role"],
+                json!("assistant"),
+                "tool message {index} follows an assistant message"
+            );
+            assert!(
+                previous["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("→ "),
+                "tool message {index} follows the call that asked for it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_verifiers_cut_refused_scenario_leaves_the_conversation_as_it_was() {
+        let scratch = Scratch::new("cut-refused");
+        let summary = "z".repeat(20_000);
+        let harness = Harness::new(&scratch, pair_config(), Some(&summary));
+        let folder = scratch.folder("work");
+        let handle = pair_conversation(&harness, &folder);
+
+        let events =
+            ContextStore::read(harness.sessions.store().as_ref(), &handle).expect("the log");
+        assert!(
+            events.iter().any(|event| event.kind == "compaction/failed"
+                && event.field("refused") == Some(&json!(true))),
+            "the refusal is recorded rather than swallowed"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != "compaction/summary"),
+            "no summary was accepted"
+        );
+        assert!(
+            !events.iter().any(|event| event.kind == "context/note"
+                && event.field("surfaceOp").and_then(|op| op.get("op")) == Some(&json!("replace"))),
+            "no replacement landed"
+        );
+
+        let (code, stdout, _) = harness.run(&json_args(&handle.id), &folder, None);
+        assert_eq!(code, 0);
+        let view: Value = serde_json::from_str(&stdout).expect("JSON");
+        let texts = texts(&view);
+        assert!(
+            !texts.iter().any(|text| text.contains("zzzz")),
+            "no part of the refused summary reached the model"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("yyyy")),
+            "the span it would have shadowed is still sent"
+        );
+    }
 }
