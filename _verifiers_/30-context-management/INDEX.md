@@ -32,11 +32,36 @@ a display or a window.
 
 ## What decides it
 
-`check.mjs` drives turns against a scripted endpoint and a local HTTP double, and reads three
-things: the transcript (what was logged), `heddle context <session> --json` (what the model would
-read), and `dist/` directly for the two properties a scripted provider cannot produce on demand —
-a non-shrinking summary and a cut that falls inside a tool pair. Every fixture is local, so the
-whole part is offline and free.
+`check.mjs` drives turns against a scripted endpoint and a local HTTP double, and reads two things:
+the transcript (what was logged) and `heddle context <session> --json` (what the model would read).
+Every claim goes through the command line, so the same checks judge the TypeScript build and a
+`HEDDLE_BIN` binary. Every fixture is local, so the whole part is offline and free.
+
+The two engine properties a scripted provider was once thought unable to produce are produced through
+the command line:
+
+- **A refused summary** — the scripted compaction step returns a summary larger than its span; the check
+  judges the `compaction/failed` record with `refused: true`, no summary and no replacement, and that the
+  model still reads the span it would have shadowed.
+- **A cut aimed inside a tool pair** — one turn writes a file and reads it back; the 6000-character result
+  (under the 8192 at which a result is pruned) is the newest node and alone outweighs `retainTokens`, so
+  the retained tail reaches its budget at the result and the cut must back off before its call. The check
+  judges `compaction/start`'s `shadowedSeqs` (the call and its result together, and not through the pair)
+  and that every tool message the model reads follows its call.
+
+**What the cut check judges about the system prompt.** Through the command line the prompt is a
+`context/note` appended when the round starts, *after* the first prompt, so it is never the surface's head
+node — and the planner protects only a head system node. Measured on the TypeScript build: the plan
+shadows that note, and the next round appends it again, so the model still reads it, after the summary
+rather than first. The check therefore judges what a consumer relies on — the model is never left without
+its system prompt — rather than "never inside a shadowed span", which held only for a head system node the
+command line never produces. Whether the prompt should keep its position is an open question for the
+harness, not for this check.
+
+One check still reads the TypeScript build directly: *a long conversation can be compacted more than
+once* folds the log with `transcriptTurns` from `dist/server/web.js` to judge the reader's view. Under
+`HEDDLE_BIN`, in a lane without a TypeScript build, that import fails, so the check needs a route through
+the binary before part 3 can pass there.
 
 ## Running it
 
