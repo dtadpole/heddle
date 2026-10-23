@@ -1,6 +1,6 @@
 ---
 title: Web Daemon
-version: 1.1.0
+version: 1.2.0
 description: The supervised user service — a launchd agent on macOS, a systemd user unit on Linux — that keeps the heddle Web UI running at the documented port, with either build.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -21,7 +21,9 @@ for the machine it runs on, and the reader both daemon verifiers share.
 | [`heddle-web.service.template`](heddle-web.service.template) | the Linux user unit, with the same placeholders and the same arguments |
 | [`install.sh`](install.sh) | writes the service for this machine and loads it; `--status`, `--restart`, `--uninstall`, and `--print` to show the definition without touching anything. It **refuses** a checkout that is not committed `main` — on `main`, or detached exactly at `origin/main` — so the service cannot be installed from a workspace (`HEDDLE_ALLOW_DIRTY_INSTALL=1` is the development override). |
 | [`service.mjs`](service.mjs) | reads the installed service on either platform — its program, checkout, port, log, pid and the process owning its port — and decides whether a checkout is committed main; [`95-web-daemon`](../../_verifiers_/95-web-daemon/INDEX.md) and [`96-deployment`](../../_verifiers_/96-deployment/INDEX.md) both read through it |
-| [`_tests_/`](_tests_/INDEX.md) | the component suites: the reader's rules, and the installer run in throwaway checkouts with stand-in supervisors |
+| [`supervisor.mjs`](supervisor.mjs) | the inner supervisor: runs the server and puts it back when it exits, with a bounded backoff and a loud give-up. `install.sh` puts it in front of the program on macOS, where launchd was measured not to restart a job; Linux keeps systemd alone |
+| [`guard.sh`](guard.sh) | the outer layer: one probe of the port, and a platform start when nothing answers. Run from cron once a minute on a host whose launchd never starts the agent at login; `install.sh --guard` adds that line, `--guard-uninstall` removes it |
+| [`_tests_/`](_tests_/INDEX.md) | the component suites: the reader's rules, the supervisor, and the installer run in throwaway checkouts with stand-in supervisors |
 
 ## Either build, either platform
 
@@ -33,7 +35,7 @@ verifier judges through: the Rust port's part 11 is this daemon pointed at the b
 |---|---|---|
 | supervisor | launchd agent `com.dtadpole.heddle-web`, `~/Library/LaunchAgents` | systemd user unit `heddle-web.service`, `~/.config/systemd/user` |
 | default port | 3082, behind the gate on 8082 the browser uses | 8082, owned by the server itself: nothing fronts it, and it is the port the owner's SSH forward reaches |
-| keeps it up | `KeepAlive`, `ThrottleInterval` | `Restart=always`, a fixed `RestartSec`, `StartLimitIntervalSec=0` |
+| keeps it up | `KeepAlive`, `ThrottleInterval`, and [`supervisor.mjs`](supervisor.mjs) inside them (see below) | `Restart=always`, a fixed `RestartSec`, `StartLimitIntervalSec=0` |
 | survives logout and boot | an agent starts at login | only if the account lingers — the installer refuses one that does not (`HEDDLE_ALLOW_NO_LINGER=1` overrides) |
 | logs | `~/.heddle/web.log` | `~/.heddle/web.log`, appended |
 
@@ -59,6 +61,31 @@ than a unit they have to be told about.
 `KeepAlive` is the supervisor half of the convention, with `ThrottleInterval` bounding a crash loop, and
 the working directory is what makes the default profile load — a daemon started elsewhere would boot an
 empty tree, which is a real failure mode this repository has already met once.
+
+**On this Mac that half was measured not to work**, and the service carries its own answer (2026-10-22,
+macOS 27.0, 26A428). A plain `sleep 300` under `RunAtLoad` + `KeepAlive` reproduces all three, so it is the host
+rather than this service:
+
+| What was done | What launchd did |
+|---|---|
+| `launchctl bootstrap gui/501 <plist>` | `state = not running`, `runs = 0`, `pended nondemand spawn` — `RunAtLoad` did not fire |
+| `launchctl kickstart -k gui/501/<label>` | started, so a **demand** spawn works even when a nondemand one is pending |
+| kill that process with SIGKILL | stayed `not running`; `KeepAlive` never restarted it |
+| a job with `StartInterval 5` | never fired; `runs = 0` after 13 s |
+
+So, and each is a rule in this folder:
+
+- `install.sh` **kickstarts** the agent after bootstrapping it, because bootstrap alone leaves a job on disk;
+- the macOS agent runs [`supervisor.mjs`](supervisor.mjs), which restarts the server itself — quickly for a kill,
+  with backoff for a crash loop, and `exit 1` with a sentence after ten failed starts rather than looping forever;
+- `install.sh` tightens `~/.heddle/web.log` to `600`, because it carries the launch token and the 8082 gate refuses
+  to read a log other users can read — a 644 log there looks exactly like a stopped server;
+- [`guard.sh`](guard.sh) is the outer layer, because a job that launchd never starts at login cannot be restarted
+  by the supervisor living inside it. `install.sh --guard` adds one cron line (`* * * * * /bin/sh <checkout>/_tools_/web-daemon/guard.sh`);
+  the probe answers on a host where the platform starts the job, so the line is harmless on Linux too. Every action
+  it takes is written to `~/.heddle/guard.log` with the reading that caused it;
+- `95-web-daemon`'s stays-up check kills the process that **owns the port** and requires a new one within twenty
+  seconds, because that is the process whose death is an outage, whichever layer is charged with replacing it.
 
 **Liveness is port ownership**, never a process-name search. The convention is blunt about why: `pgrep -f`
 matches the searching command's own line and has been measured concluding a dead service was up. A bound

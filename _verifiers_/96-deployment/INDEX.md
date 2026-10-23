@@ -1,6 +1,6 @@
 ---
 title: Verifier 15 — Deployment
-version: 1.2.0
+version: 1.3.0
 description: the page the owner actually sees is the deployment checkout's build, served by a process running that checkout, and that checkout contains only committed main — on macOS behind the gate, on a Linux host behind the owner's SSH forward, with the TypeScript build or the binary HEDDLE_BIN names.
 grounded_in:
   - source: owner statement 2026-10-17 that a worktree may carry initial verification but the job is not done until merged to main and the deployment is verified
@@ -37,6 +37,12 @@ server, so a byte comparison is a statement about the deployment, not about timi
 | the live service runs the deployment checkout's build | the process listening on the service's port executes that checkout's `dist/cli.js`, or the binary the service names; on Linux it must also be inside `heddle-web.service`'s control group, so a server started by hand from the same checkout does not pass |
 | the page the owner sees is this build | the owner's URL answers 200 with exactly that checkout's page — `dist/server/page.html` for the TypeScript build, `src/server/page.html` for the binary — with only its `heddle-page` marker filled in |
 | the deployment checkout contains only committed main | that checkout is on `main` at its tip, **or detached exactly at `origin/main`**, and `git status --porcelain` is empty |
+
+**A supervisor in front of the server does not change the claim.** The macOS agent runs
+[`supervisor.mjs`](../../_tools_/web-daemon/INDEX.md), so the process launchd owns is not the process that serves.
+The check reads the command line after the supervisor's `--` and the pid that owns the port, because those are the
+process and the build the deployment claims; reading the front of the command line would make `node` the entry and
+pass for any node process on the machine.
 
 **The owner's URL.** On macOS the service sits on 3082 behind the gate on `http://127.0.0.1:8082/`, and the gate
 is what is fetched. On a Linux host nothing fronts the server: it owns 8082, the port the owner's SSH forward

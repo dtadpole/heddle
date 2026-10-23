@@ -7,6 +7,8 @@
 #   ./install.sh --restart    write it again and restart it (after a build or a new binary)
 #   ./install.sh --uninstall  stop it and remove the file
 #   ./install.sh --print      print the definition this machine would get, and change nothing
+#   ./install.sh --guard      add the once-a-minute guard that starts the service when nothing is running it
+#   ./install.sh --guard-uninstall  remove that guard line, and nothing else
 #
 # HEDDLE_BIN=/abs/path/heddle serves with that binary instead of `node dist/cli.js`. HEDDLE_WEB_PORT overrides
 # the port: 3082 on macOS, behind the 8082 gate; 8082 on Linux, where nothing fronts the server.
@@ -44,7 +46,7 @@ case "$platform" in
 esac
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 node_bin() {
@@ -92,6 +94,15 @@ resolve_program() {
     exe=$(node_bin)
     cli=$(bin_for)
   fi
+  node=$(node_bin)
+  node_dir=$(dirname -- "$node")
+  case "${HEDDLE_WEB_SUPERVISOR:-1}" in
+    0|no|false) supervise=no ;;
+    *) supervise=yes ;;
+  esac
+  # The supervisor is a macOS answer to a measured defect, not a second daemon layer: Linux's systemd
+  # `Restart=always` already puts the process back, and an extra parent there would only add a process.
+  [ "$platform" = darwin ] || supervise=no
 }
 
 require_committed_main() {
@@ -128,19 +139,36 @@ require_committed_main() {
 }
 
 render_plist() {
-  # Without a CLI argument (HEDDLE_BIN), the line that would carry it is dropped rather than left empty.
-  if [ -n "$cli" ]; then bin_edit="s|@BIN@|$cli|g"; else bin_edit='/<string>@BIN@<\/string>/d'; fi
-  sed \
-    -e "$bin_edit" \
-    -e "s|@LABEL@|$label|g" \
-    -e "s|@NODE@|$exe|g" \
-    -e "s|@NODE_DIR@|$(dirname -- "$exe")|g" \
-    -e "s|@REPO@|$repo|g" \
-    -e "s|@PORT@|$port|g" \
-    -e "s|@LOG@|$log|g" \
-    -e "s|@HOME@|$HOME/.heddle|g" \
-    -e "s|@HOME_DIR@|$HOME|g" \
-    "$here/heddle-web.plist.template"
+  # The job's arguments, one `<string>` per element. Two shapes: the supervisor in front of the program (macOS,
+  # the default — see supervisor.mjs for the measurement it answers), or the program itself.
+  args=$(mktemp "${TMPDIR:-/tmp}/heddle-web-args.XXXXXX") || exit 2
+  trap 'rm -f "$args"' EXIT HUP INT TERM
+  if [ "$supervise" = yes ]; then
+    xml_strings "$node" "$here/supervisor.mjs" -- >> "$args"
+  fi
+  xml_strings "$exe" >> "$args"
+  if [ -n "$cli" ]; then xml_strings "$cli" >> "$args"; fi
+  xml_strings web --host 127.0.0.1 --port "$port" --config "$repo/cordis.yml" >> "$args"
+  awk -v list="$args" '
+    /@PROGRAM_ARGUMENTS@/ { while ((getline line < list) > 0) print line; close(list); next }
+    { print }
+  ' "$here/heddle-web.plist.template" |
+    sed \
+      -e "s|@LABEL@|$label|g" \
+      -e "s|@NODE_DIR@|$node_dir|g" \
+      -e "s|@REPO@|$repo|g" \
+      -e "s|@PORT@|$port|g" \
+      -e "s|@LOG@|$log|g" \
+      -e "s|@HOME@|$HOME/.heddle|g" \
+      -e "s|@HOME_DIR@|$HOME|g"
+}
+
+# One plist argument, XML-escaped: a path with `&`, `<` or `>` would otherwise make the plist unreadable.
+xml_strings() {
+  for value in "$@"; do
+    escaped=$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+    printf '    <string>%s</string>\n' "$escaped"
+  done
 }
 
 render_unit() {
@@ -206,6 +234,13 @@ load() {
     if loaded; then launchctl bootout "$domain/$label" >/dev/null 2>&1 || true; fi
     write_definition
     launchctl bootstrap "$domain" "$target"
+    # Measured on this Mac (macOS 27.0, 26A428, 2026-10-22): `bootstrap` registers the job but its nondemand
+    # spawn stays pending — `RunAtLoad` does not fire, so the job is `state = not running` with `runs = 0` until
+    # it is asked for. A demand start is what makes an install an install rather than a file on disk.
+    launchctl kickstart -k "$domain/$label" >/dev/null 2>&1 || true
+    # The log carries the launch token, and the 8082 gate refuses to read a log other users can read; a
+    # 644 file here would look exactly like a stopped server. Tighten it before anyone needs the token.
+    if [ -f "$log" ]; then chmod 600 "$log" 2>/dev/null || true; fi
   else
     require_linger
     write_definition
@@ -218,6 +253,28 @@ load() {
 
 name() {
   if [ "$platform" = darwin ]; then printf 'agent %s' "$label"; else printf 'unit %s' "$unit"; fi
+}
+
+# The guard line, and the crontab edits. Cron is the one scheduler this Mac was measured to run while launchd left
+# a bootstrapped agent's nondemand spawn pending: an agent that is not started at login has nothing to bring it
+# back, and no platform timer is available to ask. The line is added by exact match, so running --guard twice
+# leaves one entry, and --guard-uninstall removes that entry and nothing else from the account's crontab.
+guard_line="* * * * * /bin/sh $here/guard.sh >/dev/null 2>&1"
+
+install_guard() {
+  current=$(crontab -l 2>/dev/null || true)
+  if printf '%s\n' "$current" | grep -Fqx "$guard_line"; then
+    echo "guard already installed: $guard_line"
+    return
+  fi
+  { printf '%s\n' "$current"; printf '%s\n' "$guard_line"; } | grep -v '^$' | crontab -
+  echo "installed the guard: $guard_line"
+}
+
+uninstall_guard() {
+  current=$(crontab -l 2>/dev/null || true)
+  printf '%s\n' "$current" | grep -v '^$' | grep -Fvx "$guard_line" | crontab - || true
+  echo "removed the guard line, if it was there: $guard_line"
 }
 
 case "${1:-}" in
@@ -247,6 +304,12 @@ case "${1:-}" in
     ;;
   --print)
     render
+    ;;
+  --guard)
+    install_guard
+    ;;
+  --guard-uninstall)
+    uninstall_guard
     ;;
   --help|-h)
     usage

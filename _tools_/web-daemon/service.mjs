@@ -134,21 +134,29 @@ function flagValue(argv, flag) {
  *   TypeScript build, otherwise the program itself (the binary `HEDDLE_BIN` named).
  * - `root` is the checkout: the folder `dist/cli.js` lives in, otherwise the service's working directory, otherwise
  *   the folder of the profile named by `--config`.
+ * - `supervised` is true when a supervisor runs in front of the server (`install.sh` puts
+ *   [`supervisor.mjs`](supervisor.mjs) there on macOS, because launchd was measured not to restart a job). The
+ *   command after `--` is the server, and **that** is what the deployment claims: taking `node` as the entry would
+ *   pass for any node process on the machine, which is the lookalike this verifier exists to refuse.
  */
 export function describeCommand(argv, workingDirectory = null) {
-  const cli = argv.find((argument) => typeof argument === 'string' && argument.endsWith('/dist/cli.js')) ?? null
-  const portText = flagValue(argv, '--port')
+  const separator = argv.indexOf('--')
+  const server = separator >= 0 ? argv.slice(separator + 1) : argv
+  const cli = server.find((argument) => typeof argument === 'string' && argument.endsWith('/dist/cli.js')) ?? null
+  const portText = flagValue(server, '--port')
   const port = portText !== null && /^\d+$/.test(portText) ? Number(portText) : null
-  const config = flagValue(argv, '--config')
+  const config = flagValue(server, '--config')
   const root = cli !== null ? cli.slice(0, -'/dist/cli.js'.length) : (workingDirectory ?? (config !== null ? dirname(config) : null))
   return {
     argv,
+    server,
+    supervised: separator >= 0,
     program: argv[0] ?? null,
     cli,
-    entry: cli ?? argv[0] ?? null,
+    entry: cli ?? server[0] ?? null,
     root,
     port,
-    host: flagValue(argv, '--host'),
+    host: flagValue(server, '--host'),
     config,
   }
 }

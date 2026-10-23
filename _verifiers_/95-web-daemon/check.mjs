@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
-import { DOCUMENTED_PORT, LABEL, UNIT, installedService, parseUnit, serviceState, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
+import { DOCUMENTED_PORT, LABEL, UNIT, installedService, listenerPid, parseUnit, serviceState, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
 
 /**
  * Verifier 9 — the Web UI daemon.
@@ -60,7 +60,6 @@ test('the daemon definition is committed and complete', async (context) => {
   }
   assert.match(plist, /<key>KeepAlive<\/key>\s*<true\/>/, 'it is kept alive rather than run once')
   assert.match(plist, /<key>ThrottleInterval<\/key>\s*<integer>\d+<\/integer>/, 'and a crash loop is throttled')
-  assert.match(plist, /127\.0\.0\.1/, 'it binds loopback, as the server itself requires')
   /**
    * The **values** are checked, not the text: the template's own comment explains why `/dev/null` is
    * wrong, so a check that searched the file for that string failed on the sentence saying not to use it.
@@ -71,7 +70,7 @@ test('the daemon definition is committed and complete', async (context) => {
     assert.ok(value !== undefined && value.length > 0, `${key} names a file`)
     assert.notEqual(value, '/dev/null', `${key} is not /dev/null`)
   }
-  assert.match(plist, /@PORT@/, 'the port is a placeholder, so the machine supplies it rather than the repository')
+  assert.match(plist, /@PROGRAM_ARGUMENTS@/, 'the arguments are rendered by the installer, one element per argument')
 
   const script = readFileSync(installer, 'utf8')
   assert.match(script, /set -eu/, 'the installer fails loudly rather than continuing past an error')
@@ -79,11 +78,19 @@ test('the daemon definition is committed and complete', async (context) => {
     assert.ok(script.includes(flag), `it offers ${flag}`)
   }
   /**
+   * The arguments the template no longer spells out are the installer's: it renders the loopback host, the port
+   * the machine supplies and the profile beside the checkout, so the definition is complete only with both files.
+   */
+  for (const argument of ['--host 127.0.0.1', '--port "$port"', '--config "$repo/cordis.yml"']) {
+    assert.ok(script.includes(argument), `the installer renders ${argument}`)
+  }
+  /**
    * Idempotence is the property that makes it safe to run twice, and the script achieves it by unloading
    * before loading. Both halves are asserted because either one alone is a duplicate or a leak.
    */
   assert.match(script, /bootout/, 'installing replaces an existing agent rather than adding a second')
   assert.match(script, /launchctl bootstrap/, 'and it loads through launchd rather than running the process itself')
+  assert.match(script, /launchctl kickstart/, 'and starts it on demand, because this Mac was measured not to spawn a bootstrapped job by itself')
   assert.match(script, /readlink -f|volta/, 'it resolves the real interpreter rather than handing launchd a shell shim')
 })
 
@@ -171,30 +178,31 @@ test('the definition keeps the process alive rather than pretending to', async (
     context.skip(`${live.reason}, so its restart behaviour cannot be judged here`)
     return
   }
-  const { service, state } = live
+  const { service } = live
   /**
-   * The claim is that this is a **daemon**, not a process someone started. Measured: killing the server
-   * leaves the supervisor with a different pid serving the same port within seconds — launchd on macOS,
-   * systemd on Linux (3 s on the Linux deployment host, 2026-10-22) — which is the difference between "it is
-   * running" and "it will be running".
+   * The claim is that this is a **daemon**, not a process someone started. Measured: killing the process that
+   * owns the port leaves a **different** pid serving it within seconds — systemd on Linux (3 s, 2026-10-22), and
+   * on macOS the supervisor `install.sh` puts in front of the server (measured the same day, because launchd on
+   * this Mac does not restart a job at all). Which process the platform or the supervisor holds is their
+   * business; the process that serves is the one this check kills, which is the one an outage is.
    *
    * A bounded wait, because a supervisor that takes minutes to notice is also a finding.
    */
-  if (!skipUnless(context, state.pid !== null, `the supervisor did not report a pid for the ${NAME}, so the restart cannot be judged`)) return
+  const before = listenerPid(service.port)
+  if (!skipUnless(context, before !== null, `no process is listening on port ${service.port}, so the restart cannot be judged`)) return
 
-  process.kill(state.pid, 'SIGKILL')
+  process.kill(before, 'SIGKILL')
   const deadline = Date.now() + 20_000
-  let recovered = false
-  while (Date.now() < deadline && !recovered) {
+  let recovered = null
+  while (Date.now() < deadline && recovered === null) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
     try {
       const health = await fetch(`http://127.0.0.1:${service.port}/healthz`, { signal: AbortSignal.timeout(1000) })
-      if (health.ok) recovered = true
+      if (health.ok) recovered = listenerPid(service.port)
     } catch {
       // still down
     }
   }
-  assert.ok(recovered, `the service came back within twenty seconds after being killed (port ${service.port})`)
-  const after = serviceState(service)
-  assert.ok(after.pid !== null && after.pid !== state.pid, `and it is a new process (${state.pid} -> ${after.pid}), not the killed one answering late`)
+  assert.ok(recovered !== null, `the server came back within twenty seconds after being killed (port ${service.port})`)
+  assert.notEqual(recovered, before, `and it is a new process (${before} -> ${recovered}), not the killed one answering late`)
 })

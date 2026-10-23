@@ -64,6 +64,11 @@ function fixture({ name = 'repo' } = {}) {
   record('systemctl', 'case "$*" in *is-active*) exit 3;; esac\n')
   record('launchctl', 'case "$1" in print) exit 113;; esac\n')
   record('loginctl', 'echo "${FAKE_LINGER:-yes}"\n')
+  // The account's crontab, kept in a file so the --guard edits can be read back like a real one.
+  record(
+    'crontab',
+    'if [ "$1" = "-l" ]; then [ -f "$CRONTAB_FILE" ] && cat "$CRONTAB_FILE"; exit 0; fi\ncat > "$CRONTAB_FILE"\n',
+  )
 
   const heddleBin = join(base, 'heddle')
   writeFileSync(heddleBin, '#!/bin/sh\nexit 0\n')
@@ -115,20 +120,28 @@ test('HEDDLE_BIN makes the binary the program on both platforms, and HEDDLE_WEB_
   assert.equal(exec, `${f.heddleBin} web --host 127.0.0.1 --port 9911 --config ${f.repo}/cordis.yml`)
   assert.doesNotMatch(linux.stdout, /dist\/cli\.js/, 'no node, no CLI')
 
-  const darwin = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_BIN: f.heddleBin })
+  const darwin = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_BIN: f.heddleBin, HEDDLE_WEB_SUPERVISOR: '0' })
   assert.equal(darwin.status, 0, darwin.stderr)
   assert.doesNotMatch(darwin.stdout, /@[A-Z_]+@/)
   const args = [...darwin.stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   assert.deepEqual(args, [f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the CLI line is dropped, not left empty, and macOS keeps 3082')
 })
 
-test('macOS without HEDDLE_BIN renders the agent exactly as before: node, then the CLI', () => {
+test('macOS renders the supervisor in front of the server, and asks not to only when told', () => {
   const f = fixture()
   const { status, stdout, stderr } = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin' })
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
-  assert.deepEqual(args.slice(0, 3), [process.execPath, `${f.repo}/dist/cli.js`, 'web'])
-  assert.match(stdout, new RegExp(`<key>WorkingDirectory</key>\\s*<string>${f.repo}</string>`))
+  const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
+  assert.deepEqual(args, [process.execPath, supervisor, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which runs the server')
+
+  const bare = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SUPERVISOR: '0' })
+  assert.equal(bare.status, 0, bare.stderr)
+  const direct = [...bare.stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
+  assert.deepEqual(direct.slice(0, 3), [process.execPath, `${f.repo}/dist/cli.js`, 'web'], 'the platform alone, for a host whose launchd restarts jobs')
+
+  const linux = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'linux' })
+  assert.doesNotMatch(unitValue(parseUnit(linux.stdout), 'Service', 'ExecStart'), /supervisor\.mjs/, 'systemd already restarts the process, so Linux gets no extra layer')
 })
 
 test('a bad program is refused before anything is written', () => {
@@ -243,14 +256,18 @@ test('Linux uninstall disables and stops the unit, removes it and reloads', () =
   assert.deepEqual(calls(f), [`systemctl --user disable --now ${UNIT}`, 'systemctl --user daemon-reload'])
 })
 
-test('macOS install writes the agent and bootstraps it into the GUI domain', () => {
+test('macOS install writes the agent, bootstraps it and starts it on demand', () => {
   const f = fixture()
   const result = install(f, [], { HEDDLE_WEB_PLATFORM: 'darwin' })
   assert.equal(result.status, 0, result.stderr)
   const target = join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.plist')
   assert.ok(existsSync(target))
   const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
-  assert.deepEqual(calls(f), [`launchctl print gui/${uid}/com.dtadpole.heddle-web`, `launchctl bootstrap gui/${uid} ${target}`])
+  assert.deepEqual(calls(f), [
+    `launchctl print gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl bootstrap gui/${uid} ${target}`,
+    `launchctl kickstart -k gui/${uid}/com.dtadpole.heddle-web`,
+  ], 'bootstrap registers the job; kickstart is what starts it on a host whose launchd leaves a nondemand spawn pending')
 })
 
 test('a template names its placeholders only where they are filled, never in a comment', () => {
@@ -262,6 +279,27 @@ test('a template names its placeholders only where they are filled, never in a c
   const plistTemplate = readFileSync(join(daemon, 'heddle-web.plist.template'), 'utf8')
   const comments = [...plistTemplate.matchAll(/<!--([\s\S]*?)-->/g)].map((m) => m[1]).filter((text) => /@[A-Z_]+@/.test(text))
   assert.deepEqual(comments, [], 'nor any comment in the plist template')
+})
+
+test('the guard is one cron line, added once, removed by itself, and never a surprise', () => {
+  const f = fixture()
+  const file = join(f.base, 'crontab')
+  const env = { HEDDLE_WEB_PLATFORM: 'darwin', CRONTAB_FILE: file }
+  const line = `* * * * * /bin/sh ${f.repo}/_tools_/web-daemon/guard.sh >/dev/null 2>&1`
+
+  assert.equal(install(f, [], env).status, 0, 'installing the service does not edit the crontab')
+  assert.ok(!existsSync(file), 'no cron entry is written without --guard')
+
+  const first = install(f, ['--guard'], env)
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(readFileSync(file, 'utf8').trim(), line, 'one line, naming this checkout\'s guard')
+
+  assert.equal(install(f, ['--guard'], env).status, 0)
+  assert.equal(readFileSync(file, 'utf8').trim(), line, 'running it twice leaves one line, not two')
+
+  writeFileSync(file, `0 3 * * * /bin/true\n${line}\n`)
+  assert.equal(install(f, ['--guard-uninstall'], env).status, 0)
+  assert.equal(readFileSync(file, 'utf8').trim(), '0 3 * * * /bin/true', 'uninstalling removes that line and nothing else')
 })
 
 test('an unknown platform and an unknown option are refused', () => {

@@ -1,6 +1,6 @@
 ---
 title: Verifier 11 — Web Daemon
-version: 1.1.0
+version: 1.2.0
 description: a supervised user service — a launchd agent on macOS, a systemd user unit on Linux — keeps the Web UI running at the documented port, survives a kill, and does not weaken the token.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -43,10 +43,23 @@ through [`_tools_/web-daemon/service.mjs`](../../_tools_/web-daemon/service.mjs)
    written for the documented port — **3082 on macOS**, behind the 8082 gate, **8082 on Linux**, where the
    server itself owns the port the owner's SSH forward reaches — and its page and API must still refuse a
    request without a session. A host with no service installed reports **unjudged**.
-4. **It stays up** — the server is killed and required to be answering again within twenty seconds, from a
-   new pid, which is the difference between "it is running" and "it will be running". The kill is real: on
-   the deployment host it interrupts the live service for a few seconds (3 s measured on the Linux host,
+4. **It stays up** — the process that **owns the port** is killed and required to be answering again within
+   twenty seconds, from a new pid, which is the difference between "it is running" and "it will be running". The
+   port owner is the server, so the kill is the one whose death is an outage; which layer replaces it is not this
+   check's business — launchd, systemd, or [`supervisor.mjs`](../../_tools_/web-daemon/INDEX.md) inside the macOS
+   agent, which exists because launchd on the owner's Mac was measured not to restart a loaded job at all. The
+   kill is real: it interrupts the live service for a few seconds (3 s measured on the Linux host, and the Mac,
    2026-10-22).
+
+## The Rust branch
+
+Part 11's Rust shape is the **same daemon pointed at the binary** (`rust/ULTIMATE_GOAL.md`): `HEDDLE_BIN` makes
+`install.sh` render that binary as the program, with the same arguments, and the supervisor in front of it runs the
+binary exactly as it runs node. Nothing in the definition is node-specific except the interpreter the installer
+resolves. So the binary deployment needs no second definition and no second verifier: install with
+`HEDDLE_BIN=/abs/path/heddle`, and checks 1 and 2 judge the rendered definition, checks 3 and 4 the service that is
+installed. The served build is [`96-deployment`](../96-deployment/INDEX.md)'s claim, and it knows the binary serves
+the repository's `src/server/page.html` rather than a `dist/` copy.
 
 ## Running it
 

@@ -92,6 +92,30 @@ test('a command line names the build, the checkout and the port, for either buil
   assert.equal(describeCommand(['/b/heddle', 'web', '--port']).port, null, 'a flag with no value has none')
 })
 
+test('a supervised command line is judged by the server after --, never by the supervisor in front of it', () => {
+  // The measured reason this exists: with the supervisor in the agent, `program` is node, so an entry taken from
+  // the front of the command line would have made "the live process runs this build" true for any node process.
+  const supervised = describeCommand(
+    ['/n/node', '/srv/checkout/_tools_/web-daemon/supervisor.mjs', '--', '/n/node', '/srv/live/dist/cli.js', 'web', '--host', '127.0.0.1', '--port', '3082', '--config', '/srv/live/cordis.yml'],
+    '/srv/live',
+  )
+  assert.equal(supervised.supervised, true)
+  assert.equal(supervised.program, '/n/node', 'what launchd runs is the supervisor')
+  assert.equal(supervised.entry, '/srv/live/dist/cli.js', 'what the deployment claims is the server')
+  assert.equal(supervised.root, '/srv/live')
+  assert.equal(supervised.port, 3082)
+  assert.deepEqual(supervised.server.slice(0, 2), ['/n/node', '/srv/live/dist/cli.js'])
+
+  const supervisedBinary = describeCommand(
+    ['/n/node', '/srv/checkout/_tools_/web-daemon/supervisor.mjs', '--', '/srv/live/rust/target/release/heddle', 'web', '--port', '8082'],
+    '/srv/live',
+  )
+  assert.equal(supervisedBinary.entry, '/srv/live/rust/target/release/heddle', 'and for the binary the port will serve')
+  assert.equal(builtPagePath(supervisedBinary), '/srv/live/src/server/page.html')
+
+  assert.equal(describeCommand(['/n/node', '/srv/live/dist/cli.js', 'web']).supervised, false, 'a bare command line is not supervised')
+})
+
 test('each build is compared with the page file it actually serves', () => {
   assert.equal(builtPagePath(describeCommand(['/n/node', '/srv/live/dist/cli.js', 'web'])), '/srv/live/dist/server/page.html')
   assert.equal(builtPagePath(describeCommand(['/srv/live/rust/target/release/heddle', 'web'], '/srv/live')), '/srv/live/src/server/page.html')
