@@ -21,6 +21,25 @@ a display or a window.
 
 `check-tools.mjs` lists and calls the built-in tools, and `check-plugins.mjs` adds a fixture tool through a layer file.
 
+## Under `HEDDLE_BIN`
+
+The TypeScript build loads each fixture tool as a `.ts` plugin; a Rust binary cannot load TypeScript, so under
+`HEDDLE_BIN` each fixture tool is a **process** instead — part 4's Rust shape in `rust/ULTIMATE_GOAL.md`. The row
+names a component manifest beside the profile, in the shape D-031 froze:
+
+```yaml
+# shout-tool.component.yml; the row is `name: ./shout-tool.component.yml`
+program: "/path/to/node"
+args:
+  - ./shout-tool.mjs
+```
+
+The script speaks line-delimited JSON-RPC 2.0 on stdio (`rust/crates/heddle-tools/PROTOCOL.md`). It answers
+`initialize` with the spec its plugin registers, and each `tools/call` the way the plugin's `run` does: `shout`
+asks the host `sandbox/assertWritable` for `shout.txt` under the workspace root before writing it, the shadowing
+script declares `read_file`, and the malformed one declares `{"name":"","description":""}`. The claims, the `.ts`
+fixtures and their verdicts on the TypeScript build are unchanged.
+
 ## Running it
 
 ```bash
