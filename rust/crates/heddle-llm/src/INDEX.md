@@ -13,14 +13,13 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 
 | File | Ported from | What it is |
 |---|---|---|
-| [`lib.rs`](lib.rs) | — | the crate root, its module map and re-exports |
+| [`lib.rs`](lib.rs) | — | the crate root, its module map, and re-exports — the endpoint vocabulary from `heddle-config` |
 | [`types.rs`](types.rs) | `llm/types.ts` | messages, content parts, tool specs, requests, chunks, finish reasons — JSON shapes byte-compatible with the session log |
-| [`endpoint.rs`](endpoint.rs) | `llm/types.ts` | `EndpointConfig` and the model catalogue lookups (`offered_models`, `base_url_for`, `reasoning_level_for`, …) |
 | [`error.rs`](error.rs) | `llm/types.ts` | `ModelError` and its codes |
 | [`usage.rs`](usage.rs) | `llm/usage.ts` | `TokenUsage` and each provider's normalisation, merge and billed total |
 | [`sse.rs`](sse.rs) | `llm/adapters.ts` | the incremental event-stream parser |
 | [`http.rs`](http.rs) | `llm/http.ts` | the shared HTTP client: Title-Case headers, proxy form, body sniffing, failure codes |
-| [`adapter.rs`](adapter.rs) | `llm/adapters.ts` | the `Adapter` trait, `adapter_for`, `reasoning_value`, `PreparedCall`, the `StreamFold` driver |
+| [`adapter.rs`](adapter.rs) | `llm/adapters.ts` | the `Adapter` trait, `adapter_for`, `reasoning_value`, `reasoning_configured`, `PreparedCall`, the `StreamFold` driver |
 | [`chat.rs`](chat.rs) | `llm/adapters.ts` | Chat Completions: request builder, message mapping, fold |
 | [`responses.rs`](responses.rs) | `llm/adapters.ts` | Responses: request builder, input list, finish reason, fold |
 | [`anthropic.rs`](anthropic.rs) | `llm/adapters.ts` | Anthropic publisher route: call builder, message mapping, fold |

@@ -28,8 +28,10 @@ use std::sync::atomic::AtomicU64;
 use serde::Serialize;
 
 use crate::adapter::{Adapter, ChunkStream};
-use crate::endpoint::{EndpointConfig, InputModality};
+use heddle_config::EndpointConfig;
+
 use crate::error::ModelError;
+use crate::model_info::InputModality;
 use crate::model_info::ModelListCache;
 use crate::types::{GenerateRequest, Message, ToolCall};
 

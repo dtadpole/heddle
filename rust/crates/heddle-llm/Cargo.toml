@@ -9,11 +9,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# A leaf crate: it depends on no other heddle crate. The TypeScript import graph is the evidence — nothing under
-# `src/llm/` or `src/stream/printer.ts` imports configuration, sessions or the event bus; only the composition point
-# `src/plugins/model.ts` does, and that composition is the binary's boot. See INDEX.md, "Where it sits".
+# One heddle dependency: `heddle-config`, which owns the endpoint vocabulary (`EndpointConfig` and its model
+# catalogue). Nothing here reads configuration files, sessions or the event bus; see INDEX.md, "Where it sits".
 [dependencies]
 bytes.workspace = true
+heddle-config.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true

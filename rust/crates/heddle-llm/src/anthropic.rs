@@ -12,10 +12,10 @@
 use serde_json::Value;
 
 use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
-use crate::endpoint::EndpointConfig;
 use crate::error::ModelError;
 use crate::sse::SseEvent;
 use crate::types::{Chunk, ContentPart, GenerateRequest, Message, ToolCall};
+use heddle_config::EndpointConfig;
 
 /// The body version a publisher route requires; it is not a header on this shape.
 pub const ANTHROPIC_VERTEX_VERSION: &str = "vertex-2023-10-16";

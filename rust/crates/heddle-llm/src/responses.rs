@@ -9,10 +9,10 @@
 use serde_json::Value;
 
 use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
-use crate::endpoint::EndpointConfig;
 use crate::error::ModelError;
 use crate::sse::SseEvent;
 use crate::types::{Chunk, ContentPart, GenerateRequest, Message, ToolCall};
+use heddle_config::EndpointConfig;
 
 /// The Responses adapter for one endpoint.
 #[derive(Debug, Clone)]

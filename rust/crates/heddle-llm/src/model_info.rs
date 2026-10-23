@@ -12,7 +12,34 @@
 
 use serde_json::Value;
 
-use crate::endpoint::{EndpointConfig, EndpointKind, InputModality};
+use heddle_config::{EndpointConfig, EndpointKind};
+use serde::{Deserialize, Serialize};
+
+/// What a model accepts: the two input modalities the harness can deliver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    Text,
+    Image,
+}
+
+impl InputModality {
+    /// The modality as configuration spells it (`EndpointConfig::input_modalities` holds these strings).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+        }
+    }
+}
+
+/// Whether a wire shape publishes a model list (`listedKind`): the two OpenAI shapes.
+pub fn has_model_list(kind: &EndpointKind) -> bool {
+    matches!(
+        kind,
+        EndpointKind::OpenaiChat | EndpointKind::OpenaiResponses
+    )
+}
 
 /// How long a model-list read may take before the answer stays `None`.
 pub const DEFAULT_MODEL_INFO_TIMEOUT_MS: u64 = 1500;

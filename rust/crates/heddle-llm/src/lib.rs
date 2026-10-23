@@ -14,7 +14,6 @@
 //! | Module | Ported from | What it holds |
 //! |---|---|---|
 //! | [`types`] | `llm/types.ts` | messages, content parts, tool specs, requests, chunks, finish reasons |
-//! | [`endpoint`] | `llm/types.ts` | the endpoint configuration and its model catalogue lookups |
 //! | [`error`] | `llm/types.ts` | [`ModelError`] and its codes |
 //! | [`usage`] | `llm/usage.ts` | [`TokenUsage`] and each provider's normalisation |
 //! | [`sse`] | `llm/adapters.ts` | the incremental `text/event-stream` parser |
@@ -26,6 +25,10 @@
 //! | [`service`] | `llm/service.ts`, `plugins/model.ts` | [`ModelService`] and the `model/*` hook seam |
 //! | [`printer`] | `stream/printer.ts` | the live stream view on standard error |
 //!
+//! The endpoint vocabulary — [`EndpointConfig`], its model catalogue and the lookups `offered_models`,
+//! `base_url_for`, `context_window_for`, `reasoning_level_for` — is `heddle-config`'s and is re-exported here, so a
+//! caller names one type whichever crate it reaches it through.
+//!
 //! # Contract status
 //!
 //! The public API is declared; bodies marked `todo!()` are being ported (see `INDEX.md`, "Port plan"). Data types
@@ -35,7 +38,6 @@ pub mod adapter;
 pub mod anthropic;
 pub mod attachments;
 pub mod chat;
-pub mod endpoint;
 pub mod error;
 pub mod http;
 pub mod model_info;
@@ -48,11 +50,12 @@ pub mod types;
 pub mod usage;
 
 pub use adapter::{Adapter, ChunkStream, adapter_for};
-pub use endpoint::{
-    EndpointConfig, EndpointKind, InputModality, ModelEntry, ModelOption, ReasoningLevel,
-    ReasoningLevels, WireValue,
-};
 pub use error::{CONTEXT_WINDOW_EXCEEDED, ModelError};
+pub use heddle_config::{
+    EndpointConfig, EndpointKind, ModelEntry, ModelOption, ReasoningLevel, ReasoningLevels,
+    ReasoningValue,
+};
+pub use model_info::InputModality;
 pub use printer::{StreamPrinter, StreamPrinterOptions, StreamSummary};
 pub use service::{Generated, ModelHooks, ModelService, ProbeOptions, ProbeResult};
 pub use types::{

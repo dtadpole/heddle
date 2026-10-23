@@ -6,8 +6,8 @@
 //! ([`IMAGE_REQUEST_LIMITS`]): the oldest are replaced with an "omitted to fit" placeholder until the rest fit. Every
 //! replacement is stable text, and the bytes are read here, at request time, so the log holds only references.
 
-use crate::endpoint::EndpointConfig;
 use crate::types::{FilePart, ImageMediaType, ImagePart, Message};
+use heddle_config::EndpointConfig;
 
 /// The media types the projection can send as image content.
 pub const IMAGE_MEDIA_TYPES: [ImageMediaType; 4] = [
@@ -39,6 +39,12 @@ pub fn attachment_id(sha256: &str) -> String {
 /// The eight hex characters placeholders show.
 pub fn short_digest(sha256: &str) -> &str {
     sha256.get(..8).unwrap_or(sha256)
+}
+
+/// Whether the endpoint declares that its model accepts image input (`acceptsImages`). Absent means text only.
+pub fn accepts_images(endpoint: &EndpointConfig) -> bool {
+    let _ = endpoint;
+    todo!("port acceptsImages")
 }
 
 /// The model-facing handle for one verbatim file (`fileHandleText`).

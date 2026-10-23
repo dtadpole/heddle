@@ -14,9 +14,9 @@
 use std::path::PathBuf;
 
 use crate::adapter::{Adapter, ChunkStream};
-use crate::endpoint::EndpointConfig;
 use crate::error::ModelError;
 use crate::types::{Chunk, GenerateRequest};
+use heddle_config::EndpointConfig;
 
 /// The scripted adapter for one endpoint.
 #[derive(Debug, Clone)]

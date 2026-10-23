@@ -113,11 +113,12 @@ pub enum Role {
     Tool,
 }
 
-/// One message in a request.
+/// One message, as a request carries it and as the session log records it.
 ///
-/// JSON field order is `role`, `toolCallId` (only on a `tool` message), `content` — the order the agent loop
-/// writes a tool result in, and `role`, `content` for every other message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// JSON field order is `role`, `toolCallId` (only on a `tool` message), `content`, `source` (only on a message the
+/// harness wrote on someone's behalf) — the orders the agent loop writes a tool result in and the session service
+/// writes a user message in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub role: Role,
@@ -125,6 +126,10 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     pub content: Vec<ContentPart>,
+    /// Who wrote it when it was not a person — a goal round, a runtime-context snapshot. Recorded and carried,
+    /// never sent: no adapter reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -134,6 +139,7 @@ impl Message {
             role,
             tool_call_id: None,
             content,
+            source: None,
         }
     }
 }
@@ -143,8 +149,8 @@ impl Message {
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
-    /// JSON Schema for the arguments; an object.
-    pub parameters: serde_json::Map<String, serde_json::Value>,
+    /// JSON Schema for the arguments (an object), passed to the provider as written.
+    pub parameters: serde_json::Value,
 }
 
 /// What to ask one endpoint for.
@@ -315,11 +321,12 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_message_writes_its_call_id_before_its_content() {
+    fn a_message_writes_its_fields_in_the_order_the_log_holds_them() {
         let message = Message {
             role: Role::Tool,
             tool_call_id: Some("call-1".into()),
             content: vec![ContentPart::text("ok")],
+            source: None,
         };
         assert_eq!(
             json(&message),
@@ -328,6 +335,12 @@ mod tests {
         assert_eq!(
             json(&user_message("hello")),
             r#"{"role":"user","content":[{"type":"text","text":"hello"}]}"#
+        );
+        let mut sourced = user_message("goal round");
+        sourced.source = Some(serde_json::json!({"kind": "goal"}));
+        assert_eq!(
+            json(&sourced),
+            r#"{"role":"user","content":[{"type":"text","text":"goal round"}],"source":{"kind":"goal"}}"#
         );
     }
 

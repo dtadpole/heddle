@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use futures::Stream;
 
-use crate::endpoint::{EndpointConfig, WireValue};
 use crate::error::ModelError;
 use crate::http::ByteStream;
 use crate::sse::SseEvent;
 use crate::types::{Chunk, GenerateRequest};
+use heddle_config::{EndpointConfig, ReasoningValue};
 
 /// One call's answer, chunk by chunk. An error ends it.
 pub type ChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk, ModelError>> + Send + 'static>>;
@@ -61,9 +61,16 @@ pub struct PreparedCall {
 pub fn reasoning_value(
     endpoint: &EndpointConfig,
     request: &GenerateRequest,
-) -> Result<Option<WireValue>, ModelError> {
+) -> Result<Option<ReasoningValue>, ModelError> {
     let _ = (endpoint, request);
     todo!("port reasoningValue")
+}
+
+/// Whether an endpoint's models reason at all: the `reasoning` capability, an endpoint-level block, or any offered
+/// model's own block. It decides whether a Responses request asks for a reasoning summary.
+pub fn reasoning_configured(endpoint: &EndpointConfig) -> bool {
+    let _ = endpoint;
+    todo!("port reasoningConfigured from openAiResponsesAdapter")
 }
 
 /// What one parsed event did to a fold.

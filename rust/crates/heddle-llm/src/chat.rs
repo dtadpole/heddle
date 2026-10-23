@@ -9,10 +9,10 @@
 use serde_json::Value;
 
 use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
-use crate::endpoint::EndpointConfig;
 use crate::error::ModelError;
 use crate::sse::SseEvent;
 use crate::types::{Chunk, GenerateRequest, Message};
+use heddle_config::EndpointConfig;
 
 /// The Chat Completions adapter for one endpoint.
 #[derive(Debug, Clone)]
