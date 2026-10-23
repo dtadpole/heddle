@@ -17,12 +17,14 @@
 //! | [`policy`] | the collaboration policy, written once per session as a durable note |
 //! | [`plugin`] | the `team` profile row: composition, policy upkeep, `team/changed`, boot recovery |
 //! | [`api`] | the `GET /api/team` answer |
+//! | [`command`] | the entry point the binary calls from `web`'s startup edge: recover every team and print the line |
 //! | [`ports`] | the seams to the session store, the agent loop and the live-turn registry |
 //! | `testing` | in-memory doubles of the ports (feature `test-doubles`) |
 //!
-//! The contract landed first; bodies that are not yet ported are `todo!()` (see the crate's `INDEX.md`).
+//! The contract landed first; the implementation follows it module by module, with unit tests beside the code.
 
 pub mod api;
+pub mod command;
 pub mod error;
 pub mod plugin;
 pub mod policy;

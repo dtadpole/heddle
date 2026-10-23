@@ -23,10 +23,11 @@
 //! | [`service`] | `service.ts` | the seam the agent loop talks to; the only place that knows all of the above |
 //! | [`events`] | (the log vocabulary) | the session events this crate writes |
 //! | [`store`] | `PrunableStore` | the port this crate needs from the session store |
-//! | [`types`] | `src/llm/types.ts` (part) | provisional stand-ins for `heddle-llm`'s message types |
+//! | [`types`] | `src/llm/types.ts` (part) | the message types, re-exported from `heddle-llm`, and `text_message` |
 //!
-//! **Status:** the public API is declared and the bodies are `todo!()`; each module lands with its
-//! unit tests in the order the crate's `INDEX.md` gives.
+//! **Status:** every module is implemented and has unit tests beside it. The message types are
+//! `heddle-llm`'s; the `ContextStore` adapter for `heddle-session`'s store is the one piece that waits
+//! on another crate, and the crate's `INDEX.md` names it.
 
 pub mod budget;
 pub mod compaction;
@@ -38,6 +39,7 @@ pub mod pairing;
 pub mod prune;
 pub mod runtime;
 pub mod service;
+pub mod session_store;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

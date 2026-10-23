@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.3.2
+version: 0.4.2
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on the merged candidate at `c67f5ad` that became `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `ea1028b`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -48,27 +48,30 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
   node _tools_/verify-runner/run.mjs _verifiers_/<part>/check*.mjs --json
 ```
 
-**18 check files, 116 checks: 0 passed, 0 failed, 116 unjudged.** Every backend check skipped at its capability
-probe because the binary's `--help` does not name the option it needs (`--profile`, `--endpoint`, `--turn`, …), and
-every other command exits 2 with `heddle: not ported to Rust yet: <command>`. So no part of the goal was judged, and
-none passed.
+**18 check files, 117 checks: 10 passed, 0 failed, 107 unjudged. Part 0 passes.** `05-config-system` exits `0`
+through the binary: profiles, layers, includes and their cycles, both environment-reference shapes, a missing
+reference, a bad value refused naming the row and the field, a patch against a missing row, provenance and an
+unknown profile. Under `HEDDLE_BIN` its rows name component manifests rather than `.ts` plugins — part 0's Rust shape in
+[`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), stated in that verifier's INDEX — and the same ten checks pass on the
+TypeScript build at the same revision. Every other backend check skipped at its capability probe, because the binary advertises `--profile`,
+`profiles` and `config` and nothing else yet: every other command still exits 2 with
+`heddle: not ported to Rust yet: <command>`.
 
-The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies — and three now carry
-their ports behind those APIs: `heddle-config`, `heddle-llm` (one `todo!()` left, the request builders that wait on
-configuration) and `heddle-sandbox` (one). `heddle-context` and `heddle-team` are still contracts. The event, session,
-workspace, tools and agent crates still arrive from the lane's branches, and the binary is still the `--help`/exit-2
-stub. A contract is not a port: what has not happened is a **part** passing its verifier on the binary, because the
-binary advertises nothing yet.
+Behind the binary, every backend library crate on `main` carries its port: `git grep -c 'todo!('` finds none in
+`heddle-config`, `heddle-session`, `heddle-workspace`, `heddle-llm`, `heddle-context`, `heddle-tools`, `heddle-agent`,
+`heddle-sandbox`, `heddle-events`, `heddle-goal`, `heddle-todo` or `heddle-team`. The binary has three, and they are the
+remaining work for parts 1 to 8: the bare boot, the `--turn` branch and `web`. The ui-lane crates (`heddle-server`
+and the three `heddle-web-*`) are still 24-line placeholders on `main`; they arrive through the ui lane.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
-| 0 configuration system | `_verifiers_/05-config-system` | 10 checks — unjudged |
+| 0 configuration system | `_verifiers_/05-config-system` | **passes** — 10 of 10 |
 | 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged |
 | 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
-| 3 context management | `_verifiers_/30-context-management` | 8 checks — unjudged |
+| 3 context management | `_verifiers_/30-context-management` | 9 checks — unjudged; one still reads `dist/` for the reader's view (that verifier's INDEX) |
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
 | 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
-| 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged |
+| 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged; under `HEDDLE_BIN` each hook is a process (that verifier's INDEX) |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — unjudged |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | 17 checks — unjudged |
 | 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |
