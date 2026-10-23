@@ -80,8 +80,29 @@ pub fn validate_escalation_args(
     permissions: Option<&Value>,
     justification: Option<&Value>,
 ) -> Result<(), EscalationArgsError> {
-    let _ = (permissions, justification);
-    todo!("port validateEscalationArgs from src/sandbox/escalation.ts")
+    if permissions.is_some() && justification.is_none() {
+        return Err(EscalationArgsError {
+            message: "invalid escalation: sandbox_permissions requires a justification".to_owned(),
+        });
+    }
+    if justification.is_some() && permissions.is_none() {
+        return Err(EscalationArgsError {
+            message:
+                "invalid escalation: justification is only valid together with sandbox_permissions"
+                    .to_owned(),
+        });
+    }
+    if let Some(justification) = justification {
+        let sentence = justification
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty());
+        if !sentence {
+            return Err(EscalationArgsError {
+                message: "invalid justification: expected a non-empty sentence".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Why an escalation did not happen, as a stable code a caller can report rather than guess.
@@ -183,6 +204,398 @@ where
     A: EscalationApproval + Sync,
     C: Future<Output = ()> + Send,
 {
-    let _ = (request, approval, cancel);
-    todo!("port approveEscalation from src/sandbox/escalation.ts")
+    let Some(target) = request.requested_mode.as_str().and_then(SandboxMode::parse) else {
+        return Err(EscalationRefusal {
+            code: RefusalCode::Malformed,
+            message: format!(
+                "'{}' is not a sandbox mode that a call can escalate to",
+                crate::js::string_of(Some(&request.requested_mode))
+            ),
+        });
+    };
+    let effective = request.effective_mode;
+    if target == effective {
+        return Ok(target);
+    }
+    if !wider_modes(effective).contains(&target) {
+        return Err(EscalationRefusal {
+            code: RefusalCode::NotWider,
+            message: format!(
+                "an escalation to '{target}' is not strictly wider than this call's '{effective}' mode"
+            ),
+        });
+    }
+    let justification = request.justification;
+    let subject = request.subject;
+    let ask = ApprovalAsk {
+        tool: request.tool,
+        reason: format!("escalate sandbox to {target}: {justification}"),
+        display_reason: Some(format!(
+            "Allow this {subject} with {target} permissions: {justification}"
+        )),
+        session: request.session,
+    };
+    match approval.request(ask, cancel).await {
+        ApprovalOutcome::AllowedOnce => Ok(target),
+        outcome => Err(refusal_for(outcome, target, effective, subject)),
+    }
+}
+
+/// The refusal sentence for an ask that was answered no, withdrawn, or not answerable.
+fn refusal_for(
+    outcome: ApprovalOutcome,
+    target: SandboxMode,
+    effective: SandboxMode,
+    subject: EscalationSubject,
+) -> EscalationRefusal {
+    let (code, message) = match outcome {
+        ApprovalOutcome::Rejected => (
+            RefusalCode::Rejected,
+            format!(
+                "the request to run this {subject} with '{target}' permissions was rejected; the call stays under '{effective}'"
+            ),
+        ),
+        ApprovalOutcome::Cancelled => (
+            RefusalCode::Cancelled,
+            format!(
+                "the request to run this {subject} with '{target}' permissions was cancelled; the call stays under '{effective}'"
+            ),
+        ),
+        // `allowed-once` was handled by the caller; treating it as unavailable keeps this total rather than
+        // panicking on an outcome the caller forgot.
+        ApprovalOutcome::Unavailable | ApprovalOutcome::AllowedOnce => (
+            RefusalCode::Unavailable,
+            format!(
+                "no one can approve running this {subject} with '{target}' permissions on this run; the call stays under '{effective}'"
+            ),
+        ),
+    };
+    EscalationRefusal { code, message }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::Mutex;
+
+    use serde_json::{Value, json};
+
+    use super::{
+        ESCALATION_TARGETS, EscalationApproval, EscalationRequest, EscalationSubject, RefusalCode,
+        approve_escalation, validate_escalation_args, wider_modes,
+    };
+    use crate::approvals::{ApprovalAsk, ApprovalOutcome};
+    use crate::mode::SandboxMode;
+
+    const JUSTIFICATION: &str = "need to write the generated file";
+
+    /// An approval channel that records the ask and answers with one fixed outcome.
+    struct Recorder {
+        outcome: ApprovalOutcome,
+        asks: Mutex<Vec<ApprovalAsk>>,
+    }
+
+    impl Recorder {
+        fn new(outcome: ApprovalOutcome) -> Recorder {
+            Recorder {
+                outcome,
+                asks: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asks(&self) -> Vec<ApprovalAsk> {
+            self.asks.lock().unwrap().clone()
+        }
+    }
+
+    impl EscalationApproval for Recorder {
+        fn request<C>(
+            &self,
+            ask: ApprovalAsk,
+            _cancel: C,
+        ) -> impl Future<Output = ApprovalOutcome> + Send
+        where
+            C: Future<Output = ()> + Send,
+        {
+            self.asks.lock().unwrap().push(ask);
+            std::future::ready(self.outcome)
+        }
+    }
+
+    fn request(tool: &str, requested: Value, effective: SandboxMode) -> EscalationRequest {
+        EscalationRequest {
+            tool: tool.to_owned(),
+            requested_mode: requested,
+            effective_mode: effective,
+            justification: JUSTIFICATION.to_owned(),
+            subject: EscalationSubject::for_tool(tool),
+            session: Some("session-1".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_escalation_targets_are_the_two_wider_modes() {
+        assert_eq!(
+            ESCALATION_TARGETS,
+            [SandboxMode::WorkspaceWrite, SandboxMode::DangerFullAccess]
+        );
+        assert_eq!(wider_modes(SandboxMode::ReadOnly).len(), 2);
+        assert_eq!(
+            wider_modes(SandboxMode::WorkspaceWrite),
+            &[SandboxMode::DangerFullAccess]
+        );
+        assert!(wider_modes(SandboxMode::DangerFullAccess).is_empty());
+    }
+
+    #[test]
+    fn the_argument_pairing_errors_fire_in_the_typescript_order() {
+        let permissions = || json!("workspace-write");
+        let reason = || json!(JUSTIFICATION);
+
+        assert_eq!(validate_escalation_args(None, None), Ok(()));
+        assert_eq!(
+            validate_escalation_args(Some(&permissions()), None),
+            Err(super::EscalationArgsError {
+                message: "invalid escalation: sandbox_permissions requires a justification"
+                    .to_owned(),
+            })
+        );
+        assert_eq!(
+            validate_escalation_args(None, Some(&reason())),
+            Err(super::EscalationArgsError {
+                message:
+                    "invalid escalation: justification is only valid together with sandbox_permissions"
+                        .to_owned(),
+            })
+        );
+        for bad in [json!(""), json!("   "), json!(7), json!(null), json!(["x"])] {
+            assert_eq!(
+                validate_escalation_args(Some(&permissions()), Some(&bad)),
+                Err(super::EscalationArgsError {
+                    message: "invalid justification: expected a non-empty sentence".to_owned(),
+                }),
+                "{bad:?} is not a non-empty sentence"
+            );
+        }
+        assert_eq!(
+            validate_escalation_args(Some(&permissions()), Some(&reason())),
+            Ok(())
+        );
+        assert_eq!(
+            validate_escalation_args(None, Some(&json!(null))),
+            Err(super::EscalationArgsError {
+                message:
+                    "invalid escalation: justification is only valid together with sandbox_permissions"
+                        .to_owned(),
+            }),
+            "a present null is still a present justification"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_that_is_not_a_mode_is_malformed_and_asks_nobody() {
+        for (requested, quoted) in [
+            (json!("workspace"), "workspace"),
+            (json!(1), "1"),
+            (json!(null), "null"),
+            (json!({"mode": "read-only"}), "[object Object]"),
+        ] {
+            let recorder = Recorder::new(ApprovalOutcome::AllowedOnce);
+            let refusal = approve_escalation(
+                request("write_file", requested, SandboxMode::WorkspaceWrite),
+                &recorder,
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refusal.code, RefusalCode::Malformed);
+            assert_eq!(
+                refusal.message,
+                format!("'{quoted}' is not a sandbox mode that a call can escalate to")
+            );
+            assert!(recorder.asks().is_empty(), "nobody was asked");
+        }
+    }
+
+    #[tokio::test]
+    async fn repeating_the_effective_mode_grants_it_without_asking() {
+        let recorder = Recorder::new(ApprovalOutcome::Rejected);
+        let granted = approve_escalation(
+            request(
+                "write_file",
+                json!("workspace-write"),
+                SandboxMode::WorkspaceWrite,
+            ),
+            &recorder,
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(granted, Ok(SandboxMode::WorkspaceWrite));
+        assert!(
+            recorder.asks().is_empty(),
+            "the same boundary needs no question"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mode_that_is_not_strictly_wider_is_refused_without_asking() {
+        for (requested, effective) in [
+            (json!("read-only"), SandboxMode::WorkspaceWrite),
+            (json!("read-only"), SandboxMode::DangerFullAccess),
+            (json!("workspace-write"), SandboxMode::DangerFullAccess),
+        ] {
+            let recorder = Recorder::new(ApprovalOutcome::AllowedOnce);
+            let target = requested.as_str().unwrap().to_owned();
+            let refusal = approve_escalation(
+                request("write_file", requested, effective),
+                &recorder,
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refusal.code, RefusalCode::NotWider);
+            assert_eq!(
+                refusal.message,
+                format!(
+                    "an escalation to '{target}' is not strictly wider than this call's '{effective}' mode"
+                )
+            );
+            assert!(recorder.asks().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wider_mode_asks_with_the_justification_verbatim_and_grants_one_call() {
+        let recorder = Recorder::new(ApprovalOutcome::AllowedOnce);
+        let granted = approve_escalation(
+            request(
+                "write_file",
+                json!("workspace-write"),
+                SandboxMode::ReadOnly,
+            ),
+            &recorder,
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(granted, Ok(SandboxMode::WorkspaceWrite));
+
+        let asks = recorder.asks();
+        assert_eq!(asks.len(), 1, "exactly one question");
+        assert_eq!(asks[0].tool, "write_file");
+        assert_eq!(
+            asks[0].reason,
+            format!("escalate sandbox to workspace-write: {JUSTIFICATION}")
+        );
+        assert_eq!(
+            asks[0].display_reason.as_deref(),
+            Some(
+                "Allow this operation with workspace-write permissions: need to write the generated file"
+            )
+        );
+        assert_eq!(asks[0].session.as_deref(), Some("session-1"));
+    }
+
+    #[tokio::test]
+    async fn a_shell_escalation_asks_about_a_command() {
+        let recorder = Recorder::new(ApprovalOutcome::AllowedOnce);
+        approve_escalation(
+            request(
+                "bash",
+                json!("danger-full-access"),
+                SandboxMode::WorkspaceWrite,
+            ),
+            &recorder,
+            std::future::pending(),
+        )
+        .await
+        .expect("granted once");
+        let asks = recorder.asks();
+        assert_eq!(
+            asks[0].display_reason.as_deref(),
+            Some(
+                "Allow this command with danger-full-access permissions: need to write the generated file"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn each_no_answer_maps_to_its_typescript_sentence() {
+        let cases = [
+            (
+                ApprovalOutcome::Rejected,
+                RefusalCode::Rejected,
+                "the request to run this command with 'danger-full-access' permissions was rejected; the call stays under 'workspace-write'",
+            ),
+            (
+                ApprovalOutcome::Cancelled,
+                RefusalCode::Cancelled,
+                "the request to run this command with 'danger-full-access' permissions was cancelled; the call stays under 'workspace-write'",
+            ),
+            (
+                ApprovalOutcome::Unavailable,
+                RefusalCode::Unavailable,
+                "no one can approve running this command with 'danger-full-access' permissions on this run; the call stays under 'workspace-write'",
+            ),
+        ];
+        for (outcome, code, message) in cases {
+            let recorder = Recorder::new(outcome);
+            let refusal = approve_escalation(
+                request(
+                    "bash",
+                    json!("danger-full-access"),
+                    SandboxMode::WorkspaceWrite,
+                ),
+                &recorder,
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refusal.code, code);
+            assert_eq!(refusal.message, message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_escalation_refusal_says_operation_not_command() {
+        let recorder = Recorder::new(ApprovalOutcome::Unavailable);
+        let refusal = approve_escalation(
+            request(
+                "write_file",
+                json!("workspace-write"),
+                SandboxMode::ReadOnly,
+            ),
+            &recorder,
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            refusal.message,
+            "no one can approve running this operation with 'workspace-write' permissions on this run; the call stays under 'read-only'"
+        );
+    }
+
+    #[test]
+    fn a_tool_names_its_subject_by_whether_it_is_a_shell() {
+        assert_eq!(
+            EscalationSubject::for_tool("bash"),
+            EscalationSubject::Command
+        );
+        assert_eq!(
+            EscalationSubject::for_tool("write_file"),
+            EscalationSubject::Operation
+        );
+        assert_eq!(EscalationSubject::Command.as_str(), "command");
+        assert_eq!(EscalationSubject::Operation.as_str(), "operation");
+    }
+
+    #[test]
+    fn a_refusal_reports_under_the_tool_code() {
+        assert_eq!(super::EscalationRefusal::TOOL_CODE, "ESCALATION_REFUSED");
+        assert_eq!(RefusalCode::Malformed.as_str(), "MALFORMED");
+        assert_eq!(RefusalCode::NotWider.as_str(), "NOT_WIDER");
+        assert_eq!(RefusalCode::Rejected.as_str(), "REJECTED");
+        assert_eq!(RefusalCode::Cancelled.as_str(), "CANCELLED");
+        assert_eq!(RefusalCode::Unavailable.as_str(), "UNAVAILABLE");
+    }
 }

@@ -74,6 +74,10 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 | 6 | the ladder | `escalation.rs` (`approve_escalation`) | the same mode needs no ask; not-wider and malformed refusals; the ask's reason and display reason carry the justification verbatim; each outcome maps to its refusal sentence; it runs with `ApprovalService` as the channel |
 | 7 | judged through the binary | none here | once tools, server, session and boot compose it: `75-permission-sandbox` and `80-web-ui` check-approval through `HEDDLE_BIN`, recorded with the command and date |
 
+**Landed so far:** tasks 1 and 2 are implemented, with their unit tests (38 tests at 2026-10-22, `cargo test -p
+heddle-sandbox`); the task 6 ladder body is ported and judged against a test double, and its `ApprovalService`-channel
+claim waits on task 5. Tasks 3, 4 and 5 still have `todo!()` bodies.
+
 ## Risks, stated now
 
 - **On Linux the verifier cannot pass as written.** `check-shell-confinement.mjs` skips its three kernel checks

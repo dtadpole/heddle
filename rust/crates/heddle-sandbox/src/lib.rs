@@ -15,7 +15,9 @@
 //! | [`service`] | [`SandboxService`], [`SandboxConfig`], [`SandboxDenial`] | `sandbox/service.ts` |
 //! | [`approvals`] | [`ApprovalService`], [`ApprovalsConfig`], [`ApprovalRequest`] | `approvals/service.ts` |
 //!
-//! [`testfs`] is the test-only scratch directory and symlink helper.
+//! A private [`js`] module holds the one thing the refusal sentences need from another language: the
+//! `String()` coercion the TypeScript messages interpolate. [`testfs`] is the test-only scratch directory and
+//! symlink helper.
 //!
 //! The crate depends on no other heddle crate. What it needs from them arrives as values: the profile rows'
 //! `config` deserialises into [`SandboxConfig`] and [`ApprovalsConfig`], the harness home arrives in
@@ -58,6 +60,88 @@ pub use service::{BackendChoice, SandboxConfig, SandboxDenial, SandboxHost, Sand
 pub use transition::{
     FULL_ACCESS_CONFIRMATION, ModeChange, TransitionRefusal, permission_transition,
 };
+
+/// The JavaScript value coercions the TypeScript refusal sentences interpolate.
+///
+/// A refusal sentence quotes the offending value the way a page or a log does, so the Rust port has to agree
+/// with `String(value)` — `undefined` for an absent field, `null`, `[object Object]`, and an array joined with
+/// `,`. `serde_json::Value` cannot tell an absent field from a present one, so the caller passes `None` for
+/// absent and `Some(Value::Null)` for present-and-null.
+mod js {
+    use serde_json::Value;
+
+    /// `String(value)` for a JSON value, or `undefined` when the field was absent.
+    pub(crate) fn string_of(value: Option<&Value>) -> String {
+        match value {
+            None => "undefined".to_owned(),
+            Some(Value::Null) => "null".to_owned(),
+            Some(Value::Bool(flag)) => flag.to_string(),
+            Some(Value::Number(number)) => number_to_string(number),
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Value::Null => String::new(),
+                    other => string_of(Some(other)),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            Some(Value::Object(_)) => "[object Object]".to_owned(),
+        }
+    }
+
+    /// `String(number)`: an integral value prints without a fractional part.
+    fn number_to_string(number: &serde_json::Number) -> String {
+        if let Some(integer) = number.as_i64() {
+            return integer.to_string();
+        }
+        if let Some(integer) = number.as_u64() {
+            return integer.to_string();
+        }
+        let float = number.as_f64().unwrap_or(f64::NAN);
+        if float.is_finite() && float.fract() == 0.0 {
+            return format!("{}", float as i64);
+        }
+        number.to_string()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use serde_json::json;
+
+        use super::string_of;
+
+        #[test]
+        fn an_absent_field_is_undefined_and_a_present_null_is_null() {
+            assert_eq!(string_of(None), "undefined");
+            assert_eq!(string_of(Some(&json!(null))), "null");
+        }
+
+        #[test]
+        fn scalars_print_the_way_javascript_does() {
+            assert_eq!(string_of(Some(&json!(true))), "true");
+            assert_eq!(string_of(Some(&json!(false))), "false");
+            assert_eq!(string_of(Some(&json!(3))), "3");
+            assert_eq!(string_of(Some(&json!(1.5))), "1.5");
+            assert_eq!(string_of(Some(&json!(2.0))), "2");
+            assert_eq!(string_of(Some(&json!("read-only"))), "read-only");
+        }
+
+        #[test]
+        fn arrays_join_with_commas_and_nulls_print_empty() {
+            assert_eq!(string_of(Some(&json!([1, null, 2]))), "1,,2");
+            assert_eq!(string_of(Some(&json!([["a", "b"]]))), "a,b");
+        }
+
+        #[test]
+        fn an_object_is_its_constructor_name() {
+            assert_eq!(
+                string_of(Some(&json!({"mode": "read-only"}))),
+                "[object Object]"
+            );
+        }
+    }
+}
 
 /// Test-only scratch directories and symlinks, so a path rule is judged on the filesystem it describes.
 #[cfg(test)]
