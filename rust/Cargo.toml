@@ -51,7 +51,10 @@ bytes = "1"
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: serde_json's default float parser is not correctly rounded, so a session-log line read and
+# written back can move a float by one ulp (measured: 0.9999551342447491 came back as ...492). JSON.parse is correctly
+# rounded, and the log is byte-compatible with the TypeScript store, so every crate parses floats the way it does.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # The configuration crate reads YAML 1.2 with its tags preserved (`!env`, `!include`), so a layered file's
 # tagged nodes reach the reader as data instead of being resolved by a serde deserializer first.
 saphyr = "0.0.6"

@@ -54,7 +54,7 @@ The Rust port of session goals, their driver and their tools.
 | 2 | Decode, fold, event body, the service and its activation rule — every case of `test/goal.test.ts` | landed |
 | 3 | The driver, the trigger and the boot sweep on Tokio — every case of `test/goal-driver.test.ts`, including the reentrant pass and the yield between rounds | landed |
 | 4 | The tools, the routes and the command renderings, byte for byte with the TypeScript build | landed |
-| 5 | Swap the doubles for `heddle-session`'s store, `heddle-agent`'s turn and `heddle-tools`' types | when those APIs land |
+| 5 | Swap the doubles for `heddle-session`'s store (`SessionLog` is implemented for `SessionStore`), `heddle-agent`'s turn and `heddle-tools`' types | the store: landed; the turn (the boot's `RoundRunner`) and the tool types: when those APIs settle |
 | 6 | `check-goal` through `HEDDLE_BIN`, the restart case included | with the server and the binary |
 
 ## Read next

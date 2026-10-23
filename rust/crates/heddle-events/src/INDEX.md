@@ -19,6 +19,8 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`waterfall.rs`](waterfall.rs) | `Next`, the continuation a waterfall listener receives |
 | [`error.rs`](error.rs) | `HookError` (refused or failed, attributed), `ParallelError` |
 | [`points.rs`](points.rs) | the point names, the `heddle hooks` catalog, the lifecycle events |
+| [`command.rs`](command.rs) | `heddle hooks [--json]`, behind the binary's entry-point convention (D-043) |
+| [`bridge.rs`](bridge.rs) | the catalog's points as JSON, the blocking dispatch, and one function per hook-port method |
 | [`outside.rs`](outside.rs) | outside listeners: message shapes, the `JsonListener` seam, bridges, the stdio transport |
 
 ## Read next
