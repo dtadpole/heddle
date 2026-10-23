@@ -34,6 +34,10 @@ trait declared here, so it builds and is tested against doubles before the crate
 | `POST /api/sessions/{id}/steer` | `turn_control` | `TurnControlHost` |
 | `POST /api/sessions/{id}/stop` | `turn_control` | `TurnControlHost` |
 
+`check-runtime-context` asserts no composer route: it judges the Trajectory view's runtime-context rows
+(`heddle-web-trajectory`) and the server's `/api/sessions/{id}/permission`; the composer's contribution to that
+page is the composer card's markup, which the server serves. It is listed here because the assignment names it.
+
 `router(Arc<H>) -> axum::Router` mounts all six for any `H: ComposerHost` (blanket over the four traits); each
 module also has its own `routes`, and [`ROUTES`](src/lib.rs) lists the six `(method, path)` pairs so a caller can
 assert at boot that they do not collide with its own (the server's are `/api/turn`, `/api/sessions`, the session
