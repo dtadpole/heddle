@@ -189,6 +189,21 @@ copies `token.ts` faithfully therefore answers `~user/x` as `<home>user/x` where
 the one place this crate's deliberate difference (see *Where it differs on purpose*) shows inside one binary. Call
 `heddle_home` and `expand_home` there too, and the server has one rule for each.
 
+### 8. Starting an outside component
+
+How the binary turns an outside row into a process, as of main `67c2587` (`rust/crates/heddle/src/adapters.rs`,
+`OutsideRow`). `--validate` and the start read the manifest through the same `read_component_manifest`, so a manifest
+that validates is one that starts.
+
+| Part | Where it comes from |
+|---|---|
+| the manifest file | the row's name through step 5: `./x.component.yml` resolves against `anchor_dir`, the **first** file layer's directory, not the directory of the layer that wrote the row |
+| the program | `program` starting with `.` resolves lexically against the manifest's folder; anything else is used as written — an absolute path, or a bare name the system finds on `PATH`. `~` is not expanded |
+| the arguments | `args` as written, none when absent |
+| the working directory | the manifest's folder |
+| the configuration | the row's composed `config`, handed over in `initialize`; `{}` when the row writes none or `null` (step 4) |
+| the name in errors and logs | the manifest's file name without `.component.yml`, not the row's `id` — so `id: alpha` naming `./shout.component.yml` reads `alpha:` in `--validate` problems but `shout` once running |
+
 ### Keeping `05-config-system` judged
 
 Re-run it against every lane candidate. The verifier's entry point runs the same runner, check for check, as
@@ -240,6 +255,8 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | lane `6bfcc5f` (the binary dispatches the owners' entry points and the turn: `commands.rs` largely rewritten, a new `runtime.rs`) | `HEDDLE_BIN=<debug build of exactly 6bfcc5f> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; `heddle config --validate` on the repository's own profile: 16 rows checked, 0 problems |
 | 2026-10-22 | main `5d1d8f3` (`6bfcc5f` plus status docs and two lockfile lines filling in the binary's declared `heddle-events` and `tokio` dependencies) | the `6bfcc5f` run above stands: `HEDDLE_BIN=<debug build of exactly 6bfcc5f> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
 | 2026-10-22 | lane `a36a4c0` (the binary starts an outside component a row declares by manifest, through `read_component_manifest`) | `HEDDLE_BIN=<debug build of exactly a36a4c0> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, built after the candidate on a clean lane | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `67c2587` (`a36a4c0` plus the lane gate and status docs; no Rust changed, so the lane release build is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and `HEDDLE_BIN=<lane release build> node _tools_/verify-runner/lane.mjs 05-config-system` | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `4e504df` (agent increment: each goal round answered with a real agent turn; `heddle-agent` and `heddle-goal` changed) | `HEDDLE_BIN=<debug build of exactly 4e504df> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 
 ## Decisions the contract makes
 
