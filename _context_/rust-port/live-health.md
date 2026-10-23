@@ -5,7 +5,7 @@ description: What the live-monitor pass judges every 20 minutes, the topology it
 level: L2
 status: unverified
 created: 2026-10-23T03:18:00Z
-modified: 2026-10-23T03:35:00Z
+modified: 2026-10-23T04:07:25Z
 grounded_in:
   - source: [hd] Live Monitor responsibilities, 2026-10-22
   - source: heddle-web-gate INDEX (dsh-web-ops), read 2026-10-22: 8082 is the token-supplying gate over heddle's 3082, token read from ~/.heddle/web.log
