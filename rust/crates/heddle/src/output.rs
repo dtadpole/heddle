@@ -151,18 +151,29 @@ mod tests {
     fn stringify_matches_json_stringify_with_two_space_indent() {
         let value =
             json!({ "id": "alpha", "config": { "label": "x", "count": 7 }, "inject": ["a", "b"] });
-        // The order is serde_json's map order; the shape is JSON.stringify's.
         let text = stringify(&value);
+        // The shape is JSON.stringify's: one key per line, two spaces per level, `": "` between a
+        // key and its value.
         assert!(text.starts_with("{\n  \""), "{text}");
-        assert!(
-            text.contains("\"config\": {\n    \"count\": 7,\n    \"label\": \"x\"\n  }"),
-            "{text}"
+        assert!(text.ends_with("\n}"), "{text}");
+        for line in text.lines().skip(1) {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            assert_eq!(indent % 2, 0, "two spaces per level: {line:?}");
+            assert!(indent <= 4, "this value nests two levels: {line:?}");
+        }
+        // Key order is the map's own — insertion order when `preserve_order` is on, which the
+        // workspace unifies across crates. The contract is the shape and the values, not one order.
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).expect("the text parses back"),
+            value
         );
+        assert!(text.contains("\"label\": \"x\""), "{text}");
+        assert!(text.contains("\"count\": 7"), "{text}");
+        // Arrays keep their order, and every nested level indents by two.
         assert!(
             text.contains("\"inject\": [\n    \"a\",\n    \"b\"\n  ]"),
             "{text}"
         );
-        assert!(text.ends_with("\n}"), "{text}");
     }
 
     #[test]
