@@ -39,3 +39,6 @@
 {"at": "2026-10-23T00:17-07:00", "deployed": "bc3ce8b", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T00:41-07:00", "deployed": "9319116", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt from 9319116, every checked route 200, its own store"}
 {"at": "2026-10-23T00:44-07:00", "deployed": "c072e63", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the binary is fully ported on main; the preview, behind on heddle-config which the old watch missed, rebuilt from c072e63"}
+{"at": "2026-10-23T00:49-07:00", "deployed": "2942ee2", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
+{"at": "2026-10-23T00:51-07:00", "deployed": "8775bfe", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
+{"at": "2026-10-23T00:55-07:00", "deployed": "8248e5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
