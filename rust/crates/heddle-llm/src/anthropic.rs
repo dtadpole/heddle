@@ -786,7 +786,7 @@ mod tests {
             name: "claude".into(),
             kind: heddle_config::EndpointKind::AnthropicVertex,
             base_url: "http://gateway.example:443/v1".into(),
-            model: Some("claude-opus-5-5".into()),
+            model: Some("claude-model".into()),
             models: None,
             reasoning: None,
             project: Some("a-project".into()),
@@ -829,7 +829,7 @@ mod tests {
         let call = anthropic_call(&base_endpoint(), &request()).expect("builds");
         assert_eq!(
             call.url,
-            "http://gateway.example:443/v1/projects/a-project/locations/global/publishers/anthropic/models/claude-opus-5-5:streamRawPredict"
+            "http://gateway.example:443/v1/projects/a-project/locations/global/publishers/anthropic/models/claude-model:streamRawPredict"
         );
         assert_eq!(
             call.body["anthropic_version"],

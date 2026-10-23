@@ -315,7 +315,7 @@ async fn the_anthropic_shape_streams_thinking_and_a_tool_use_block() {
         "claude",
         EndpointKind::AnthropicVertex,
         &double.base_url,
-        "claude-opus-5-5",
+        "claude-model",
     );
     endpoint.project = Some("a-project".into());
     endpoint.region = Some("global".into());
@@ -350,7 +350,7 @@ async fn the_anthropic_shape_streams_thinking_and_a_tool_use_block() {
     let seen = double.requests().join("\n");
     assert!(
         seen.starts_with(
-            "POST /projects/a-project/locations/global/publishers/anthropic/models/claude-opus-5-5:streamRawPredict HTTP/1.1"
+            "POST /projects/a-project/locations/global/publishers/anthropic/models/claude-model:streamRawPredict HTTP/1.1"
         ),
         "{seen}"
     );
@@ -501,7 +501,7 @@ async fn a_publisher_route_that_answers_without_a_stream_is_a_bad_body() {
         "claude",
         EndpointKind::AnthropicVertex,
         &double.base_url,
-        "claude-opus-5-5",
+        "claude-model",
     );
     endpoint.project = Some("a-project".into());
     endpoint.region = Some("global".into());
@@ -522,7 +522,7 @@ async fn a_provider_failure_inside_the_anthropic_stream_is_remote() {
         "claude",
         EndpointKind::AnthropicVertex,
         &double.base_url,
-        "claude-opus-5-5",
+        "claude-model",
     );
     endpoint.project = Some("a-project".into());
     endpoint.region = Some("global".into());
