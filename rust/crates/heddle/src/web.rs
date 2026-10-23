@@ -117,7 +117,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
-        notes: Vec::new(),
+        notes: start_notes(&boot),
         shutdown: shutdown.clone(),
     };
     let web_args = heddle_server::command::Args {
@@ -148,6 +148,19 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     } else {
         Exit::Failure
     }
+}
+
+/// The lines web reports once it is up and before the URL: the teams a previous process left mid-way,
+/// settled and their queued mail delivered (`heddle_team::command::web_start_note`).
+fn start_notes(boot: &Boot) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(team) = boot.services.get::<Arc<heddle_team::TeamService>>("team")
+        && let Some(note) =
+            crate::runtime::tokio().block_on(heddle_team::command::web_start_note(&team))
+    {
+        notes.push(note);
+    }
+    notes
 }
 
 /// Resolve on SIGINT or SIGTERM, whichever comes first.

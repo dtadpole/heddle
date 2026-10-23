@@ -1592,6 +1592,21 @@ impl heddle_team::plugin::TeamAgent for TeamTurns {
     }
 }
 
+/// Whether a member's turn is running, and stopping it, through the live-turn registry.
+struct TeamTurnsLive {
+    turns: heddle_agent::TurnRegistry,
+}
+
+impl heddle_team::TeamLive for TeamTurnsLive {
+    fn is_running(&self, session: &str) -> bool {
+        self.turns.is_running(session)
+    }
+
+    fn abort(&self, session: &str) -> bool {
+        self.turns.abort(session, Some("interrupted by the Lead"))
+    }
+}
+
 /// `src/plugins/team.ts`: a Lead's teammates, their tasks and their mail, durable in the session log.
 pub struct TeamComponent;
 
@@ -1620,7 +1635,10 @@ impl Component for TeamComponent {
                 runtime: Arc::downgrade(&runtime),
                 store,
             }),
-            live: None,
+            // A member's running turn is the turns row's: the team asks it and stops it there.
+            live: services
+                .get::<heddle_agent::TurnRegistry>("turns")
+                .map(|turns| Arc::new(TeamTurnsLive { turns }) as Arc<dyn heddle_team::TeamLive>),
             config,
             emit_changed: None,
             warn: None,
