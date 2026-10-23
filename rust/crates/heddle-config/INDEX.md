@@ -1,6 +1,8 @@
 ---
 title: The heddle-config crate
-version: 0.3.1
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:04:42Z
+version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -237,6 +239,10 @@ before any other work. Each check leans on the steps above:
 | a profile that does not exist says which ones do | 3 |
 
 One line per run, oldest first: the candidate, the command as run (with the binary it judged), and the result.
+**Measured and inferred are kept apart** (constitution C5): a row whose command column says *the … run above stands*
+is an **inference** — no Rust source, lockfile version, 05 verifier or runner differed, so the earlier binary was the
+candidate's — not a fresh run. From main `8072846` on, every row is a fresh run with a binary built from the commit
+it judges.
 
 | Date | Candidate | Command, and the binary it judged | Result |
 |---|---|---|---|
