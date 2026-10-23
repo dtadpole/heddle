@@ -1591,4 +1591,108 @@ mod tests {
         );
         assert!(wrote);
     }
+
+    #[test]
+    fn a_preparation_that_clears_the_pressure_by_pruning_pays_for_no_summary() {
+        let scratch = Scratch::new("prepare-prune");
+        let model = Arc::new(ScriptedModel {
+            summary: "the briefing".to_string(),
+            ..ScriptedModel::default()
+        });
+        let (store, service) = build_service(
+            ContextConfig {
+                context_window: Some(3000),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(scratch.path(), Some(model.clone())),
+        );
+        let session = store.open("s");
+        store.message(&session, Message::text(Role::System, "be brief"));
+        store.message(&session, Message::text(Role::User, "do the thing"));
+        store.message(
+            &session,
+            Message {
+                role: Role::Tool,
+                content: vec![ContentPart::Text {
+                    text: "x".repeat(30_000),
+                }],
+                tool_call_id: Some("call-1".to_string()),
+                source: None,
+            },
+        );
+
+        let report = block_on(service.prepare(
+            &session,
+            &PrepareOptions {
+                cwd: scratch.path(),
+                endpoint: "local",
+                model: None,
+                tools: &[],
+                system: None,
+                summarizer: None,
+                force: false,
+            },
+        ))
+        .expect("the preparation succeeds");
+        assert_eq!(report.pruned, 1, "the oversized result was rewritten");
+        assert!(!report.compacted, "and no summary was paid for");
+        assert!(
+            model
+                .calls
+                .lock()
+                .expect("the model lock is not poisoned")
+                .is_empty(),
+            "the summariser was never asked"
+        );
+        let texts = surface_texts(&store, &session);
+        assert!(
+            texts.iter().any(|text| text.contains("pruned")),
+            "the model is sent the marker instead of the body"
+        );
+    }
+
+    #[test]
+    fn an_overflow_with_no_summariser_to_ask_reduces_nothing_and_passes_on() {
+        let scratch = Scratch::new("no-model");
+        let (store, service) = build_service(
+            ContextConfig {
+                context_window: Some(900),
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            // No model layer at all: the default summariser refuses rather than guessing.
+            dependencies(scratch.path(), None),
+        );
+        let session = store.open("s");
+        store.message(&session, Message::text(Role::System, "be brief"));
+        store.message(&session, Message::text(Role::User, "u".repeat(1500)));
+        store.message(&session, Message::text(Role::Assistant, "a".repeat(1500)));
+
+        let decision = block_on(service.recover_overflow(
+            &session,
+            &OverflowRequest {
+                error_code: crate::types::CONTEXT_WINDOW_EXCEEDED,
+                cwd: scratch.path(),
+                endpoint: "local",
+                model: None,
+                tools: &[],
+            },
+        ))
+        .expect("the recovery runs");
+        assert_eq!(decision, RecoveryDecision::PassOn);
+        let events = store.read(&session).expect("the log reads");
+        assert!(
+            events.iter().any(|event| event.kind == "compaction/failed"),
+            "the refusal is recorded rather than swallowed"
+        );
+        let recovery = events.last().expect("the decision is the newest event");
+        assert_eq!(recovery.kind, "compaction/recovery");
+        assert_eq!(recovery.field("retry"), Some(&json!(false)));
+        assert_eq!(
+            recovery.field("generationBefore"),
+            recovery.field("generationAfter"),
+            "nothing landed, so the generations agree"
+        );
+    }
 }
