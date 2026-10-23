@@ -20,7 +20,7 @@ key order kept), so it depends on no session type.
 | Ported from | `src/server/ledger.ts`, `src/server/log-download.ts`, `src/server/tool-inspector.ts` |
 | Judged by | `_verifiers_/85-trajectory-view`, `_verifiers_/80-web-ui` (check-trajectory-view; the ledger half of check-runtime-context; the dock of check-composer), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and tested — 69 unit tests and 4 verifier-expectation tests; served through the real `heddle-server` router in a probe (below); the binary's `web` composition is the remaining step** |
+| Status | **implemented and tested — 69 unit tests and 6 verifier-expectation tests; served through the real `heddle-server` router in a probe (below); the binary's `web` composition is the remaining step** |
 
 ## Public API
 
@@ -108,7 +108,9 @@ key order kept), so it depends on no session type.
   TypeScript build ran `85-trajectory-view`'s scripted turn and `80-web-ui check-trajectory-view`'s two-turn
   `list_dir` session from source, and the logs it wrote are checked in as [`tests/fixtures/`](tests/fixtures/INDEX.md).
   Every API assertion those checks and `check-runtime-context` make about `?view=ledger` holds on this crate's
-  projection of those logs, and the same logs projected by `src/server/ledger.ts` give identical answers. So
+  projection of those logs, and so do the figures `check-composer`'s statistics dock prints from the chat route's
+  `stats` (turns, steps, the billed total, the cache and context shares, the decode rate), judged on a log
+  recorded against that check's own chat double; and the same logs projected by `src/server/ledger.ts` give identical answers. So
   when the binary records what the TypeScript build records, the trajectory half of those checks passes; the
   agent loop's `model/request` record (`heddle-agent`'s `ModelRequestRecord`) already has the same fields in
   the same order as the recorded one.
