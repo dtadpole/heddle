@@ -1,6 +1,6 @@
 ---
 title: The heddle-workspace crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for workspaces, the folders they name, and the classified recursive tree — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -34,6 +34,7 @@ Everything is re-exported at the crate root.
 | `read_file_text`, `FileReading`, `FileReadError`, `FILE_LIMIT_BYTES` | the right panel's file reader and its three refusals |
 | `compare_names` | the tree's name order (`Intl.Collator`, numeric, base sensitivity) |
 | `WorkspaceError` | failures; `StillHoldsSessions` carries the `still holds N session(s)` sentence the `409` returns |
+| `command::{run, Command, Args, Context, describe_tree}` | `heddle workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file` and `session new`, answered here (D-043) |
 
 ### Decisions a dependent crate should know
 
@@ -57,26 +58,28 @@ Each step lands with its unit tests (`cargo test --manifest-path rust/Cargo.toml
 | 4 | `tree`, `kind_of` | the `70-workspaces-sessions` fixture as a unit test: levels, folders before files, dot/plumbing hidden, generated, instance-only sessions, `_sessions_` hoisted newest/pinned first, captured-session suppression, archived filter, `adHoc`; JSON key order | `heddle tree`, `/api/tree` |
 | 5 | `file` | small file whole; truncated at the limit; NUL refused; invalid UTF-8 refused; directory refused; `lines` with and without a trailing newline | `heddle file`, file preview |
 
-## Where it stands, 2026-10-22
+## Where it stands, 2026-10-22 (evening)
 
-Steps 1–5 are ported, each with the unit tests the table names: **36 unit tests pass**, plus **4
+**Merged.** Steps 1–5 are on `main` (integrator-one, through `b0ef8ab`). `b51e3a1` (the command entry
+point) waits for the next candidate on `hd/developer-eight`.
+
+**Tested.** `cargo test --manifest-path rust/Cargo.toml -p heddle-workspace`: **48 unit tests** and **4
 cross-crate tests** in [`tests/verifier_shape.rs`](tests/verifier_shape.rs) that hold
-`70-workspaces-sessions`'s claims at the seam the command line will call — one folder one session and
-`--new`, containment and the nearest root, the sibling-prefix trap, hoisted sessions and the
-instance-only rule, and the file reader's refusals. That is **40 tests** for this crate alongside
-`heddle-session`'s 120, and `rustfmt` and `clippy -D warnings` are clean. The tree's fixture is the verifier's own shape: type and
-instance classification, badges, folders before files, plumbing and generated folders, the boundary that
-only an instance carries a session, hoisted `_sessions_` rows (pinned first, then updated), the
-captured-session suppression, the archived filter and the virtual root's `adHoc` group. What is not
-judged yet is the command line and the page that call it.
+`70-workspaces-sessions`'s claims at the seam the command line calls; `rustfmt` and `clippy -D warnings`
+clean. The tree's fixture is the verifier's own shape: classification and badges, folders before files,
+plumbing and generated folders, instance-only sessions, hoisted `_sessions_` rows, the captured-session
+suppression, the archived filter and the virtual root's `adHoc` group.
 
-**Pre-triage, 2026-10-22.** A throwaway probe outside the repository (not committed) composed this crate
-with `heddle-session` for `70-workspaces-sessions`, and **11 of its 22 checks pass** through it: the
-tree's one-level walk, type/instance/badge classification, plain containers, hidden plumbing, the
-profile-declared generated folder, the empty type folder, hoisted `_sessions_` rows with the
-captured-session suppression, the instance-only session rule implied by them, `session new` writing its
-definition, the file reader and its refusals, and the outside-root refusal. The rest need the agent loop,
-the server or the page.
+**Answers.** [`src/command.rs`](src/command.rs) answers `workspaces`, `workspace add|list|remove|rename`,
+`tree`, `file` and `session new` (here, not in `heddle-session`, because it needs both services) in the
+D-043 convention, with `describe_tree` ported from the CLI. Text and sentences are `src/cli.ts`'s byte for
+byte — including a rename without a positional being refused with the add sentence — and path arguments
+resolve against `Context::cwd`, never the process's directory. Sixteen tests across the two command
+modules are built from the verifier's expectations; a padding mutation in `describe_tree` fails two.
+
+**Waits on.** developer-two's dispatch lines and the workspace row's adapter, then every other row of
+`heddle.patch.yml` starting (see [`../heddle-session/INDEX.md`](../heddle-session/INDEX.md)). `80-web-ui
+check-workspaces` also needs developer-ten's routes.
 
 **Done** with `heddle-session`: when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through
 `HEDDLE_BIN` and the backend lane's integrator has merged the branch.
