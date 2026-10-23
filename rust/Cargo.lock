@@ -795,8 +795,14 @@ dependencies = [
 name = "heddle-team"
 version = "0.0.1"
 dependencies = [
+ "heddle-agent",
  "heddle-config",
+ "heddle-context",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-server",
  "heddle-session",
+ "heddle-tools",
  "serde",
  "serde_json",
  "thiserror",

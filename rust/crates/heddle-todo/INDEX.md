@@ -28,7 +28,7 @@ The Rust port of the todo list and its tools.
 | `TodoService`, `TodoConfig` | `get`, `write` (whole-list replacement), `clear`; `allowParallelInProgress` off by default |
 | `TodoError`, `TodoErrorCode` | `TODO_INVALID_LIST`, `TODO_INVALID_LOG`, or a log failure |
 | `SessionLog`, `LogError`, `Clock`, `SystemClock`, `iso_timestamp` | the ports: `open`/`read`/`append` over JSON events, and a `Date.toISOString` clock |
-| `tool::{todo_tool_specs, run_todo_write, run_todo_read}` | the two tools as specs and functions; `ToolSpec`/`ToolAnswer` mirror `heddle-tools`' shapes until its API lands |
+| `tool::{todo_tool_specs, run_todo_write, run_todo_read}` | the two tools as specs and functions over std and serde types; the boot wraps them as `heddle-tools` registry tools (the session from the call's context, the answer read as a `ToolResult`), so this crate needs no tools dependency |
 | `http::get_todo` | `GET /api/todo` as status and exact body bytes (503 / 400 / 404 / 200 `{session, todo}`) |
 
 ## What the other seats provide, and what they get
@@ -49,7 +49,7 @@ The Rust port of the todo list and its tools.
 | 1 | Public API, docs | landed |
 | 2 | `iso_timestamp`, validation, counts, decode, fold, event body, the service — porting every case of `test/todo.test.ts` | landed |
 | 3 | The tools and the route, with their answers compared byte for byte with the TypeScript build's | landed |
-| 4 | Swap the `SessionLog` double for `heddle-session`'s store (`SessionLog` is implemented for `SessionStore`) and the mirrors for `heddle-tools`' types | the store: landed; the tool types: when `heddle-tools`' `Tool` stops using its provisional mirrors |
+| 4 | Swap the `SessionLog` double for `heddle-session`'s store (`SessionLog` is implemented for `SessionStore`) and the mirrors for `heddle-tools`' types | landed: the store directly, the tool types through the boot's wrapper (settled, so the shapes stay this crate's) |
 | 5 | `check-todo` through `HEDDLE_BIN` | with the server and the binary |
 
 ## Read next
