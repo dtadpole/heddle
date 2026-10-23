@@ -27,8 +27,9 @@ pub mod upstream;
 
 pub use adapters::LlmModel;
 pub use ports::{
-    ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord, NoTurnHooks, PortError,
-    PreStep, RequestErrorAction, RequestErrorPayload, SessionPort, TurnHooks,
+    ChainedTurnHooks, ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord,
+    NoTurnHooks, PortError, PreStep, RequestErrorAction, RequestErrorPayload, SessionPort,
+    TurnHooks,
 };
 pub use subagent::{
     ParentFacts, SubagentConfig, SubagentDeps, SubagentError, SubagentErrorCode, SubagentLimits,

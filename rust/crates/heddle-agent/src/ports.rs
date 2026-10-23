@@ -14,6 +14,7 @@
 //! | [`TurnHooks`] | `heddle-events` | the `agent/pre-step` and `agent/request-error` waterfalls |
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -244,3 +245,165 @@ pub trait TurnHooks: Send + Sync {
 pub struct NoTurnHooks;
 
 impl TurnHooks for NoTurnHooks {}
+
+/// Several [`TurnHooks`] as one, in order — how the event bus's listeners and the context service's overflow
+/// recovery share a turn.
+///
+/// Both points are waterfalls in the TypeScript build: `pre_step` passes each listener's step to the next and the
+/// first failure ends the round; `request_error` asks each in turn and the first that answers decides (a listener
+/// that passes calls `next`), so a later listener is not asked once a retry is granted.
+#[derive(Clone, Default)]
+pub struct ChainedTurnHooks {
+    hooks: Vec<Arc<dyn TurnHooks>>,
+}
+
+impl ChainedTurnHooks {
+    /// The listeners, asked in this order.
+    pub fn new(hooks: Vec<Arc<dyn TurnHooks>>) -> Self {
+        Self { hooks }
+    }
+}
+
+impl TurnHooks for ChainedTurnHooks {
+    fn pre_step(&self, step: PreStep) -> Result<PreStep, HookFailure> {
+        self.hooks
+            .iter()
+            .try_fold(step, |step, hooks| hooks.pre_step(step))
+    }
+
+    fn request_error<'a>(
+        &'a self,
+        payload: &'a RequestErrorPayload,
+    ) -> BoxFuture<'a, Option<RequestErrorAction>> {
+        Box::pin(async move {
+            for hooks in &self.hooks {
+                if let Some(action) = hooks.request_error(payload).await {
+                    return Some(action);
+                }
+            }
+            None
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Named {
+        name: &'static str,
+        answer: Option<RequestErrorAction>,
+        asked: std::sync::Mutex<Vec<&'static str>>,
+        refuse: bool,
+    }
+
+    impl Named {
+        fn new(name: &'static str, answer: Option<RequestErrorAction>, refuse: bool) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                answer,
+                asked: std::sync::Mutex::new(Vec::new()),
+                refuse,
+            })
+        }
+    }
+
+    impl TurnHooks for Named {
+        fn pre_step(&self, mut step: PreStep) -> Result<PreStep, HookFailure> {
+            if self.refuse {
+                return Err(HookFailure::Refusal(format!("{} refused", self.name)));
+            }
+            step.tools.push(ToolSpec {
+                name: self.name.to_owned(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            });
+            Ok(step)
+        }
+
+        fn request_error<'a>(
+            &'a self,
+            _: &'a RequestErrorPayload,
+        ) -> BoxFuture<'a, Option<RequestErrorAction>> {
+            self.asked.lock().unwrap().push(self.name);
+            let answer = self.answer;
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn step() -> PreStep {
+        PreStep {
+            round: 1,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_chain_passes_each_listeners_step_to_the_next_and_stops_at_a_refusal() {
+        let chain = ChainedTurnHooks::new(vec![
+            Named::new("a", None, false),
+            Named::new("b", None, false),
+        ]);
+        let names: Vec<String> = chain
+            .pre_step(step())
+            .unwrap()
+            .tools
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["a", "b"],
+            "each listener saw the step the one before left"
+        );
+        let refusing = ChainedTurnHooks::new(vec![
+            Named::new("a", None, true),
+            Named::new("b", None, false),
+        ]);
+        assert!(matches!(
+            refusing.pre_step(step()),
+            Err(HookFailure::Refusal(message)) if message == "a refused"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_chain_asks_each_listener_until_one_grants_a_retry() {
+        let first = Named::new("bus", None, false);
+        let second = Named::new("context", Some(RequestErrorAction::Retry), false);
+        let third = Named::new("after", Some(RequestErrorAction::Retry), false);
+        let chain = ChainedTurnHooks::new(vec![
+            Arc::clone(&first) as Arc<dyn TurnHooks>,
+            Arc::clone(&second) as Arc<dyn TurnHooks>,
+            Arc::clone(&third) as Arc<dyn TurnHooks>,
+        ]);
+        let payload = RequestErrorPayload {
+            code: "CONTEXT_WINDOW_EXCEEDED".into(),
+            message: "too long".into(),
+            session: SessionHandle {
+                id: "s".into(),
+                dir: "/s".into(),
+                transcript: "/s/t".into(),
+                meta: "/s/m".into(),
+            },
+            endpoint: "scripted".into(),
+            model: None,
+            cwd: PathBuf::from("/w"),
+            tools: Vec::new(),
+        };
+        assert_eq!(
+            chain.request_error(&payload).await,
+            Some(RequestErrorAction::Retry)
+        );
+        assert_eq!(*first.asked.lock().unwrap(), ["bus"]);
+        assert_eq!(*second.asked.lock().unwrap(), ["context"]);
+        assert!(
+            third.asked.lock().unwrap().is_empty(),
+            "a granted retry ends the waterfall"
+        );
+        assert_eq!(
+            ChainedTurnHooks::default().request_error(&payload).await,
+            None
+        );
+    }
+}
