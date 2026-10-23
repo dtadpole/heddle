@@ -109,6 +109,15 @@ Steps 1–8 are ported, each with the unit tests the table names: **120 unit tes
 What remains for `70-workspaces-sessions` is the `heddle` binary composing this crate, which is another
 seat's scope: it is honestly unjudged (exit 3) until then.
 
+**Pre-triage, 2026-10-22.** A throwaway probe outside the repository (not committed, not this crate)
+implements only `--help`, `workspace add/remove/rename`, `workspaces --json`, `sessions --json`,
+`tree --json`, `file --json` and `session new` by calling this crate and `heddle-workspace`. Run as
+`HEDDLE_BIN`, **11 of the verifier's 22 checks pass** — every check that needs neither the agent loop nor
+the server/page: the tree's levels, classification and badges, the generated folder, the file reader and
+its refusals, `session new` with its definition, hoisted `_sessions_` rows, and the outside-root refusal.
+The other 11 need `--turn` (9), the server's workspace/tree routes (2) or the page, so they are not this
+crate's to judge. The row stays unjudged until the real binary runs.
+
 **Done** when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through `HEDDLE_BIN` with the
 CLI (`heddle`) and server (`heddle-server`) crates composing this one, and the backend lane's integrator has merged it.
 

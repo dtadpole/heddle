@@ -70,6 +70,14 @@ only an instance carries a session, hoisted `_sessions_` rows (pinned first, the
 captured-session suppression, the archived filter and the virtual root's `adHoc` group. What is not
 judged yet is the command line and the page that call it.
 
+**Pre-triage, 2026-10-22.** A throwaway probe outside the repository (not committed) composed this crate
+with `heddle-session` for `70-workspaces-sessions`, and **11 of its 22 checks pass** through it: the
+tree's one-level walk, type/instance/badge classification, plain containers, hidden plumbing, the
+profile-declared generated folder, the empty type folder, hoisted `_sessions_` rows with the
+captured-session suppression, the instance-only session rule implied by them, `session new` writing its
+definition, the file reader and its refusals, and the outside-root refusal. The rest need the agent loop,
+the server or the page.
+
 **Done** with `heddle-session`: when `70-workspaces-sessions` and `80-web-ui check-workspaces` pass through
 `HEDDLE_BIN` and the backend lane's integrator has merged the branch.
 
