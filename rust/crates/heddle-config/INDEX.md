@@ -123,6 +123,9 @@ as `runConfigCommand` did not.
 - **The last write wins per top-level field**, and a patch replaces that field whole: a restated `config` is the
   entire `config`.
 - **A removed row stays**, with `disabled: Some(true)`; the binary's loader gives it no entry.
+- **No config is `None`.** A row that writes no `config`, or writes `config: null`, composes to `config: None`, and
+  a patch writing `config: null` clears it. Validation checks `None` as `{}`; a caller starting a component hands it
+  `{}`, as a Cordis plugin received, so its schema's defaults apply — never `null`, which every typed config refuses.
 - **Provenance** is one entry per leaf field, naming only the layer that won; `origin_of` answers a parent field
   (`config`) with the first leaf beneath it.
 - **Every problem is collected** before it fails (a duplicate insert, a patch or remove naming a row no earlier layer
@@ -228,6 +231,7 @@ coordinator before any other work. Each check leans on the steps above:
 | `insert:` written as a mapping or string | a `TypeError`, or one problem per character | `{file}: layer {n}: insert must be a list` |
 | a row `id` that is not a string | accepted, never addressable | a problem naming the file and field |
 | `heddle.json` `endpoints` as a mapping | a `TypeError` in the model plugin | a sentence naming the file |
+| a row written with `config: null`, in `config --json` | prints `"config": null` | prints no `config` key, as for an absent config; no verifier reads the difference |
 
 Kept as the TypeScript build has it, though inconsistent: `heddle --config X config` does not apply the project
 patch beside `X`, while `heddle --config X --turn …` does (`LayerOptions::for_inspection` vs `for_run`).
