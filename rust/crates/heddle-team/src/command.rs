@@ -10,6 +10,11 @@
 //! The shape is the binary's convention for an entry point in the owning crate: a [`Command`], the [`Args`] it
 //! reads (none), a [`Context`] holding the composed service, and [`run`] writing to the given streams and
 //! answering an exit code. It reads no environment and prints nothing on its own.
+//!
+//! The server's `web` entry point prints the boot's lines itself, from a list of notes it is handed before it
+//! starts (`heddle_server::command::Context::notes`, each written as `heddle web: <note>`). For that seam,
+//! [`web_start_note`] does the same recovery and answers the note instead of writing the line; [`run`] is
+//! that note written out.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -51,11 +56,10 @@ pub async fn run(
 ) -> i32 {
     match command {
         Command::RecoverAtWebStart => {
-            let report = context.team.recover_store().await;
-            let Some(line) = report.boot_line() else {
+            let Some(note) = web_start_note(context.team).await else {
                 return 0;
             };
-            match writeln!(out, "{line}") {
+            match writeln!(out, "heddle web: {note}") {
                 Ok(()) => 0,
                 Err(error) => {
                     let _ = writeln!(
@@ -67,6 +71,14 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Recover every team in the store and answer the boot note — `recovered N team(s) (S settled, D delivered[, F
+/// failed])`, without the `heddle web: ` prefix — or `None` when there was no team. For a `web` that prints its
+/// boot notes itself: the binary pushes this after the goal-resumption note, so the lines keep the TypeScript
+/// order (goals, teams, then the URL).
+pub async fn web_start_note(team: &TeamService) -> Option<String> {
+    team.recover_store().await.boot_note()
 }
 
 #[cfg(test)]
@@ -240,6 +252,30 @@ mod tests {
             out,
             "heddle web: recovered 1 team(s) (0 settled, 0 delivered)\n"
         );
+    }
+
+    #[tokio::test]
+    async fn the_note_for_the_servers_boot_notes_is_the_line_without_its_prefix() {
+        // Two identical stores, because recovery changes what it recovers.
+        let by_note = harness();
+        recorded_team(&by_note.store);
+        let note = web_start_note(&by_note.service).await;
+        assert_eq!(
+            note.as_deref(),
+            Some("recovered 1 team(s) (2 settled, 1 delivered)")
+        );
+
+        let by_line = harness();
+        recorded_team(&by_line.store);
+        let (_, out, _) = run_recovery(&by_line).await;
+        assert_eq!(
+            format!("heddle web: {}\n", note.unwrap_or_default()),
+            out,
+            "the server writing the note prints exactly what run prints"
+        );
+
+        let empty = harness();
+        assert_eq!(web_start_note(&empty.service).await, None);
     }
 
     #[tokio::test]
