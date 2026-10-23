@@ -99,6 +99,10 @@ Steps 1–8 are ported, each with the unit tests the table names: **120 unit tes
   machine with its types stripped — over a transcript this crate just wrote, and asserts it sees the same
   three events, no tear, and the whole file consumed. It reports skipped rather than failing where Node
   is absent, so a host without the oracle still runs the suite.
+- **The bytes are the oracle's bytes.** [`tests/typescript_bytes.rs`](tests/typescript_bytes.rs) asks the
+  same Node to `JSON.stringify` the values the store writes — event lines, pretty meta records, and
+  `new Date(ms).toISOString()` for six instants — and compares byte for byte, so an escaping or
+  number-formatting drift is caught rather than copied into a fixture.
 
 What remains for `70-workspaces-sessions` is the `heddle` binary composing this crate, which is another
 seat's scope: it is honestly unjudged (exit 3) until then.
