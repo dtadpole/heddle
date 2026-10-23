@@ -15,11 +15,13 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::Stream;
+use std::collections::VecDeque;
+
+use futures::{Stream, StreamExt};
 
 use crate::error::ModelError;
 use crate::http::ByteStream;
-use crate::sse::SseEvent;
+use crate::sse::{SseEvent, read_sse};
 use crate::types::{Chunk, GenerateRequest};
 use heddle_config::{EndpointConfig, ReasoningValue};
 
@@ -120,9 +122,46 @@ pub trait StreamFold: Send {
 }
 
 /// Drive a fold over a streamed body: parse events, fold each, stop at the terminal one or at the body's end.
+///
+/// `end` is asked for its tail only when the body ended without a terminal event, so a fold that already answered
+/// `finished` is not asked to finish twice.
 pub fn fold_sse(body: ByteStream, fold: Box<dyn StreamFold>) -> ChunkStream {
-    let _ = (body, fold);
-    todo!("port the adapters' read loop")
+    let state = (read_sse(body), fold, VecDeque::new(), false);
+    Box::pin(futures::stream::unfold(
+        state,
+        |(mut events, mut fold, mut queue, mut done)| async move {
+            loop {
+                if let Some(item) = queue.pop_front() {
+                    return Some((item, (events, fold, queue, done)));
+                }
+                if done {
+                    return None;
+                }
+                match events.next().await {
+                    Some(Ok(event)) => match fold.event(&event) {
+                        Ok(folded) => {
+                            queue.extend(folded.chunks.into_iter().map(Ok));
+                            if folded.finished {
+                                done = true;
+                            }
+                        }
+                        Err(error) => {
+                            done = true;
+                            queue.push_back(Err(error));
+                        }
+                    },
+                    Some(Err(error)) => {
+                        done = true;
+                        queue.push_back(Err(error));
+                    }
+                    None => {
+                        done = true;
+                        queue.extend(fold.end().into_iter().map(Ok));
+                    }
+                }
+            }
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -225,6 +264,53 @@ mod tests {
             .unwrap_or_else(|error| panic!("{kind:?} is a known kind: {error}"));
             assert_eq!(adapter.endpoint().name, "responses");
         }
+    }
+
+    #[test]
+    fn the_driver_folds_a_streamed_body_across_read_boundaries() {
+        use bytes::Bytes;
+        let body: ByteStream = Box::pin(futures::stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: ",
+            )),
+            Ok(Bytes::from_static(
+                b"{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            )),
+        ]));
+        let chunks: Vec<Option<Chunk>> = futures::executor::block_on(
+            fold_sse(body, Box::new(crate::chat::ChatFold::new())).collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(Result::ok)
+        .collect();
+        assert_eq!(
+            chunks,
+            vec![
+                Some(Chunk::TextDelta { text: "hi".into() }),
+                Some(Chunk::Done {
+                    finish_reason: "stop".into(),
+                    usage: None
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_body_that_ends_without_a_terminal_event_gets_the_folds_tail() {
+        use bytes::Bytes;
+        let body: ByteStream = Box::pin(futures::stream::iter(vec![Ok(Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"cut\"}\n\n",
+        ))]));
+        let chunks: Vec<_> = futures::executor::block_on(
+            fold_sse(body, Box::new(crate::responses::ResponsesFold::new())).collect(),
+        );
+        assert_eq!(
+            chunks.last().and_then(|item| item.as_ref().ok()),
+            Some(&Chunk::Done {
+                finish_reason: "stream_ended".into(),
+                usage: None
+            })
+        );
     }
 
     #[test]
