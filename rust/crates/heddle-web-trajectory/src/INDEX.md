@@ -1,6 +1,8 @@
 ---
 title: The heddle-web-trajectory sources
-version: 0.3.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:10:00Z
+version: 0.3.1
 description: The sources of the heddle-web-trajectory crate, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -27,4 +29,4 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 
 ## Read next
 
-[`../INDEX.md`](../INDEX.md) for what the crate ports, what judges it, and its port plan.
+[`../INDEX.md`](../INDEX.md) for the crate's map; [`../API.md`](../API.md) for the public API.
