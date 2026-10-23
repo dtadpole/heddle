@@ -12,7 +12,7 @@
 //! | [`heddle_agent::ModelPort`] | `adapters::LlmModel` | `heddle-llm`'s `ModelService` |
 //! | [`heddle_agent::SessionPort`] | `adapters::Sessions` | `heddle-session`'s `SessionService` |
 //! | [`heddle_agent::ContextPort`] | `adapters::Context` | `heddle-context`'s service on the session store |
-//! | [`heddle_agent::TurnHooks`] | [`heddle_agent::NoTurnHooks`] | until `heddle-events`' bus is mounted |
+//! | [`heddle_agent::TurnHooks`] | `heddle_events::ports::BusHooks` | the run's one bus |
 
 use std::sync::{Arc, OnceLock};
 
@@ -67,7 +67,11 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
             context,
         )),
         tools,
-        hooks: Arc::new(heddle_agent::NoTurnHooks),
+        // `agent/pre-step` reaches the bus when the boot made one.
+        hooks: match crate::adapters::bus_hooks(services) {
+            Some(hooks) => Arc::new(hooks),
+            None => Arc::new(heddle_agent::NoTurnHooks),
+        },
         turns: services.get::<heddle_agent::TurnRegistry>("turns"),
     })
 }

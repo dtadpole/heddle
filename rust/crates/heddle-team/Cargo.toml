@@ -13,6 +13,15 @@ workspace = true
 # In-memory doubles of the crate's ports (session store, turn runner, live-turn registry, ids), for this
 # crate's own tests and for any crate that tests against the team service without the real session store.
 test-doubles = []
+# The `team` row composed over the crates that own each capability (`compose`), for the binary to call with one
+# line. Without it the crate depends on no other heddle crate.
+compose = [
+    "dep:heddle-agent",
+    "dep:heddle-llm",
+    "dep:heddle-server",
+    "dep:heddle-session",
+    "dep:heddle-tools",
+]
 
 [dependencies]
 serde.workspace = true
@@ -22,9 +31,17 @@ tokio.workspace = true
 # Teammate session ids and message ids are `session-<uuid v4>` and `team-message-<uuid v4>`, as in the
 # TypeScript build. Not yet a workspace dependency; to be hoisted into rust/Cargo.toml by its owner.
 uuid = { version = "1", features = ["v4"] }
+heddle-agent = { workspace = true, optional = true }
+heddle-llm = { workspace = true, optional = true }
+heddle-server = { workspace = true, optional = true }
+heddle-session = { workspace = true, optional = true }
+heddle-tools = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Test-only: `tests/session_store.rs` runs the team layer over the real session store, booted on the recorded
-# check-teams fixture. The library itself still depends on no other heddle crate.
+# check-teams fixture, and the `compose` tests boot a real agent runtime (model, session, context, sandbox and
+# the gated tool registry) the way the binary does.
 heddle-config.workspace = true
+heddle-context.workspace = true
+heddle-sandbox.workspace = true
 heddle-session.workspace = true

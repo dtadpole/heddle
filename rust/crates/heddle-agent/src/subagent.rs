@@ -103,6 +103,17 @@ impl Default for SubagentConfig {
     }
 }
 
+impl SubagentConfig {
+    /// The `subagent-tool` row's configuration: an absent row config (`null`) is every default, and an unknown
+    /// key is refused naming itself.
+    pub fn from_row(config: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        if config.is_null() {
+            return Ok(Self::default());
+        }
+        serde_json::from_value(config.clone())
+    }
+}
+
 impl From<SubagentConfig> for SubagentLimits {
     fn from(config: SubagentConfig) -> Self {
         Self {
@@ -391,6 +402,74 @@ impl SubagentRun for RuntimeRunner {
             Ok(())
         })
     }
+}
+
+/// A [`SubagentRun`] bound to the agent runtime once it exists.
+///
+/// The `subagent-tool` row registers `delegate` while the tree boots, but a child turn runs on the
+/// [`AgentRuntime`], which is composed from the booted rows afterwards — the TypeScript plugin reaches the agent
+/// service lazily for the same reason. The row hands this runner to the tool, and the boot calls [`Self::bind`]
+/// once the runtime exists. A delegation before then is refused as `SUBAGENT_FAILED`, naming why.
+#[derive(Default)]
+pub struct LateSubagentRunner {
+    runtime: std::sync::OnceLock<Weak<AgentRuntime>>,
+}
+
+impl LateSubagentRunner {
+    /// A runner with no runtime yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bind the runtime child turns run on. `false` when one was bound already; the first binding stays.
+    pub fn bind(&self, runtime: &Arc<AgentRuntime>) -> bool {
+        self.runtime.set(Arc::downgrade(runtime)).is_ok()
+    }
+}
+
+impl SubagentRun for LateSubagentRunner {
+    fn run<'a>(
+        &'a self,
+        child: &'a SessionHandle,
+        prompt: String,
+        cancel: Option<CancellationToken>,
+    ) -> BoxFuture<'a, Result<(), SubagentError>> {
+        Box::pin(async move {
+            let Some(runtime) = self.runtime.get() else {
+                return Err(SubagentError::new(
+                    SubagentErrorCode::SubagentFailed,
+                    "the agent runtime is not composed yet",
+                ));
+            };
+            RuntimeRunner {
+                runtime: runtime.clone(),
+            }
+            .run(child, prompt, cancel)
+            .await
+        })
+    }
+}
+
+/// The whole `subagent-tool` row: its configuration read, and its `delegate` tool registered into `registry` over
+/// the session store, running children through `runner` (bind it to the runtime after boot).
+///
+/// Fails, naming the reason, when the configuration has an unknown key or a tool of the same name cannot be
+/// registered.
+pub fn register_subagent_row(
+    registry: &heddle_tools::ToolRegistry,
+    config: &serde_json::Value,
+    store: Arc<dyn SubagentStore>,
+    runner: Arc<LateSubagentRunner>,
+) -> Result<(), String> {
+    let config =
+        SubagentConfig::from_row(config).map_err(|error| format!("subagent-tool: {error}"))?;
+    let deps = SubagentDeps { store, run: runner };
+    for tool in subagent_tools(deps, config.into()) {
+        registry
+            .register(tool)
+            .map_err(|error| format!("subagent-tool: {error}"))?;
+    }
+    Ok(())
 }
 
 /// The model-facing `delegate` tool: one call, one child agent, its final answer as the result
@@ -1231,5 +1310,74 @@ mod tests {
             active.lock().unwrap().is_empty(),
             "released after the delegation"
         );
+    }
+
+    #[test]
+    fn the_rows_configuration_defaults_when_absent_and_refuses_an_unknown_key() {
+        assert_eq!(
+            SubagentConfig::from_row(&serde_json::Value::Null).unwrap(),
+            SubagentConfig::default()
+        );
+        let config = SubagentConfig::from_row(&serde_json::json!({ "maxDepth": 3 })).unwrap();
+        assert_eq!(config.max_depth, 3);
+        assert_eq!(config.max_active, SubagentConfig::default().max_active);
+        let error = SubagentConfig::from_row(&serde_json::json!({ "maxDeep": 3 })).unwrap_err();
+        assert!(error.to_string().contains("maxDeep"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_late_runner_refuses_until_bound_and_the_row_registers_delegate() {
+        let runner = Arc::new(LateSubagentRunner::new());
+        let failure = runner
+            .run(&parent_handle(), "go".into(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, SubagentErrorCode::SubagentFailed);
+        assert_eq!(failure.message, "the agent runtime is not composed yet");
+
+        let registry = crate::turn::tests::registry_with(Vec::new());
+        let store = FakeStore::with(0, Some("answer"));
+        register_subagent_row(
+            &registry,
+            &serde_json::Value::Null,
+            Arc::clone(&store) as Arc<dyn SubagentStore>,
+            Arc::clone(&runner),
+        )
+        .unwrap();
+        assert!(registry.has("delegate"));
+        let error = register_subagent_row(
+            &registry,
+            &serde_json::json!({ "bogus": true }),
+            store as Arc<dyn SubagentStore>,
+            runner,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("subagent-tool: "), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_late_runner_once_bound_runs_children_on_that_runtime_and_keeps_the_first_binding() {
+        let runtime = Arc::new(crate::turn::AgentRuntime {
+            model: Arc::new(NoEndpoint),
+            session: Arc::new(Unused),
+            context: Arc::new(Unused),
+            tools: Arc::new(ToolRegistry::new(ToolGates {
+                approvals: Arc::new(AllowAll),
+                sandbox: Arc::new(FlatSandbox),
+                modes: Arc::new(DefaultModes),
+                hooks: Arc::new(NoToolHooks),
+            })),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: None,
+        });
+        let runner = LateSubagentRunner::new();
+        assert!(runner.bind(&runtime));
+        assert!(!runner.bind(&runtime), "the first binding stays");
+        // The child now reaches the runtime, whose own refusal replaces "not composed yet".
+        let error = runner
+            .run(&parent_handle(), "do it".into(), None)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("no endpoint"), "{}", error.message);
     }
 }
