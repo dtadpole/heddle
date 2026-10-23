@@ -125,6 +125,9 @@ const serverOrigin = launchUrl === null ? null : (() => {
   }
 })()
 
+/** The port the deployment listens on, from the launch URL the server itself printed. */
+const serverPort = serverOrigin === null ? '3082' : new URL(serverOrigin).port || '80'
+
 const deployment = (() => {
   const head = gitAt(DEPLOY_ROOT, 'rev-parse', 'HEAD')
   const branch = gitAt(DEPLOY_ROOT, 'rev-parse', '--abbrev-ref', 'HEAD')
@@ -417,17 +420,17 @@ async function judgeGate() {
  */
 function judgeProcess() {
   try {
-    const pids = execFileSync('lsof', ['-nP', '-iTCP:3082', '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).trim().split('\n').filter((line) => line.length > 0)
+    const pids = execFileSync('lsof', ['-nP', `-iTCP:${serverPort}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).trim().split('\n').filter((line) => line.length > 0)
     const pid = pids[0]
     if (pid === undefined) {
       const judged = processVerdict({ command: null, deployRoot: DEPLOY_ROOT, home: homedir() })
-      return { port: 3082, verdict: judged.verdict, detail: judged.detail }
+      return { port: Number(serverPort), verdict: judged.verdict, detail: judged.detail }
     }
     const command = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8' }).trim()
     const judged = processVerdict({ command, deployRoot: DEPLOY_ROOT, home: homedir() })
-    return { port: 3082, command: tildeText(command, homedir()), verdict: judged.verdict, detail: judged.detail }
+    return { port: Number(serverPort), command: tildeText(command, homedir()), verdict: judged.verdict, detail: judged.detail }
   } catch (error) {
-    return { port: 3082, verdict: 'unjudged', detail: `the listener on 3082 could not be read: ${error.message}` }
+    return { port: Number(serverPort), verdict: 'unjudged', detail: `the listener on port ${serverPort} could not be read: ${error.message}` }
   }
 }
 
