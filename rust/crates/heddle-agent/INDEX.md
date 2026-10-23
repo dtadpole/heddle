@@ -1,6 +1,8 @@
 ---
 title: The heddle-agent crate
-version: 0.5.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:05:53Z
+version: 0.6.0
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -35,6 +37,7 @@ The Rust port of the agentic loop, turns and subagents.
 | `adapters::Sessions`, `adapters::SessionSubagents` | the `SessionPort` and the `SubagentStore` over `heddle-session`'s `SessionService`; `model/request` written through the session crate's record in the TypeScript field order | the binary (boot) |
 | `command` (`Command::Turn`, `Args`, `Context`, `run`, `resolve_endpoint`, `StreamView`, `GoalAdvance`) | the `--turn` command in the owning crate (D-043): config problems, endpoint, the folder's session or `--resume`/`--new`, the turn, the goal join, the TypeScript text or `--json` key for key, exit 1 on any denial but `UNKNOWN_TOOL` | the binary's dispatch |
 | `adapters::ContextRecovery<S>` (`new`, `over_session_handles`) | the context service's `agent/request-error` listener: `recover_overflow`, a retry only when a forced reduction landed | the binary (boot), chained with the bus's `BusHooks` |
+| `register_subagent_row`, `LateSubagentRunner`, `SubagentConfig::from_row` | the whole `subagent-tool` row in one call: its configuration read and `delegate` registered, running children through a runner the boot binds to the runtime once it exists | the binary (boot) |
 | `ChainedTurnHooks` | several `TurnHooks` as one waterfall: `pre_step` threads each listener's step, `request_error` stops at the first answer | the binary (boot) |
 | `adapters::Context<S>` (`new`, `over_session_handles`) | the `ContextPort` over `heddle-context`'s `ContextService<S>`, generic over its store; `prepare` with no summariser override and `force: false`, `assemble` for a granted retry | the binary (boot) |
 | `has_new_input`, `parse_arguments`, `merge_usage`, `turn::tool_message_text`, `turn::is_hook_refusal` | the loop's pure rules | the loop; tests |
@@ -55,13 +58,14 @@ records are still this crate's, converted at the seam. Unit tests: 74, green, wi
   the real crates (`adapters::{LlmModel, Sessions, SessionSubagents, Context}`; `Context::over_session_handles` binds
   `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
   `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
-- **Measured through the binary (2026-10-22, local experiment, not committed):** with the binary's `--turn` branch
-  dispatching to `command::run`, the runtime composed from these adapters and the `subagent-tool` row composed from
-  this crate, `50-agentic-loop`'s `check.mjs` passes 6/6 and `check-subagents.mjs` 1/1 — once the default tree's
-  `goal-driver` and `team` rows, which the binary cannot load yet, are stood in for. Without them, `--turn` refuses
-  the run as the TypeScript does (`the configuration names row 'goal-driver' … which nothing registered`).
-- **Open, not in this crate:** the binary's `--turn` dispatch, the `subagent-tool` row adapter, and the `goal-driver`
-  and `team` rows (their owners have the exact lines).
+- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule — a scratch worktree at the
+  binary owner's tip `4e4e30e` with this branch merged, only `usage::SERVED` edited to add Tools and Turn, a debug
+  build, the verifiers through `HEDDLE_BIN`):** `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs`
+  **1/1** pass with the binary's own `subagent-tool`, `goal-driver` and `team` rows; `check-teams.mjs` is unjudged
+  (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed the delegation limit
+  (`maxActive` never triggered, so a child's replayed `delegate` made a grandchild session).
+- **Open, not in this crate:** serving `Capability::Turn` in the binary, and the Web UI serving a turn with tools
+  for `check-teams.mjs`.
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
   runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
   starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.
