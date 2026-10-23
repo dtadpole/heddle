@@ -654,3 +654,130 @@ async fn an_image_turn_discovers_the_routes_capability_and_sends_the_image() {
         "a turn without an image never costs a model-list read"
     );
 }
+
+/// `20-streaming`'s "recorded" and "live" checks, against a double built frame for frame like the verifier's own
+/// `chatDouble` (`_tools_/verify-runner/lib.mjs`): a reasoning frame, a pause, then **one** finish frame whose
+/// `delta` is the whole assistant message, then `[DONE]`. The endpoint says `stream: false`, as `httpConfig` does
+/// there, and the double answers an event stream anyway — so the answer must be read as what it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_verifiers_chat_double_streams_even_to_an_endpoint_that_asked_for_json() {
+    let first = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"recorded reasoning\"},\"finish_reason\":null}]}\n\n"
+    )
+    .into_bytes();
+    let rest = concat!(
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"recorded content\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let base_url = staged_double(first, rest, std::time::Duration::from_millis(400));
+    let mut configured = endpoint("double", EndpointKind::OpenaiChat, &base_url, "double");
+    configured.stream = Some(false);
+    let service = ModelService::new(vec![configured]).expect("registers the endpoint");
+
+    // The binary's `--stream` view, fed the turn's chunks as the session would append them.
+    let stderr: Arc<Mutex<Vec<(std::time::Instant, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = stderr.clone();
+    struct Timed(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
+    impl Write for Timed {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buffer").push((
+                std::time::Instant::now(),
+                String::from_utf8_lossy(bytes).into_owned(),
+            ));
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut view = heddle_llm::command::print_stream("s1", Box::new(Timed(sink)));
+
+    let started = std::time::Instant::now();
+    let mut stream = service
+        .stream(ask("double", "say something"))
+        .expect("streams");
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        let chunk = item.expect("streams");
+        if let Chunk::TextDelta { text: delta } = &chunk {
+            text.push_str(delta);
+        }
+        let event = if matches!(chunk, Chunk::Done { .. }) {
+            serde_json::json!({ "type": "assistant/completed" })
+        } else {
+            serde_json::json!({ "type": "assistant/chunk", "chunk": chunk })
+        };
+        view.observe("s1", &event.to_string());
+    }
+    let ended = started.elapsed();
+    view.dispose();
+
+    assert_eq!(text, "recorded content", "the answer reached the caller");
+    let summary: serde_json::Value =
+        serde_json::from_str(&view.summary_json()).expect("the summary is JSON");
+    assert!(summary["textDeltas"].as_u64() > Some(0), "{summary}");
+    assert!(summary["reasoningDeltas"].as_u64() > Some(0), "{summary}");
+    assert_eq!(summary["completed"], serde_json::json!(true));
+
+    let printed = stderr.lock().expect("buffer").clone();
+    let reasoning_at = printed
+        .iter()
+        .find(|(_, text)| text.contains("[reasoning]"))
+        .map(|(at, _)| *at)
+        .expect("a reasoning delta was printed");
+    assert!(
+        reasoning_at.duration_since(started) + std::time::Duration::from_millis(200) < ended,
+        "the first delta was printed at {:?}, the turn ended at {ended:?}: it did not wait for the end",
+        reasoning_at.duration_since(started)
+    );
+    let all: String = printed.iter().map(|(_, text)| text.as_str()).collect();
+    assert!(
+        all.find("[reasoning]") < all.find("recorded content"),
+        "reasoning before content: {all}"
+    );
+}
+
+/// `10-llm-backends`' default check: with no endpoint named, the configuration's default answers even though it
+/// is not first, and the first endpoint is never reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn with_no_endpoint_named_the_configured_default_answers_and_the_first_is_never_reached() {
+    let sse = |content: &str| {
+        format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"role\":\"assistant\",\"content\":\"{content}\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+        )
+    };
+    let first_body = sse("the first endpoint answered");
+    let chosen_body = sse("the default endpoint answered");
+    let first = Double::start(move |_| reply("text/event-stream", &first_body));
+    let chosen = Double::start(move |_| reply("text/event-stream", &chosen_body));
+    let mut first_endpoint = endpoint("first", EndpointKind::OpenaiChat, &first.base_url, "double");
+    first_endpoint.stream = Some(true);
+    let mut chosen_endpoint = endpoint(
+        "chosen",
+        EndpointKind::OpenaiChat,
+        &chosen.base_url,
+        "double",
+    );
+    chosen_endpoint.stream = Some(true);
+    let service =
+        ModelService::from_configuration(vec![first_endpoint, chosen_endpoint], Some("chosen"))
+            .expect("registers the endpoints");
+
+    let endpoint =
+        heddle_llm::command::turn_endpoint(None, &service.names(), service.nominated().as_deref())
+            .expect("a default exists");
+    assert_eq!(endpoint, "chosen");
+    let generated = service
+        .generate(ask(&endpoint, "say something"))
+        .await
+        .expect("answers");
+    assert_eq!(generated.text, "the default endpoint answered");
+    assert!(
+        first.requests().is_empty(),
+        "the first endpoint in the list was never reached"
+    );
+    assert_eq!(chosen.requests().len(), 1);
+}
