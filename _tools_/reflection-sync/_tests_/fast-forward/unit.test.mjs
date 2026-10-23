@@ -109,7 +109,7 @@ test('the plan classifies every kind of local work', () => {
     changed: new Set(['same.md', 'edited.md', '_logs_/log.jsonl', 'untracked-same.md', 'untracked-different.md']),
     headContent: content({}),
     remoteContent: content({ 'same.md': 'remote', 'edited.md': 'remote', '_logs_/log.jsonl': 'remote', 'untracked-same.md': 'same' }),
-    workContent: content({ 'same.md': 'remote', 'untracked-same.md': 'same', 'untracked-different.md': 'mine', 'edited.md': 'mine' }),
+    workContent: content({ 'same.md': 'remote', 'untracked-same.md': 'same', 'untracked-different.md': 'mine', 'edited.md': 'mine', '_logs_/log.jsonl': 'remote\nlocal append\n' }),
     unionLogs: true,
   })
   assert.deepEqual(plan.blockers.map((b) => b.path).sort(), ['edited.md', 'staged.md', 'untracked-different.md'])
@@ -231,6 +231,35 @@ test('an append to the review log unions both lines instead of blocking the sync
   const lines = read(w, '_logs_/review.jsonl').trim().split('\n')
   assert.deepEqual(lines.sort(), ['first', 'local append', 'remote append', 'second'].sort())
   assert.equal(head(w), remoteHead(w))
+})
+
+test('a local log whose lines are all already in the remote is refreshed, not unioned', (t) => {
+  const w = world(t)
+  // The remote has a,b,extra,remote; the local edit adds only a line the remote
+  // already has, so the merge brings the whole file with no union write needed.
+  pushFrom(w, { '_logs_/review.jsonl': 'first\nsecond\nextra\nremote append\n' })
+  write(w.shared, '_logs_/review.jsonl', 'first\nsecond\nextra\n')
+  const r = run(w)
+  assert.equal(r.code, OK, r.lines.join('\n'))
+  assert.match(r.lines.join('\n'), /refresh    _logs_\/review\.jsonl/)
+  assert.doesNotMatch(r.lines.join('\n'), /union      _logs_\/review\.jsonl/)
+  assert.equal(read(w, '_logs_/review.jsonl'), 'first\nsecond\nextra\nremote append\n')
+})
+
+test('a log deleted upstream is refused with a clear reason, not recreated', (t) => {
+  const w = world(t)
+  write(w.shared, '_logs_/review.jsonl', 'first\nsecond\nlocal append\n')
+  git(w.other, ['fetch', '-q', 'origin'])
+  git(w.other, ['reset', '-q', '--hard', 'origin/main'])
+  git(w.other, ['rm', '-q', '_logs_/review.jsonl'])
+  git(w.other, ['commit', '-q', '-m', 'delete log'])
+  git(w.other, ['push', '-q'])
+  const before = head(w)
+  const r = run(w)
+  assert.equal(r.code, REFUSED, r.lines.join('\n'))
+  assert.match(r.lines.join('\n'), /origin\/main deleted this append-only log; refusing to recreate it/)
+  assert.equal(head(w), before)
+  assert.equal(read(w, '_logs_/review.jsonl'), 'first\nsecond\nlocal append\n')
 })
 
 test('the union can be turned off, and then the same log blocks the sync', (t) => {

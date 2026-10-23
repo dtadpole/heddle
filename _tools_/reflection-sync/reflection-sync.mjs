@@ -90,7 +90,16 @@ export function planSync({ entries, changed, headContent, remoteContent, workCon
       continue
     }
     if (unionLogs && isLogPath(entry.path, logPattern)) {
-      actions.push({ kind: 'union', path: entry.path })
+      if (remote === null) {
+        // The remote deleted an append-only log. Recreating it would resurrect content
+        // the record removed; refuse instead of writing a file nobody can explain.
+        blockers.push({ path: entry.path, reason: 'origin/main deleted this append-only log; refusing to recreate it' })
+        continue
+      }
+      // A local append whose lines the remote already has needs no union: the merge
+      // alone brings the file to the remote's version, with the local lines in it.
+      const merged = unionLines(remote, local)
+      actions.push({ kind: same(merged, remote) ? 'refresh' : 'union', path: entry.path })
       continue
     }
     void headContent
