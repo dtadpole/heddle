@@ -98,6 +98,11 @@ const DEPLOY_ROOT = expand(options.deploy ?? '~/heddle-live')
 const LOG_FILE = expand(options.log ?? '~/.heddle/web.log')
 const SESSION = options.session ?? 'hd-live-monitor'
 const SEND_TURN = options['no-turn'] !== true
+/**
+ * The preview's turn alone can be paused: live-deploy asked for it on 2026-10-22 (23:24) while the
+ * preview wrote into the deployment's session store. A paused turn is unjudged, never a pass.
+ */
+const PREVIEW_TURN = options['no-preview-turn'] !== true
 
 /** The browser is a child of this pass, but its session outlives it: that is the tool's design. */
 process.env.HEDDLE_BROWSER_SESSION = SESSION
@@ -836,7 +841,9 @@ async function judgePreview() {
   } catch {}
   const turn = !SEND_TURN
     ? { verdict: 'unjudged', detail: '--no-turn' }
-    : !fixtureOnly(kinds)
+    : !PREVIEW_TURN
+      ? { verdict: 'unjudged', detail: 'the preview turn is paused (--no-preview-turn) until its session store is separated from the deployment' }
+      : !fixtureOnly(kinds)
       ? { verdict: 'unjudged', detail: 'an endpoint other than the offline fixture is configured, so no turn was spent' }
       : await previewTurn(launch)
   const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn })

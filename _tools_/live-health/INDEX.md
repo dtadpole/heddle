@@ -6,7 +6,7 @@ grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the heddle web gate's entry point in the dsh-web-ops tree, read 2026-10-22
 created: 2026-10-23T03:19:02Z
-modified: 2026-10-23T05:10:55Z
+modified: 2026-10-23T06:25:36Z
 ---
 
 # `live-health`
@@ -34,6 +34,7 @@ in a real browser and appended to
 ```bash
 node _tools_/live-health/probe.mjs --pin        # one pass, appended; exit 0 pass, 1 fail, 3 unjudged
 node _tools_/live-health/probe.mjs --json       # the whole record of one pass
+node _tools_/live-health/probe.mjs --pin --no-preview-turn   # the preview's turn paused, by its owner's request
 node _tools_/live-health/summary.mjs --last=12  # the newest passes as a table
 node --test _tools_/live-health/_tests_/pass-rules/unit.test.mjs
 ```
