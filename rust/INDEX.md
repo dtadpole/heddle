@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.3.2
+version: 0.4.0
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on the merged candidate at `c67f5ad` that became `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on the merged candidate at `5b953ad` that became `main`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -48,21 +48,24 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
   node _tools_/verify-runner/run.mjs _verifiers_/<part>/check*.mjs --json
 ```
 
-**18 check files, 116 checks: 0 passed, 0 failed, 116 unjudged.** Every backend check skipped at its capability
-probe because the binary's `--help` does not name the option it needs (`--profile`, `--endpoint`, `--turn`, …), and
-every other command exits 2 with `heddle: not ported to Rust yet: <command>`. So no part of the goal was judged, and
-none passed.
+**18 check files, 116 checks: 10 passed, 0 failed, 106 unjudged. Part 0 passes.** `05-config-system` exits `0`
+through the binary: profiles, layers, includes and their cycles, both environment-reference shapes, a missing
+reference, a bad value refused naming the row and the field, a patch against a missing row, provenance and an
+unknown profile. Under `HEDDLE_BIN` its rows name component manifests rather than `.ts` plugins — part 0's Rust shape in
+[`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), stated in that verifier's INDEX — and the same ten checks pass on the
+TypeScript build at the same revision. Every other backend check skipped at its capability probe, because the binary advertises `--profile`,
+`profiles` and `config` and nothing else yet: every other command still exits 2 with
+`heddle: not ported to Rust yet: <command>`.
 
-The crates' **contracts** have landed — the public API, the port plan and the `todo!()` bodies — and three now carry
-their ports behind those APIs: `heddle-config`, `heddle-llm` (one `todo!()` left, the request builders that wait on
-configuration) and `heddle-sandbox` (one). `heddle-context` and `heddle-team` are still contracts. The event, session,
-workspace, tools and agent crates still arrive from the lane's branches, and the binary is still the `--help`/exit-2
-stub. A contract is not a port: what has not happened is a **part** passing its verifier on the binary, because the
-binary advertises nothing yet.
+Behind the binary, every backend crate on `main` carries its port, not only its contract — `heddle-config`,
+`heddle-session`, `heddle-workspace`, `heddle-context`, `heddle-tools`, `heddle-agent`, `heddle-events`,
+`heddle-goal`, `heddle-todo` and `heddle-team` have no `todo!()` left, and `heddle-llm` and `heddle-sandbox` have one
+each (their newer tips are on the lane's branches). `heddle-server` is still its contract. What turns a ported crate
+into a passing part is the binary composing it, and that is the next work for parts 1 to 8.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
-| 0 configuration system | `_verifiers_/05-config-system` | 10 checks — unjudged |
+| 0 configuration system | `_verifiers_/05-config-system` | **passes** — 10 of 10 |
 | 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged |
 | 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
 | 3 context management | `_verifiers_/30-context-management` | 8 checks — unjudged |
