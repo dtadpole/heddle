@@ -101,8 +101,9 @@ pub struct Breakdown {
     pub messages: u64,
 }
 
-/// What one assembly was made of.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+/// What one assembly was made of. `Default` is the empty report (no messages, every count zero), for
+/// callers and tests that build one field by field.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextReport {
     /// What the request carries, after the tool-pairing repair.
@@ -2260,5 +2261,25 @@ mod tests {
         };
         let recover = service.recover_overflow(&session, &request);
         assert_send(&recover);
+    }
+
+    #[test]
+    fn the_default_report_is_empty_and_summarises_to_zeroes() {
+        let report = ContextReport {
+            estimated_tokens: 12,
+            ..ContextReport::default()
+        };
+        assert!(report.messages.is_empty());
+        assert!(report.instructions.is_empty());
+        assert_eq!(report.breakdown, super::Breakdown::default());
+        assert_eq!(
+            report.summary(),
+            super::ContextSummary {
+                estimated_tokens: 12,
+                threshold_tokens: 0,
+                pruned: 0,
+                compacted: false,
+            }
+        );
     }
 }
