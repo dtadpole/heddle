@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:25:51Z
+modified: 2026-10-23T06:45:36Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -295,6 +295,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `b8c3d6e`, now main `3c12b45` (web always carries the markdown renderer; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly b8c3d6e> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
 | 2026-10-22 | lane `27157e4`, now main `999984c` (web composes the statistics and uploads; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 27157e4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and the uploads directory comes from `heddle_home` on the invocation's `Env` (step 7) |
 | 2026-10-22 | main `5c2ca91` (`5e164c4`: a model switched mid-turn lands on that turn's next model call, in `web.rs`; then a status doc) | `HEDDLE_BIN=<debug build of exactly 5c2ca91> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots; the new `Env::default()` and `default_endpoints()` calls are test-only |
+| 2026-10-22 | lane `e9a0836` (D-048: the binary advertises web, the turn, context, tools, hooks and models) | `HEDDLE_BIN=<debug build of exactly e9a0836> sh _verifiers_/05-config-system/verify.sh --json`, and with the same binary the backend lane `lane.mjs --json 05-config-system 10-llm-backends 20-streaming 30-context-management 40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints` | 10/10 passed, verdict 0 — no passing check turns into a failure for part 0. Backend lane: 117 checks, 101 pass, 7 fail, 9 unjudged; the 7 failures (50 teams, 70 session ordering, 75 sandbox enforcement) are none of this crate's: the sandbox row's configuration reaches the binary intact |
 
 ## Decisions the contract makes
 

@@ -65,8 +65,9 @@ mod tests {
         assert!(stdout.contains(
             "      --profile <name>       boot a named profile from $HEDDLE_HOME/profiles\n"
         ));
-        // `web` answers, but is not advertised until every verifier its gate opens runs clean.
-        assert!(!stdout.contains("  web "));
+        // `web` and the turn answer through their crates, so the help lists them.
+        assert!(stdout.contains("  web                        serve the Web UI on localhost\n"));
+        assert!(stdout.contains("--turn <text>"));
         // The session, workspace and goal commands answer through their crates, so the help lists them.
         for line in [
             "  sessions ",
