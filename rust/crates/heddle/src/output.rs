@@ -35,13 +35,6 @@ impl<'a> Output<'a> {
         let _ = self.stderr.write_all(text.as_bytes());
     }
 
-    /// Push both streams out now: a long-running command (`web`) prints its address and then waits, and
-    /// whoever reads that address must see it while the process is still running.
-    pub fn flush(&mut self) {
-        let _ = self.stdout.flush();
-        let _ = self.stderr.flush();
-    }
-
     /// One JSON document to stdout, as `JSON.stringify(value, null, 2)` followed by a newline.
     pub fn json(&mut self, value: &Value) {
         let mut text = stringify(value);

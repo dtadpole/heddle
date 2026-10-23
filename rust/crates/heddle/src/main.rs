@@ -65,16 +65,7 @@ mod tests {
         assert!(stdout.contains(
             "      --profile <name>       boot a named profile from $HEDDLE_HOME/profiles\n"
         ));
-        assert!(stdout.contains("  web                        serve the Web UI on localhost\n"));
-        // The session, workspace and goal commands answer through their crates, so the help lists them.
-        for line in [
-            "  sessions ",
-            "  workspaces ",
-            "  tree [<path>] ",
-            "  goal [<session-id>] ",
-        ] {
-            assert!(stdout.contains(line), "{line} in the help");
-        }
+        assert!(!stdout.contains("  web "));
     }
 
     #[test]
@@ -94,14 +85,10 @@ mod tests {
 
     #[test]
     fn an_unwired_command_says_so_on_stderr_and_exits_two() {
-        // With every command wired, the bare application is what still says so.
-        let (exit, stdout, stderr) = run_captured(&[]);
+        let (exit, stdout, stderr) = run_captured(&["web"]);
         assert_eq!(exit, Exit::Unported);
         assert_eq!(exit.code(), 2);
         assert_eq!(stdout, "");
-        assert_eq!(
-            stderr,
-            "heddle: not ported to Rust yet: the bare application\n"
-        );
+        assert_eq!(stderr, "heddle: not ported to Rust yet: web\n");
     }
 }

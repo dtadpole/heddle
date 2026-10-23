@@ -65,18 +65,8 @@ impl Capability {
 ///
 /// `Config` is served because `heddle_config::command::run` owns every sentence of `profiles` and
 /// `config` and the binary delegates to it; `--profile` in the help is what makes `05-config-system`
-/// judge this binary instead of calling the part unjudged. `Sessions`, `Workspaces` and `Goal` are served
-/// because `heddle-session`, `heddle-workspace` and `heddle-goal` answer them through their entry points
-/// over rows the boot composes; `70-workspaces-sessions` runs 0 failures through them, its web checks
-/// unjudged until `web` is served.
-pub const SERVED: &[Capability] = &[
-    Capability::Always,
-    Capability::Config,
-    Capability::Sessions,
-    Capability::Workspaces,
-    Capability::Goal,
-    Capability::Web,
-];
+/// judge this binary instead of calling the part unjudged.
+pub const SERVED: &[Capability] = &[Capability::Always, Capability::Config];
 
 /// The words the verifiers gate on, and the capability that must be served before one may appear.
 pub const GATE_WORDS: &[(&str, Capability)] = &[
