@@ -118,7 +118,7 @@ async function withHarness(label, options, body) {
 }
 
 test('workspace-write confines the shell to the workspace, including its descendants', { skip: DARWIN ? false : 'the macOS Seatbelt rung is the one this machine can judge' }, async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness(
     'workspace-write',
     {
@@ -153,7 +153,7 @@ test('workspace-write confines the shell to the workspace, including its descend
 })
 
 test('read-only keeps a shell but denies every write', { skip: DARWIN ? false : 'the macOS Seatbelt rung is the one this machine can judge' }, async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness(
     'read-only',
     {
@@ -177,7 +177,7 @@ test('read-only keeps a shell but denies every write', { skip: DARWIN ? false : 
 })
 
 test('danger-full-access is the only bypass', { skip: DARWIN ? false : 'the macOS Seatbelt rung is the one this machine can judge' }, async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness(
     'full-access',
     {
@@ -196,7 +196,7 @@ test('danger-full-access is the only bypass', { skip: DARWIN ? false : 'the macO
 })
 
 test('a confined call fails closed when no backend is usable', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness(
     'fail-closed',
     {
