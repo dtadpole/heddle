@@ -109,7 +109,10 @@ pub(crate) fn highlight_pieces(code: &str, language: Option<&str>) -> Vec<Piece>
     let set = syntax_set();
     // JSON is classed by its own rules: highlight.js's JSON grammar differs from the general table where a reader
     // sees it (see `json_class`).
-    let json = language.and_then(grammar_for) == Some("json");
+    let grammar = language.and_then(grammar_for);
+    let json = grammar == Some("json");
+    // So are JavaScript and TypeScript, for the two things highlight.js leaves unclassed there (see `script_class`).
+    let script = matches!(grammar, Some("javascript" | "typescript"));
     let mut parse_state = syntect::parsing::ParseState::new(syntax);
     let mut stack = syntect::parsing::ScopeStack::new();
     for line in code.split_inclusive('\n') {
@@ -125,6 +128,8 @@ pub(crate) fn highlight_pieces(code: &str, language: Option<&str>) -> Vec<Piece>
             }
             let class = if json {
                 json_class(&stack)
+            } else if script {
+                script_class(&stack)
             } else {
                 class_for_stack(&stack)
             };
@@ -276,6 +281,29 @@ fn class_for_stack(stack: &syntect::parsing::ScopeStack) -> Option<&'static str>
         }
     }
     None
+}
+
+/// highlight.js's classes for JavaScript and TypeScript: the general table, except that an operator and a plain
+/// identifier are left unclassed.
+///
+/// Measured against the TypeScript build (`highlightCode` from `src/server/highlight.ts`, highlight.js 11) on
+/// check-file-view's `hostile.js`, `<script>window.__ran = true</script>`: `&lt;script&gt;` and `&lt;/script&gt;`
+/// come out as bare text, `=` is bare, and so is a plain name like `ok` — only `window`, `__ran`, `true`, `const`
+/// and `1` are classed. Classing `<` and `>` as keywords and `script` as a variable split the tag across three
+/// spans, so the literal `&lt;script&gt;` the check looks for never appeared. A word operator (`typeof`, `new`,
+/// `instanceof`) is still a keyword, as highlight.js classes it.
+fn script_class(stack: &syntect::parsing::ScopeStack) -> Option<&'static str> {
+    if let Some(innermost) = stack.scopes.last() {
+        let name = innermost.build_string();
+        if scope_matches(&name, "variable.other.readwrite") {
+            return None;
+        }
+        let word = name.contains(".word") || name.contains(".new") || name.contains(".expression");
+        if scope_matches(&name, "keyword.operator") && !word {
+            return None;
+        }
+    }
+    class_for_stack(stack)
 }
 
 /// highlight.js's classes for JSON, which differ from the general table in what a reader sees.
@@ -615,6 +643,37 @@ mod tests {
         assert!(
             commented.contains(&"/* one") && commented.contains(&"two */"),
             "both lines are comments: {commented:?}"
+        );
+    }
+
+    #[test]
+    fn a_script_tag_in_javascript_stays_readable_text_as_highlight_js_leaves_it() {
+        // check-file-view's hostile.js. The TypeScript build's `highlightCode` (measured with Node from
+        // src/server/highlight.ts) answers `&lt;script&gt;<span class="hljs-variable language_">window</span>.…
+        // <span class="hljs-literal">true</span>&lt;/script&gt;\n<span class="hljs-keyword">const</span> ok = …`:
+        // the tag is bare text, not a token. Classing `<` and `>` as keywords split it across spans, and the
+        // check's `/&lt;script&gt;/` ("it is visible as text instead") failed.
+        //
+        // Known divergence, NOT fixed here and not pinned: after `<`, syntect's JavaScript grammar reads
+        // `/script>` as the start of a regular-expression literal that runs to the end of the next line, so the
+        // closing tag and `const ok = 1;` are classed `hljs-regexp` where highlight.js leaves the tag bare and
+        // classes `const` and `1`. It predates this change (the `<` keyword split hid it), no check asserts it,
+        // the text is unchanged, and fixing it is a grammar change rather than a class mapping.
+        let source = "<script>window.__ran = true</script>\nconst ok = 1;\n";
+        let html = highlight_code(source, Some("javascript"));
+        assert!(!html.contains("<script"), "no tag survives: {html}");
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "the opening tag is one run of text: {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="hljs-literal">true</span>"#),
+            "{html}"
+        );
+        assert_eq!(
+            text_of(source, Some("javascript")),
+            source,
+            "nothing is lost"
         );
     }
 

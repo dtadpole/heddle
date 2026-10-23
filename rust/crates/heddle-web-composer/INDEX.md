@@ -1,6 +1,6 @@
 ---
 title: The heddle-web-composer crate
-version: 0.3.0
+version: 0.4.0
 description: The Rust port crate for the composer routes — runtime context, the context view, the model switcher and the tool catalog — its public API, what it needs from other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -20,7 +20,7 @@ trait declared here, so it builds and is tested against doubles before the crate
 | Ported from | `src/server/tool-catalog.ts`, the composer routes of `src/server/web.ts` |
 | Judged by | `_verifiers_/80-web-ui` (check-composer, check-context-view, check-runtime-context, check-model-switcher), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and tested — 37 unit tests, 7 integration tests behind a door double; mounting by the binary is the remaining step** |
+| Status | **on `main` and mounted by `heddle web`; the four checks pass 33/33 through `HEDDLE_BIN` once the context row lands (see below) — 43 unit tests, 7 integration tests behind a door double** |
 | Owner | `developer-twelve` since 2026-10-22 (D-037, from `developer-eleven`, whose `10a0bd5` is the base of this tree); `heddle-web-trajectory` stays `developer-eleven`'s |
 
 ## Routes
@@ -153,21 +153,26 @@ What is left for the four checks to run through `HEDDLE_BIN` is not in these rou
 `heddle web`, its `mount_router(heddle_web_composer::router(..))`, and a host implementation over the
 session/context/model crates.
 
-## Where the port stands (2026-10-22, branch `hd/developer-twelve`)
+## Where the port stands (2026-10-23, branch `hd/developer-twelve`)
 
-- **Answers**: `router()` mounts `GET /api/context`, `GET /api/endpoints`, `POST /api/sessions/{id}/model` (D-039);
+- **On `main`, mounted**: `heddle web` (`rust/crates/heddle/src/web.rs`) mounts `router()` — `GET /api/context`,
+  `GET /api/endpoints`, `POST /api/sessions/{id}/model` (D-039) — over a host built from the binary's services;
   `/api/status`, steer and stop are the server's routes, kept here as modules with their answers and tests.
-- **Tested**: 37 unit tests; 7 integration tests behind the door double (the 13 check expectations plus six door
+- **Judged through `HEDDLE_BIN`** (debug build, `node _tools_/verify-runner/run.mjs _verifiers_/80-web-ui/check-<name>.mjs`):
+
+  | Tree | composer | context-view | runtime-context | model-switcher | total |
+  |---|---|---|---|---|---|
+  | ui lane `5f51a02` as it is | 24/25 | 0/2 | 1/1 | 5/5 | 30/33 |
+  | the lane + this branch `a0689eb` + `hd/developer-ten-web` `1193ef8` (the context row) | 25/25 | 2/2 | 1/1 | 5/5 | **33/33** |
+
+  The three failures on the lane are the profile's missing context plugin (`web.rs`, developer-ten, the context row);
+  with it, context-view #1 still needed `58dfda7` here (the log read after assembling). Logs are kept under the
+  reflection project's `_projects_/heddle/logs/developer-twelve/` (`lane-5f51a02-*`, `lane-plus-fixes-*`).
+- **Tested**: 43 unit tests; 7 integration tests behind the door double (the 13 check expectations plus six door
   tests, each shown to fail under mutation). Verify with `_tools_/local-build/run test --manifest-path rust/Cargo.toml
   -p heddle-web-composer`, then `clippy … --all-targets -- -D warnings` and `fmt … --check` (the ui lane's gate).
-- **Waits on**: developer-two — `heddle web` answers exit 2 on `main` (`commands::web` is a `todo!`); then the binary's
-  `mount_router(heddle_web_composer::router(..))` and host adapters over the session/context crates.
-- **Open**: integrator-two holds the merge of this branch up to its tip, and the public-hygiene gate's 12 rule-22
-  findings here (synthetic `session-<uuid>` ids the routes require), offered to be moved onto whatever shape the
-  gate's allowlist accepts.
-- **Next step**: the day `heddle web` answers through `HEDDLE_BIN`, run `80-web-ui` check-composer,
-  check-context-view, check-runtime-context and check-model-switcher from the ui lane worktree and report counts.
-  If `SERVER_CORE_ROUTES` in `tests/support/mod.rs` falls behind the server's `CORE_ROUTES`, update the copy.
+- **Next step**: when the context row and this branch reach `main`, re-run the four checks on `main`'s binary. If
+  `SERVER_CORE_ROUTES` in `tests/support/mod.rs` falls behind the server's `CORE_ROUTES`, update the copy.
 
 ## Read next
 
