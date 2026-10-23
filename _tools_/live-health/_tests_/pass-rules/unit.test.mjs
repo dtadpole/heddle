@@ -13,6 +13,7 @@ import { test } from 'node:test'
 
 import {
   consoleVerdict,
+  deploymentDown,
   processVerdict,
   doorVerdict,
   gateVerdict,
@@ -138,6 +139,16 @@ test('the serving process must run the deployment checkout, and another checkout
   assert.equal(processVerdict({ command: null, deployRoot: deploy, home }).verdict, 'unjudged')
   const rust = processVerdict({ command: `${home}/heddle--developer-ten/rust/target/release/heddle web --port 3082`, deployRoot: deploy, home })
   assert.equal(rust.verdict, 'unjudged')
+})
+
+test('only a gate with no upstream or a silent port counts as down enough to kickstart', () => {
+  assert.equal(deploymentDown({ gate: { verdict: 'fail', proxyError: true }, door: { verdict: 'unjudged' } }), true)
+  assert.equal(deploymentDown({ gate: { verdict: 'fail', status: null }, door: { verdict: 'fail', detail: 'x' } }), true)
+  assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'fail', detail: 'the deployed server on http://127.0.0.1:3082 does not answer: fetch failed' } }), true)
+  // A gate that answers a wrong status, or a server that answers and refuses, is not down.
+  assert.equal(deploymentDown({ gate: { verdict: 'fail', status: 500, proxyError: false }, door: { verdict: 'pass' } }), false)
+  assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'fail', detail: 'the deployed server answered 200 without a credential' } }), false)
+  assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'pass' } }), false)
 })
 
 test('the pass fails on any failure, is unjudged on any unjudged check, and passes only when all pass', () => {

@@ -126,6 +126,28 @@ a move at equal content is the finding that goes to the ui lane. Measured flat (
 heddle 46 interactive / 18 enabled; DSH 139 / 17, with DSH's 1 hit-test miss and 1 clip on its own
 gated surfaces.
 
+## The one action the monitor may take
+
+Since 2026-10-22 live-deploy delegates **one** action to this seat: if the pass finds the deployment
+down (the gate's `502` because its upstream is gone, or the server's port silent), it may run
+`launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web` once, wait up to 20 s, re-read the gate,
+process and door, and record *restored by live-monitor, kickstart* with the elapsed time. Nothing else
+is run against the deployment. The delegation exists because launchd on this Mac never starts the
+loaded agent by itself; live-deploy's interval guard holds it up only while their session lives, so a
+silent 3082 after their session stops is otherwise unnoticed. A restore that fails within 20 s is a
+real alert, and a restore on two consecutive passes is a crash loop to report, not a success.
+
+## A restore was used, and the instrument failed once
+
+At 03:42:20 the door found 3082 down after the redeploy window in `~/.heddle/guard.log`
+(`03:36:39Z … the agent is not loaded; bootstrapping`, then `03:39:20Z`, `03:40:35Z`, `03:40:50Z`
+silent). The delegated kickstart brought it back in **507 ms**. The door check then failed `401`,
+and that failure was the instrument's, not the deployment's: the pass still held the launch token it
+read before the restart, and a relaunched server mints a new one. The pass now **re-reads the launch
+URL after a restore** and judges the door with the current token; the next pass is green. The failed
+entry was removed from the record rather than pinned as a deployment failure, because it described
+nothing the deployment did.
+
 ## How often
 
 A `schedule_create` in this seat fires **every 20 minutes**: it runs the pass, pins the entry, and reports

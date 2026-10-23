@@ -67,6 +67,23 @@ node --test _tools_/live-health/_tests_/pass-rules/unit.test.mjs
 The reading itself — a real page, a real deployment — stays an integration step. `probe.mjs` does the
 reading and calls these rules; a rule that is wrong fails a test before it can fail a quiet deployment.
 
+## The one action it may take
+
+The deployment's owner delegates exactly one action (live-deploy, 2026-10-22): if a pass finds the
+deployment **down** — the gate answering `502` because its upstream is gone, or the server's port
+silent — it may run
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
+```
+
+once, wait up to 20 s for the port to answer, re-read the gate, the process and the door, and record
+`restored by live-monitor, kickstart` with the elapsed time. Nothing else is ever run against the
+deployment: no installer, no `bootout`, no edit to the checkout. A reading that says the deployment is
+down triggers nothing without `--restore`, and a kickstart that does not bring it back within 20 s is a
+real alert to live-deploy and the coordinator with the pass's evidence. The gate exists because
+launchd on this macOS never restarts the loaded agent by itself.
+
 ## What the pass leaves alone
 
 - **One health session, not one per pass.** A turn creates a session in the deployment's store, so the
@@ -84,7 +101,8 @@ reading and calls these rules; a rule that is wrong fails a test before it can f
 ```bash
 _tools_/live-health/probe.mjs                 # summary, exit 0/1/3
 _tools_/live-health/probe.mjs --json --pin    # append the pass to _context_/rust-port/live-health.jsonl
-_tools_/live-health/probe.mjs --no-turn       # do not spend a turn (a scripted endpoint makes one free)
+_tools_/live-health/probe.mjs --no-turn       # do not spend a turn; the pass then ends unjudged, so it is not for the record
+_tools_/live-health/probe.mjs --restore       # if the deployment is down, one delegated kickstart
 ```
 
 It drives `_tools_/browser-use` as a **library** in this seat's own headless session

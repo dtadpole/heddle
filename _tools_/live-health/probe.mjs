@@ -58,6 +58,7 @@ import { zstdDecompressSync } from 'node:zlib'
 
 import {
   consoleVerdict,
+  deploymentDown,
   doorVerdict,
   gateVerdict,
   launchUrlFromLog,
@@ -115,18 +116,40 @@ function readLaunchUrl() {
   return launchUrlFromLog(readFileSync(LOG_FILE, 'utf8'))
 }
 
-const launchUrl = readLaunchUrl()
+let launchUrl = readLaunchUrl()
 /** The deployed server's own origin (`http://127.0.0.1:3082`), where the token door lives. */
-const serverOrigin = launchUrl === null ? null : (() => {
+let serverOrigin = originOf(launchUrl)
+/** The port the deployment listens on, from the launch URL the server itself printed. */
+let serverPort = portOf(serverOrigin)
+
+/** The origin of a launch URL, or null when it is not one. */
+function originOf(url) {
+  if (url === null) return null
   try {
-    return new URL(launchUrl).origin
+    return new URL(url).origin
   } catch {
     return null
   }
-})()
+}
 
-/** The port the deployment listens on, from the launch URL the server itself printed. */
-const serverPort = serverOrigin === null ? '3082' : new URL(serverOrigin).port || '80'
+/** The port of an origin, or the deployment's default when no origin is readable. */
+function portOf(origin) {
+  return origin === null ? '3082' : new URL(origin).port || '80'
+}
+
+/**
+ * Re-read the deployment's launch target.
+ *
+ * A kickstart restarts the server, which mints a **new** per-process launch token; the one the pass
+ * read before the restore is stale the moment the process comes back. Measured 2026-10-22: a restore
+ * took 507 ms, the gate recovered, and the door check failed `401` because it still held the old
+ * token. The target is therefore re-read after every restore.
+ */
+function refreshDeploymentTarget() {
+  launchUrl = readLaunchUrl()
+  serverOrigin = originOf(launchUrl)
+  serverPort = portOf(serverOrigin)
+}
 
 const deployment = (() => {
   const head = gitAt(DEPLOY_ROOT, 'rev-parse', 'HEAD')
@@ -666,11 +689,56 @@ async function judgeDsh() {
   }
 }
 
+// ---- the delegated restore ---------------------------------------------------------------------
+
+/**
+ * The launchd label the deployment runs under, and the one action the deployment's owner delegates to
+ * this seat (live-deploy, 2026-10-22): if the pass finds the deployment down, run exactly this
+ * kickstart once, then wait up to 20 s for the port to answer. Anything else against the deployment —
+ * install.sh, bootout, edits to the checkout — stays live-deploy's. A restore is recorded in the pass,
+ * and a kickstart that does not bring it back is a real alert.
+ */
+const DEPLOY_LABEL = 'com.dtadpole.heddle-web'
+
+/** One delegated kickstart, then wait for the port to answer again. */
+async function restoreDeployment() {
+  const started = Date.now()
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 501
+  const command = `launchctl kickstart -k gui/${uid}/${DEPLOY_LABEL}`
+  const target = serverOrigin === null ? 'http://127.0.0.1:3082/healthz' : `${serverOrigin}/healthz`
+  try {
+    execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${DEPLOY_LABEL}`], { encoding: 'utf8', timeout: 10_000 })
+  } catch (error) {
+    return { attempted: true, command, broughtBack: false, waitedMs: Date.now() - started, error: String(error.message).slice(0, 200) }
+  }
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(3_000) })
+      if (response.status === 200) return { attempted: true, command, broughtBack: true, waitedMs: Date.now() - started, note: 'restored by live-monitor, kickstart' }
+    } catch {
+      // Not back yet; the next poll is the honest retry.
+    }
+    await new Promise((done) => setTimeout(done, 500))
+  }
+  return { attempted: true, command, broughtBack: false, waitedMs: Date.now() - started, note: 'the kickstart did not bring the port back within 20s' }
+}
+
 // ---- the pass ---------------------------------------------------------------------------------
 
 pass.checks.gate = await judgeGate()
 pass.checks.process = judgeProcess()
 pass.checks.door = await judgeDoor()
+if (options.restore === true && deploymentDown(pass.checks)) {
+  pass.restore = await restoreDeployment()
+  if (pass.restore.broughtBack === true) {
+    // The restart minted a new token: the door must be judged with the current one, not the one read before it.
+    refreshDeploymentTarget()
+    pass.checks.gate = { ...(await judgeGate()), restored: true }
+    pass.checks.process = { ...judgeProcess(), restored: true }
+    pass.checks.door = { ...(await judgeDoor()), restored: true }
+  }
+}
 pass.checks.load = pass.checks.gate.verdict === 'pass' ? await judgeLoad() : { verdict: 'unjudged', detail: 'the gate did not serve the app, so the page was not loaded' }
 pass.checks.marker = judgeMarker(pass.checks.load)
 
@@ -712,6 +780,7 @@ if (options.json === true) {
   say(`live-health ${pass.at}`)
   say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}, behind ${deployment.behind ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
+  if (pass.restore !== undefined) say(`restore     ${pass.restore.broughtBack ? 'used' : 'FAILED'}  ${pass.restore.note ?? pass.restore.error ?? ''} (${pass.restore.waitedMs}ms)`)
   say(`process     ${mark(pass.checks.process.verdict)}  ${pass.checks.process.detail}`)
   say(`door        ${mark(pass.checks.door.verdict)}  ${pass.checks.door.detail}`)
   say(`load        ${mark(pass.checks.load.verdict)}  ${pass.checks.load.detail}`)

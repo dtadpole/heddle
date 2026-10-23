@@ -174,6 +174,19 @@ export function processVerdict({ command, deployRoot, home }) {
   return { verdict: 'fail', detail: `the port is served by another checkout or command, not ${tildePath(expected, home)}: ${shown}` }
 }
 
+/**
+ * Whether the reads say the deployment is **down**, which is the only state in which the delegated
+ * kickstart may run. Two readings count: the gate saying its upstream is gone (`502`, its own
+ * `heddle-proxy` sentence, or no answer at all), and the server's port not answering. A gate that
+ * answers a different error, or a server that answers and refuses, is unhealthy but not down — a
+ * restart is not the fix for it, so it must not be taken.
+ */
+export function deploymentDown({ gate, door }) {
+  const gateDown = gate?.verdict === 'fail' && (gate.proxyError === true || gate.status === null || gate.status === undefined)
+  const doorDown = door?.verdict === 'fail' && /does not answer/.test(String(door.detail ?? ''))
+  return gateDown === true || doorDown === true
+}
+
 /** The pass: any failure fails it, any unjudged check leaves it unjudged, only all-pass passes. */
 export function passVerdict(checks) {
   const verdicts = Object.values(checks).map((check) => check.verdict)
