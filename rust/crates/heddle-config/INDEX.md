@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:33:18Z
-version: 0.5.0
+modified: 2026-10-23T09:01:12Z
+version: 0.6.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -49,14 +49,18 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 
 ### Who reads what
 
+Measured on main `37da0fd` in each crate's production code (test modules excluded):
+
 | Crate | Reads | Because the TypeScript build did, in |
 |---|---|---|
-| `heddle` (the binary) | `command::run`, `LayerOptions::for_run`, `default_layers`, `compose`, `anchor_dir`, `EntryRow::component`, `NamedLayer::inline`, `Layer::patching`, `profile_argument`, `ManifestCatalog`, `Env`; implements `ComponentCatalog` | `cli.ts`, `boot.ts` |
-| `heddle-llm` | `EndpointConfig` and its catalogue methods, `EndpointPatch`, `resolve_endpoints`, `describe_endpoint`, `read_local_config`, `local_config_candidates` | `plugins/model.ts`, the adapters |
-| `heddle-server`, `heddle-web-composer` | `describe_endpoints`, `selection_problem`, `expand_home`, `canonical_path`, `is_under` | `server/web.ts` |
-| `heddle-web-files` | `heddle_home`, `is_under` | `server/uploads.ts`, `server/attachments.ts` |
-| `heddle-session`, `heddle-workspace` | `canonical_path`, `is_under`, `depth_of` | `session/*.ts`, `workspace/service.ts` |
-| `heddle-context`, `heddle-sandbox` | `heddle_home`, `Env` | `context/service.ts`, `sandbox/service.ts` |
+| `heddle` (the binary) | boot: `command::run`, `LayerOptions`, `default_layers`, `compose`, `anchor_dir`, `EntryRow` and `ComponentName`, `NamedLayer`, `Layer`, `profile_argument`, `ManifestCatalog`, `read_component_manifest`, `Schema` and `SchemaLookup`, `Env`, and it implements `ComponentCatalog`; the model row (`adapters.rs`): `read_local_config`, `local_config_candidates`, `resolve_endpoints`, `EndpointPatch`, `describe_endpoint`; web (`web.rs`): `describe_endpoints`, `selection_problem`, `heddle_home` | `cli.ts`, `boot.ts`, `plugins/model.ts`, `server/web.ts`, `server/uploads.ts` |
+| `heddle-llm` | `EndpointConfig`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel` and `ReasoningLevels`, `ReasoningValue`, `describe_endpoint` | the adapters |
+| `heddle-session` | `canonical_path`, `expand_home`, `heddle_home`, `paths`, `Env` | `session/*.ts` |
+| `heddle-workspace` | `canonical_path`, `is_under`, `depth_of`, `expand_home`, `heddle_home`, `Env` | `workspace/service.ts` |
+
+`heddle-server`, `heddle-web-composer`, `heddle-web-files` and `heddle-context` take nothing from this crate in
+production code, and `heddle-sandbox` does not depend on it: the web routes reach it through the binary's `web.rs`,
+and the server keeps the TypeScript folder route's own `~` and path rules (step 7).
 
 ## The config-boot contract
 
@@ -179,22 +183,23 @@ an adapter; each constructor stores `env`, `cwd` or nothing, and none of the 20 
 
 ### 7. What the server reads after boot
 
+What the web side takes from this crate as of main `37da0fd` — every call from `rust/crates/heddle/src/web.rs`, each
+with the invocation's `Env`:
+
 | Call | What to know |
 |---|---|
 | `describe_endpoints(&endpoints, nominated)` | `default` is `null` unless the nominated endpoint is in the list; no key value ever appears, only `credential: "set"` and a key file's path |
 | `selection_problem(&endpoint, model, effort)` | the caller finds the endpoint by name first; an unknown endpoint name is the caller's sentence, not this one |
-| `expand_home(path, &env)` | the folder route's `~` (`web.ts`: `statSync(expandHome(path))`); takes the boot's `Env`, unlike the TypeScript `homedir()`; `~user/x` is returned unchanged |
-| `heddle_home(&env)` | the uploads directory, `$HEDDLE_HOME/uploads` (`uploads.ts`: `uploadDirectory(heddleHome())`), and the launch secret's directory; `HEDDLE_HOME=""` is honoured as given, as the TypeScript `??` honoured it |
-| `canonical_path(path)` | `realpath` when the path exists, lexical otherwise; a relative path resolves against the process working directory |
-| `is_under(parent, child)` | segment-wise, so `/a/b-sibling` is not under `/a/b`; pass canonical paths |
+| `heddle_home(&env)` | the uploads directory, `$HEDDLE_HOME/uploads` (`uploads.ts`: `uploadDirectory(heddleHome())`), the launch secret's directory and the page host's home; `HEDDLE_HOME=""` is honoured as given, as the TypeScript `??` honoured it |
 
-These six are everything the TypeScript server took from what this crate ports: `web.ts` imports `describeEndpoints`
-and `selectionProblem` from `src/endpoints.ts`, `expandHome` from `config/schema.ts` and `canonicalPath` and `isUnder`
-from `src/paths.ts`, and `uploads.ts` imports `heddleHome` from `config/schema.ts`. Its `token.ts` kept a private copy
-of both rules (`HEDDLE_HOME ?? ~/.heddle`, and a `~` expansion that looks only at the first character). A port that
-copies `token.ts` faithfully therefore answers `~user/x` as `<home>user/x` where `expand_home` leaves it unchanged —
-the one place this crate's deliberate difference (see *Where it differs on purpose*) shows inside one binary. Call
-`heddle_home` and `expand_home` there too, and the server has one rule for each.
+**The folder route keeps the TypeScript `~` rule, and should.** `heddle-server` expands the folder route's path with its
+own first-character rule (`token::expand_home`, then its own `canonical_path`). That is exactly the TypeScript route:
+`web.ts` calls `statSync(expandHome(path))`, and `config/schema.ts`'s `expandHome` is
+`path.startsWith('~') ? homedir() + path.slice(1) : path`, so `~x` becomes `<home>x` on both builds. This crate's
+`expand_home` leaves `~user/x` unchanged on purpose (see *Where it differs on purpose*), for configuration's own paths
+(key files, `--profile ~/p`); calling it from the folder route would move that route away from the TypeScript build.
+So the binary holds two `~` rules by design: the folder route's (TypeScript) and configuration's (this crate). The
+route reads `HOME` from the process, which in the binary is the same environment the boot's `Env` was built from.
 
 ### 8. Starting an outside component
 
