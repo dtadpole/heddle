@@ -1,5 +1,7 @@
 ---
 title: Verifier 15 — Deployment
+created: 2026-10-18T03:44:42Z
+modified: 2026-10-23T05:14:51Z
 version: 2.0.0
 description: the page the owner sees is the deployment checkout's build, served by a process running that checkout, and that checkout contains only committed main.
 grounded_in:

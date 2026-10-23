@@ -171,3 +171,27 @@ test('a platform with no supervisor, and --status, are answered rather than gues
   assert.match(status.stdout, /service: running/)
   assert.deepEqual(calls(f).filter((line) => !line.startsWith('launchctl print')), [])
 })
+
+test('an answering port with the agent loaded but not running is an unsupervised server, and gets its supervisor back', () => {
+  // Measured 2026-10-22 on a scratch agent: with AbandonProcessGroup a SIGKILLed supervisor leaves its server
+  // answering while launchd reads the job "not running" and never restarts it, so nothing would restart that server
+  // after its next crash. Starting the job lets a new supervisor reclaim it.
+  const f = fixture({ job: 'not running', answers: true })
+  const result = run(f)
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(calls(f), ['launchctl kickstart gui/' + process.getuid() + '/com.dtadpole.heddle-web'])
+  assert.match(log(f), /answering but the agent is not running \(an unsupervised server\)/)
+  const again = run(f)
+  assert.equal(again.status, 0)
+  assert.equal(calls(f).length, 1, 'inside the cooldown it does not act twice')
+})
+
+test('an answering port is left alone while the agent runs, and while it is not loaded at all (an install in progress)', () => {
+  const running = fixture({ job: 'running', answers: true })
+  run(running)
+  assert.deepEqual(calls(running), [])
+  const absent = fixture({ job: 'absent', answers: true })
+  run(absent)
+  assert.deepEqual(calls(absent), [], 'not loaded is the installer between bootout and bootstrap: leave it')
+  assert.equal(log(absent), '')
+})

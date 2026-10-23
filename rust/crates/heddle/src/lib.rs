@@ -21,6 +21,7 @@ pub mod ports;
 pub mod runtime;
 pub mod services;
 pub mod usage;
+pub mod web;
 
 use std::path::PathBuf;
 
