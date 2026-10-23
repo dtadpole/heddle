@@ -781,3 +781,84 @@ async fn with_no_endpoint_named_the_configured_default_answers_and_the_first_is_
     );
     assert_eq!(chosen.requests().len(), 1);
 }
+
+/// The JSON body of a recorded request, after its head.
+fn body_of(request: &str) -> serde_json::Value {
+    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+    serde_json::from_str(body).unwrap_or_else(|error| panic!("a JSON body ({error}): {request}"))
+}
+
+/// `10-llm-backends` writes its endpoint with `httpConfig` (`_tools_/verify-runner/lib.mjs`) — literally
+/// `{default, endpoints: [{name, kind, baseUrl, model, stream}]}` with the double under a path prefix (`/ds` for
+/// chat, `/cx` for Responses) — and asserts the route each shape is sent to and what its body carries. This reads
+/// that configuration as JSON, the way the binary will, rather than building the endpoint in Rust.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_verifiers_http_config_sends_each_shape_to_its_route_with_the_body_it_requires() {
+    let chat_sse = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"answered over chat completions\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let responses_sse = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answered over responses\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n"
+    );
+    let chat = Double::start(move |_| reply("text/event-stream", chat_sse));
+    let codex = Double::start(move |_| reply("text/event-stream", responses_sse));
+
+    let config: serde_json::Value = serde_json::json!({
+        "default": "codex",
+        "endpoints": [
+            { "name": "chat", "kind": "openai-chat", "baseUrl": format!("{}/ds", chat.base_url), "model": "double", "stream": true },
+            { "name": "codex", "kind": "openai-responses", "baseUrl": format!("{}/cx", codex.base_url), "model": "double", "stream": true }
+        ]
+    });
+    let endpoints: Vec<EndpointConfig> = serde_json::from_value(config["endpoints"].clone())
+        .expect("the verifier's endpoints deserialize");
+    let service = ModelService::from_configuration(endpoints, config["default"].as_str())
+        .expect("registers the endpoints");
+    assert_eq!(service.default_endpoint(None).as_deref(), Some("codex"));
+
+    // "a turn runs over the Chat Completions shape": the route that shape uses, carrying the conversation.
+    let generated = service
+        .generate(ask("chat", "say something"))
+        .await
+        .expect("answers");
+    assert_eq!(generated.text, "answered over chat completions");
+    let request = chat
+        .requests()
+        .pop()
+        .expect("the request reached the endpoint");
+    assert!(
+        request.starts_with("POST /ds/chat/completions HTTP/1.1"),
+        "{request}"
+    );
+    let body = body_of(&request);
+    assert!(
+        body["messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty()),
+        "it carried the conversation: {body}"
+    );
+
+    // "a turn runs over the Responses shape, which is a different contract": input is a list, and it streams.
+    let generated = service
+        .generate(ask("codex", "say something"))
+        .await
+        .expect("answers");
+    assert_eq!(generated.text, "answered over responses");
+    let request = codex
+        .requests()
+        .pop()
+        .expect("the request reached the endpoint");
+    assert!(
+        request.starts_with("POST /cx/responses HTTP/1.1"),
+        "{request}"
+    );
+    let body = body_of(&request);
+    assert!(
+        body["input"].is_array(),
+        "input is a list, which that route requires: {body}"
+    );
+    assert_eq!(
+        body["stream"],
+        serde_json::json!(true),
+        "and it is streamed: {body}"
+    );
+}
