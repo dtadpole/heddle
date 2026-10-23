@@ -17,6 +17,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`log.rs`](log.rs) | the `SessionLog` and `Clock` ports and `iso_timestamp` |
 | [`tool.rs`](tool.rs) | `todo_write` and `todo_read` as specs and functions |
 | [`http.rs`](http.rs) | `GET /api/todo` |
+| [`test_support.rs`](test_support.rs) | the in-memory log, fixed clock and fixed ids the tests use (tests only) |
 
 ## Read next
 
