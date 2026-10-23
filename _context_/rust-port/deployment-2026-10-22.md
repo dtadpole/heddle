@@ -142,6 +142,28 @@ transient cause into an outage that lasts until a person or a monitor acts; `--g
 behaviour for a platform that restarts the job. Both are covered by the suite: one test that a failing server is
 started again after the limit while the supervisor stays alive, and one that `--give-up` exits 1.
 
+## The flap at 20:49–20:50, and the guard race it exposed
+
+The coordinator measured a 502 at `8082` with `3082` momentarily not listening, and three kickstarts in
+`guard.log` 75 s and 15 s apart. The cause was not a crash loop and not a slow launch: each entry was the restore of
+a **deliberate kill by `_verifiers_/95-web-daemon`'s stays-up check**, which integrator-two's lane gate ran against
+this deployment (its 03:39:44Z note records the 95 and 96 runs). At that moment the agent had no supervisor, launchd
+does not restart a loaded agent here, and the interim 15-second guard was the only restorer — so three kills became
+three restores, each about 15 s later, and each window a 502. **A gateway that runs 95 against the owner's page is,
+by construction, running a kill test on it.**
+
+It also exposed a real race in the guard. `guard.sh` probed the port: a silent port meant "kick the job". Once the
+supervisor was installed, a killed server is back in about a second, but during that second the port is silent, so a
+port-only guard kicks the job it is supposed to protect — launchd kills the supervisor and the fresh server, and the
+restart begins again. Measured on the live deployment: the old guard logged `port 3082 silent but the agent is
+loaded; kickstarting it` during a restart; then, after the fix, the same scenario produced **zero actions, zero log
+lines**, and the supervisor had a new pid answering 200 a second later.
+
+The fix, on `hd/live-deploy` (`ba92183`, with the slow-retry supervisor in `58f60f6`): the guard acts on the **job**,
+not the port — `running` (or systemd `active`) means the supervisor owns the server, so it does nothing — plus a
+20-second cooldown; seven component tests drive the whole script against stand-in platform commands. The deployment
+takes both at its next move of `main`.
+
 **The supervisor was also judged under launchd itself** (20:38 PDT), on a scratch label and a scratch port so the
 live agent was untouched: an agent whose `ProgramArguments` are `node supervisor.mjs -- node <checkout>/dist/cli.js
 web … --port 3098`, started with `launchctl kickstart -k`, answered `/healthz` 200 on 3098; a SIGKILL of the server
