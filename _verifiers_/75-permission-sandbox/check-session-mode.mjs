@@ -201,7 +201,7 @@ function permissionEvents(home, session) {
 /** Whether the built CLI and this profile are available to judge the claim at all. */
 async function supportsSessionMode() {
   const help = await runCli(['--help'])
-  return /--profile/.test(help.stdout) && existsSync(harnessEntry())
+  return /^  web\b/m.test(help.stdout) && existsSync(harnessEntry())
 }
 
 async function withHarness(label, options, body) {

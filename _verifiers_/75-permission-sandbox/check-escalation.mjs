@@ -171,7 +171,7 @@ async function withHarness(label, body) {
 }
 
 test('an approved retry runs the one denied call under the wider mode, and the session stays read-only', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness('approved', async (h, server) => {
     const turn = startTurn(server, { prompt: 'write inside' })
     const pending = await waitForApproval(server)
@@ -195,7 +195,7 @@ test('an approved retry runs the one denied call under the wider mode, and the s
 })
 
 test('a rejected retry leaves the effect undone', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness('rejected', async (h, server) => {
     const turn = startTurn(server, { prompt: 'write inside' })
     const pending = await waitForApproval(server)
@@ -214,7 +214,7 @@ test('a rejected retry leaves the effect undone', async (context) => {
 })
 
 test('a run with no one to answer refuses the escalation instead of waiting or widening', async (context) => {
-  if (!skipUnless(context, (await runCli(['--help'])).stdout.includes('--profile'), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const h = harness('unattended')
   try {
     const run = await runCli(['--profile', h.profileDir, '--endpoint', 'scripted', '--turn', 'write inside'], { env: h.env, timeoutMs: 60_000 })

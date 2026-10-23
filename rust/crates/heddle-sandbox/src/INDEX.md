@@ -1,19 +1,29 @@
 ---
 title: The heddle-sandbox sources
-version: 0.1.0
-description: The sources of the heddle-sandbox crate, with unit tests beside the code.
+version: 0.2.0
+description: The sources of the heddle-sandbox crate, one module per TypeScript file, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
+  - source: src/sandbox/*.ts and src/approvals/service.ts, read 2026-10-22
 ---
 
 # `rust/crates/heddle-sandbox/src`
 
 The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code.
 
-| File | What it is |
-|---|---|
-| [`lib.rs`](lib.rs) | the crate root and its documentation |
+| File | What it is | Ported from |
+|---|---|---|
+| [`lib.rs`](lib.rs) | the crate root, its module table and the re-exports | — |
+| [`mode.rs`](mode.rs) | the three modes, the resolved policy, the writable-root set, the model-visible policy sentence | `src/sandbox/policy.ts` |
+| [`paths.rs`](paths.rs) | lexical resolve, canonicalisation through the deepest existing ancestor, component-wise containment | `src/sandbox/paths.ts` |
+| [`backend.rs`](backend.rs) | the backend trait, platform selection, the fail-closed error, outcome classification and the shell's sentences | `src/sandbox/backend.ts` |
+| [`seatbelt.rs`](seatbelt.rs) | the macOS rung: the SBPL profile and its functional probe | `src/sandbox/seatbelt.ts` |
+| [`linux.rs`](linux.rs) | the bubblewrap and Landlock rungs and their chain | `src/sandbox/linux.ts` |
+| [`escalation.rs`](escalation.rs) | the one-call wider-retry ladder and its approval ask | `src/sandbox/escalation.ts` |
+| [`transition.rs`](transition.rs) | the owner's session-mode change rule | `permissionTransition` in `src/sandbox/service.ts` |
+| [`service.rs`](service.rs) | the sandbox service: the file fence and the shell seam | `SandboxService` in `src/sandbox/service.ts` |
+| [`approvals.rs`](approvals.rs) | the approval policy and the question channel | `src/approvals/service.ts` |
 
 ## Read next
 
-[`../INDEX.md`](../INDEX.md) for what the crate ports and what judges it.
+[`../INDEX.md`](../INDEX.md) for the public API, what the other crates must do with it, and the port plan.
