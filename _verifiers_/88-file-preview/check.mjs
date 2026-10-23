@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 
 import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
@@ -25,6 +25,76 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
  */
 
 const CAPABILITY = 'one preview surface, rendering each file type with the library appropriate to it'
+
+/**
+ * A workspace with one file of each kind the preview renders.
+ *
+ * It used to be the project checkout at a fixed path from another machine (`/Users/<account>/heddle`), which made the
+ * check unjudgeable here: the route registered a folder that did not exist, so every read answered nothing and the
+ * first test failed at its first assertion. The files below are the same kinds of content that checkout held, written
+ * by the check itself — a document with frontmatter, a table, an inline code span, a script and an inline handler;
+ * source; a config; a license; two documents that link to each other; and an image a document embeds.
+ */
+function writeWorkspace(work) {
+  mkdirSync(work, { recursive: true })
+  const prose = Array.from({ length: 12 }, (_, index) =>
+    `Paragraph ${index + 1}: the preview has to draw a document as a document, with its blocks and its inline marks, ` +
+    'and every sentence here is long enough that the rendered text reads as a page rather than as a sample. A renderer ' +
+    'that drops a paragraph is a renderer that loses the document.').join('\n\n')
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">',
+    '<title>heddle</title>',
+    '<desc>the mark, drawn in a few strokes and padded so the asset is a real file rather than a placeholder</desc>',
+    '<rect x="0" y="0" width="64" height="64" rx="12" fill="#E68000"/>',
+    '<path d="M10 22 L54 22 M10 32 L54 32 M10 42 L54 42" stroke="#1b1b1b" stroke-width="3" stroke-linecap="round"/>',
+    '<circle cx="20" cy="22" r="4" fill="#fff"/><circle cx="32" cy="32" r="4" fill="#fff"/><circle cx="44" cy="42" r="4" fill="#fff"/>',
+    '<!-- This comment exists so the file is comfortably over the half-kilobyte the raw route must carry; an image',
+    '     smaller than that would pass the byte-count assertion for the wrong reason. -->',
+    '</svg>',
+  ].join('\n')
+  writeFileSync(join(work, 'AGENTS.md'), [
+    '---',
+    'title: The workspace conventions',
+    'status: active',
+    '---',
+    '',
+    '# Conventions',
+    '',
+    'This document is the workspace entry point, and its preview is what the file panel is judged by.',
+    '',
+    '| Folder | What it holds |',
+    '|---|---|',
+    '| `_context_` | what the work depends on |',
+    '| `_tools_` | the instruments |',
+    '',
+    'A path is written with `inline code`, and a document may carry markup that must not survive:',
+    '',
+    '<script>window.__pwned = 1</script>',
+    '<span onclick="window.__pwned = 1">an inline handler</span>',
+    '',
+    prose,
+    '',
+    '## Read next',
+    '',
+    '[`INDEX.md`](INDEX.md) points at the rest.',
+  ].join('\n'))
+  writeFileSync(join(work, 'ULTIMATE_GOAL.md'), [
+    '# Ultimate goal',
+    '',
+    'The goal is stated here, and it links to the files that carry it:',
+    '',
+    '- [`INDEX.md`](INDEX.md) — the index',
+    '- [`AGENTS.md`](AGENTS.md) — the conventions',
+    '',
+    prose,
+  ].join('\n'))
+  writeFileSync(join(work, 'INDEX.md'), ['# Index', '', prose, '', '[`AGENTS.md`](AGENTS.md)'].join('\n'))
+  writeFileSync(join(work, 'README.md'), ['# Heddle', '', '![the mark](heddle.svg)', '', prose].join('\n'))
+  writeFileSync(join(work, 'package.json'), `${JSON.stringify({ name: 'heddle', version: '0.0.1', private: true, description: 'a harness and agent framework', scripts: { build: 'tsc', test: 'node --test' } }, null, 2)}\n`)
+  writeFileSync(join(work, 'cordis.yml'), ['plugins:', '  - name: session', '    config:', '      root: .heddle', ''].join('\n'))
+  writeFileSync(join(work, 'LICENSE'), ['MIT License', '', 'Copyright (c) 2026 the heddle authors', '', 'Permission is hereby granted, free of charge, to any person obtaining a copy of this software.', ''].join('\n'))
+  writeFileSync(join(work, 'heddle.svg'), svg)
+}
 
 /** Start the Web UI and resolve once it prints its URL. */
 function startCli(args, env) {
@@ -73,6 +143,7 @@ test('the server renders each file type, and the page offers no second surface',
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   const home = isolatedHome('preview-api')
   const work = fixtureDir('preview-api')
+  writeWorkspace(work)
   const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
   const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
     HEDDLE_HOME: home,
@@ -84,7 +155,7 @@ test('the server renders each file type, and the page offers no second surface',
     await fetch(`${origin}/api/workspaces`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ path: '/Users/zhenc/heddle' }),
+      body: JSON.stringify({ path: work }),
     })
 
     /**
@@ -94,22 +165,22 @@ test('the server renders each file type, and the page offers no second surface',
      */
     const read = async (path) => (await fetch(`${origin}/api/file?path=${encodeURIComponent(path)}`, { headers: { cookie } })).json()
 
-    const document = await read('/Users/zhenc/heddle/AGENTS.md')
+    const document = await read(join(work, 'AGENTS.md'))
     assert.equal(document.renderer, 'markdown', 'a document is rendered as markdown')
     assert.match(String(document.html), /<h1>/, 'with block elements, not its source')
     assert.match(String(document.html), /<table>/, 'including a table')
 
-    const source = await read('/Users/zhenc/heddle/package.json')
+    const source = await read(join(work, 'package.json'))
     assert.equal(source.renderer, 'code', 'a source file is rendered as code')
     assert.equal(source.language, 'json', 'with the language its extension names')
     assert.match(String(source.html), /hljs-/, "carrying the highlighter's own classes")
     assert.match(String(source.html), /class="ln"/, 'and a line gutter')
 
-    const config = await read('/Users/zhenc/heddle/cordis.yml')
+    const config = await read(join(work, 'cordis.yml'))
     assert.equal(config.renderer, 'code', 'a yaml file is rendered as code rather than as text')
     assert.equal(config.language, 'yaml', 'which was measured as text before the map covered it')
 
-    const plain = await read('/Users/zhenc/heddle/LICENSE')
+    const plain = await read(join(work, 'LICENSE'))
     assert.equal(plain.renderer, 'text', 'a file with no renderer is text')
     assert.equal(plain.html, undefined, 'with no markup produced for it')
 
@@ -124,7 +195,7 @@ test('the server renders each file type, and the page offers no second surface',
     assert.match(String(document.html), /<section class="frontmatter">/, 'frontmatter is lifted into its own block')
     assert.ok(!String(document.html).includes('`'), 'and a code span is not shown as backticks')
 
-    const hostile = await read('/Users/zhenc/heddle/AGENTS.md')
+    const hostile = await read(join(work, 'AGENTS.md'))
     assert.match(String(hostile.html), /<table>/, 'a table is a table, with its cells')
     assert.ok(!String(hostile.html).includes('onclick'), 'and no attribute of the document survives')
 
@@ -135,7 +206,7 @@ test('the server renders each file type, and the page offers no second surface',
      * answered `404` — a document with an image showed alt text and a broken marker. The raw route serves a file's
      * bytes, with the type chosen so a browser renders an image and does **not** execute anything else.
      */
-    const asset = await fetch(`${origin}/api/raw?path=${encodeURIComponent('/Users/zhenc/heddle/heddle.svg')}`, { headers: { cookie } })
+    const asset = await fetch(`${origin}/api/raw?path=${encodeURIComponent(join(work, 'heddle.svg'))}`, { headers: { cookie } })
     assert.equal(asset.status, 200, 'an image in a workspace is served')
     assert.equal(asset.headers.get('content-type'), 'image/svg+xml', 'with the type its extension names')
     assert.equal(asset.headers.get('content-disposition'), 'inline', 'and inline, so it renders in the document')
@@ -147,7 +218,7 @@ test('the server renders each file type, and the page offers no second surface',
      * This is the rule that makes the route safe to give a session cookie: a workspace can hold an `.html` file, and
      * a route that handed that back as `text/html` would be a same-origin page the harness runs by being viewed.
      */
-    const runnable = await fetch(`${origin}/api/raw?path=${encodeURIComponent('/Users/zhenc/heddle/README.md')}`, { headers: { cookie } })
+    const runnable = await fetch(`${origin}/api/raw?path=${encodeURIComponent(join(work, 'README.md'))}`, { headers: { cookie } })
     assert.equal(runnable.status, 200, 'a markdown file is served too')
     assert.notEqual(runnable.headers.get('content-type'), 'text/markdown', 'but not as something a browser renders as a page')
     assert.match(String(runnable.headers.get('content-disposition')), /attachment/, 'it is offered as a download instead')
@@ -306,6 +377,7 @@ test('a click in the left panel opens the one preview, rendered for its type and
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const home = isolatedHome('preview-ui')
   const work = fixtureDir('preview-ui')
+  writeWorkspace(work)
   const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
   const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
     HEDDLE_HOME: home,
@@ -318,7 +390,7 @@ test('a click in the left panel opens the one preview, rendered for its type and
     await fetch(`${origin}/api/workspaces`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ path: '/Users/zhenc/heddle' }),
+      body: JSON.stringify({ path: work }),
     })
 
     await browser.goto(server.url)
