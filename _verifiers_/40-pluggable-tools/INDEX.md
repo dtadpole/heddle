@@ -1,6 +1,6 @@
 ---
 title: Verifier 4 — Pluggable Tools
-version: 1.0.0
+version: 1.1.0
 description: tools are configurable and pluggable.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -39,6 +39,13 @@ The script speaks line-delimited JSON-RPC 2.0 on stdio (`rust/crates/heddle-tool
 asks the host `sandbox/assertWritable` for `shout.txt` under the workspace root before writing it, the shadowing
 script declares `read_file`, and the malformed one declares `{"name":"","description":""}`. The claims, the `.ts`
 fixtures and their verdicts on the TypeScript build are unchanged.
+
+The processes are judged on their own by [`_tests_/process-tools/`](_tests_/process-tools/INDEX.md), which drives each
+over the protocol with the suite playing the host, so a failed check under `HEDDLE_BIN` is the binary's:
+
+```bash
+node --test _verifiers_/40-pluggable-tools/_tests_/process-tools/unit.test.mjs
+```
 
 ## Running it
 
