@@ -12,6 +12,8 @@
 #
 # HEDDLE_BIN=/abs/path/heddle serves with that binary instead of `node dist/cli.js`. HEDDLE_WEB_PORT overrides
 # the port: 3082 on macOS, behind the 8082 gate; 8082 on Linux, where nothing fronts the server.
+# HEDDLE_WEB_LABEL, HEDDLE_WEB_UNIT, HEDDLE_WEB_HOME and HEDDLE_WEB_LOG name a scratch service instead of the
+# deployment's; rehearse.sh uses them, so an experiment never touches the live agent.
 # The file is written under the account's own home, so none of this needs sudo. Every step is idempotent:
 # running it twice leaves one service, and the paths it fills in come from the machine it runs on rather
 # than from the repository.
@@ -19,9 +21,13 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-label="com.dtadpole.heddle-web"
-unit="heddle-web.service"
-log="$HOME/.heddle/web.log"
+label="${HEDDLE_WEB_LABEL:-com.dtadpole.heddle-web}"
+unit="${HEDDLE_WEB_UNIT:-heddle-web.service}"
+# Where the service keeps its state and writes its log. Overridable so a **scratch** service (rehearse.sh) never
+# shares them with the deployment: the 8082 gate reads the newest launch token from the deployment's log, so a
+# rehearsal server that printed its token there would hand the gate a token the live server does not know.
+heddle_home="${HEDDLE_WEB_HOME:-$HOME/.heddle}"
+log="${HEDDLE_WEB_LOG:-$heddle_home/web.log}"
 
 # The platform decides the supervisor. HEDDLE_WEB_PLATFORM exists for the installer's own tests, which render
 # and drive both branches on one machine with stand-in launchctl, systemctl and loginctl commands.
@@ -46,7 +52,7 @@ case "$platform" in
 esac
 
 usage() {
-  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 node_bin() {
@@ -159,7 +165,7 @@ render_plist() {
       -e "s|@REPO@|$repo|g" \
       -e "s|@PORT@|$port|g" \
       -e "s|@LOG@|$log|g" \
-      -e "s|@HOME@|$HOME/.heddle|g" \
+      -e "s|@HOME@|$heddle_home|g" \
       -e "s|@HOME_DIR@|$HOME|g"
 }
 
@@ -187,7 +193,7 @@ render_unit() {
     -e "s|@REPO@|$repo|g" \
     -e "s|@PORT@|$port|g" \
     -e "s|@LOG@|$log|g" \
-    -e "s|@HOME@|$HOME/.heddle|g" \
+    -e "s|@HOME@|$heddle_home|g" \
     -e "s|@HOME_DIR@|$HOME|g" \
     "$here/heddle-web.service.template"
 }
@@ -198,10 +204,17 @@ render() {
   if [ "$platform" = darwin ]; then render_plist; else render_unit; fi
 }
 
-write_definition() {
-  # Rendered to a string first, so a refusal leaves the installed file as it was rather than half written.
+prepare_definition() {
+  # Rendered to a string first, and **before anything is stopped**: a refusal (a checkout that is not committed main,
+  # a missing build, a bad HEDDLE_BIN) must leave both the installed file and the running service as they were.
+  # Measured 2026-10-23, and it was an outage: `--restart` booted the live agent out, then the render refused a
+  # deployment one commit behind a freshly fetched origin/main and exited, so nothing was loaded again — 8082
+  # answered 502 for about forty seconds until the agent was bootstrapped by hand.
   definition=$(render)
-  mkdir -p "$HOME/.heddle" "$(dirname -- "$target")"
+}
+
+write_definition() {
+  mkdir -p "$heddle_home" "$(dirname -- "$log")" "$(dirname -- "$target")"
   printf '%s\n' "$definition" > "$target"
   echo "wrote $target"
 }
@@ -228,12 +241,37 @@ loaded() {
   fi
 }
 
+bootstrap_agent() {
+  # Load the agent, retrying a refusal for a few seconds: even after the old job is gone, launchd can still answer
+  # `5: Input/output error` for a moment. A bootstrap that never succeeds is reported and exits non-zero, because an
+  # installer that reports success with nothing loaded is the worst answer it can give.
+  attempt=1
+  while :; do
+    if output=$(launchctl bootstrap "$domain" "$target" 2>&1); then return 0; fi
+    if [ "$attempt" -ge "${HEDDLE_BOOTSTRAP_ATTEMPTS:-10}" ]; then
+      echo "install.sh: launchctl bootstrap failed $attempt times; $label is NOT loaded: $output" >&2
+      echo "  Load it by hand once launchd settles: launchctl bootstrap $domain $target && launchctl kickstart -k $domain/$label" >&2
+      exit 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.5
+  done
+}
+
 load() {
   # Idempotent on both platforms: an existing service is replaced rather than duplicated.
   if [ "$platform" = darwin ]; then
-    if loaded; then launchctl bootout "$domain/$label" >/dev/null 2>&1 || true; fi
+    prepare_definition
+    if loaded; then
+      launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+      # `bootout` returns before launchd has finished removing the job, and a `bootstrap` of the same label in that
+      # window fails with `5: Input/output error` — measured 2026-10-23 on a rehearsal agent, where it left nothing
+      # loaded. So wait for the job to be gone (up to ten seconds) before loading it again.
+      waited=0
+      while loaded && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+    fi
     write_definition
-    launchctl bootstrap "$domain" "$target"
+    bootstrap_agent
     # Measured on this Mac (macOS 27.0, 26A428, 2026-10-22): `bootstrap` registers the job but its nondemand
     # spawn stays pending — `RunAtLoad` does not fire, so the job is `state = not running` with `runs = 0` until
     # it is asked for. A demand start is what makes an install an install rather than a file on disk.
@@ -243,6 +281,7 @@ load() {
     if [ -f "$log" ]; then chmod 600 "$log" 2>/dev/null || true; fi
   else
     require_linger
+    prepare_definition
     write_definition
     systemctl --user daemon-reload
     systemctl --user enable --quiet "$unit"
