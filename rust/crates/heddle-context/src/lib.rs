@@ -30,6 +30,7 @@
 //! on another crate, and the crate's `INDEX.md` names it.
 
 pub mod budget;
+pub mod command;
 pub mod compaction;
 mod error;
 pub mod events;
@@ -39,6 +40,7 @@ pub mod pairing;
 pub mod prune;
 pub mod runtime;
 pub mod service;
+pub mod session_store;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

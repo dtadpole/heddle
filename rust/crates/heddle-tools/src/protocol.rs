@@ -214,12 +214,43 @@ pub struct InitializeParams {
     pub mode: SandboxMode,
 }
 
+/// One tool as a component declares it.
+///
+/// `parameters` is optional **here** on purpose: a declared spec missing it is a malformed registration, and the
+/// registry refuses it with its own sentence ("a tool must be registered with a name") so the run fails where
+/// the configuration is written. Refusing the line as a wire error instead would name a JSON field rather than
+/// the tool's defect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeclaredTool {
+    /// What the model calls the tool by.
+    pub name: String,
+    /// What the model is told the tool does.
+    pub description: String,
+    /// JSON Schema for the arguments; an empty object when the component omitted it.
+    #[serde(default = "empty_object")]
+    pub parameters: serde_json::Value,
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+impl From<DeclaredTool> for ToolSpec {
+    fn from(tool: DeclaredTool) -> Self {
+        Self {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        }
+    }
+}
+
 /// `initialize` result: what the component provides.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InitializeResult {
     /// The tools, each registered through the same rule as a built-in (non-blank name and description).
     #[serde(default)]
-    pub tools: Vec<ToolSpec>,
+    pub tools: Vec<DeclaredTool>,
     /// The hook listeners. Reserved for part 6 (`heddle-events`), which defines the entry shape; carried
     /// unread by this crate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

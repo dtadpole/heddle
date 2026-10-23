@@ -6,10 +6,12 @@
 //! [`Chunk::ReasoningDelta`]; tool-call fragments are passed on live as [`Chunk::ToolCallDelta`] and assembled
 //! by `index` into one [`Chunk::ToolCall`] each when the round finishes.
 
+use futures::StreamExt;
 use serde_json::Value;
 
-use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
+use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse};
 use crate::error::ModelError;
+use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
 use crate::types::{Chunk, ContentPart, GenerateRequest, Message};
 use heddle_config::EndpointConfig;
@@ -32,8 +34,34 @@ impl Adapter for ChatAdapter {
     }
 
     fn stream(&self, request: GenerateRequest) -> ChunkStream {
-        let _ = request;
-        todo!("port openAiChatAdapter")
+        let prepared = match chat_request(&self.endpoint, &request) {
+            Ok(prepared) => prepared,
+            Err(error) => return crate::adapter::error_stream(error),
+        };
+        let endpoint = self.endpoint.clone();
+        let lazy = futures::stream::once(async move {
+            let call = WireRequest {
+                url: prepared.url,
+                method: Method::Post,
+                body: Some(prepared.body),
+                headers: prepared.headers,
+                api_key: endpoint.api_key.clone(),
+                stream: prepared.stream,
+                timeout_ms: endpoint.timeout_ms,
+                endpoint: endpoint.name.clone(),
+                proxy: endpoint.proxy.clone(),
+            };
+            let stream: ChunkStream = match wire(call).await {
+                // A non-streamed answer is reduced to the same chunks.
+                Ok(WireResponse::Json(answer)) => Box::pin(futures::stream::iter(
+                    chunks_from_chat_json(&answer).into_iter().map(Ok),
+                )),
+                Ok(WireResponse::Stream { body, .. }) => fold_sse(body, Box::new(ChatFold::new())),
+                Err(error) => crate::adapter::error_stream(error),
+            };
+            stream
+        });
+        Box::pin(lazy.flatten())
     }
 }
 
@@ -44,8 +72,72 @@ pub fn chat_request(
     endpoint: &EndpointConfig,
     request: &GenerateRequest,
 ) -> Result<PreparedCall, ModelError> {
-    let _ = (endpoint, request);
-    todo!("port the openAiChatAdapter body builder")
+    let streaming = endpoint.stream.or(request.stream).unwrap_or(true);
+    let mut body = serde_json::Map::new();
+    if let Some(model) = request.model.as_ref().or(endpoint.model.as_ref()) {
+        body.insert("model".into(), Value::String(model.clone()));
+    }
+    body.insert(
+        "messages".into(),
+        Value::Array(request.messages.iter().map(to_chat_message).collect()),
+    );
+    if !request.tools.is_empty() {
+        body.insert(
+            "tools".into(),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.parameters
+                            }
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(max_tokens) = request.max_output_tokens.or(endpoint.max_output_tokens) {
+        body.insert("max_tokens".into(), Value::from(max_tokens));
+    }
+    if let Some(temperature) = request.temperature {
+        body.insert(
+            "temperature".into(),
+            serde_json::Number::from_f64(temperature)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+        );
+    }
+    // Chat Completions names the level `reasoning_effort`; the value is the model's declared wire value.
+    if let Some(value) = crate::adapter::reasoning_value(endpoint, request)? {
+        body.insert(
+            "reasoning_effort".into(),
+            serde_json::to_value(value).unwrap_or(Value::Null),
+        );
+    }
+    body.insert("stream".into(), Value::Bool(streaming));
+
+    Ok(PreparedCall {
+        url: format!(
+            "{}/chat/completions",
+            endpoint.base_url_for(request.model.as_deref())
+        ),
+        body: Value::Object(body),
+        headers: crate::http::title_case_headers(
+            &endpoint
+                .headers
+                .iter()
+                .flatten()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>(),
+        ),
+        stream: streaming,
+    })
 }
 
 /// One message in this shape (`toChatMessage`): text parts joined by `\n` as a string `content` (`null` when there
@@ -344,6 +436,7 @@ impl StreamFold for ChatFold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::user_message;
     use crate::usage::TokenUsage;
 
     fn sse(data: &str) -> SseEvent {
@@ -649,5 +742,147 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn base_endpoint() -> EndpointConfig {
+        EndpointConfig {
+            name: "chat".into(),
+            kind: heddle_config::EndpointKind::OpenaiChat,
+            base_url: "http://gateway.example/v1".into(),
+            model: Some("m".into()),
+            models: None,
+            reasoning: None,
+            project: None,
+            region: None,
+            api_key: None,
+            api_key_file: None,
+            headers: None,
+            stream: None,
+            max_output_tokens: None,
+            context_window: None,
+            capabilities: None,
+            input_modalities: None,
+            proxy: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn the_request_is_the_body_this_route_takes() {
+        let request = GenerateRequest {
+            endpoint: "chat".into(),
+            messages: vec![user_message("hi")],
+            tools: vec![crate::types::ToolSpec {
+                name: "bash".into(),
+                description: "run a command".into(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            }],
+            max_output_tokens: Some(64),
+            temperature: Some(0.2),
+            ..GenerateRequest::default()
+        };
+        let call = chat_request(&base_endpoint(), &request).expect("builds");
+        assert_eq!(call.url, "http://gateway.example/v1/chat/completions");
+        assert!(call.stream, "a call streams unless it is told not to");
+        assert_eq!(call.body["model"], serde_json::json!("m"));
+        assert_eq!(
+            call.body["messages"],
+            serde_json::json!([{ "role": "user", "content": "hi" }])
+        );
+        assert_eq!(
+            call.body["tools"],
+            serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "run a command",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }])
+        );
+        assert_eq!(call.body["max_tokens"], serde_json::json!(64));
+        assert_eq!(call.body["temperature"], serde_json::json!(0.2));
+        assert_eq!(call.body["stream"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_requests_model_wins_and_its_own_gateway_is_the_address() {
+        let mut endpoint = base_endpoint();
+        endpoint.models = Some(vec![heddle_config::ModelEntry::Option(
+            heddle_config::ModelOption {
+                id: "other".into(),
+                base_url: Some("http://other.example/v2".into()),
+                ..heddle_config::ModelOption::default()
+            },
+        )]);
+        let call = chat_request(
+            &endpoint,
+            &GenerateRequest {
+                endpoint: "chat".into(),
+                messages: vec![user_message("hi")],
+                model: Some("other".into()),
+                ..GenerateRequest::default()
+            },
+        )
+        .expect("builds");
+        assert_eq!(call.url, "http://other.example/v2/chat/completions");
+        assert_eq!(call.body["model"], serde_json::json!("other"));
+    }
+
+    #[test]
+    fn the_streaming_flag_follows_the_endpoint_then_the_request_then_true() {
+        let mut endpoint = base_endpoint();
+        endpoint.stream = Some(false);
+        let request = GenerateRequest {
+            endpoint: "chat".into(),
+            messages: vec![user_message("hi")],
+            ..GenerateRequest::default()
+        };
+        let call = chat_request(&endpoint, &request).expect("builds");
+        assert!(!call.stream);
+        assert_eq!(call.body["stream"], serde_json::json!(false));
+
+        let mut endpoint = base_endpoint();
+        endpoint.stream = None;
+        let request = GenerateRequest {
+            stream: Some(false),
+            ..request
+        };
+        assert!(!chat_request(&endpoint, &request).expect("builds").stream);
+
+        let call = chat_request(
+            &endpoint,
+            &GenerateRequest {
+                endpoint: "chat".into(),
+                messages: vec![user_message("hi")],
+                ..GenerateRequest::default()
+            },
+        )
+        .expect("builds");
+        assert!(call.stream);
+    }
+
+    #[test]
+    fn a_reasoning_level_the_model_declares_goes_out_as_its_wire_value() {
+        let mut endpoint = base_endpoint();
+        endpoint.reasoning = Some(heddle_config::ReasoningLevels {
+            default: None,
+            levels: vec![heddle_config::ReasoningLevel {
+                id: "high".into(),
+                name: "High".into(),
+                value: Some(heddle_config::ReasoningValue::Text("high".into())),
+            }],
+        });
+        let call = chat_request(
+            &endpoint,
+            &GenerateRequest {
+                endpoint: "chat".into(),
+                messages: vec![user_message("hi")],
+                reasoning_effort: Some("high".into()),
+                ..GenerateRequest::default()
+            },
+        )
+        .expect("builds");
+        assert_eq!(call.body["reasoning_effort"], serde_json::json!("high"));
     }
 }

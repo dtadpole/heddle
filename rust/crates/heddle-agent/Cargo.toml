@@ -10,6 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+heddle-context.workspace = true
+heddle-llm.workspace = true
+heddle-session.workspace = true
 heddle-tools.workspace = true
 futures.workspace = true
 serde.workspace = true
@@ -20,3 +23,10 @@ tracing.workspace = true
 # The cancellation token every crate passes for a Stop (`AbortSignal` in the TypeScript build). Named here
 # until it is a `[workspace.dependencies]` entry, which is the workspace owner's file.
 tokio-util = "0.7"
+
+[dev-dependencies]
+heddle-config.workspace = true
+# The in-memory context store, so the context adapter is judged against the real service.
+heddle-context = { workspace = true, features = ["testing"] }
+# The real sandbox, so the turn command's tests run the real built-ins inside a scratch workspace.
+heddle-sandbox.workspace = true

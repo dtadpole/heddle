@@ -80,6 +80,9 @@ function startServer(home, work, config) {
     url,
     logs: () => output,
     close: async () => {
+      // A harness that exited before printing its URL has already emitted 'exit', and the event is not replayed:
+      // waiting for it would hang the check instead of letting it report that the server did not start.
+      if (child.exitCode !== null || child.signalCode !== null) return
       child.kill()
       await new Promise((resolve) => child.once('exit', resolve))
     },
