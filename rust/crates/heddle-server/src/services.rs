@@ -48,11 +48,17 @@ pub struct ServiceError {
 
 impl ServiceError {
     pub fn new(message: impl Into<String>) -> Self {
-        todo!()
+        ServiceError {
+            message: message.into(),
+            code: None,
+        }
     }
 
     pub fn with_code(message: impl Into<String>, code: impl Into<String>) -> Self {
-        todo!()
+        ServiceError {
+            message: message.into(),
+            code: Some(code.into()),
+        }
     }
 }
 
@@ -87,7 +93,7 @@ pub struct SessionMeta {
 impl SessionMeta {
     /// The selection this record carries.
     pub fn selection(&self) -> SessionSelection {
-        todo!()
+        crate::selection::session_request_selection(Some(self))
     }
 }
 
@@ -224,9 +230,13 @@ pub enum ArchivedFilter {
 }
 
 impl ArchivedFilter {
-    /// Read the query parameter.
+    /// Read the query parameter: `only`, `show` (or the legacy `1`), else hide.
     pub fn from_query(value: Option<&str>) -> Self {
-        todo!()
+        match value {
+            Some("only") => ArchivedFilter::Only,
+            Some("show") | Some("1") => ArchivedFilter::Show,
+            _ => ArchivedFilter::Hide,
+        }
     }
 }
 
@@ -486,6 +496,20 @@ impl Harness {
         sandbox: Arc<dyn SandboxService>,
         cwd: PathBuf,
     ) -> Self {
-        todo!()
+        Harness {
+            sessions,
+            models,
+            turns,
+            sandbox,
+            workspaces: None,
+            approvals: None,
+            goals: None,
+            todos: None,
+            team: None,
+            attachments: None,
+            markdown: None,
+            stats: None,
+            cwd,
+        }
     }
 }

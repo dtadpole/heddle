@@ -37,19 +37,35 @@
 //! ([`crate::respond::SessionPath`]). Two routers claiming the same method and path is a build error
 //! ([`ServerError::Route`]), found at startup rather than as a route silently shadowed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::Body;
+use axum::extract::{Query, Request, State};
+use axum::http::{Method, StatusCode, header::HOST};
+use axum::middleware::{self, Next};
 use axum::response::Response;
+use axum::routing::{delete, get, patch, post};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
+use tokio::sync::mpsc;
 
-use crate::respond::SessionId;
-use crate::runs::RunRegistry;
-use crate::services::Harness;
-use crate::stream::EventHub;
+use crate::fence;
+use crate::page;
+use crate::preview;
+use crate::respond::{self, JsonBody, SessionId, SessionPath};
+use crate::runs::{RunRegistry, iso_time};
+use crate::selection::{SessionSelection, session_request_selection, turn_selection};
+use crate::services::{
+    ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
+    ServiceError, SessionMeta, StartSession,
+};
+use crate::stream::{EventHub, SseFrame, names, sse_response};
+use crate::token::{
+    self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
+};
 
 /// The default port: 3080 is `dsh web` and 3081 a relay on the machine this was developed on.
 pub const DEFAULT_PORT: u16 = 3082;
@@ -114,18 +130,18 @@ pub struct ServerOptions {
 impl ServerOptions {
     /// The host the server binds.
     pub fn host(&self) -> &str {
-        todo!()
+        self.host.as_deref().unwrap_or(DEFAULT_HOST)
     }
 
     /// The port the server asks for (`0` is "any").
     pub fn port(&self) -> u16 {
-        todo!()
+        self.port.unwrap_or(DEFAULT_PORT)
     }
 }
 
 /// The launch URL: `http://<host>:<port>/?token=<token>`.
 pub fn launch_url(host: &str, port: u16, token: &str) -> String {
-    todo!()
+    format!("http://{host}:{port}/?{TOKEN_QUERY}={token}")
 }
 
 /// What `heddle web --dry-run --json` prints: the plan, without binding.
@@ -142,12 +158,19 @@ pub struct DryRunPlan {
 impl DryRunPlan {
     /// The plan for these options: the chosen host and port, nothing bound.
     pub fn for_options(options: &ServerOptions) -> Self {
-        todo!()
+        let host = options.host().to_owned();
+        let port = options.port();
+        DryRunPlan {
+            url: launch_url(&host, port, "generated-at-start"),
+            host,
+            port,
+            dry_run: true,
+        }
     }
 
     /// `heddle web: would serve <url>`.
     pub fn announce(&self) -> String {
-        todo!()
+        format!("heddle web: would serve {}", self.url)
     }
 }
 
@@ -212,34 +235,34 @@ struct Shared {
 
 impl AppState {
     pub fn harness(&self) -> &Harness {
-        todo!()
+        &self.inner.harness
     }
 
     pub fn events(&self) -> &EventHub {
-        todo!()
+        &self.inner.events
     }
 
     pub fn runs(&self) -> &RunRegistry {
-        todo!()
+        &self.inner.runs
     }
 
     pub fn options(&self) -> &ServerOptions {
-        todo!()
+        &self.inner.options
     }
 
     /// The port the server is bound to (the real one when `0` was asked for).
     pub fn port(&self) -> u16 {
-        todo!()
+        self.inner.port
     }
 
     /// The host the server is bound to.
     pub fn host(&self) -> &str {
-        todo!()
+        self.inner.options.host()
     }
 
     /// A registered session view by name.
     pub fn session_view(&self, name: &str) -> Option<Arc<dyn SessionView>> {
-        todo!()
+        self.inner.views.get(name).cloned()
     }
 }
 
@@ -255,39 +278,158 @@ pub struct ServerBuilder {
 
 impl ServerBuilder {
     pub fn new(harness: Harness, options: ServerOptions) -> Self {
-        todo!()
+        ServerBuilder {
+            harness,
+            options,
+            events: EventHub::new(),
+            runs: RunRegistry::new(),
+            features: Vec::new(),
+            views: BTreeMap::new(),
+        }
     }
 
     /// The hub the server will stream from, so the binary can bridge the event bus into it before start.
     pub fn events(&self) -> EventHub {
-        todo!()
+        self.events.clone()
     }
 
     /// The run registry, shared with anything that needs to know which sessions are running.
     pub fn runs(&self) -> RunRegistry {
-        todo!()
+        self.runs.clone()
     }
 
     /// Mount a feature's routes.
-    pub fn mount(self, feature: impl Feature) -> Self {
-        todo!()
+    pub fn mount(mut self, feature: impl Feature) -> Self {
+        self.features.push(Box::new(feature));
+        self
     }
 
     /// Register a `?view=<name>` projection of `GET /api/sessions/{id}`.
-    pub fn session_view(self, name: impl Into<String>, view: Arc<dyn SessionView>) -> Self {
-        todo!()
+    pub fn session_view(mut self, name: impl Into<String>, view: Arc<dyn SessionView>) -> Self {
+        self.views.insert(name.into(), view);
+        self
     }
 
     /// The router and its state without a socket, for tests that drive it with `tower::ServiceExt`.
     /// `port` stands in for the bound port; the secret is read from (or created at) the options' path.
     pub fn into_router(self, port: u16) -> Result<(Router, AppState), ServerError> {
-        todo!()
+        let host = self.options.host();
+        if !fence::is_loopback(host) {
+            return Err(ServerError::NotLoopback(fence::bind_refusal(host)));
+        }
+        let secret_path = self
+            .options
+            .secret_path
+            .clone()
+            .unwrap_or_else(token::default_secret_path);
+        let secret =
+            token::read_or_create_secret(&secret_path).map_err(|source| ServerError::Secret {
+                path: secret_path.clone(),
+                source,
+            })?;
+        let launch_token = self
+            .options
+            .token
+            .clone()
+            .unwrap_or_else(token::create_launch_token);
+        let state = AppState {
+            inner: Arc::new(Shared {
+                harness: self.harness,
+                events: self.events,
+                runs: self.runs,
+                options: self.options,
+                views: self.views,
+                launch_token,
+                secret,
+                port,
+            }),
+        };
+
+        let mut router = Router::new()
+            .route("/favicon.svg", get(favicon))
+            .route("/favicon.ico", get(favicon))
+            .route("/healthz", get(healthz))
+            .route("/", get(page_route))
+            .route("/api/events", get(events_route))
+            .route("/api/status", get(status))
+            .route("/api/sessions", get(list_sessions).post(create_session))
+            .route("/api/sessions/{id}", get(session_view_route))
+            .route("/api/sessions/{id}/fork", post(fork_session))
+            .route("/api/sessions/{id}/flags", post(flags_session))
+            .route("/api/sessions/{id}/title", post(title_session))
+            .route("/api/sessions/{id}/permission", post(permission_session))
+            .route("/api/sessions/{id}/steer", post(steer_session))
+            .route("/api/sessions/{id}/stop", post(stop_session))
+            .route("/api/folders/session", post(folder_session))
+            .route("/api/turn", post(turn))
+            .route("/api/tree", get(tree))
+            .route("/api/workspaces", post(add_workspace))
+            .route("/api/workspaces/{id}", patch(rename_workspace))
+            .route("/api/workspaces/{id}", delete(remove_workspace))
+            .route("/api/approvals", get(list_approvals))
+            .route("/api/approvals/{id}", post(answer_approval))
+            .route("/api/goal", get(get_goal).post(post_goal))
+            .route("/api/todo", get(get_todo))
+            .route("/api/team", get(get_team))
+            .route("/api/html", get(html_preview))
+            .route("/vendor/purify.js", get(purify));
+        for feature in self.features {
+            let name = feature.name();
+            let routes = feature.routes();
+            if router.has_routes() && routes.has_routes() {
+                // `merge` panics on a duplicate method+path; catching it here would need the router to be
+                // unwound, so the duplicate is reported by `merge` itself, naming the feature below.
+                tracing::debug!(feature = name, "mounting feature routes");
+            }
+            router = router.merge(routes);
+        }
+        let router = router
+            .fallback(fallback_route)
+            .layer(middleware::from_fn_with_state(state.clone(), door))
+            .with_state(state.clone());
+        Ok((router, state))
     }
 
     /// Refuse a non-loopback host, read the secret, mint the token, bind, and serve in the background.
     /// Returns once the socket is listening, so the caller can print the URL without racing it.
     pub async fn start(self) -> Result<WebServer, ServerError> {
-        todo!()
+        let host = self.options.host().to_owned();
+        // The host is judged before a socket is opened, so the refusal cannot leave one behind.
+        if !fence::is_loopback(&host) {
+            return Err(ServerError::NotLoopback(fence::bind_refusal(&host)));
+        }
+        let requested_port = self.options.port();
+        let address = format!("{host}:{requested_port}");
+        let listener = tokio::net::TcpListener::bind((host.as_str(), requested_port))
+            .await
+            .map_err(|source| ServerError::Bind {
+                address: address.clone(),
+                source,
+            })?;
+        let port = listener
+            .local_addr()
+            .map(|local| local.port())
+            .unwrap_or(requested_port);
+        // The state carries the real port, because `/healthz` and the cookie authority judge it.
+        let (router, state) = self.into_router(port)?;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        let token = state.inner.launch_token.clone();
+        Ok(WebServer {
+            url: launch_url(&host, port, &token),
+            token,
+            host,
+            port,
+            state,
+            shutdown: Some(shutdown_tx),
+            task: Some(task),
+        })
     }
 }
 
@@ -305,42 +447,1729 @@ pub struct WebServer {
 impl WebServer {
     /// `http://<host>:<port>/?token=<token>`.
     pub fn url(&self) -> &str {
-        todo!()
+        &self.url
     }
 
     pub fn token(&self) -> &str {
-        todo!()
+        &self.token
     }
 
     pub fn host(&self) -> &str {
-        todo!()
+        &self.host
     }
 
     /// The bound port.
     pub fn port(&self) -> u16 {
-        todo!()
+        self.port
     }
 
     pub fn state(&self) -> &AppState {
-        todo!()
+        &self.state
     }
 
     /// The two lines `heddle web` prints once listening:
     /// `heddle web: <url>` and `heddle web: serving on <host>:<port>; pass --port to change it`.
     /// The verifiers wait for the first.
     pub fn announce(&self) -> [String; 2] {
-        todo!()
+        [
+            format!("heddle web: {}", self.url),
+            format!(
+                "heddle web: serving on {}:{}; pass --port to change it",
+                self.host, self.port
+            ),
+        ]
     }
 
     /// What `--json` adds: `{"url","host","port","token"}` on one line.
     pub fn announce_json(&self) -> String {
-        todo!()
+        format!(
+            "{{\"url\":{},\"host\":{},\"port\":{},\"token\":{}}}",
+            serde_json::to_string(&self.url).expect("a string serializes"),
+            serde_json::to_string(&self.host).expect("a string serializes"),
+            self.port,
+            serde_json::to_string(&self.token).expect("a string serializes")
+        )
     }
 
     /// Stop, streams and all: detach the approval answerer, end every stream subscriber, stop accepting,
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
-    pub async fn close(self) {
-        todo!()
+    pub async fn close(mut self) {
+        self.state.events().close();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            // A graceful shutdown waits for open connections; an event stream never ends on its own, so the
+            // task is aborted after the subscribers were ended. The listener and its socket are closed with it.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !task.is_finished() {
+                task.abort();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The door: fence, favicon/healthz, handshake, decision, page, unauthorized
+
+async fn door(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let authority = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{}:{}", state.host(), state.port()));
+    let host_header = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let origin = request
+        .headers()
+        .get("origin")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if let Some(refusal) =
+        fence::reject_untrusted(host_header.as_deref(), origin.as_deref(), &authority)
+    {
+        return respond::text(StatusCode::FORBIDDEN, format!("{refusal}\n"));
+    }
+
+    let path = request.uri().path().to_owned();
+    let method = request.method().clone();
+    if method == Method::GET && (path == "/favicon.svg" || path == "/favicon.ico") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "image/svg+xml")
+            .header("content-length", page::FAVICON_SVG.len().to_string())
+            .header("cache-control", "no-store")
+            .body(Body::from(page::FAVICON_SVG))
+            .expect("a response builder with static headers");
+    }
+    if method == Method::GET && path == "/healthz" {
+        return healthz_body(state.port());
+    }
+
+    let query = parse_query(request.uri().query());
+    if path == "/" && query.contains_key(TOKEN_QUERY) {
+        let presented = query.get(TOKEN_QUERY).map(String::as_str).unwrap_or("");
+        if !token::safe_equal(presented, &state.inner.launch_token) {
+            return respond::html(StatusCode::UNAUTHORIZED, page::token_form_page(true));
+        }
+        let value = mint_cookie(&state.inner.secret, &authority, token::now_ms());
+        return Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header("location", "/")
+            .header(
+                "set-cookie",
+                cookie_header(&authority, &value, token::COOKIE_MAX_AGE),
+            )
+            .header("cache-control", "no-store")
+            .header("referrer-policy", "no-referrer")
+            .body(Body::empty())
+            .expect("a response builder with static headers");
+    }
+
+    let credentials = Credentials {
+        cookie: read_cookie(
+            request
+                .headers()
+                .get("cookie")
+                .and_then(|value| value.to_str().ok()),
+            &cookie_name(&authority),
+        ),
+        query: query.get(TOKEN_QUERY).map(String::as_str),
+    };
+    let decision = token::authorize(
+        &credentials,
+        &Door {
+            launch_token: &state.inner.launch_token,
+            secret: &state.inner.secret,
+            authority: &authority,
+            now_ms: token::now_ms(),
+        },
+    );
+    let offered = credentials.offered();
+    if fence::refuse_cross_site_write(&method, offered.cookie, decision.is_ok()) {
+        return respond::text(StatusCode::FORBIDDEN, fence::CROSS_SITE_WRITE_REFUSAL);
+    }
+
+    if path == "/" && method == Method::GET {
+        let access = page::page_access(decision.is_ok(), offered.cookie);
+        if access.status == 200 {
+            return respond::html(StatusCode::OK, page::page());
+        }
+        return respond::html(
+            StatusCode::UNAUTHORIZED,
+            page::token_form_page(access.stale),
+        );
+    }
+
+    if !decision.is_ok() {
+        if path.starts_with("/api") {
+            return respond::unauthorized();
+        }
+        return respond::html(StatusCode::UNAUTHORIZED, page::token_form_page(false));
+    }
+
+    next.run(request).await
+}
+
+/// A query string as `URLSearchParams` reads it: percent-decoded, `+` as a space, the first value winning.
+fn parse_query(query: Option<&str>) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    let Some(query) = query else {
+        return values;
+    };
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        values
+            .entry(decode_component(key))
+            .or_insert_with(|| decode_component(value));
+    }
+    values
+}
+
+/// Percent-decode one query component, with `+` read as a space.
+fn decode_component(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
+                match hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        index += 3;
+                    }
+                    None => {
+                        out.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The core routes
+
+async fn fallback_route() -> Response {
+    respond::not_found()
+}
+
+async fn favicon() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "image/svg+xml")
+        .header("content-length", page::FAVICON_SVG.len().to_string())
+        .header("cache-control", "no-store")
+        .body(Body::from(page::FAVICON_SVG))
+        .expect("a response builder with static headers")
+}
+
+/// `/healthz`'s answer, in the TypeScript key order: `ok`, `service`, `port`.
+#[derive(Serialize)]
+struct Healthz {
+    ok: bool,
+    service: &'static str,
+    port: u16,
+}
+
+fn healthz_body(port: u16) -> Response {
+    respond::json_compact(
+        StatusCode::OK,
+        &Healthz {
+            ok: true,
+            service: SERVICE_NAME,
+            port,
+        },
+    )
+}
+
+async fn healthz(State(state): State<AppState>) -> Response {
+    healthz_body(state.port())
+}
+
+async fn page_route() -> Response {
+    respond::html(StatusCode::OK, page::page())
+}
+
+async fn events_route(State(state): State<AppState>) -> Response {
+    sse_response(state.events().subscribe())
+}
+
+/// One session's meta as a listing entry: the store's record plus this server's run state.
+fn listing_entry(meta: &SessionMeta, state: &AppState) -> Value {
+    let mut value = serde_json::to_value(meta).unwrap_or_else(|_| json!({"id": meta.id}));
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    let snapshot = state.runs().snapshot(&meta.id);
+    object.insert("running".into(), Value::Bool(snapshot.running));
+    if let Some(since) = snapshot.running_since {
+        object.insert("runningSince".into(), Value::String(iso_time(since)));
+    }
+    if let Some(completed) = snapshot.turn_completed_at {
+        object.insert("turnCompletedAt".into(), Value::String(iso_time(completed)));
+    }
+    value
+}
+
+async fn list_sessions(State(state): State<AppState>) -> Response {
+    let sessions: Vec<Value> = state
+        .harness()
+        .sessions
+        .list()
+        .iter()
+        .map(|meta| listing_entry(meta, &state))
+        .collect();
+    respond::json(StatusCode::OK, &Value::Array(sessions))
+}
+
+async fn status(State(state): State<AppState>) -> Response {
+    respond::json(
+        StatusCode::OK,
+        &json!({
+            "sandbox": {"mode": state.harness().sandbox.default_mode()},
+            "cwd": state.harness().sandbox.workspace_root(),
+        }),
+    )
+}
+
+fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
+    match error.code {
+        Some(code) => respond::error_with_code(status, error.message, code),
+        None => respond::error(status, error.message),
+    }
+}
+
+fn path_of(value: &str) -> PathBuf {
+    PathBuf::from(value)
+}
+
+async fn create_session(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let branch = body
+        .non_empty("branch")
+        .map(path_of)
+        .unwrap_or_else(|| state.harness().cwd.clone());
+    if !workspaces.owns(&branch) {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            format!("{} is not under any workspace root", branch.display()),
+        );
+    }
+    match state
+        .harness()
+        .sessions
+        .create_at(&branch, body.non_empty("title"))
+    {
+        Ok(created) => respond::json(
+            StatusCode::OK,
+            &json!({
+                "session": created.session,
+                "branch": branch.display().to_string(),
+                "name": created.name,
+                "definition": created.definition,
+                "log": created.log,
+            }),
+        ),
+        Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn folder_session(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let folder = body.non_empty("folder").map(path_of);
+    let Some(folder) = folder.filter(|folder| workspaces.owns(folder)) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "the folder must be under a workspace root",
+        );
+    };
+    let options = OpenAt {
+        fresh: body.bool("new") == Some(true),
+        title: None,
+        selection: SessionSelection::default(),
+    };
+    match state.harness().sessions.open_at(&folder, options) {
+        Ok(id) => {
+            let meta = state.harness().sessions.meta(&id);
+            let mut session = Map::new();
+            session.insert("id".into(), Value::String(id));
+            session.insert(
+                "turns".into(),
+                Value::from(meta.as_ref().map(|meta| meta.turns).unwrap_or(0)),
+            );
+            if let Some(title) = meta.and_then(|meta| meta.title) {
+                session.insert("title".into(), Value::String(title));
+            }
+            respond::json(
+                StatusCode::OK,
+                &json!({"folder": folder.display().to_string(), "session": session}),
+            )
+        }
+        Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn session_view_route(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let sessions = &state.harness().sessions;
+    if !sessions.exists(id.as_str()) {
+        return respond::no_session(id.as_str());
+    }
+    let Some(events) = sessions.events(id.as_str()) else {
+        return respond::no_session(id.as_str());
+    };
+    if let Some(name) = query.get("view") {
+        let Some(view) = state.session_view(name) else {
+            return respond::error(StatusCode::NOT_FOUND, format!("no view {name}"));
+        };
+        return view.respond(&state, &id, &events);
+    }
+    let meta = sessions.meta(id.as_str());
+    let mode = sessions.effective_mode(id.as_str(), &state.harness().sandbox.default_mode());
+    let mut turns = crate::transcript::transcript_turns(&events);
+    if let Some(markdown) = state.harness().markdown.as_ref() {
+        for turn in &mut turns {
+            if turn.kind == crate::transcript::TurnKind::Assistant {
+                turn.html = Some(markdown.render(&turn.text));
+            }
+        }
+    }
+    let mut body = Map::new();
+    body.insert("id".into(), Value::String(id.to_string()));
+    body.insert(
+        "endpoint".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.endpoint.clone())
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    body.insert(
+        "model".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.model.clone())
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    body.insert(
+        "reasoningEffort".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.reasoning_effort.clone())
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    body.insert(
+        "title".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.title.clone())
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    body.insert(
+        "cwd".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.cwd.clone())
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    body.insert("permission".into(), json!({"mode": mode}));
+    body.insert(
+        "turns".into(),
+        serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
+    );
+    if let Some(stats) = state.harness().stats.as_ref() {
+        body.insert("stats".into(), stats.stats(id.as_str(), &events));
+    }
+    respond::json(StatusCode::OK, &Value::Object(body))
+}
+
+async fn fork_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
+    match state.harness().sessions.fork(id.as_str()) {
+        ForkOutcome::NotFound => respond::no_session(id.as_str()),
+        ForkOutcome::Unavailable { code } => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!("session {id} has no completed turn to fork from"),
+            code,
+        ),
+        ForkOutcome::Forked(created) => respond::json(
+            StatusCode::OK,
+            &json!({
+                "session": created.session,
+                "name": created.name,
+                "definition": created.definition,
+                "log": created.log,
+            }),
+        ),
+    }
+}
+
+async fn flags_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let pinned = body.bool("pinned");
+    let archived = body.bool("archived");
+    if pinned.is_none() && archived.is_none() {
+        return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
+    }
+    if archived == Some(true) && state.runs().is_running(id.as_str()) {
+        if body.bool("stop") != Some(true) {
+            return respond::error_with_code(
+                StatusCode::CONFLICT,
+                format!("session {id} is running; pass stop: true to stop it and archive"),
+                "active",
+            );
+        }
+        state.runs().abort(id.as_str());
+    }
+    match state
+        .harness()
+        .sessions
+        .set_flags(id.as_str(), FlagPatch { pinned, archived })
+    {
+        Ok(None) => respond::no_session(id.as_str()),
+        Ok(Some(meta)) => respond::json(StatusCode::OK, &meta),
+        Err(error) => {
+            let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
+            respond::error_with_code(StatusCode::CONFLICT, error.message, code)
+        }
+    }
+}
+
+async fn title_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let Some(title) = body.str("title") else {
+        return respond::error(StatusCode::BAD_REQUEST, "a title is required");
+    };
+    let title = title.to_owned();
+    let folder = body.non_empty("folder").map(path_of);
+    if let Some(folder) = folder.as_ref()
+        && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
+    {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            format!("{} does not hold {id}", folder.display()),
+        );
+    }
+    match state.harness().sessions.rename(id.as_str(), &title) {
+        None => respond::no_session(id.as_str()),
+        Some(meta) => {
+            if let Some(folder) = folder.as_ref()
+                && let Err(error) = state
+                    .harness()
+                    .sessions
+                    .update_definition_title(folder, &title)
+            {
+                return service_refusal(error, StatusCode::BAD_REQUEST);
+            }
+            respond::json(StatusCode::OK, &meta)
+        }
+    }
+}
+
+async fn permission_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let sessions = &state.harness().sessions;
+    if !sessions.exists(id.as_str()) {
+        return respond::no_session(id.as_str());
+    }
+    let fallback = state.harness().sandbox.default_mode();
+    let current = sessions.effective_mode(id.as_str(), &fallback);
+    let requested = body.get("mode").cloned().unwrap_or(Value::Null);
+    let confirm = body.get("confirm").cloned().unwrap_or(Value::Null);
+    match state
+        .harness()
+        .sandbox
+        .transition(&current, &requested, &confirm)
+    {
+        Err(reason) => respond::json(
+            StatusCode::CONFLICT,
+            &json!({"error": reason, "session": id.to_string(), "mode": current}),
+        ),
+        Ok(mode) => match sessions.set_mode(id.as_str(), &mode, &fallback) {
+            Ok(written) => {
+                let mut body = Map::new();
+                body.insert("session".into(), Value::String(id.to_string()));
+                body.insert("mode".into(), Value::String(written.mode));
+                body.insert("changed".into(), Value::Bool(written.changed));
+                if let Some(seq) = written.seq {
+                    body.insert("seq".into(), Value::from(seq));
+                }
+                respond::json(StatusCode::OK, &Value::Object(body))
+            }
+            Err(error) => service_refusal(error, StatusCode::CONFLICT),
+        },
+    }
+}
+
+async fn steer_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    let Some(prompt) = body.trimmed("prompt") else {
+        return respond::error(StatusCode::BAD_REQUEST, "a prompt is required");
+    };
+    let attachments = match state.harness().attachments.as_ref() {
+        Some(reader) => match reader.read(body.get("attachments")) {
+            Ok(attachments) => attachments,
+            Err(message) => return respond::error(StatusCode::BAD_REQUEST, message),
+        },
+        None => Vec::new(),
+    };
+    if !state.runs().is_running(id.as_str()) {
+        return respond::error_with_code(
+            StatusCode::CONFLICT,
+            "the current turn no longer accepts steering",
+            "session/steer-unavailable",
+        );
+    }
+    if !state.harness().sessions.exists(id.as_str()) {
+        return respond::no_session(id.as_str());
+    }
+    let mut content = vec![json!({"type": "text", "text": prompt})];
+    content.extend(attachments);
+    match state.harness().sessions.user_content(id.as_str(), content) {
+        Ok(()) => respond::json(
+            StatusCode::OK,
+            &json!({"accepted": true, "session": id.to_string()}),
+        ),
+        Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
+    let stopped = state.runs().abort(id.as_str());
+    respond::json(
+        StatusCode::OK,
+        &json!({"stopped": stopped, "session": id.to_string()}),
+    )
+}
+
+async fn tree(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let path = query.get("path").map(|path| path_of(path));
+    let archived =
+        crate::services::ArchivedFilter::from_query(query.get("archived").map(String::as_str));
+    let sessions = state.harness().sessions.list();
+    match workspaces.tree(path.as_deref(), archived, &sessions) {
+        Ok(value) => respond::json(StatusCode::OK, &value),
+        Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let Some(raw) = body
+        .str("path")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return respond::error(StatusCode::BAD_REQUEST, "a path is required");
+    };
+    if !raw.starts_with('/') && !raw.starts_with('~') {
+        return respond::error(StatusCode::BAD_REQUEST, "the path must be absolute");
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let path = token::expand_home(raw, &home);
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return respond::error(StatusCode::BAD_REQUEST, format!("{raw} does not exist"));
+        }
+    };
+    if !metadata.is_dir() {
+        return respond::error(StatusCode::BAD_REQUEST, format!("{raw} is not a folder"));
+    }
+    let name = body
+        .str("name")
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = name {
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !valid {
+            return respond::error(
+                StatusCode::BAD_REQUEST,
+                "a name must be lowercase letters, digits and dashes",
+            );
+        }
+    }
+    match workspaces.add(&path, name) {
+        Ok((record, created)) => respond::json(
+            StatusCode::OK,
+            &json!({"record": record, "created": created}),
+        ),
+        Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn rename_workspace(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let Some(title) = body.str("title") else {
+        return respond::error(StatusCode::BAD_REQUEST, "a title is required");
+    };
+    match workspaces.rename(&id, title) {
+        Ok(Some(record)) => respond::json(StatusCode::OK, &record),
+        Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
+        Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn remove_workspace(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    if !workspaces.find(&id) {
+        return respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}"));
+    }
+    let sessions = state.harness().sessions.list();
+    match workspaces.remove(&id, &sessions) {
+        Ok(outcome) => respond::json(StatusCode::OK, &outcome),
+        Err(error) => service_refusal(error, StatusCode::CONFLICT),
+    }
+}
+
+async fn list_approvals(State(state): State<AppState>) -> Response {
+    let requests = state
+        .harness()
+        .approvals
+        .as_ref()
+        .map(|approvals| approvals.pending_requests())
+        .unwrap_or_default();
+    respond::json_compact(StatusCode::OK, &json!({"requests": requests}))
+}
+
+async fn answer_approval(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    let Some(service) = state.harness().approvals.as_ref() else {
+        return respond::plugin_missing("approval");
+    };
+    let looks_like_approval = id.strip_prefix("approval-").is_some_and(|rest| {
+        rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    });
+    if !looks_like_approval {
+        return respond::error(StatusCode::BAD_REQUEST, "not an approval id");
+    }
+    let outcome = match body.str("outcome") {
+        Some("allowed-once") => ApprovalOutcome::AllowedOnce,
+        Some("rejected") => ApprovalOutcome::Rejected,
+        Some("cancelled") => ApprovalOutcome::Cancelled,
+        _ => {
+            return respond::error(
+                StatusCode::BAD_REQUEST,
+                "outcome must be 'allowed-once', 'rejected' or 'cancelled'",
+            );
+        }
+    };
+    if service.answer(&id, outcome) {
+        respond::json_compact(StatusCode::OK, &json!({"answered": true}))
+    } else {
+        respond::error(
+            StatusCode::CONFLICT,
+            "that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it",
+        )
+    }
+}
+
+fn session_query(query: &HashMap<String, String>) -> Option<String> {
+    query.get("session").filter(|id| !id.is_empty()).cloned()
+}
+
+async fn get_goal(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(goals) = state.harness().goals.as_ref() else {
+        return respond::plugin_missing("goal");
+    };
+    let Some(session) = session_query(&query) else {
+        return respond::error(StatusCode::BAD_REQUEST, "a session is required");
+    };
+    if !state.harness().sessions.exists(&session) {
+        return respond::no_session(&session);
+    }
+    let goal = goals.get(&session);
+    respond::json(StatusCode::OK, &json!({"session": session, "goal": goal}))
+}
+
+async fn get_todo(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(todos) = state.harness().todos.as_ref() else {
+        return respond::plugin_missing("todo");
+    };
+    let Some(session) = session_query(&query) else {
+        return respond::error(StatusCode::BAD_REQUEST, "a session is required");
+    };
+    if !state.harness().sessions.exists(&session) {
+        return respond::no_session(&session);
+    }
+    let todo = todos.get(&session);
+    respond::json(StatusCode::OK, &json!({"session": session, "todo": todo}))
+}
+
+async fn get_team(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(team) = state.harness().team.as_ref() else {
+        return respond::plugin_missing("team");
+    };
+    let Some(session) = session_query(&query) else {
+        return respond::error(StatusCode::BAD_REQUEST, "a session is required");
+    };
+    if !state.harness().sessions.exists(&session) {
+        return respond::no_session(&session);
+    }
+    let view = team.view(&session);
+    respond::json(
+        StatusCode::OK,
+        &json!({
+            "session": session,
+            "lead": view.lead,
+            "members": view.members,
+            "tasks": view.tasks,
+            "messages": view.messages,
+            "delivered": view.delivered,
+        }),
+    )
+}
+
+async fn post_goal(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(goals) = state.harness().goals.as_ref() else {
+        return respond::plugin_missing("goal");
+    };
+    let session = body.str("session").unwrap_or("");
+    if session.is_empty() || !state.harness().sessions.exists(session) {
+        return respond::no_session(session);
+    }
+    let reference = GoalRef {
+        id: body.str("goal_id").unwrap_or("").to_owned(),
+        revision: body.number("revision").unwrap_or(0.0) as u64,
+    };
+    let action = match body.str("action").unwrap_or("") {
+        "create" => GoalAction::Create {
+            objective: body.str("objective").unwrap_or("").to_owned(),
+            max_goal_rounds: body.number("max_goal_rounds").map(|value| value as u64),
+        },
+        "edit" => GoalAction::Edit {
+            goal: reference,
+            objective: body.str("objective").map(str::to_owned),
+            max_goal_rounds: body.number("max_goal_rounds").map(|value| value as u64),
+        },
+        "pause" => GoalAction::Pause(reference),
+        "resume" => GoalAction::Resume(reference),
+        "complete" => GoalAction::Complete(reference),
+        "blocked" => GoalAction::Blocked {
+            goal: reference,
+            reason: body.get("blocked_reason").cloned().unwrap_or(Value::Null),
+        },
+        "clear" => GoalAction::Clear(reference),
+        other => {
+            return respond::error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown goal action {}",
+                    serde_json::to_string(other).unwrap_or_default()
+                ),
+            );
+        }
+    };
+    match goals.act(session, action) {
+        Ok(GoalAnswer::Goal(view)) => respond::json(StatusCode::OK, &json!({"goal": view})),
+        Ok(GoalAnswer::Cleared(cleared)) => {
+            respond::json(StatusCode::OK, &json!({"cleared": cleared}))
+        }
+        Err(error) => {
+            let status = match error.code.as_deref() {
+                Some("GOAL_NOT_FOUND") => StatusCode::NOT_FOUND,
+                Some("GOAL_STALE_REVISION") => StatusCode::CONFLICT,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            respond::error_with_code(status, error.message, error.code.unwrap_or_default())
+        }
+    }
+}
+
+async fn html_preview(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let Some(wanted) = query.get("path").filter(|path| !path.is_empty()) else {
+        return respond::error(StatusCode::BAD_REQUEST, "a path is required");
+    };
+    let path = PathBuf::from(wanted);
+    if !workspaces.owns(&path) {
+        return respond::error(
+            StatusCode::NOT_FOUND,
+            "that path is not under any workspace root",
+        );
+    }
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return respond::error(StatusCode::NOT_FOUND, "not a file"),
+    };
+    if metadata.len() > preview::MAX_PREVIEW_BYTES {
+        return respond::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the document is larger than 4MB",
+        );
+    }
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(_) => return respond::error(StatusCode::NOT_FOUND, "no such document"),
+    };
+    let document = preview::prepare_document(&path, &source, metadata.len());
+    respond::json(StatusCode::OK, &document)
+}
+
+async fn purify(State(state): State<AppState>) -> Response {
+    match preview::purify_path(&state.options().asset_roots) {
+        Some(path) => match std::fs::read(&path) {
+            Ok(bytes) => respond::file_bytes(&path, "purify.min.js", bytes),
+            Err(_) => respond::error(StatusCode::NOT_FOUND, "the sanitiser is not installed"),
+        },
+        None => respond::error(StatusCode::NOT_FOUND, "the sanitiser is not installed"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The turn
+
+async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
+        return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
+    };
+    let attachments = match state.harness().attachments.as_ref() {
+        Some(reader) => match reader.read(body.get("attachments")) {
+            Ok(attachments) => attachments,
+            Err(message) => return respond::error(StatusCode::BAD_REQUEST, message),
+        },
+        None => Vec::new(),
+    };
+
+    let requested_endpoint = body.non_empty("endpoint");
+    let requested_model = body.non_empty("model");
+    let requested_effort = body.non_empty("reasoningEffort");
+    let models = state.harness().models.as_ref();
+    if let Some(endpoint) = requested_endpoint
+        && !models.has(endpoint)
+    {
+        return respond::text(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "no endpoint named '{endpoint}'; configured: {}\n",
+                models.names().join(", ")
+            ),
+        );
+    }
+
+    let born = SessionSelection {
+        endpoint: requested_endpoint.map(str::to_owned),
+        model: requested_model.map(str::to_owned),
+        reasoning_effort: requested_effort.map(str::to_owned),
+    };
+    let sessions = &state.harness().sessions;
+    let resume = body.str("session").filter(|id| !id.is_empty());
+    let folder = body.non_empty("folder").map(path_of);
+    let title: String = prompt.chars().take(60).collect();
+    let session = if let Some(resume) = resume {
+        sessions.start(StartSession {
+            resume: Some(resume.to_owned()),
+            cwd: None,
+            title: None,
+            selection: born.clone(),
+        })
+    } else if let Some(folder) = folder.as_ref() {
+        let Some(workspaces) = state.harness().workspaces.as_ref() else {
+            return respond::plugin_missing("workspace");
+        };
+        if !workspaces.owns(folder) {
+            return respond::text(
+                StatusCode::BAD_REQUEST,
+                "the folder must be under a workspace root\n",
+            );
+        }
+        sessions.open_at(
+            folder,
+            OpenAt {
+                fresh: body.bool("new") == Some(true),
+                title: Some(title),
+                selection: born.clone(),
+            },
+        )
+    } else {
+        sessions.start(StartSession {
+            resume: None,
+            cwd: Some(state.harness().cwd.clone()),
+            title: Some(title),
+            selection: born.clone(),
+        })
+    };
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => return service_refusal(error, StatusCode::BAD_REQUEST),
+    };
+    if let Some(folder) = folder.as_ref()
+        && let Some(workspaces) = state.harness().workspaces.as_ref()
+    {
+        workspaces.ensure_owner(folder);
+    }
+
+    let meta = sessions.meta(&session);
+    let recorded = session_request_selection(meta.as_ref());
+    let Some(selection) = turn_selection(
+        requested_endpoint,
+        requested_model,
+        requested_effort,
+        &recorded,
+        state.options().default_endpoint.as_deref(),
+        models,
+    ) else {
+        return respond::text(StatusCode::BAD_REQUEST, "no endpoint is configured\n");
+    };
+    if !models.has(&selection.endpoint) {
+        return respond::text(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "no endpoint named '{}'; configured: {}\n",
+                selection.endpoint,
+                models.names().join(", ")
+            ),
+        );
+    }
+    let unchanged = meta.as_ref().is_some_and(|meta| {
+        meta.endpoint.as_deref() == Some(selection.endpoint.as_str())
+            && meta.model == selection.model
+            && meta.reasoning_effort == selection.reasoning_effort
+    });
+    if !unchanged {
+        let recorded_selection = SessionSelection {
+            endpoint: Some(selection.endpoint.clone()),
+            model: selection.model.clone(),
+            reasoning_effort: selection.reasoning_effort.clone(),
+        };
+        sessions.set_model(&session, &recorded_selection);
+    }
+
+    let guard = state.runs().begin(&session);
+    let cancel = guard.cancellation();
+    let request = crate::services::TurnRequest {
+        session: session.clone(),
+        endpoint: selection.endpoint.clone(),
+        prompt: prompt.to_owned(),
+        attachments,
+        cancel: cancel.clone(),
+        max_rounds: state.options().max_rounds,
+        model: selection.model.clone(),
+        reasoning_effort: selection.reasoning_effort.clone(),
+    };
+    let runner = state.harness().turns.clone();
+    let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
+    let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
+    let stream_session = session.clone();
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let mut running = Box::pin(runner.run_turn(request));
+        let outcome = loop {
+            tokio::select! {
+                frame = frames.next() => {
+                    match frame {
+                        Some(frame) => {
+                            if sender.send(frame).is_err() {
+                                // The reader is gone; the turn itself still runs to its end.
+                                break None;
+                            }
+                        }
+                        None => break None,
+                    }
+                }
+                result = &mut running => break Some(result),
+            }
+        };
+        let stopped = || {
+            SseFrame::new(
+                names::CANCELLED,
+                &json!({"session": stream_session, "message": "stopped"}),
+            )
+        };
+        match outcome {
+            None => {}
+            Some(Ok(outcome)) => {
+                if cancel.is_cancelled() {
+                    let _ = sender.send(stopped());
+                } else {
+                    let mut done = Map::new();
+                    done.insert("session".into(), Value::String(stream_session));
+                    done.insert("text".into(), Value::String(outcome.text));
+                    done.insert("finishReason".into(), Value::String(outcome.finish_reason));
+                    done.insert("rounds".into(), Value::from(outcome.rounds));
+                    done.insert("denials".into(), Value::Array(outcome.denials));
+                    if let Some(ended) = outcome.ended {
+                        done.insert(
+                            "ended".into(),
+                            Value::Array(ended.into_iter().map(Value::String).collect()),
+                        );
+                    }
+                    if let Some(usage) = outcome.usage {
+                        done.insert("usage".into(), usage);
+                    }
+                    let _ = sender.send(SseFrame::new(names::DONE, &Value::Object(done)));
+                }
+            }
+            Some(Err(error)) => {
+                if cancel.is_cancelled() {
+                    let _ = sender.send(stopped());
+                } else {
+                    let _ = sender.send(SseFrame::new(
+                        names::ERROR,
+                        &json!({"session": stream_session, "message": error.message}),
+                    ));
+                }
+            }
+        }
+        drop(guard);
+    });
+    let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|frame| (frame, receiver))
+    });
+    sse_response(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::selection::SessionSelection;
+    use crate::services::{
+        ApprovalService, CreatedSession, ForkOutcome, ModeWrite, ModelService, SandboxService,
+        SessionMeta, SessionService, TurnOutcome, TurnRequest, TurnRunner,
+    };
+    use axum::body::to_bytes;
+    use futures::future::BoxFuture;
+    use http_body_util::BodyExt;
+    use std::path::Path;
+    use tower::ServiceExt;
+
+    struct Sessions {
+        metas: Vec<SessionMeta>,
+        events: HashMap<String, Vec<Value>>,
+    }
+
+    impl Sessions {
+        fn with_one() -> Self {
+            Sessions {
+                metas: vec![SessionMeta {
+                    id: "session-00000000-0000-0000-0000-000000000001".into(),
+                    cwd: Some("/work".into()),
+                    endpoint: Some("double".into()),
+                    title: Some("first".into()),
+                    turns: 1,
+                    ..SessionMeta::default()
+                }],
+                events: HashMap::new(),
+            }
+        }
+    }
+
+    impl SessionService for Sessions {
+        fn list(&self) -> Vec<SessionMeta> {
+            self.metas.clone()
+        }
+        fn exists(&self, id: &str) -> bool {
+            self.metas.iter().any(|meta| meta.id == id)
+        }
+        fn events(&self, id: &str) -> Option<Vec<Value>> {
+            self.events.get(id).cloned().or(Some(Vec::new()))
+        }
+        fn start(&self, _options: StartSession) -> Result<String, ServiceError> {
+            Ok(self.metas[0].id.clone())
+        }
+        fn open_at(&self, _folder: &Path, _options: OpenAt) -> Result<String, ServiceError> {
+            Ok(self.metas[0].id.clone())
+        }
+        fn create_at(
+            &self,
+            _branch: &Path,
+            _title: Option<&str>,
+        ) -> Result<CreatedSession, ServiceError> {
+            Ok(CreatedSession {
+                session: self.metas[0].id.clone(),
+                name: "test".into(),
+                definition: "def.yaml".into(),
+                log: "log.zst".into(),
+            })
+        }
+        fn fork(&self, _id: &str) -> ForkOutcome {
+            ForkOutcome::NotFound
+        }
+        fn set_flags(
+            &self,
+            _id: &str,
+            _patch: FlagPatch,
+        ) -> Result<Option<SessionMeta>, ServiceError> {
+            Ok(self.metas.first().cloned())
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
+            self.metas.first().cloned()
+        }
+        fn definition_id(&self, _folder: &Path) -> Option<String> {
+            None
+        }
+        fn update_definition_title(
+            &self,
+            _folder: &Path,
+            _title: &str,
+        ) -> Result<(), ServiceError> {
+            Ok(())
+        }
+        fn set_model(&self, _id: &str, _selection: &SessionSelection) -> Option<SessionMeta> {
+            self.metas.first().cloned()
+        }
+        fn effective_mode(&self, _id: &str, fallback: &str) -> String {
+            fallback.to_owned()
+        }
+        fn set_mode(
+            &self,
+            _id: &str,
+            mode: &str,
+            _fallback: &str,
+        ) -> Result<ModeWrite, ServiceError> {
+            Ok(ModeWrite {
+                mode: mode.to_owned(),
+                changed: true,
+                seq: Some(1),
+            })
+        }
+        fn user_content(&self, _id: &str, _content: Vec<Value>) -> Result<(), ServiceError> {
+            Ok(())
+        }
+        fn folder(&self, _id: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    struct Models;
+
+    impl ModelService for Models {
+        fn names(&self) -> Vec<String> {
+            vec!["double".into()]
+        }
+        fn default_endpoint(&self) -> Option<String> {
+            Some("double".into())
+        }
+        fn declares_level(&self, _endpoint: &str, _model: Option<&str>, _effort: &str) -> bool {
+            true
+        }
+    }
+
+    struct Turns;
+
+    impl TurnRunner for Turns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Ok(TurnOutcome::default()) })
+        }
+    }
+
+    struct Sandbox;
+
+    impl SandboxService for Sandbox {
+        fn default_mode(&self) -> String {
+            "workspace-write".into()
+        }
+        fn workspace_root(&self) -> String {
+            "/work".into()
+        }
+        fn transition(
+            &self,
+            _current: &str,
+            _requested: &Value,
+            _confirm: &Value,
+        ) -> Result<String, String> {
+            Ok("read-only".into())
+        }
+    }
+
+    struct Approvals;
+
+    impl ApprovalService for Approvals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            false
+        }
+    }
+
+    fn harness() -> Harness {
+        let mut harness = Harness::new(
+            Arc::new(Sessions::with_one()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        harness.approvals = Some(Arc::new(Approvals));
+        harness
+    }
+
+    fn temp_secret(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("heddle-server-test-{label}-{}", std::process::id()))
+            .join("web-secret")
+    }
+
+    fn app(label: &str) -> (Router, AppState) {
+        ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret(label)),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router")
+    }
+
+    async fn call(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> (StatusCode, HashMap<String, String>, Vec<u8>) {
+        let mut request = axum::http::Request::builder().method(method).uri(uri);
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers: HashMap<String, String> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    value.to_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    fn body_text(bytes: &[u8]) -> String {
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn healthz_and_the_favicon_need_no_token() {
+        let (router, _) = app("health");
+        let (status, headers, bytes) = call(&router, Method::GET, "/healthz", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "application/json");
+        assert_eq!(
+            body_text(&bytes),
+            format!("{{\"ok\":true,\"service\":\"{SERVICE_NAME}\",\"port\":3082}}\n")
+        );
+
+        let (status, headers, bytes) = call(&router, Method::GET, "/favicon.svg", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "image/svg+xml");
+        assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_api_refuses_without_a_credential_and_says_so() {
+        let (router, _) = app("unauthorized");
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body_text(&bytes), "unauthorized\n");
+    }
+
+    #[tokio::test]
+    async fn the_bare_page_is_the_token_form_not_the_app() {
+        let (router, _) = app("bare");
+        let (status, headers, bytes) = call(&router, Method::GET, "/", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+        let html = body_text(&bytes);
+        assert!(html.contains("A launch token is required for this page."));
+        assert!(html.contains("<form method=\"get\" action=\"/\">"));
+        assert!(!html.contains("id=\"log\""));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_token_is_the_stale_form_and_the_right_one_mints_a_cookie() {
+        let (router, _) = app("handshake");
+        let (status, _, bytes) = call(&router, Method::GET, "/?token=wrong", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body_text(&bytes).contains("That token is not the current one."));
+
+        let (status, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(headers["location"], "/");
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        assert!(cookie.starts_with("heddle-auth-"));
+        assert!(headers["set-cookie"].contains("HttpOnly"));
+        assert!(headers["set-cookie"].contains("SameSite=Strict"));
+
+        // The bare URL with that cookie is the app, and the API is served.
+        let (status, _, bytes) = call(&router, Method::GET, "/", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body_text(&bytes).contains("id=\"log\""));
+
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body[0]["id"],
+            "session-00000000-0000-0000-0000-000000000001"
+        );
+        assert_eq!(body[0]["running"], false);
+    }
+
+    #[tokio::test]
+    async fn a_forged_cookie_is_refused_and_a_wrong_authority_does_not_authenticate() {
+        let (router, _) = app("forged");
+        let (status, _, _) = call(
+            &router,
+            Method::GET,
+            "/api/sessions",
+            Some("heddle-auth-x=v1.1.forged"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_fence_refuses_a_foreign_host_and_origin_before_the_token() {
+        let (router, _) = app("fence");
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/sessions")
+                    .header("host", "evil.example:3082")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body_text(&bytes).contains("is not loopback"));
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/sessions")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_same_machine_gate_origin_is_served_and_an_opaque_one_is_refused() {
+        let (router, _) = app("origin");
+        // A handshake first, because the gate carries the cookie.
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/sessions")
+                    .header("cookie", &cookie)
+                    .header("origin", "http://127.0.0.1:8082")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/turn")
+                    .header("cookie", &cookie)
+                    .header("origin", "null")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_cross_site_write_without_a_valid_cookie_is_403() {
+        let (router, _) = app("cross-site");
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/turn")
+                    .header(
+                        "cookie",
+                        format!("{}=v1.1.forged", cookie_name("127.0.0.1:3082")),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body_text(&bytes).contains("a cross-site request that changes state"));
+    }
+
+    #[tokio::test]
+    async fn approvals_are_listed_and_an_unknown_question_is_a_conflict() {
+        let (router, _) = app("approvals");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/approvals", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_text(&bytes), "{\"requests\":[]}\n");
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/approvals/approval-00000000-0000-0000-0000-000000000000")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"outcome":"allowed-once"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn status_names_the_deployment_mode_and_root() {
+        let (router, _) = app("status");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/status", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body_text(&bytes),
+            "{\n  \"cwd\": \"/work\",\n  \"sandbox\": {\n    \"mode\": \"workspace-write\"\n  }\n}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_view_is_refused_when_it_does_not_exist_and_the_chat_view_has_its_record() {
+        let (router, _) = app("chat");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/session-00000000-0000-0000-0000-000000000001",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["id"], "session-00000000-0000-0000-0000-000000000001");
+        assert_eq!(body["endpoint"], "double");
+        assert_eq!(body["permission"]["mode"], "workspace-write");
+        assert!(body["turns"].is_array());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_session_is_404_and_a_non_id_is_400() {
+        let (router, _) = app("missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/session-11111111-1111-1111-1111-111111111111",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"no session session-11111111-1111-1111-1111-111111111111\"}\n"
+        );
+
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/..%2F..%2Fetc%2Fpasswd",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(&bytes), "{\"error\":\"not a session id\"}\n");
+    }
+
+    #[tokio::test]
+    async fn the_dry_run_plan_does_not_bind_and_names_the_default() {
+        let plan = DryRunPlan::for_options(&ServerOptions::default());
+        assert_eq!(plan.port, DEFAULT_PORT);
+        assert_eq!(plan.host, DEFAULT_HOST);
+        assert_eq!(plan.url, "http://127.0.0.1:3082/?token=generated-at-start");
+        assert_eq!(
+            plan.announce(),
+            "heddle web: would serve http://127.0.0.1:3082/?token=generated-at-start"
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["dryRun"], true);
+    }
+
+    #[test]
+    fn a_non_loopback_bind_is_refused() {
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                host: Some("0.0.0.0".into()),
+                token: Some("x".into()),
+                secret_path: Some(temp_secret("bind")),
+                ..ServerOptions::default()
+            },
+        );
+        let error = builder.into_router(3082).err().expect("a refusal");
+        assert!(
+            matches!(error, ServerError::NotLoopback(sentence) if sentence.contains("refusing to bind 0.0.0.0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_server_starts_on_an_ephemeral_port_and_announces_its_url() {
+        let server = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("start")),
+                ..ServerOptions::default()
+            },
+        )
+        .start()
+        .await
+        .expect("the server starts");
+        assert!(server.port() > 0);
+        assert_eq!(
+            server.url(),
+            format!("http://127.0.0.1:{}/?token=test-token", server.port())
+        );
+        assert_eq!(
+            server.announce()[0],
+            format!(
+                "heddle web: http://127.0.0.1:{}/?token=test-token",
+                server.port()
+            )
+        );
+        assert!(server.announce_json().contains("\"port\":"));
+        server.close().await;
+    }
+
+    // `to_bytes` is used by `call`'s siblings in other modules; the import is kept explicit here.
+    #[allow(dead_code)]
+    async fn _body(response: Response) -> Vec<u8> {
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
     }
 }
