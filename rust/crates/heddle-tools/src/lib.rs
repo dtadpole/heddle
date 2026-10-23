@@ -16,13 +16,15 @@
 //! | [`protocol`] | the outside-component wire: line-delimited JSON-RPC 2.0 on stdio |
 //! | [`outside`] | starting an outside component and forwarding its tools' calls |
 //! | [`upstream`] | `heddle-sandbox`'s own types, and provisional mirrors of `heddle-llm`/`heddle-session` types |
-//! | [`adapters`] | the gate ports over the real `heddle-sandbox` services |
+//! | [`adapters`] | the gate ports over the real `heddle-sandbox` and `heddle-session` services |
+//! | [`command`] | the `tools` and `commands` commands, in the owning crate (D-043) |
 //!
 //! Background jobs are named in this crate's description but have no TypeScript source and no verifier
 //! yet; they are not part of this API until the oracle has them.
 
 pub mod adapters;
 pub mod builtin;
+pub mod command;
 pub mod config;
 pub mod gates;
 pub mod outside;

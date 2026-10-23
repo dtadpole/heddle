@@ -23,7 +23,10 @@ use heddle_sandbox::{
 
 use heddle_session::SessionService;
 
-use crate::gates::{ApprovalGate, EscalationError, EscalationRequest, ModeResolver, SandboxGate};
+use crate::gates::{
+    ApprovalGate, EscalationError, EscalationRequest, ModeResolver, NoToolHooks, SandboxGate,
+    ToolGates,
+};
 use crate::upstream::{
     ApprovalDecision, ConfinedArgv, SandboxDenial, SandboxMode, SandboxOutcome, SandboxUnavailable,
     SessionHandle,
@@ -202,6 +205,25 @@ impl ModeResolver for SessionModes {
     }
 }
 
+/// The registry's gates over the deployment's three services, with no hook listeners — what the `tools` row
+/// injects (`approvals`, `sandbox`, `session`). The binary's adapter for the row is then
+/// `ToolRegistry::from_config(gates_over(sandbox, approvals, sessions), &ToolsConfig::from_row(&config)?)`.
+///
+/// The hook port stays [`NoToolHooks`] until the event bus attaches its own [`ToolHooks`](crate::ToolHooks)
+/// through the returned [`ToolGates`]' `hooks` field.
+pub fn gates_over(
+    sandbox: Arc<SandboxService>,
+    approvals: Arc<ApprovalService>,
+    sessions: Arc<SessionService>,
+) -> ToolGates {
+    ToolGates {
+        approvals: Arc::new(SandboxApprovals::new(approvals)),
+        sandbox: Arc::new(Sandbox::new(sandbox)),
+        modes: Arc::new(SessionModes::new(sessions)),
+        hooks: Arc::new(NoToolHooks),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -359,6 +381,47 @@ mod tests {
             modes.effective_mode(&handle, SandboxMode::WorkspaceWrite),
             SandboxMode::ReadOnly
         );
+    }
+
+    #[tokio::test]
+    async fn a_registry_over_the_three_real_services_writes_inside_and_refuses_outside() {
+        let root = scratch("composed");
+        let gates = gates_over(
+            sandbox_at(&root),
+            Arc::new(ApprovalService::new(ApprovalsConfig::default())),
+            sessions_at(&root.join("sessions")),
+        );
+        let registry =
+            crate::ToolRegistry::from_config(gates, &crate::config::ToolsConfig::default());
+        let args = |value: serde_json::Value| value.as_object().cloned().unwrap();
+        let wrote = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "one.txt", "content": "first" })),
+                crate::ToolContext::new(&root),
+            )
+            .await;
+        assert_eq!(wrote.error, None, "{wrote:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("one.txt")).unwrap(),
+            "first"
+        );
+        let read = registry
+            .call(
+                "read_file",
+                args(json!({ "path": "one.txt" })),
+                crate::ToolContext::new(&root),
+            )
+            .await;
+        assert_eq!(read.output, "first");
+        let outside = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "/etc/heddle-should-not-exist", "content": "no" })),
+                crate::ToolContext::new(&root),
+            )
+            .await;
+        assert_eq!(outside.error.unwrap().code, crate::codes::SANDBOX);
     }
 
     #[tokio::test]
