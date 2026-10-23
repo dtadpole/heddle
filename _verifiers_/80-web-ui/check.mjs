@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, removeDir, runCli, runCliSource, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
@@ -27,6 +27,28 @@ import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/brows
  * the constant the server exports, because that is where a person reads it.
  */
 
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
+
 const CAPABILITY = 'a Web UI on localhost with a live stream'
 
 /**
@@ -42,11 +64,11 @@ const CAPABILITY = 'a Web UI on localhost with a live stream'
 async function startServer(label, options = {}) {
   const home = isolatedHome(`web-${label}`)
   const work = fixtureDir(`web-${label}`)
-  const double = await chatDouble({
+  const double = held(await chatDouble({
     content: 'live content',
     reasoning: 'live reasoning',
     holdOpenMs: options.holdOpenMs ?? 1200,
-  })
+  }))
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double', '--session-root', join(home, 'sessions')],
@@ -189,7 +211,7 @@ test('the server takes the documented default port when none is named', async (c
    */
   const home = isolatedHome('default-port')
   const work = fixtureDir('default-port')
-  const double = await chatDouble({ content: 'x' })
+  const double = held(await chatDouble({ content: 'x' }))
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   try {
     const run = await runCliSource(['web', '--host', '127.0.0.1', '--endpoint', 'double', '--dry-run', '--json'], {
