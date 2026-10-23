@@ -113,6 +113,12 @@ call of one pass. `--json` prints the whole record; `--pin` appends it to the JS
 the page without spending a turn; `--keep-browser` leaves the browser open for a debugging session. It reads `~/heddle-live` and `~/.heddle/web.log`; it writes nothing into either, and
 the only file it writes is the pinned JSONL in this seat's worktree.
 
+The deployment block of a pass records `head`, `branch`, `dirty`, `mainTip` (fetched before it is
+compared, with `mainTipFresh` saying whether that succeeded), `behind` and `ahead`. Staleness
+(`behind`) is recorded and watched across two consecutive passes; a dirty tree or commits not on
+`main` (`ahead`) are the stronger finding, because the served build then does not come from the
+deployment's declared source.
+
 ## Pinned results
 
 `_context_/rust-port/live-health.jsonl` — one JSON object per pass, append-only, and

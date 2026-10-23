@@ -153,12 +153,31 @@ function refreshDeploymentTarget() {
   serverPort = portOf(serverOrigin)
 }
 
+/**
+ * The main tip is fetched before it is compared.
+ *
+ * A pass runs on the schedule, between rounds, so the worktree's `origin/main` may be hours old; a
+ * staleness reading against a stale ref is worse than none. The fetch is best-effort and recorded:
+ * `mainTipFresh` says whether the tip was refreshed, so a reader knows what the comparison measured.
+ */
+function refreshMainTip() {
+  try {
+    execFileSync('git', ['--no-optional-locks', '-C', REPO, 'fetch', 'origin', '--quiet'], { stdio: 'ignore', timeout: 10_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const mainTipFresh = refreshMainTip()
+
 const deployment = (() => {
   const head = gitAt(DEPLOY_ROOT, 'rev-parse', 'HEAD')
   const branch = gitAt(DEPLOY_ROOT, 'rev-parse', '--abbrev-ref', 'HEAD')
   const dirty = gitAt(DEPLOY_ROOT, 'status', '--porcelain')
   const mainTip = gitAt(REPO, 'rev-parse', 'origin/main')
   const behind = head !== null && mainTip !== null ? Number(gitAt(DEPLOY_ROOT, 'rev-list', '--count', `${head}..${mainTip}`) ?? 0) : null
+  const ahead = head !== null && mainTip !== null ? Number(gitAt(DEPLOY_ROOT, 'rev-list', '--count', `${mainTip}..${head}`) ?? 0) : null
   const pagePath = join(DEPLOY_ROOT, 'dist', 'server', 'page.html')
   const built = existsSync(pagePath) ? readFileSync(pagePath) : null
   return {
@@ -169,7 +188,9 @@ const deployment = (() => {
     dirty: dirty === null ? null : dirty === '' ? 0 : dirty.split('\n').length,
     mainTip,
     mainTipShort: mainTip?.slice(0, 12) ?? null,
+    mainTipFresh,
     behind,
+    ahead,
     pagePath,
     /** The marker the served document must carry, computed from this checkout's built page. */
     expectedMarker: built === null ? null : createHash('sha256').update(built).digest('hex').slice(0, 12),
@@ -802,7 +823,7 @@ if (options.json === true) {
 } else {
   const mark = (verdict) => (verdict === 'pass' ? 'pass' : verdict === 'fail' ? 'FAIL' : '----')
   say(`live-health ${pass.at}`)
-  say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}, behind ${deployment.behind ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
+  say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}${deployment.mainTipFresh ? '' : ' (ref not refreshed)'}, behind ${deployment.behind ?? '?'}, ahead ${deployment.ahead ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
   if (pass.restore !== undefined) say(`restore     ${pass.restore.broughtBack ? 'used' : 'FAILED'}  ${pass.restore.note ?? pass.restore.error ?? ''} (${pass.restore.waitedMs}ms)`)
   say(`process     ${mark(pass.checks.process.verdict)}  ${pass.checks.process.detail}`)
