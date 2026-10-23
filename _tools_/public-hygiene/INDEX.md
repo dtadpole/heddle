@@ -82,6 +82,23 @@ published on main — names in paths, session ids, internal aliases, devserver n
 are not this range's work and a range push is judged by the default mode; cleaning published history is the
 owner's decision, not an integrator's.
 
+## Placeholder UUIDs (D-046)
+
+A test must carry a well-formed id, and building one at runtime to slip past the gate is not allowed (D-044), so
+the gate tells a placeholder from a real id. Ignoring the version nibble (the first hex digit of the third group)
+and the variant nibble (the first of the fourth), a UUID is a **placeholder** when at least 29 of its remaining 30
+hex digits are one and the same digit: the nil UUID, `00000000-0000-4000-8000-000000000000`, the all-ones forms,
+each with or without one trailing counter digit. A random UUID never meets that. A match is exempt only when every
+UUID it overlaps is a placeholder; a match on a real UUID, or on text that is not a full UUID (a vector with eleven
+digits or a `g` in it), is judged as before. The exemption is not tied to a rule number, because numbers are lines
+of the private list and move when it is edited.
+
+## What a range brings in
+
+`--range A..B` judges the commits in `B` that `A` lacks, and the content change **since their merge base**
+(`A...B`): what a merge would bring in. A tree diff would also show, reversed, everything `A` changed after `B`
+forked, and read main's own fixes back as lines a behind branch adds.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -97,7 +114,9 @@ node --test _tools_/public-hygiene/_tests_/gate/unit.test.mjs
 ```
 
 They judge the list format, literal and regex matching, redaction, the diff and log parsers, the identity
-check, the built-in rule, and the three exit codes against a throwaway git repository.
+check, the built-in rule, the placeholder rule (integrator-two's six measured shapes exempt, a random v4 and two
+stray digits caught), a branch behind main, a symlinked invocation, and the three exit codes against a throwaway
+git repository.
 
 ## Read next
 
