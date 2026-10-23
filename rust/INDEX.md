@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `cce4bec`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `6549572`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
