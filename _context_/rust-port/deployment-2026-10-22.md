@@ -1,9 +1,9 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:27:13Z
+modified: 2026-10-23T04:30:58Z
 level: L3
-version: 1.6.0
+version: 1.7.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
 status: unverified
 grounded_in:
@@ -217,6 +217,26 @@ seat's worktree): `started` **failed** after 20 s, and the scratch log gave the 
 yet: web`, exit 2 after 4 ms, retried by the supervisor with backoff — and the other five claims were reported
 **unjudged** rather than failed one by one. The rehearsal now stops at that point instead of spending another minute,
 which a component test pins. The TypeScript rehearsal run right after held 6 of 6 again (95: 4 pass, 0 fail).
+
+## The gate on 8082 has no working supervisor either
+
+The owner's address is the gate, not the server: `ai.reflection.heddle-web-gate` (dsh-web-ops' token-supplying
+proxy, installed on this Mac with that project's own installer) listens on 8082 and forwards to 3082. Its only parent
+is launchd (`ppid 1`; no supervisord runs here), so it has the same defect the server had before `supervisor.mjs`: a
+gate process that dies is not restarted, and 8082 stays down although the server behind it is healthy.
+
+Rehearsed on a scratch pair, 2026-10-22 at about 21:33 PDT, with the gate's unchanged code on 8096 in front of a
+rehearsal heddle on 3096 (own log, mode 600), the live gate untouched (pid 97470 before and after):
+
+| Gate arrangement | SIGKILL of the process owning 8096 |
+|---|---|
+| launchd alone (as the live gate runs now) | `000` at 2, 5, 10 and 15 s; the job stays `not running` |
+| `supervisor.mjs -- node heddle-gate.mjs` under the same agent | back in **400 ms** on a new pid (15349 → 15501), and `/api/sessions` answers 200 through a fresh token handshake |
+
+So the fix is the one the server already has, and the supervisor is already on `main`
+(`~/heddle-live/_tools_/web-daemon/supervisor.mjs`). Changing the gate's installed agent belongs to dsh-web-ops, so it
+is proposed to the coordinator rather than done: the gate's plist would gain the two arguments in front of its program,
+with the same environment, and dsh-web-ops' `install-heddle-gate.sh` restores the original in one command.
 
 ## Who acts on the service, and the guard's state (D-045)
 
