@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use heddle_server::Harness;
-use heddle_server::services::{ModelService as ServerModels, SandboxService as ServerSandbox};
+use heddle_server::services::{
+    ModelService as ServerModels, SandboxService as ServerSandbox, ServiceError, TurnOutcome,
+    TurnRequest, TurnRunner,
+};
 use serde_json::Value;
 
 use crate::boot::Boot;
@@ -31,6 +34,19 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
         harness.sessions = Arc::new(heddle_server::adapters::StoreSessions::new(
             heddle_session::SessionService::from_store(Arc::clone(sessions.store())),
         ));
+    }
+    if let (Some(runtime), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_agent::AgentRuntime>>("agent-runtime")
+            .or_else(|| {
+                crate::runtime::agent_runtime(&boot.services)
+                    .ok()
+                    .map(Arc::new)
+            }),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        harness.turns = Arc::new(Turns { runtime, sessions });
     }
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
@@ -123,6 +139,58 @@ async fn wait_for_stop() {
     tokio::select! {
         _ = interrupt.recv() => {}
         _ = terminate.recv() => {}
+    }
+}
+
+/// A turn the page posts, on the run's shared agent runtime: the session's events reach the page through
+/// the store's listener, and the request's token is the turn's, so `/stop` cancels exactly it.
+struct Turns {
+    runtime: Arc<heddle_agent::AgentRuntime>,
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+impl TurnRunner for Turns {
+    fn run_turn(
+        &self,
+        request: TurnRequest,
+    ) -> futures::future::BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+        let runtime = Arc::clone(&self.runtime);
+        let sessions = Arc::clone(&self.sessions);
+        Box::pin(async move {
+            let handle = sessions
+                .open(&request.session)
+                .ok_or_else(|| ServiceError::new(format!("no session '{}'", request.session)))?;
+            let mut options =
+                heddle_agent::RunTurnOptions::new(handle, request.endpoint, request.prompt);
+            options.attachments = request
+                .attachments
+                .into_iter()
+                .filter_map(|part| serde_json::from_value(part).ok())
+                .collect();
+            options.model = request.model;
+            options.reasoning_effort = request.reasoning_effort;
+            // The page's rule is DSH's: no round cap unless the server was started with one.
+            options.max_rounds = match request.max_rounds {
+                Some(rounds) => heddle_agent::RoundLimit::Rounds(rounds),
+                None => heddle_agent::RoundLimit::Unbounded,
+            };
+            options.cancel = Some(request.cancel);
+            let result = heddle_agent::run_turn(&runtime, options)
+                .await
+                .map_err(|error| ServiceError::new(error.to_string()))?;
+            Ok(TurnOutcome {
+                text: result.text,
+                finish_reason: result.finish_reason,
+                rounds: u64::from(result.rounds),
+                denials: result
+                    .denials
+                    .iter()
+                    .filter_map(|denial| serde_json::to_value(denial).ok())
+                    .collect(),
+                ended: Some(result.ended),
+                usage: serde_json::to_value(result.usage).ok(),
+            })
+        })
     }
 }
 
