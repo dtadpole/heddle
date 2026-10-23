@@ -42,3 +42,4 @@
 {"at": "2026-10-23T00:49-07:00", "deployed": "2942ee2", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
 {"at": "2026-10-23T00:51-07:00", "deployed": "8775bfe", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
 {"at": "2026-10-23T00:55-07:00", "deployed": "8248e5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (docs and config records only)"}
+{"at": "2026-10-23T00:58-07:00", "deployed": "77fb012", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "a restart only because 40069c7 changed preview.sh under _tools_/web-daemon (needless; the restart rule is narrowed in the next commit); the preview rebuilt from 77fb012 (composer, files)"}
