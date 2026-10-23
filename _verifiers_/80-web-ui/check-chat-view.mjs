@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, httpConfig, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The chat view: one element per tool **call**, carrying its result.
@@ -78,7 +78,7 @@ function startCli(args, options) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: options.cwd ?? repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...(options.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -918,12 +918,16 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     assert.ok(shape.turns >= 24, `the transcript has more turns than sections once the tool steps are in (${shape.turns})`)
     assert.equal(shape.rows, 16, `but the rail has one row per section (${shape.rows})`)
     /**
-     * The server marks the page with the hash of the built document's original bytes. The source has an
-     * `unbuilt` placeholder, not a rail-specific version label. Compare with the exact build this fixture
-     * starts; accepting any hash would not distinguish a current page from a stale one.
+     * The server marks the page with the hash of the document's original bytes, computed when it serves it.
+     * The source has an `unbuilt` placeholder, not a rail-specific version label. Compare with the exact build
+     * this fixture starts — the built copy beside `dist/` on the TypeScript build, the source a binary through
+     * `HEDDLE_BIN` serves; accepting any hash would not distinguish a current page from a stale one.
      */
+    const pageFile = process.env.HEDDLE_BIN
+      ? join(repoRoot, 'src', 'server', 'page.html')
+      : join(repoRoot, 'dist', 'server', 'page.html')
     const pageBuild = createHash('sha256')
-      .update(readFileSync(join(repoRoot, 'dist', 'server', 'page.html')))
+      .update(readFileSync(pageFile))
       .digest('hex')
       .slice(0, 12)
     assert.equal(
