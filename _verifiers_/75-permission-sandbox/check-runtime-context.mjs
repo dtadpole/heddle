@@ -4,7 +4,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, httpConfig, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 8, the runtime-context half — a mode change reaches the **active loop**, and survives a restart.
@@ -60,8 +60,7 @@ async function sequenceDouble(sequence) {
 function startWeb(env) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
-      process.execPath,
-      [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(env.HEDDLE_HOME, 'sessions')],
+      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(env.HEDDLE_HOME, 'sessions')]),
       { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let output = ''

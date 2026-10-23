@@ -1,6 +1,6 @@
 ---
 title: Check Library Rules
-version: 1.0.0
+version: 1.1.0
 description: The rules the verifier checks stand on, judged without a browser or a CLI.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, separating component tests from delivery verifiers
@@ -11,7 +11,9 @@ grounded_in:
 Instance of [`_tests_`](../INDEX.md). Holds [`unit.test.mjs`](unit.test.mjs) for
 [`lib.mjs`](../../lib.mjs), the library every check imports: how a transcript is found and decoded in either store
 layout, how sessions are listed, how a JSON document is taken from a noisy stream, how a directory is
-fingerprinted, what `skipUnless` reports, and how per-run evidence paths preserve earlier artifacts.
+fingerprinted, what `skipUnless` reports, how per-run evidence paths preserve earlier artifacts, and which
+harness a check runs — `heddleCommand` and `harnessEntry` name the `HEDDLE_BIN` binary when it is set, and
+`inProcessOnly` leaves a check that calls `dist/` modules unjudged there.
 
 The rule it guards is the quiet one: a helper that reads the wrong file turns a check into a claim about
 nothing.

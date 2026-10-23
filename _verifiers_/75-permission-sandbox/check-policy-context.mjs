@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 8, the model-context half — the standing file policy is **told** to the model, not only enforced.
@@ -23,8 +23,7 @@ const CAPABILITY = 'a model told the session’s file policy'
 function startWeb(env) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
-      process.execPath,
-      [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(env.HEDDLE_HOME, 'sessions')],
+      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(env.HEDDLE_HOME, 'sessions')]),
       { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let output = ''

@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, readTranscript, removeDir, repoRoot, runCli, sessionsUnder, skipUnless, tempDir } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, harnessEntry, heddleCommand, readTranscript, removeDir, repoRoot, runCli, sessionsUnder, skipUnless, tempDir } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 8, the session-scoped half — the access mode a session carries and every tool call is gated by.
@@ -101,8 +101,7 @@ function harness(label, options) {
 function startWeb(profileDir, env) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
-      process.execPath,
-      [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--profile', profileDir, '--endpoint', 'scripted'],
+      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--profile', profileDir, '--endpoint', 'scripted']),
       { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let output = ''
@@ -202,7 +201,7 @@ function permissionEvents(home, session) {
 /** Whether the built CLI and this profile are available to judge the claim at all. */
 async function supportsSessionMode() {
   const help = await runCli(['--help'])
-  return /--profile/.test(help.stdout) && existsSync(join(repoRoot, 'dist', 'cli.js'))
+  return /--profile/.test(help.stdout) && existsSync(harnessEntry())
 }
 
 async function withHarness(label, options, body) {

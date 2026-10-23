@@ -7,7 +7,9 @@ import { zstdCompressSync } from 'node:zlib'
 
 import {
   evidencePath,
+  harnessEntry,
   heddleCommand,
+  inProcessOnly,
   scratchRoot,
   fingerprint,
   hasDependency,
@@ -182,5 +184,29 @@ test('the harness under test is the TypeScript build unless HEDDLE_BIN names ano
   assert.deepEqual(argv.slice(1), ['--turn', 'hi'], 'with the arguments after it')
   assert.deepEqual(heddleCommand(['web', '--port', '0'], { HEDDLE_BIN: '/opt/heddle-rs/heddle' }), ['/opt/heddle-rs/heddle', ['web', '--port', '0']], 'HEDDLE_BIN replaces the whole command, arguments unchanged')
   assert.equal(heddleCommand(['x'], { HEDDLE_BIN: '' })[0], process.execPath, 'and an empty value means the default')
+})
+
+test('the build a check asks about is the one under test, never dist/ by name', () => {
+  assert.equal(harnessEntry({}), heddleCommand([], {})[1][0], 'by default it is the file node runs')
+  assert.match(harnessEntry({}), /dist[\\/]cli\.js$/)
+  assert.equal(harnessEntry({ HEDDLE_BIN: '/opt/heddle-rs/heddle' }), '/opt/heddle-rs/heddle', 'under HEDDLE_BIN it is the binary')
+  assert.equal(harnessEntry({ HEDDLE_BIN: '' }), harnessEntry({}), 'and an empty value means the default')
+})
+
+test('an in-process check judges the TypeScript build and is unjudged under HEDDLE_BIN', () => {
+  /**
+   * Such a check calls `dist/` modules directly, so under `HEDDLE_BIN` it would pass without the binary ever
+   * running. The pin is both directions: it still runs on the TypeScript build, and it skips — with a reason
+   * naming the claim — whenever a binary is the harness under test.
+   */
+  const skipped = []
+  const context = { skip: (reason) => skipped.push(reason) }
+  assert.equal(inProcessOnly(context, 'a cut keeps a pair', {}), true, 'the TypeScript build is judged')
+  assert.equal(inProcessOnly(context, 'a cut keeps a pair', { HEDDLE_BIN: '' }), true, 'an empty value is the default')
+  assert.deepEqual(skipped, [], 'and nothing was skipped')
+  assert.equal(inProcessOnly(context, 'a cut keeps a pair', { HEDDLE_BIN: '/opt/heddle-rs/heddle' }), false, 'a binary is not judged in process')
+  assert.equal(skipped.length, 1)
+  assert.match(skipped[0], /HEDDLE_BIN/, 'the skip says why')
+  assert.match(skipped[0], /a cut keeps a pair/, 'and names the claim left unjudged')
 })
 

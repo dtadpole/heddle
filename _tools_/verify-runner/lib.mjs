@@ -166,9 +166,36 @@ export async function run(command, args, options = {}) {
  * value is the default, so an unset and a blank variable mean the same thing.
  */
 export function heddleCommand(args, env = process.env) {
-  const bin = env.HEDDLE_BIN
-  if (typeof bin === 'string' && bin.length > 0) return [bin, [...args]]
+  const bin = namedBinary(env)
+  if (bin !== null) return [bin, [...args]]
   return [process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args]]
+}
+
+/** The binary `HEDDLE_BIN` names, or `null` when the TypeScript build is the one under test. */
+function namedBinary(env) {
+  const bin = env.HEDDLE_BIN
+  return typeof bin === 'string' && bin.length > 0 ? bin : null
+}
+
+/**
+ * The file that **is** the harness under test: `dist/cli.js` by default, the `HEDDLE_BIN` binary otherwise.
+ *
+ * For a check that first asks whether there is a build to judge at all. Naming `dist/cli.js` there asks the
+ * TypeScript build that question even when the binary is the one under test.
+ */
+export function harnessEntry(env = process.env) {
+  return namedBinary(env) ?? join(repoRoot, 'dist', 'cli.js')
+}
+
+/**
+ * Skip a check that judges the TypeScript build **in process** when `HEDDLE_BIN` names the harness under test.
+ *
+ * Such a check imports modules from `dist/` and calls them, so under `HEDDLE_BIN` it would pass without the
+ * binary ever running — a pass reported for a build it never looked at. There it is unjudged, and says why,
+ * until its claim has a route through the command line; on the TypeScript build it judges what it always did.
+ */
+export function inProcessOnly(context, claim, env = process.env) {
+  return skipUnless(context, namedBinary(env) === null, `judged in process against dist/, not through HEDDLE_BIN: ${claim}`)
 }
 
 /**

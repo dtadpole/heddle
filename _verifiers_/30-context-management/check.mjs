@@ -7,6 +7,7 @@ import { test } from 'node:test'
 
 import {
   fixtureDir,
+  inProcessOnly,
   parseJson,
   readTranscript,
   removeDir,
@@ -313,6 +314,7 @@ test('trimming one oversized result can clear the pressure, and then nothing is 
 })
 
 test('a cut never splits a tool call from its result, and never shadows the prompt', async (context) => {
+  if (!inProcessOnly(context, 'a cut keeps a tool call with its result, and a summary that does not shrink is refused')) return
   const storeModule = await built(context, 'session/store.js')
   if (storeModule === undefined) return
   const compactionModule = await built(context, 'context/compaction.js')

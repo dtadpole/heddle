@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Agent Teams end to end: a Lead's real turn spawns a teammate through the tools, creates and completes a task
@@ -20,8 +20,7 @@ const CAPABILITY = 'a turn with tools'
 
 function startServer(home, work, config) {
   const child = spawn(
-    process.execPath,
-    [join(repoRoot, 'dist/cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')]),
     { cwd: work, env: { ...process.env, HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
   )
   let output = ''
@@ -84,7 +83,7 @@ async function waitFor(read, timeoutMs, what) {
 }
 
 test('a Lead spawns, delegates, tasks, messages and answers — and the team survives a restart', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(process.execPath, [join(repoRoot, 'dist/cli.js'), '--help'], { encoding: 'utf8' })), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
   const home = isolatedHome('team-e2e')
   const work = fixtureDir('team-e2e-work')
   const root = join(home, 'sessions')
@@ -162,7 +161,7 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
 })
 
 test('boot settles a previous process’s provisioning members and delivers its queued mail', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(process.execPath, [join(repoRoot, 'dist/cli.js'), '--help'], { encoding: 'utf8' })), CAPABILITY)) return
+  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
   const home = isolatedHome('team-recover')
   const work = fixtureDir('team-recover-work')
   const root = join(home, 'sessions')

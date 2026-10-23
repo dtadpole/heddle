@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, readTranscript, removeDir, repoRoot, runCli, sessionsUnder, skipUnless, tempDir } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, readTranscript, removeDir, repoRoot, runCli, sessionsUnder, skipUnless, tempDir } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 8, the escalation half — one approved wider retry, and nothing more.
@@ -87,8 +87,7 @@ function harness(label) {
 function startWeb(h) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
-      process.execPath,
-      [join(repoRoot, 'dist', 'cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--profile', h.profileDir, '--endpoint', 'scripted'],
+      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--profile', h.profileDir, '--endpoint', 'scripted']),
       { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', ...h.env }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let output = ''

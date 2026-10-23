@@ -1,6 +1,6 @@
 ---
 title: Verify Runner
-version: 2.0.0
+version: 2.1.0
 description: Turns one check file into the project's verdict, and holds the fixtures, doubles and browser wrapper the checks are written with.
 grounded_in:
   - source: human-authored
@@ -53,7 +53,7 @@ node --test _tools_/verify-runner/_tests_/verdict-rules/unit.test.mjs
 ## The library a check imports
 
 `lib.mjs` is what a check file reaches for so that a fixture, a fake model or a transcript read is
-written once instead of in every check. Four rules it carries are worth naming:
+written once instead of in every check. Five rules it carries are worth naming:
 
 - **Nothing spends anything.** `scriptedConfig` points an endpoint at a JSON file of steps, and
   `chatDouble` / `responsesDouble` are local HTTP servers that speak the provider's real wire shape.
@@ -66,6 +66,11 @@ written once instead of in every check. Four rules it carries are worth naming:
 - **A check asks for a session, not for a file format.** `transcriptFile(dir)` finds the transcript a
   session actually has in either store layout, and `readTranscript` decodes both the zstd and plain
   formats.
+- **A check runs the harness under test, never `dist/cli.js` by name.** `runCli`, `runCliTimed` and a
+  check's own `spawn(...heddleCommand(args))` run `node dist/cli.js` by default and the binary named by
+  `HEDDLE_BIN` otherwise; `harnessEntry()` is the file that is the harness, for a check asking whether
+  there is a build to judge. A check that imports `dist/` modules and calls them cannot judge a binary,
+  so it starts with `inProcessOnly(context, claim)` and is unjudged under `HEDDLE_BIN`.
 
 Alongside it, `browser.mjs` is the one-page wrapper over `browser-use`: `goto`, `evaluate`, `waitFor`,
 `screenshot`, `close`, headless by default, with a temporary profile per call. It is not a second
