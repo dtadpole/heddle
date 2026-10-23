@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment''s measurements, 2026-10-22'
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T05:41:45Z
+modified: 2026-10-23T05:44:09Z
 level: L3
 version: 1.0.0
 description: The readings behind the deployment record — the bring-up proof, restart windows, the scratch rehearsals, the Rust branch and the gate.
@@ -46,9 +46,9 @@ the job `running`, answering nothing. After them, rehearsal 22:30:25–22:31:36 
 outlived its killed supervisor and was reclaimed in 1,519 ms; a hung one was replaced in 8,172 ms (probes every 2 s;
 the default 5 s gives about 20 s).
 
-**The Rust branch, about 21:20.** The lanes' release binary (sha256 `a355a0aa1fc4…`) through `HEDDLE_BIN`: started
-failed after 20 s — `heddle: not ported to Rust yet: web`, exit 2 after 4 ms — and the other claims were unjudged.
-At 21:43 main's own binary, built at `a2d4ae4` after the heddle-server merge, answered the same.
+**The Rust branch through `HEDDLE_BIN`.** At 21:20 and 21:43 `started` failed (`not ported to Rust yet: web`, exit 2)
+and the rest was unjudged. At 22:42, with `heddle web` on main, all eight claims held, 95 4/4: part 11 holds through
+the binary. Details in `_verifiers_/95-web-daemon/readings.md`.
 
 **The Rust preview.** 21:52, `b6995b6`: page and token flow only; sessions and turns refused. 22:39, main `6be6ccd`
 with `51c7bf4`: turns typed in the page stream back the fixture reply; `/api/endpoints` and `/api/markdown` 404,
