@@ -1,9 +1,9 @@
 ---
 title: 90-web-ui-token — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-23T08:12:29Z
+modified: 2026-10-23T08:41:35Z
 level: L3
-version: 1.3.0
+version: 1.4.0
 description: The measured verdicts of 90-web-ui-token against the TypeScript build and the Rust binary.
 status: unverified
 grounded_in:
@@ -21,6 +21,7 @@ grounded_in:
 | about 22:10 | developer-two's `web` (22bd865) in the ui lane at `6910c6e`, release binary, by the lane gate — not on main | **9 of 9** — the first ui part met through the Rust binary |
 | 23:53 to 23:58 | main `b72cc1a`, which advertises `web` (D-048), release binary, by the lane gate | **9 of 9** |
 | 01:01 to 01:06 | main `4fc75f1`, release binary, by the lane gate (written as main's per-check baseline) | **9 of 9** |
+| 01:29 to 01:39 | main `33407a4`, release binary, by the lane gate, twice | **9 of 9 in both runs** |
 
-**Part 10 through `HEDDLE_BIN` is met on main `b72cc1a` and `4fc75f1`**: all nine checks pass on the Rust binary. The lane gate:
+**Part 10 through `HEDDLE_BIN` is met on main `b72cc1a`, `4fc75f1` and `33407a4`**: all nine checks pass on the Rust binary. The lane gate:
 `HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs --json 80-web-ui 85-trajectory-view 87-resizable-panels 88-file-preview 90-web-ui-token`.
