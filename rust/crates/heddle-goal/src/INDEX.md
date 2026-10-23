@@ -19,6 +19,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`tool.rs`](tool.rs) | `create_goal`, `get_goal`, `update_goal` as specs and functions |
 | [`http.rs`](http.rs) | `GET` and `POST /api/goal` |
 | [`cli.rs`](cli.rs) | `heddle goal`'s two renderings |
+| [`test_support.rs`](test_support.rs) | the in-memory log, fixed clock and fixed ids the tests use (tests only) |
 
 ## Read next
 
