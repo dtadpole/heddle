@@ -14,4 +14,10 @@ serde.workspace = true
 # `preserve_order`: an event body and a tool answer are written with the TypeScript build's key order, so the
 # session log stays byte-compatible. Proposed for the workspace entry; enabled here meanwhile.
 serde_json = { workspace = true, features = ["preserve_order"] }
+# The session log every write event-sources from: `SessionLog` is implemented for its store.
+heddle-session.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# A real session store in the tests needs its environment type.
+heddle-config.workspace = true

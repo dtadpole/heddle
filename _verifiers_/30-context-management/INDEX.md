@@ -58,10 +58,11 @@ its system prompt — rather than "never inside a shadowed span", which held onl
 command line never produces. Whether the prompt should keep its position is an open question for the
 harness, not for this check.
 
-One check still reads the TypeScript build directly: *a long conversation can be compacted more than
-once* folds the log with `transcriptTurns` from `dist/server/web.js` to judge the reader's view. Under
-`HEDDLE_BIN`, in a lane without a TypeScript build, that import fails, so the check needs a route through
-the binary before part 3 can pass there.
+**The reader's view is judged on the log.** *A long conversation can be compacted more than once* used to
+fold the log with `transcriptTurns` imported from `dist/server/web.js`, which fails under `HEDDLE_BIN` in a lane
+with no TypeScript build. It now applies the fold's own rule to the log: the panel draws a `message` event as a
+turn and skips every `context/note`, so "a checkpoint or an instruction baseline is never shown as something a
+person said" is a claim about which events are `message`s. No check in this folder imports `dist/`.
 
 ## Running it
 

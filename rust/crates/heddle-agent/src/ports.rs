@@ -43,6 +43,19 @@ pub struct ModelError {
     pub message: String,
 }
 
+impl From<heddle_llm::ModelError> for ModelError {
+    /// The model service's failure at the port: its code (always present there; empty reads as uncoded) and its
+    /// sentence. `heddle_llm::ModelError` carries a boxed source and is not `Clone`, which [`TurnError`]
+    /// (crate::TurnError) must be, so the loop keeps the two facts it branches on and reports.
+    fn from(error: heddle_llm::ModelError) -> Self {
+        let code = (!error.code.is_empty()).then(|| error.code.clone());
+        Self {
+            code,
+            message: error.message.clone(),
+        }
+    }
+}
+
 /// The model service: one streaming call.
 pub trait ModelPort: Send + Sync {
     /// Stream one call's chunks. The stream ends after `done`, or with an error item; `cancel` aborts the
