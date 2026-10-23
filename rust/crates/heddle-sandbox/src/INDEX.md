@@ -23,6 +23,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`transition.rs`](transition.rs) | the owner's session-mode change rule | `permissionTransition` in `src/sandbox/service.ts` |
 | [`service.rs`](service.rs) | the sandbox service: the file fence and the shell seam | `SandboxService` in `src/sandbox/service.ts` |
 | [`approvals.rs`](approvals.rs) | the approval policy and the question channel | `src/approvals/service.ts` |
+| [`fixture.rs`](fixture.rs) | the recorded approval question, its SSE frame and its answers, with tests that pin the serialiser to them | `src/approvals/service.ts`, `src/server/page.html` |
 
 ## Read next
 

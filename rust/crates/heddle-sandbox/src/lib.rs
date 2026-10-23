@@ -14,6 +14,7 @@
 //! | [`transition`] | [`permission_transition`] | `sandbox/service.ts` |
 //! | [`service`] | [`SandboxService`], [`SandboxConfig`], [`SandboxDenial`] | `sandbox/service.ts` |
 //! | [`approvals`] | [`ApprovalService`], [`ApprovalsConfig`], [`ApprovalRequest`] | `approvals/service.ts` |
+//! | [`fixture`] | the recorded approval question, its SSE frame and its answers, for the Web UI checks | `approvals/service.ts`, `server/page.html` |
 //!
 //! A private `js` module holds the one thing the refusal sentences need from another language: the
 //! `String()` coercion the TypeScript messages interpolate. `testfs` is the test-only scratch directory and
@@ -30,6 +31,7 @@
 pub mod approvals;
 pub mod backend;
 pub mod escalation;
+pub mod fixture;
 pub mod linux;
 pub mod mode;
 pub mod paths;

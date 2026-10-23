@@ -39,6 +39,12 @@ heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 | `validate_escalation_args`, `approve_escalation`, `EscalationRequest`, `EscalationRefusal` (code `ESCALATION_REFUSED`), `EscalationApproval`, `ESCALATION_TARGETS`, `wider_modes` | the tool registry's one gate | `escalation.ts` |
 | `permission_transition`, `FULL_ACCESS_CONFIRMATION`, `ModeChange`, `TransitionRefusal` | `POST /api/sessions/<id>/permission` | `permissionTransition` |
 | `ApprovalService::{new, check, attach_answerer, can_answer, pending_requests, subscribe, request, answer, history}`, `ApprovalRequest` (JSON `{id, tool, reason, displayReason, session?, at}`), `Answer`, `ApprovalOutcome`, `is_approval_id` | the registry (`check`, `request`); the server (`attach_answerer`, `subscribe` for the SSE `approval` event, `GET /api/approvals`, `POST /api/approvals/<id>`) | `ApprovalService` |
+| `fixture::{QUESTION_JSON, STREAM_FRAME, ANSWER_ALLOWED_ONCE, ANSWER_REJECTED, question, question_json, stream_frame, recorded_answer}` | the Web UI checks read the data files under [`fixtures/`](fixtures/README.md); the crate's tests pin its serialiser to them | recorded from `ApprovalService::request` and the page's `showApproval`/`answerApproval` |
+
+The recorded approval fixture is a **sample, not a contract**: `fixtures/approval-stream-frame.txt` is the exact
+SSE frame (`event: approval`, one `data:` line, a blank line), and a check compares a live frame against it after
+replacing only the `id`, `session` and `at` of the run it came from. [`fixtures/README.md`](fixtures/README.md)
+states the four facts the page depends on and the two ways to consume the files.
 
 **Three Rust shapes differ from the TypeScript on purpose.** Every check takes the call's mode explicitly (no
 "default to the deployment mode" parameter; pass `service.mode()`); an approval's cancellation is any
