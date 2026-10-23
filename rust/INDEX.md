@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.4.7
+version: 0.7.0
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `b2a9592`, judged with `_tools_/verify-runner/lane.mjs`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `b72cc1a`, judged with `_tools_/verify-runner/lane.mjs`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -49,41 +49,50 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
     40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**18 check files, 117 checks: 10 passed, 0 failed, 107 unjudged. Part 0 passes.** `05-config-system` exits `0`
-through the binary: profiles, layers, includes and their cycles, both environment-reference shapes, a missing
-reference, a bad value refused naming the row and the field, a patch against a missing row, provenance and an
-unknown profile. Under `HEDDLE_BIN` its rows name component manifests rather than `.ts` plugins — part 0's Rust shape in
-[`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), stated in that verifier's INDEX — and the same ten checks pass on the
-TypeScript build at the same revision. Every other backend check skipped at its capability probe, because the binary advertises `--profile`,
-`profiles` and `config` and nothing else yet: every other command still exits 2 with
-`heddle: not ported to Rust yet: <command>`.
+**18 check files, 117 checks: 112 passed, 1 failed, 4 unjudged. Parts 0, 2, 3, 4, 5, 6 and 8 pass.** Since `b72cc1a` the
+binary advertises `web`, `--turn`, `--stream`, `context`, `tools`, `hooks` and `models` beside configuration, sessions,
+workspaces and goal, so the checks that skipped at their capability probe are judged now: 91 checks turned from unjudged
+to passing, and none of the 21 that passed before stopped passing (compared check by check against a run on the previous
+`main`). Under D-048 a merge may open failing checks when it turns at least one into a pass and breaks none, provided
+this table names each failing check and the code that owns it — below, for both lanes.
 
-Behind the binary, every backend library crate on `main` carries its port: `git grep -c 'todo!('` finds none in
-`heddle-config`, `heddle-session`, `heddle-workspace`, `heddle-llm`, `heddle-context`, `heddle-tools`, `heddle-agent`,
-`heddle-sandbox`, `heddle-events`, `heddle-goal`, `heddle-todo` or `heddle-team`. The ui-lane crates arrived through
-the ui lane at `a2d4ae4` — `heddle-server`, `heddle-web-files`, `heddle-web-composer` and `heddle-web-trajectory` carry
-their implementations (407 unit tests between them; `heddle-web-files` has two `todo!(` left). The binary dispatches
-the owners' entry points and the turn, but advertises only `--profile`, `profiles` and `config` until each command's
-checks pass, and two `todo!(` remain in it: the bare boot and `web`. No backend verifier imports `dist/`, so a lane
-with no TypeScript build judges every one of them. Each check's capability probe asks for every command the check
-runs, matched as a command line in `--help`, so a binary that advertises one command before another leaves the
-dependent checks unjudged instead of failing them.
+**Failing, with owners:**
+
+- `70-workspaces-sessions` — *a written session moves to the top of its folder, its age follows, and a real pin click
+  holds it there*: the follow-up `POST /api/turn` on an existing session answers `400`, not `200` (owned by the served turn route:
+  `rust/crates/heddle/src/web.rs` and `heddle-server`).
+- In the ui lane's parts, measured by its gate on the same tree (`b72cc1a`, release build), five fail in `80-web-ui`:
+  `check-chat-view` #15, the weaving clock — `[data-chat-running]` is still present after 30 s (owned by
+  `heddle-server`); `check-composer` #13, the context gauge stays blank, and `check-context-view` #2, a compacted span
+  (owned by `web.rs`'s context row); `check-context-view` #1, the composition — "this profile does not load the
+  context plugin" (owned by `web.rs`'s context row, then `heddle-web-composer`); `check-file-view` #1 —
+  `hostile.js`'s `<script>` is split across highlight spans instead of shown as text (owned by `heddle-web-files`).
+
+**Unjudged, and why:** `10-llm-backends`'s two real-endpoint checks and `98-model-endpoints`'s two checks need a
+configured endpoint on the machine, which this one does not have — the same on the TypeScript build. Every other backend
+check gave a verdict.
+
+Part 0's ten checks pass through component manifests rather than `.ts` plugins (part 0's Rust shape in
+[`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md)); parts 4 and 6 load outside tools and hooks as processes (their verifiers' INDEXes).
+Behind the binary every backend library crate carries its port (`git grep -c 'todo!('` finds none in them); one `todo!(`
+remains in the binary, the bare boot, and two in `heddle-web-files`. No backend verifier imports `dist/`, and each
+check's capability probe asks for every command it runs, matched as a command line in `--help`.
 
 | Part | Verifier | On the binary, 2026-10-22 |
 |---|---|---|
 | 0 configuration system | `_verifiers_/05-config-system` | **passes** — 10 of 10 |
-| 1 LLM backends | `_verifiers_/10-llm-backends` | 8 checks — unjudged; two of them call a real configured endpoint and stay unjudged on a machine without one, on either build |
-| 2 streaming | `_verifiers_/20-streaming` | 5 checks — unjudged |
-| 3 context management | `_verifiers_/30-context-management` | 9 checks — unjudged |
-| 4 pluggable tools | `_verifiers_/40-pluggable-tools` | 6 checks — unjudged |
-| 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 checks — unjudged |
-| 6 hooks | `_verifiers_/60-hooks` | 6 checks — unjudged; under `HEDDLE_BIN` each hook is a process (that verifier's INDEX) |
-| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 45 checks — unjudged |
-| 8 permission sandbox | `_verifiers_/75-permission-sandbox` | 17 checks — unjudged |
-| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | not judged in the backend lane (the ui lane owns it); the binary exits 2 for `web`, so none can pass yet |
-| 10 token | `_verifiers_/90-web-ui-token` | not judged in the backend lane; `web` exits 2 |
-| 11 Web UI daemon | `_verifiers_/95-web-daemon` | not judged in the backend lane; `web` exits 2 |
-| model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged |
+| 1 LLM backends | `_verifiers_/10-llm-backends` | 6 pass, 0 fail, 2 unjudged — the two real-endpoint checks, which need an endpoint configured on the machine |
+| 2 streaming | `_verifiers_/20-streaming` | **passes** — 5 of 5 |
+| 3 context management | `_verifiers_/30-context-management` | **passes** — 9 of 9 |
+| 4 pluggable tools | `_verifiers_/40-pluggable-tools` | **passes** — 6 of 6; outside tools are processes under `HEDDLE_BIN` |
+| 5 agentic loop | `_verifiers_/50-agentic-loop` | **passes** — 9 of 9 |
+| 6 hooks | `_verifiers_/60-hooks` | **passes** — 6 of 6; hooks are processes under `HEDDLE_BIN` |
+| 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 44 pass, **1 fail** (above, with its owner) |
+| 8 permission sandbox | `_verifiers_/75-permission-sandbox` | **passes** — 17 of 17 (two consecutive runs) |
+| 9 Web UI | `_verifiers_/80-web-ui`, `85`, `87`, `88` | judged in the ui lane on `b72cc1a`: 76 pass, **5 fail** (listed above with owners); 85, 87 and 88 pass in full |
+| 10 token | `_verifiers_/90-web-ui-token` | **passes** — 9 of 9 (ui lane, on `b72cc1a`) |
+| 11 Web UI daemon | `_verifiers_/95-web-daemon` | not run in a lane gate: its stays-up check restarts the live server (D-045); the ui lane reads it |
+| model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged on this machine, on either build: both need a machine-local endpoint configuration |
 
 What is **in place** is the toolchain and the seam, not a part: rust 1.99.1 from rustup, the workspace, and the
 `HEDDLE_BIN` path the checks reach the binary through — 13 of 13 `_tools_/verify-runner/_tests_/helper-rules` pass,

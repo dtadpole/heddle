@@ -128,7 +128,7 @@ pub struct DriverOutcome {
     /// Rounds admitted and answered.
     pub rounds: u64,
     /// Why the chain ended: `idle`, `no-goal`, `disarmed`, `phase-complete`, `round-limit`, `goal-moved`,
-    /// `cleared`, `round-not-admitted`, `turn-failed`, …
+    /// `cleared`, `round-not-admitted`, `turn-failed`, `no-runtime`, …
     pub stopped: String,
     /// Present when the chain ended by blocking the goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,22 +171,66 @@ pub struct GoalDriver {
     goals: Arc<GoalService>,
     runner: Arc<dyn RoundRunner>,
     lanes: Mutex<HashMap<String, Lane>>,
+    /// Where chains run when the caller is not inside a runtime: a session event can be appended, and so
+    /// reach the trigger, on any thread.
+    runtime: Option<tokio::runtime::Handle>,
 }
 
+/// The sentence a request answers with when the driver has no runtime to run its chain on.
+pub const NO_RUNTIME_SENTENCE: &str =
+    "the goal driver has no async runtime to run on; build it with GoalDriver::with_runtime";
+
 impl GoalDriver {
-    /// A driver over `goals`, running rounds with `runner`.
+    /// A driver over `goals`, running rounds with `runner`, on the runtime current when it is built (if any).
     pub fn new(goals: Arc<GoalService>, runner: Arc<dyn RoundRunner>) -> Arc<GoalDriver> {
         Arc::new(GoalDriver {
             goals,
             runner,
             lanes: Mutex::new(HashMap::new()),
+            runtime: tokio::runtime::Handle::try_current().ok(),
         })
+    }
+
+    /// A driver whose chains run on `runtime`, whichever thread requests them — what the boot builds, since a
+    /// session event reaches the trigger on the thread that appended it.
+    pub fn with_runtime(
+        goals: Arc<GoalService>,
+        runner: Arc<dyn RoundRunner>,
+        runtime: tokio::runtime::Handle,
+    ) -> Arc<GoalDriver> {
+        Arc::new(GoalDriver {
+            goals,
+            runner,
+            lanes: Mutex::new(HashMap::new()),
+            runtime: Some(runtime),
+        })
+    }
+
+    /// The runtime a chain is spawned on: the driver's own, else the caller's.
+    fn spawner(&self) -> Option<tokio::runtime::Handle> {
+        self.runtime
+            .clone()
+            .or_else(|| tokio::runtime::Handle::try_current().ok())
     }
 
     /// Ask the driver to re-evaluate `session`. Idempotent and reentrant: while a chain runs, this joins it and
     /// requests one more pass after it, so an edge that lands mid-chain is never lost; otherwise it spawns a
-    /// new chain. Must be called inside a Tokio runtime.
+    /// new chain on the driver's runtime (the caller's when it has none). With no runtime at all the run
+    /// resolves at once to an error outcome naming the cause, rather than panicking in whatever thread asked.
     pub fn request(self: &Arc<Self>, session: &str) -> DriverRun {
+        let Some(runtime) = self.spawner() else {
+            tracing::warn!(session, "{NO_RUNTIME_SENTENCE}");
+            let outcome = DriverOutcome {
+                rounds: 0,
+                stopped: "no-runtime".to_owned(),
+                blocked: None,
+                error: Some(NO_RUNTIME_SENTENCE.to_owned()),
+            };
+            let future: BoxFuture<'static, DriverOutcome> = Box::pin(async move { outcome });
+            return DriverRun {
+                shared: future.shared(),
+            };
+        };
         let mut lanes = self
             .lanes
             .lock()
@@ -217,7 +261,7 @@ impl GoalDriver {
         drop(lanes);
         let driver = Arc::clone(self);
         let session = session.to_owned();
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             let outcome = driver.drain(&session).await;
             driver.finish(&session);
             let _ = sender.send(outcome);
@@ -412,10 +456,10 @@ impl GoalDriver {
                 None => false,
             }
         };
-        if pending {
+        if pending && let Some(runtime) = self.spawner() {
             let driver = Arc::clone(self);
             let session = session.to_owned();
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 let run = driver.request(&session);
                 let _ = run.await;
             });
@@ -1048,5 +1092,92 @@ mod tests {
             trigger.on_session_event("nope", "turn/completed").is_none(),
             "an unknown session is a no-op"
         );
+    }
+
+    #[test]
+    fn a_request_from_a_thread_outside_any_runtime_runs_on_the_drivers_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (log, goals) = setup();
+        create(&goals, 2.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::with_runtime(
+            goals.clone(),
+            Arc::new(runner(&log, &calls)),
+            runtime.handle().clone(),
+        );
+        // A plain thread, as a session event appended off the runtime would be.
+        let run = std::thread::spawn({
+            let driver = driver.clone();
+            move || driver.request("s1")
+        })
+        .join()
+        .unwrap();
+        let outcome = runtime.block_on(run);
+        assert_eq!(outcome.rounds, 2, "{outcome:?}");
+        assert_eq!(outcome.stopped, "round-limit");
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn with_no_runtime_anywhere_a_request_answers_an_error_instead_of_panicking() {
+        let (log, goals) = setup();
+        create(&goals, 2.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let outcome = futures::executor::block_on(driver.request("s1"));
+        assert_eq!(outcome.stopped, "no-runtime");
+        assert_eq!(outcome.error.as_deref(), Some(NO_RUNTIME_SENTENCE));
+        assert!(calls.lock().unwrap().is_empty(), "no round ran");
+        // The lane was not left busy: a driver with a runtime afterwards still works on the same goals.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let later = GoalDriver::with_runtime(
+            goals,
+            Arc::new(runner(&log, &calls)),
+            runtime.handle().clone(),
+        );
+        let outcome = runtime.block_on(later.request("s1"));
+        assert_eq!(outcome.rounds, 2, "{outcome:?}");
+    }
+
+    #[test]
+    fn the_trigger_fed_from_outside_the_runtime_continues_an_armed_goal_after_a_turn() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (log, goals) = setup();
+        create(&goals, 1.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::with_runtime(
+            goals.clone(),
+            Arc::new(runner(&log, &calls)),
+            runtime.handle().clone(),
+        );
+        let trigger = Arc::new(DriverTrigger::new(driver));
+        // What a bus listener on session/event does, on the thread that appended the event.
+        let run = std::thread::spawn({
+            let trigger = trigger.clone();
+            move || {
+                assert!(
+                    trigger.on_session_event("s1", "model/request").is_none(),
+                    "mid-turn: no request"
+                );
+                trigger.on_session_event("s1", "turn/completed")
+            }
+        })
+        .join()
+        .unwrap()
+        .expect("a completed turn requests the driver");
+        let outcome = runtime.block_on(run);
+        assert_eq!(outcome.rounds, 1, "{outcome:?}");
+        assert_eq!(outcome.stopped, "round-limit");
     }
 }

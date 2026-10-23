@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { repoRoot, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
-import { DOCUMENTED_PORT, LABEL, UNIT, installedService, listenerPid, parseUnit, serviceState, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
+import { installedService, listenerPid, parseUnit, serviceState, serviceTarget, supervisorFor, unitValue } from '../../_tools_/web-daemon/service.mjs'
 
 /**
  * Verifier 9 — the Web UI daemon.
@@ -32,7 +32,12 @@ import { DOCUMENTED_PORT, LABEL, UNIT, installedService, listenerPid, parseUnit,
 const CAPABILITY = 'a supervised user service that keeps the Web UI running at the documented port'
 const DAEMON = join(repoRoot, '_tools_', 'web-daemon')
 const SUPERVISOR = supervisorFor()
-const NAME = SUPERVISOR === 'launchd' ? `${LABEL} agent` : `${UNIT} user unit`
+/**
+ * The service judged: the deployment's, or the scratch service `rehearse.sh` names with `HEDDLE_WEB_LABEL` and
+ * `HEDDLE_WEB_PORT` — which is how the stays-up check is judged without killing the owner's server (D-042).
+ */
+const TARGET = serviceTarget()
+const NAME = `${SUPERVISOR === 'launchd' ? `${TARGET.label} agent` : `${TARGET.unit} user unit`}${TARGET.scratch ? ' (scratch)' : ''}`
 
 /** The installed service and its supervisor's state, or a reason this host cannot be judged. */
 function liveService() {
@@ -144,7 +149,7 @@ test('the daemon is loaded, owns the port and answers, or this host has none', a
    * search is not: `pgrep -f` matches the searcher's own command line and has been measured concluding a
    * dead service was up. A bound port cannot be satisfied by our own argv and cannot be satisfied twice.
    */
-  const documented = DOCUMENTED_PORT[process.platform]
+  const documented = TARGET.documentedPort
   assert.equal(service.port, documented, `the installed ${NAME} is written for the documented port ${documented} (${service.port})`)
   assert.equal(service.host, '127.0.0.1', 'and binds loopback')
 
@@ -179,6 +184,19 @@ test('the definition keeps the process alive rather than pretending to', async (
     return
   }
   const { service } = live
+  /**
+   * **Not on the owner's page by default.** This check kills the server it judges, and when the service judged is the
+   * deployment, that is a real kill of the page the owner uses. Four seats did exactly that on 2026-10-22, the last
+   * at 22:20 PDT from a verifier loop through HEDDLE_BIN, and the team's rule since is that 95's kill runs on a
+   * scratch service (D-042). So against the deployment it is unjudged unless HEDDLE_95_KILL_DEPLOYMENT=1 says the
+   * kill is meant; a scratch service named by HEDDLE_WEB_LABEL (rehearse.sh) is judged as before.
+   */
+  if (!TARGET.scratch && process.env.HEDDLE_95_KILL_DEPLOYMENT !== '1') {
+    context.skip(
+      `this kill would land on the deployment (${NAME}, port ${service.port}); judge it on a scratch service with _tools_/web-daemon/rehearse.sh, or set HEDDLE_95_KILL_DEPLOYMENT=1 to kill the deployment on purpose (D-042)`,
+    )
+    return
+  }
   /**
    * The claim is that this is a **daemon**, not a process someone started. Measured: killing the process that
    * owns the port leaves a **different** pid serving it within seconds — systemd on Linux (3 s, 2026-10-22), and

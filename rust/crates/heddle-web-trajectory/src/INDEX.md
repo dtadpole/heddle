@@ -1,6 +1,8 @@
 ---
 title: The heddle-web-trajectory sources
-version: 0.3.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:24:00Z
+version: 0.4.0
 description: The sources of the heddle-web-trajectory crate, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -13,7 +15,6 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | File | What it is |
 |---|---|
 | [`lib.rs`](lib.rs) | the crate root, its documentation and re-exports |
-| [`js_json.rs`](js_json.rs) | `JSON.stringify` with JavaScript's number formatting, for the text a person reads and the bytes `/log` writes |
 | [`ledger.rs`](ledger.rs) | events → the turn-aware ledger (`project_ledger`) |
 | [`rows.rs`](rows.rs) | the ledger → the Trajectory table's rows, previews and lanes |
 | [`timeline.rs`](timeline.rs) | the ledger → the lane strip's domain and spans |
@@ -27,4 +28,4 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 
 ## Read next
 
-[`../INDEX.md`](../INDEX.md) for what the crate ports, what judges it, and its port plan.
+[`../INDEX.md`](../INDEX.md) for the crate's map; [`../API.md`](../API.md) for the public API.

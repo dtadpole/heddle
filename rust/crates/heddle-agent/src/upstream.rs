@@ -26,6 +26,10 @@ pub use heddle_llm::{
 /// written order).
 pub use heddle_session::SessionEvent;
 
+/// The context service's own records: a named runtime-context section, a request's estimate split three ways, and
+/// one assembly's report.
+pub use heddle_context::{Breakdown as ContextBreakdown, ContextReport, RuntimeContextSection};
+
 /// The parts of a session's metadata the loop and delegation read. Mirror of a subset of
 /// `heddle_session::SessionMeta`; fields this crate does not read are kept in `rest`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -106,15 +110,6 @@ pub struct SurfaceView {
     pub replace_generation: u64,
 }
 
-/// One dynamic contribution to the runtime context. Mirror of `heddle_context::RuntimeContextSection`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeContextSection {
-    /// Its stable name, e.g. `sandbox:policy`.
-    pub name: String,
-    /// Its text.
-    pub text: String,
-}
-
 /// What a round's context is prepared for. Mirror of the options of `heddle_context`'s `prepare`/`assemble`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PrepareOptions {
@@ -128,38 +123,6 @@ pub struct PrepareOptions {
     pub tools: Vec<ToolSpec>,
     /// A system prompt for a session that has none.
     pub system: Option<String>,
-}
-
-/// A request's estimated size, split the way the context panel shows it. Mirror of `heddle_context`'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ContextBreakdown {
-    /// System prompts.
-    pub system: u64,
-    /// Tool schemas.
-    pub tools: u64,
-    /// Every other message.
-    pub messages: u64,
-}
-
-/// What a context preparation answered. Mirror of `heddle_context::ContextReport` (TypeScript `ContextReport`).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ContextReport {
-    /// What to send.
-    pub messages: Vec<Message>,
-    /// Its estimated size.
-    pub estimated_tokens: u64,
-    /// The window it is priced against.
-    pub context_window: u64,
-    /// The size that triggers a reduction.
-    pub threshold_tokens: u64,
-    /// How many oversized tool results this call rewrote.
-    pub pruned: u64,
-    /// Whether a summary replaced part of the conversation.
-    pub compacted: bool,
-    /// The instruction files the baseline carried.
-    pub instructions: Vec<String>,
-    /// The size split.
-    pub breakdown: ContextBreakdown,
 }
 
 #[cfg(test)]

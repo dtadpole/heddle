@@ -1,6 +1,8 @@
 ---
 title: The heddle-events crate
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:24:47Z
+version: 0.4.1
 description: The Rust port crate for the event bus and the named hook points, with Cordis's emit, parallel, serial, bail and waterfall modes — its public API, who uses which part, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -22,8 +24,8 @@ The Rust port of the event bus every crate emits into and listens on, and of the
 
 ## Public API
 
-The API is landed with `todo!()` bodies where the behaviour is not yet ported; the docs on each item are the
-contract. `cargo doc -p heddle-events` renders it.
+Every body is ported, with its unit tests beside it; the docs on each item are the contract.
+`cargo doc -p heddle-events` renders it.
 
 | Item | What it is |
 |---|---|
@@ -34,23 +36,24 @@ contract. `cargo doc -p heddle-events` renders it.
 | `HookError`, `HookErrorKind`, `ParallelError` | a listener's failure: `refuse` (the TypeScript `HookRefusal`) or `fail`, attributed by the bus to the point and the listener's scope |
 | `points` | the name constants of every point, `HOOK_POINTS` and its JSON and text renderings for `heddle hooks`, and the lifecycle events `Ready`, `ConfigProblem`, `TeamChanged` |
 | `outside` | outside listeners over the part-4 protocol (JSON-RPC 2.0, `hooks/call`): `HookCall`/`HookReply` (`next`, `replace`, `merge`, `refuse`, `fail`), the `JsonListener` seam, `EventBus::expose_*` and `Scope::on_json*`; `ListenerDeclaration`, `parse_listener_declarations` and `attach_declared` for the listeners a component declares in `initialize`; `RpcListener`, which wraps any part-4 client (the boot's `heddle-tools` `OutsideComponent`); `OutsideListenerConfig` (`program` + `args` + `config`, D-031) and `StdioListener`, a stand-alone client; `attach_outside_listener` |
-
 | `bridge` | the seam from the feature crates' synchronous hook ports to the bus: the catalog's points as JSON markers (`AgentPreStep`, `ModelRequest`, `ToolsPreExecute`, `ToolsPostExecute`, `SessionEvent`), `expose_catalog`, `EventBus::waterfall_blocking`, and one function per port method (`model_request`, `pre_execute`, `post_execute`, `pre_step`, `session_event`) with the TypeScript defaults and no runtime touched when nothing listens |
-
-| `ports` | `BusHooks`, which implements `heddle-llm`'s `ModelHooks`, `heddle-tools`' `ToolHooks` and `heddle-agent`'s `TurnHooks` over the bus (the oracle's failure semantics where the port can express them), and `attach_component_listeners`, which attaches a `heddle-tools` `OutsideComponent`'s declared listeners over its own connection. This crate depends on those two; they must never depend on it |
+| `ports` | `BusHooks`, which implements `heddle-llm`'s `ModelHooks`, `heddle-tools`' `ToolHooks` and `heddle-agent`'s `TurnHooks` over the bus (the oracle's failure semantics where the port can express them), and `attach_component_listeners`, which attaches a `heddle-tools` `OutsideComponent`'s declared listeners over its own connection. This crate depends on those three; they must never depend on it |
+| `command` | `heddle hooks [--json]` behind the binary's entry-point convention (D-043) |
 
 ### Who uses which part
 
-| Crate (seat) | Defines the marker of | Calls |
-|---|---|---|
-| `heddle-llm` (developer-three) | `model/request` (waterfall, request → request), `model/stream` (waterfall, request → chunk stream) | `waterfall`; `expose_waterfall` for `model/request` only |
-| `heddle-tools` (developer-five) | `tools/pre-execute` (`{name,args}` → `{allowed,reason?}`), `tools/post-execute` (`{name,args,result}` → result) | `waterfall`, `expose_waterfall` |
-| `heddle-agent` (developer-five) | `agent/pre-step`, `agent/request-error` | `waterfall`; turns a `HookError` into the turn's failure message (`is_refusal()` → its own words; else "a hook failed at …") |
-| `heddle-session` (developer-eight) | `session/event` (emit, `{session, event}`) | `emit` after the write, never before; `expose_emit` |
-| `heddle-context` (developer-four) | — | `on_waterfall` for `agent/request-error` |
-| `heddle-sandbox` (developer-seven) | `approval/request` (emit) | `emit` |
-| `heddle-server` (developer-ten) | — | `on_emit` for `session/event` and `approval/request` (the live stream); `on_waterfall_map` for `model/request` (the running-turn model rule) |
-| `heddle` (developer-two) | — | builds the bus, one `Scope` per configuration row; prints `points::hook_points_json()` / `hook_points_text()` for `heddle hooks`; listens for `ConfigProblem`; emits `Ready`; attaches `outside-listener` rows |
+The feature crates do not depend on this crate: each intercepts its calls through a **port of its own**, and
+this crate adapts to all of them in one place (`ports`), which is what keeps the workspace acyclic (D-025: a
+feature crate adapts behind the seam). The binary is the only crate that builds a bus.
+
+| Crate (seat) | How it meets the bus |
+|---|---|
+| `heddle-llm` (developer-three) | its `ModelHooks` port; `BusHooks` implements it for `model/request` (a failing listener fails the call before any stream exists). `model/stream`'s output is a stream, so it is not exposed to outside listeners |
+| `heddle-tools` (developer-five) | its `ToolHooks` port; `BusHooks` implements `tools/pre-execute` (a broken listener is a `ToolHookError`, answered `INTERRUPTED`) and `tools/post-execute` (a broken listener is `TOOL_FAILED`). Its `OutsideComponent` hosts a component's tools; `attach_component_listeners` attaches the listeners the same process declared |
+| `heddle-agent` (developer-five) | its `TurnHooks` port; `BusHooks` implements `agent/pre-step` (a refusal is reported as is, a broken hook as `a hook failed at agent/pre-step — …`). `agent/request-error` stays the port's own default: it is not in the catalog |
+| `heddle-session` (developer-eight) | its store's `EventListener` closure; the boot calls `bridge::session_event` from it, after the write |
+| `heddle-goal`, `heddle-todo` (developer-six) | none: they event-source from the session store and need no bus |
+| `heddle` (developer-two) | builds the bus, calls `bridge::expose_catalog`, hands one `BusHooks` to the model service, the tool registry's gates and the agent runtime, attaches each outside component's declared listeners through a `Scope` per row, and dispatches `hooks` to `command::run`. Runs on the multi-thread Tokio runtime the ports block on |
 
 ## Rust shapes that differ from Cordis, on purpose
 
@@ -73,7 +76,7 @@ contract. `cargo doc -p heddle-events` renders it.
 | 4b | The component shape (D-031): listeners declared in `initialize`, `merge` for a post-execute rewrite that keeps the tool's result, `RpcListener` so one process serves tools and listeners, and a child's own requests answered without id collisions | landed |
 | 4c | The port bridge: `llm`, `tools` and `agent` intercept through ports of their own, synchronous and without this crate; `bridge` makes an adapter over the bus a few lines in whichever crate holds it | landed |
 | 4d | The port adapters (`ports`): the boot passes one `BusHooks` where it passes the no-listener defaults today, for model requests, tool calls and rounds | landed |
-| 5 | `60-hooks` through `HEDDLE_BIN`: the boot attaches a component's declared listeners (developer-two); the verifier branch writes each hook as a `.component.yml` and a process instead of a `.ts` plugin (patch sent to integrator-one) | next, with the binary |
+| 5 | `60-hooks` through `HEDDLE_BIN`: the verifier's process-hook branch and its `_tests_/process-hooks` are on main, and the boot wires the bus (`12b21d1`). Rehearsal with only `SERVED` edited (`Hooks` and `Turn`, which the probe requires together): **6 of 6 pass**, `verify.sh` verdict 0, on developer-two's `3df3cc6` and again on `main` at `e0c55bf`, where `_tests_/process-hooks` also passes 6 of 6 (2026-10-23). The rehearsal on `f45993a`, before the wiring, had 1 of 6 | passes in rehearsal; judged in the lane once the binary serves `hooks` and `--turn` |
 
 ## Read next
 

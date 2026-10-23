@@ -1,0 +1,34 @@
+{"at":"2026-10-22T20:12-07:00","deployed":"a5b0c66","how":"hand, main's installer with HEDDLE_ALLOW_DIRTY_INSTALL=1","verdict_96":"2/3 main's checks, 3/3 branch's checks","note":"bring-up; page 533283 vs dist 533280; marker dd6d45d28567"}
+{"at":"2026-10-22T20:29-07:00","deployed":"b4f8abf","how":"hand, override","verdict_96":"2/3 main's, 3/3 branch's","note":"Rust lockfile chore; page unchanged"}
+{"at":"2026-10-22T20:31-07:00","deployed":"eaaa6bb","how":"hand, override","verdict_96":"2/3 main's, 3/3 branch's","note":"D-030 fixture configured; a turn answers, 0 errors"}
+{"at":"2026-10-22T20:44-07:00","deployed":"51f198b","how":"hand, the deployment's own installer, no override","verdict_95":"4/4","verdict_96":"3/3","note":"tooling merge 085caaf on main; agent runs supervisor.mjs; SIGKILL to new pid in 1 s with no guard"}
+{"at":"2026-10-22T20:47-07:00","deployed":"c67f5ad","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"page unchanged"}
+{"at":"2026-10-22T20:50-07:00","deployed":"1bcff7e","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"agent booted out afterwards to read the unjudged path: 95 verdict 3, 96 verdict 3"}
+{"at":"2026-10-22T20:54-07:00","deployed":"59fd96f","how":"hand","verdict_95":"4/4","verdict_96":"3/3"}
+{"at":"2026-10-22T20:59-07:00","deployed":"0a10ceb","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"after the 03:57Z outage; redeploy silence 288 ms"}
+{"at":"2026-10-22T21:02-07:00","deployed":"480d9b8","how":"hand","verdict_95":"4/4","verdict_96":"3/3","note":"binary web still exits 2"}
+{"at":"2026-10-22T21:13-07:00","deployed":"d28625d","how":"hand","verdict_95":"4/4","verdict_96":"3/3"}
+{"at":"2026-10-22T21:21-07:00","deployed":"b0ef8ab","how":"hand","verdict_96":"3/3","note":"95 judged on a scratch service from here on (D-042)"}
+{"at":"2026-10-22T21:24-07:00","deployed":"b89ad37","how":"hand","verdict_96":"3/3"}
+{"at":"2026-10-22T21:27-07:00","deployed":"c4c9292","how":"hand","verdict_96":"3/3"}
+{"at":"2026-10-22T21:31-07:00","deployed":"1157d4e","how":"redeploy.sh","verdict_96":"3/3","note":"first scripted redeploy: 3.8 s end to end, longest silence at 3082 300 ms"}
+{"at":"2026-10-22T21:32-07:00","deployed":"5c87849","how":"redeploy.sh","verdict_96":"3/3"}
+{"at":"2026-10-22T21:35-07:00","deployed":"29cec5b","how":"redeploy.sh","verdict_96":"3/3","note":"via c1cdb81"}
+{"at": "2026-10-22T21:43-07:00", "deployed": "a2d4ae4", "how": "redeploy.sh", "verdict_96": "3/3", "note": "146 commits: heddle-server and the web crates merged; page unchanged; the binary's web still exits 2"}
+{"at": "2026-10-22T21:45-07:00", "deployed": "1db2b4e", "how": "redeploy.sh", "verdict_96": "3/3", "note": "18 commits; page unchanged"}
+{"at": "2026-10-22T21:50-07:00", "deployed": "67c2587", "how": "redeploy.sh", "verdict_96": "3/3", "note": "only rust/ and other tools changed: checkout moved, no rebuild or restart; server pid and launch token unchanged"}
+{"at": "2026-10-22T21:57-07:00", "deployed": "8072846", "how": "redeploy.sh (seat copy, --repo)", "verdict_96": "3/3", "note": "13 commits, rust/ and tools only: checkout moved, no restart"}
+{"at": "2026-10-22T22:33-07:00", "deployed": "bb6bc00", "how": "redeploy.sh (seat copy, --repo)", "verdict_96": "3/3", "note": "181 commits incl. the tooling merge a871aae: _tools_/web-daemon changed, so a full rebuild and restart by main's installer; the deployment had trailed main since 21:56 (this seat's lapse)"}
+{"at": "2026-10-22T22:35-07:00", "deployed": "db3d76d", "how": "the deployment's own redeploy.sh, now on main", "verdict_96": "3/3", "note": "no restart; main's rehearse.sh from the deployment just before: 6 of 6, 95 4/4 on the scratch service, live pid unchanged"}
+{"at": "2026-10-22T22:41-07:00", "deployed": "452c02b", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "27 commits incl. 16b1136 (recovery paths, 95 refuses the deployment) and e3f9d91 (heddle web on main): restart; the agent now runs the health probe, reclaim, lock and AbandonProcessGroup; plain 95 from the deployment 3 pass + 1 unjudged, live pid unchanged"}
+{"at": "2026-10-22T22:45-07:00", "deployed": "5b02a4a", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "docs only: no restart"}
+{"at": "2026-10-22T22:47-07:00", "deployed": "d295bbf", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "docs only: no restart"}
+{"at": "2026-10-22T22:52-07:00", "deployed": "03e9e40", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "Rust sandbox records only: no restart"}
+{"at": "2026-10-22T22:57-07:00", "deployed": "d1d963d", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "64 commits, no restart"}
+{"at": "2026-10-22T23:02-07:00", "deployed": "d836e5b", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the 3097 preview rebuilt from the same main by preview.sh"}
+{"at": "2026-10-22T23:06-07:00", "deployed": "e57c5b6", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview.sh --check: current, nothing the preview serves changed"}
+{"at": "2026-10-22T23:09-07:00", "deployed": "74fccb4", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the 3097 preview rebuilt from 74fccb4 by preview.sh (web drives goals): endpoints, tree, goal, todo, team 200, a turn streams the fixture reply"}
+{"at": "2026-10-22T23:12-07:00", "deployed": "97f7435", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "restart, because preview.sh reached _tools_/web-daemon on main; the 3097 preview rebuilt from 97f7435 by main's preview.sh"}
+{"at": "2026-10-22T23:17-07:00", "deployed": "3c12b45", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the 3097 preview rebuilt from 3c12b45 (Markdown renderer): /api/markdown 200, every checked route 200"}
+{"at": "2026-10-22T23:26-07:00", "deployed": "3b03427", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview rebuilt from 3b03427 and reinstalled with its own session root"}
+{"at": "2026-10-22T23:33-07:00", "deployed": "adb5c5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (nothing it serves changed)"}

@@ -116,6 +116,10 @@ impl Component for ModelComponent {
             heddle_llm::ModelService::from_configuration(endpoints, config.default.as_deref())
                 .map_err(|error| error.to_string())?;
         let service = Arc::new(service);
+        // `model/request` reaches the bus, where a hook may rewrite the request.
+        if let Some(hooks) = bus_hooks(services) {
+            service.add_hooks(Arc::new(hooks));
+        }
         services.provide("model", Arc::clone(&service));
         services.provide(
             "model",
@@ -288,8 +292,31 @@ impl Component for SessionComponent {
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
         let config: heddle_session::SessionConfig =
             serde_json::from_value(config.clone()).map_err(|error| format!("session: {error}"))?;
+        // Every appended event is emitted as `session/event` on the bus, as the TypeScript store does, and
+        // published on the server's hub, so a page that is open sees it as it lands.
+        let bus = services.get::<heddle_events::EventBus>("events");
+        let hub = services
+            .get::<heddle_server::EventHub>("event-hub")
+            .map(heddle_server::adapters::session_event_listener);
+        let stream = services.get::<Arc<heddle_llm::command::StreamHub>>("stream-hub");
+        let listener = (bus.is_some() || hub.is_some() || stream.is_some()).then(|| {
+            Arc::new(
+                move |handle: &heddle_session::SessionHandle,
+                      event: &heddle_session::SessionEvent| {
+                    if let Some(bus) = &bus {
+                        heddle_events::bridge::session_event(bus, &handle.id, &event.to_value());
+                    }
+                    if let Some(hub) = &hub {
+                        hub(handle, event);
+                    }
+                    if let Some(stream) = &stream {
+                        stream.observe(&handle.id, &event.to_value());
+                    }
+                },
+            ) as heddle_session::EventListener
+        });
         let service = Arc::new(heddle_session::SessionService::new(
-            &config, &self.env, None,
+            &config, &self.env, listener,
         ));
         services.provide("session", Arc::clone(&service));
         services.provide(
@@ -798,7 +825,11 @@ impl Component for ToolsComponent {
             .ok_or_else(|| "tools: the sandbox service is not provided".to_owned())?;
         let sessions = session_service(services, "tools")?;
         // The sandbox, the approval policy and each session's recorded mode, as heddle-tools composes them.
-        let gates = heddle_tools::adapters::gates_over(sandbox, approvals, sessions);
+        let mut gates = heddle_tools::adapters::gates_over(sandbox, approvals, sessions);
+        // `tools/pre-execute` and `tools/post-execute` reach the bus.
+        if let Some(hooks) = bus_hooks(services) {
+            gates.hooks = Arc::new(hooks);
+        }
         let registry = Arc::new(heddle_tools::ToolRegistry::from_config(gates, &config));
         services.provide("tools", Arc::clone(&registry));
         services.provide(
@@ -1227,19 +1258,222 @@ impl Component for OutsideRow {
         let registry = services
             .get::<Arc<heddle_tools::ToolRegistry>>("tools")
             .ok_or_else(|| "the tool registry is not provided".to_owned())?;
-        let gate: Arc<dyn heddle_tools::SandboxGate> =
-            Arc::new(heddle_tools::adapters::Sandbox::new(sandbox));
-        let component = crate::runtime::tokio()
-            .block_on(heddle_tools::OutsideComponent::start(spec, gate))
-            .map_err(|error| error.to_string())?;
+        let _ = sandbox;
+        // The registry's own gate, so the component's calls are confined exactly as the built-ins'.
+        let gate = Arc::clone(registry.sandbox());
+        let row = spec.row.clone();
+        let component = Arc::new(
+            crate::runtime::tokio()
+                .block_on(heddle_tools::OutsideComponent::start(spec, gate))
+                .map_err(|error| error.to_string())?,
+        );
         component
             .register_into(&registry)
             .map_err(|error| error.to_string())?;
-        // The process lives as long as the run: its handle stays registered under its manifest.
+        // The listeners it declared in `initialize` attach to the bus under its own scope.
+        let listeners = match services.get::<heddle_events::EventBus>("events") {
+            Some(bus) => {
+                let scope = bus.scope(row);
+                let listeners = heddle_events::ports::attach_component_listeners(
+                    &scope,
+                    Arc::clone(&component),
+                )
+                .map_err(|error| error.to_string())?;
+                Some((scope, listeners))
+            }
+            None => None,
+        };
+        // The process, its scope and its listeners live as long as the run.
         services.provide(
             &format!("outside:{}", self.manifest.display()),
-            Arc::new(component),
+            Arc::new((component, listeners)),
         );
+        Ok(())
+    }
+}
+
+/// The hook points over the run's bus, when the boot made one.
+pub fn bus_hooks(services: &Services) -> Option<heddle_events::ports::BusHooks> {
+    services
+        .get::<heddle_events::EventBus>("events")
+        .map(heddle_events::ports::BusHooks::new)
+}
+
+/// The services every agent row waits for: what the shared runtime is built from.
+const AGENT_SERVICES: [&str; 4] = ["model", "session", "context", "tools"];
+
+/// `src/plugins/subagent-tool.ts`: `delegate`, a child agent on the same runtime.
+pub struct SubagentToolComponent;
+
+impl Component for SubagentToolComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_agent::SubagentConfig =
+            if config.as_object().is_some_and(|map| map.is_empty()) {
+                heddle_agent::SubagentConfig::default()
+            } else {
+                serde_json::from_value(config.clone())
+                    .map_err(|error| format!("subagent-tool: {error}"))?
+            };
+        let sessions = session_service(services, "subagent-tool")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        let deps = heddle_agent::SubagentDeps {
+            store: Arc::new(heddle_agent::adapters::SessionSubagents::new(sessions)),
+            run: heddle_agent::subagent_runner(Arc::downgrade(&runtime)),
+        };
+        for tool in heddle_agent::subagent_tools(deps, config.into()) {
+            runtime
+                .tools
+                .register(tool)
+                .map_err(|error| format!("subagent-tool: {error}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// `src/plugins/goal-driver.ts`: a goal continues itself, one round at a time, on the shared runtime.
+pub struct GoalDriverComponent;
+
+/// A goal round: a turn in the goal's session, on its recorded endpoint, its source naming the goal.
+struct GoalRounds {
+    runtime: std::sync::Weak<heddle_agent::AgentRuntime>,
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+impl heddle_goal::RoundRunner for GoalRounds {
+    fn run(
+        &self,
+        session: &str,
+        prompt: String,
+        source: heddle_goal::GoalRoundSource,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let runtime = self.runtime.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let session = session.to_owned();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .ok_or("the run that owned this goal has ended")?;
+            let handle = sessions
+                .open(&session)
+                .ok_or_else(|| format!("no session '{session}'"))?;
+            let endpoint = sessions
+                .meta(&session)
+                .and_then(|meta| {
+                    meta.as_map()
+                        .get("endpoint")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| runtime.model.default_endpoint())
+                .ok_or("no endpoint is configured")?;
+            let mut options = heddle_agent::RunTurnOptions::new(handle, endpoint, prompt);
+            options.source = serde_json::to_value(&source).ok();
+            heddle_agent::run_turn(&runtime, options)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl Component for GoalDriverComponent {
+    fn requires(&self) -> Vec<String> {
+        let mut requires: Vec<String> = AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        requires.push("goal".to_owned());
+        requires
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let goals = services
+            .get::<Arc<heddle_goal::GoalService>>("goal")
+            .ok_or_else(|| "goal-driver: the goal service is not provided".to_owned())?;
+        let sessions = session_service(services, "goal-driver")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        let driver = heddle_goal::GoalDriver::new(
+            goals,
+            Arc::new(GoalRounds {
+                runtime: Arc::downgrade(&runtime),
+                sessions,
+            }),
+        );
+        // DSH drives a goal at quiescence; here that is every `turn/completed` the store appends, which the
+        // bus carries as `session/event` (src/plugins/goal-driver.ts listens the same way).
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let trigger = heddle_goal::DriverTrigger::new(Arc::clone(&driver));
+            let scope = bus.scope("goal-driver");
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    let session = payload.get("session").and_then(Value::as_str);
+                    let kind = payload
+                        .get("event")
+                        .and_then(|event| event.get("type"))
+                        .and_then(Value::as_str);
+                    if let (Some(session), Some(kind)) = (session, kind) {
+                        // The chain runs on the process runtime; the append is not held open by it.
+                        if let Some(run) = trigger.on_session_event(session, kind) {
+                            crate::runtime::tokio().spawn(run);
+                        }
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("goal-driver-listener", Arc::new((scope, listener)));
+        }
+        services.provide("goalDriver", driver);
+        Ok(())
+    }
+}
+
+/// `src/plugins/team.ts`: a Lead's teammates, their tasks and their mail, durable in the session log.
+pub struct TeamComponent;
+
+impl Component for TeamComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "team")?;
+        let models = services
+            .get::<Arc<heddle_llm::ModelService>>("model")
+            .ok_or_else(|| "team: the model service is not provided".to_owned())?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-team composes its own row: the service over the session store, the teammates' turns on the
+        // runtime, the live-turn registry, and the nine tools in the runtime's registry.
+        let plugin = heddle_team::compose::start_row(heddle_team::compose::TeamRow {
+            config,
+            sessions,
+            models,
+            runtime,
+            emit_changed: None,
+            warn: None,
+        })?;
+        services.provide("team", Arc::clone(&plugin.service));
         Ok(())
     }
 }
@@ -1604,6 +1838,11 @@ mod tests {
             ("goal", json!({})),
             ("goal-tool", json!({})),
             ("turns", json!({})),
+            ("model", json!({ "readLocalConfig": false })),
+            ("context", json!({})),
+            ("subagent-tool", json!({})),
+            ("goal-driver", json!({})),
+            ("team", json!({})),
             ("greeting", json!({ "punctuation": "?" })),
             ("announce", json!({})),
             ("console", json!({})),
@@ -1640,6 +1879,9 @@ mod tests {
             "create_goal",
             "get_goal",
             "update_goal",
+            "delegate",
+            "spawn_teammate",
+            "team_task_create",
         ] {
             assert!(
                 names.contains(&expected.to_owned()),
@@ -1648,6 +1890,14 @@ mod tests {
         }
         assert!(services.goal().is_some());
         assert!(services.provides("turns"));
+        assert!(
+            services.provides("goalDriver"),
+            "the goal driver is composed"
+        );
+        assert!(
+            services.provides("agent-runtime"),
+            "the subagent tool and the goal driver share one runtime"
+        );
         let greeting = services
             .get::<Arc<Greeting>>("greeting")
             .expect("the greeting service");

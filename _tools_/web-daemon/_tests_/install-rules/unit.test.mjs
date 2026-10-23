@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -62,8 +62,34 @@ function fixture({ name = 'repo' } = {}) {
   }
   // Not running, so an install never takes the replace path by accident; `print` fails as for an absent job.
   record('systemctl', 'case "$*" in *is-active*) exit 3;; esac\n')
-  record('launchctl', 'case "$1" in print) exit 113;; esac\n')
+  // A stateful launchd stand-in. FAKE_LOADED=1 makes the job loaded on first sight, so the replace path can be judged;
+  // FAKE_BOOTOUT_LINGER=N keeps `print` answering N more times after a bootout (launchd removes a job asynchronously);
+  // FAKE_BOOTSTRAP_FAILS=N refuses the first N bootstraps with launchd's `5: Input/output error`.
+  const launchd = join(base, 'launchd')
+  mkdirSync(launchd, { recursive: true })
+  record(
+    'launchctl',
+    [
+      `state="${launchd}"`,
+      'if [ "${FAKE_LOADED:-0}" = 1 ] && [ ! -f "$state/seen" ]; then touch "$state/seen" "$state/loaded"; fi',
+      'case "$1" in',
+      '  print)',
+      '    if [ -f "$state/linger" ]; then n=$(cat "$state/linger"); if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$state/linger"; exit 0; fi; rm -f "$state/linger"; fi',
+      '    [ -f "$state/loaded" ] && exit 0',
+      '    exit 113 ;;',
+      '  bootout) rm -f "$state/loaded"; [ -n "${FAKE_BOOTOUT_LINGER:-}" ] && echo "$FAKE_BOOTOUT_LINGER" > "$state/linger"; exit 0 ;;',
+      '  bootstrap)',
+      '    done=$(cat "$state/refused" 2>/dev/null || echo 0)',
+      '    if [ "$done" -lt "${FAKE_BOOTSTRAP_FAILS:-0}" ]; then echo $((done + 1)) > "$state/refused"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi',
+      '    touch "$state/loaded"; exit 0 ;;',
+      'esac',
+      '',
+    ].join('\n'),
+  )
   record('loginctl', 'echo "${FAKE_LINGER:-yes}"\n')
+  // The post-start check probes the port; this stand-in answers unless told not to, and records nothing.
+  writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit "${FAKE_CURL_EXIT:-0}"\n')
+  chmodSync(join(bin, 'curl'), 0o755)
   // The account's crontab, kept in a file so the --guard edits can be read back like a real one.
   record(
     'crontab',
@@ -133,7 +159,8 @@ test('macOS renders the supervisor in front of the server, and asks not to only 
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
-  assert.deepEqual(args, [process.execPath, supervisor, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which runs the server')
+  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which watches, reclaims and runs the server')
+  assert.match(stdout, /<key>AbandonProcessGroup<\/key>\s*<true\/>/, 'the server outlives a killed supervisor')
 
   const bare = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SUPERVISOR: '0' })
   assert.equal(bare.status, 0, bare.stderr)
@@ -152,7 +179,7 @@ test('the Rust branch of part 11 is the same service with the binary in front of
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
-  assert.deepEqual(args, [process.execPath, supervisor, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
+  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
   assert.doesNotMatch(stdout, /dist\/cli\.js/, 'nothing node-runs-a-CLI remains in the definition')
 
   const described = describeCommand(args, f.repo)
@@ -264,6 +291,81 @@ test('a refused reinstall leaves the installed unit as it was', () => {
   assert.equal(readFileSync(target, 'utf8'), before, 'rendered first, written only when the render succeeded')
 })
 
+test('a refused macOS reinstall leaves the running agent loaded: the render happens before the bootout', () => {
+  // Measured 2026-10-23: --restart booted the live agent out, then refused a deployment one commit behind a freshly
+  // fetched origin/main, and exited with nothing loaded — 8082 answered 502 until the agent was bootstrapped by hand.
+  const f = fixture()
+  const loaded = { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_LOADED: '1' }
+  assert.equal(install(f, [], loaded).status, 0)
+  const target = join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.plist')
+  const before = readFileSync(target, 'utf8')
+  rmSync(f.calls, { force: true })
+
+  writeFileSync(join(f.repo, 'cordis.yml'), '[] # edited\n')
+  const refused = install(f, ['--restart'], loaded)
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /uncommitted changes/)
+  assert.ok(calls(f).every((line) => !line.includes('bootout')), `no bootout before the refusal (calls: ${calls(f).join(' | ')})`)
+  assert.ok(calls(f).every((line) => !line.includes('bootstrap') && !line.includes('kickstart')), 'and nothing was started either')
+  assert.equal(readFileSync(target, 'utf8'), before, 'the installed agent is the one that was there')
+
+  git(f.repo, 'checkout', '--', 'cordis.yml')
+  rmSync(f.calls, { force: true })
+  assert.equal(install(f, ['--restart'], loaded).status, 0)
+  const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
+  assert.deepEqual(calls(f), [
+    `launchctl print gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl bootout gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl print gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl bootstrap gui/${uid} ${target}`,
+    `launchctl kickstart -k gui/${uid}/com.dtadpole.heddle-web`,
+  ], 'an accepted reinstall replaces the loaded agent: bootout only after the render succeeded, bootstrap once it is gone')
+})
+
+test('a reinstall waits for launchd to finish the bootout and retries a refused bootstrap, ending loaded', () => {
+  // Measured 2026-10-23 on a rehearsal agent: bootstrap right after bootout failed with `5: Input/output error`, and
+  // the installer exited with nothing loaded. Here launchd keeps reporting the old job for three reads after the
+  // bootout and then refuses the first two bootstraps.
+  const f = fixture()
+  const env = { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_LOADED: '1', FAKE_BOOTOUT_LINGER: '3', FAKE_BOOTSTRAP_FAILS: '2' }
+  const result = install(f, ['--restart'], env)
+  assert.equal(result.status, 0, result.stderr)
+  const verbs = calls(f).map((line) => line.split(' ')[1])
+  assert.deepEqual(verbs, ['print', 'bootout', 'print', 'print', 'print', 'print', 'bootstrap', 'bootstrap', 'bootstrap', 'kickstart'],
+    'it reads until the old job is gone, then loads, retrying the two refusals, then starts')
+})
+
+test('a bootstrap that never succeeds exits 1 and says the agent is not loaded', () => {
+  const f = fixture()
+  const result = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_BOOTSTRAP_FAILS: '99', HEDDLE_BOOTSTRAP_ATTEMPTS: '3' })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /bootstrap failed 3 times; com\.dtadpole\.heddle-web is NOT loaded/)
+  assert.match(result.stderr, /Load it by hand/, 'and it says how to recover')
+  assert.ok(calls(f).every((line) => !line.includes('kickstart')), 'nothing is started on top of a failed load')
+})
+
+test('the scratch-service overrides name another agent, state directory and log, and the deployment is untouched', () => {
+  const f = fixture()
+  const scratch = join(f.base, 'scratch')
+  const env = {
+    HEDDLE_WEB_PLATFORM: 'darwin',
+    HEDDLE_WEB_LABEL: 'com.dtadpole.heddle-web.rehearsal',
+    HEDDLE_WEB_PORT: '3096',
+    HEDDLE_WEB_HOME: scratch,
+    HEDDLE_WEB_LOG: join(scratch, 'web.log'),
+  }
+  const result = install(f, [], env)
+  assert.equal(result.status, 0, result.stderr)
+  const target = join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.rehearsal.plist')
+  const plist = readFileSync(target, 'utf8')
+  assert.match(plist, /<string>com\.dtadpole\.heddle-web\.rehearsal<\/string>/)
+  assert.match(plist, new RegExp(`<key>StandardOutPath</key>\\s*<string>${scratch}/web\\.log</string>`), 'its own log, so the gate never reads its token')
+  assert.match(plist, new RegExp(`<key>HEDDLE_HOME</key>\\s*<string>${scratch}</string>`), 'its own state directory')
+  assert.match(plist, /<string>3096<\/string>/)
+  assert.ok(!existsSync(join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.plist')), 'the deployment agent file was not written')
+  assert.ok(calls(f).every((line) => !line.endsWith('/com.dtadpole.heddle-web')), 'and no launchctl call named the deployment label')
+})
+
 test('Linux uninstall disables and stops the unit, removes it and reloads', () => {
   const f = fixture()
   assert.equal(install(f, [], { HEDDLE_WEB_PLATFORM: 'linux' }).status, 0)
@@ -328,4 +430,95 @@ test('an unknown platform and an unknown option are refused', () => {
   const option = install(f, ['--frobnicate'], { HEDDLE_WEB_PLATFORM: 'linux' })
   assert.equal(option.status, 2)
   assert.match(option.stderr, /unknown option --frobnicate/)
+})
+
+test('an install is verified: a service that never answers on its port fails loudly instead of reporting success', () => {
+  const f = fixture()
+  const answered = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin' })
+  assert.equal(answered.status, 0, answered.stderr)
+  assert.match(answered.stdout, /verified: port 3082 answers/)
+
+  const silent = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_CURL_EXIT: '7', HEDDLE_START_WAIT: '1' })
+  assert.equal(silent.status, 1, 'a start that is not verified is not a start')
+  assert.match(silent.stderr, /is installed but port 3082 did not answer within 1 s/)
+
+  const skipped = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_CURL_EXIT: '7', HEDDLE_START_WAIT: '0' })
+  assert.equal(skipped.status, 0)
+  assert.match(skipped.stdout, /not verified: HEDDLE_START_WAIT=0/, 'skipping is said, never silent')
+})
+
+test('the rendered agent is well-formed XML, which no comment may break with a double hyphen', () => {
+  const f = fixture()
+  const { status, stdout } = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin' })
+  assert.equal(status, 0)
+  for (const comment of stdout.matchAll(/<!--([\s\S]*?)-->/g)) {
+    assert.doesNotMatch(comment[1], /--/, `a comment holds "--", which XML forbids: ${comment[1].trim().slice(0, 60)}`)
+  }
+})
+
+test('uninstalling stops a server this service left behind on its port, and nothing else on it', async () => {
+  // The agent abandons its process group, so a server whose supervisor died outlives the bootout: measured 2026-10-22,
+  // an uninstall left one serving on the scratch port until it was stopped by hand.
+  const f = fixture()
+  const ours = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], { stdio: 'ignore' })
+  const theirs = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'serve', '--port', '3082'], { stdio: 'ignore' })
+  const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+  const lsof = join(f.base, 'lsof-stand-in')
+  const listening = (pid) => {
+    writeFileSync(lsof, `#!/bin/sh\necho ${pid}\n`)
+    chmodSync(lsof, 0o755)
+  }
+  try {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    listening(theirs.pid)
+    const stranger = install(f, ['--uninstall'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_LSOF: lsof })
+    assert.equal(stranger.status, 0, stranger.stderr)
+    assert.match(stranger.stdout, new RegExp(`port 3082 is held by pid ${theirs.pid} .*not this service; left alone`))
+    assert.ok(alive(theirs.pid), 'a stranger is never stopped')
+
+    listening(ours.pid)
+    const leftover = install(f, ['--uninstall'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_LSOF: lsof })
+    assert.equal(leftover.status, 0, leftover.stderr)
+    assert.match(leftover.stdout, new RegExp(`stopped the server this service left on port 3082 \\(pid ${ours.pid}\\)`))
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    assert.ok(!alive(ours.pid), 'the leftover of this checkout and port is gone')
+  } finally {
+    for (const child of [ours, theirs]) child.kill('SIGKILL')
+  }
+})
+
+test('HEDDLE_WEB_SESSION_ROOT gives a second service its own session store, on both platforms; a relative one is refused', () => {
+  // The repository profile pins the session row's root to ~/.heddle/sessions, so HEDDLE_WEB_HOME alone did not
+  // separate the 3097 preview's sessions from the deployment's (measured 2026-10-22).
+  const f = fixture()
+  const mac = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SESSION_ROOT: '/srv/preview/sessions' })
+  assert.equal(mac.status, 0, mac.stderr)
+  assert.match(mac.stdout, /<string>--config<\/string>\s*<string>[^<]*\/cordis\.yml<\/string>\s*<string>--session-root<\/string>\s*<string>\/srv\/preview\/sessions<\/string>/)
+  const linux = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'linux', HEDDLE_ALLOW_NO_LINGER: '1', HEDDLE_WEB_SESSION_ROOT: '/srv/preview/sessions' })
+  assert.equal(linux.status, 0, linux.stderr)
+  assert.match(linux.stdout, /^ExecStart=.* web --host 127\.0\.0\.1 --port 8082 --config .*\/cordis\.yml --session-root \/srv\/preview\/sessions$/m)
+  const unset = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin' })
+  assert.doesNotMatch(unset.stdout, /session-root/, 'the deployment, which sets nothing, renders as before')
+  const relative = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SESSION_ROOT: 'sessions' })
+  assert.equal(relative.status, 2)
+  assert.match(relative.stderr, /HEDDLE_WEB_SESSION_ROOT must be an absolute path/)
+})
+
+test('with a session root, uninstall still recognises this service\'s leftover by its whole command line', async () => {
+  const f = fixture()
+  const ours = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`, '--session-root', '/srv/preview/sessions'], { stdio: 'ignore' })
+  const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+  const lsof = join(f.base, 'lsof-stand-in')
+  writeFileSync(lsof, `#!/bin/sh\necho ${ours.pid}\n`)
+  chmodSync(lsof, 0o755)
+  try {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    const result = install(f, ['--uninstall'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_LSOF: lsof, HEDDLE_WEB_SESSION_ROOT: '/srv/preview/sessions' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /stopped the server this service left on port 3082/)
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    assert.ok(!alive(ours.pid))
+  } finally {
+    ours.kill('SIGKILL')
+  }
 })

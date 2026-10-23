@@ -15,7 +15,7 @@ Holds the two halves of one job — making a verifier's result **honest** and ma
 |---|---|
 | [`run.mjs`](run.mjs) | the judge: runs a check under Node's test runner, reads the TAP stream, and exits with the project's verdict |
 | [`lib.mjs`](lib.mjs) | the library every check imports: the CLI runners, the scripted config and model doubles, isolated fixtures, transcript and session finding, `skipUnless` |
-| [`lane.mjs`](lane.mjs) | the lane gate: runs every check file of the parts named, and is red when a check fails or a file gives no verdict — unjudged checks do not block a merge (D-042) |
+| [`lane.mjs`](lane.mjs) | the lane gate: runs every check file of the parts named, and is red when a check fails or a file gives no verdict (D-042) — or, against a baseline, when a passing check stops passing (D-048) |
 | [`browser.mjs`](browser.mjs) | the one-page wrapper over [`browser-use/`](../browser-use/INDEX.md) that the checks needing a page import |
 | [`lib.d.mts`](lib.d.mts) | the names a TypeScript test may import from the library |
 | [`_tests_/`](_tests_/INDEX.md) | both component suites — the verdict mapping and the library's rules |
@@ -65,6 +65,17 @@ It is **green** when no check failed and every check file gave a verdict, howeve
 **red** when a check fails, a file's verdict is `1`, or a file times out or crashes. A file with no verdict is never
 read as unjudged: a half-wired binary that stalls every turn would otherwise pass the gate. `all.mjs` keeps the
 stricter question — an unjudged part is a failure there — because that is what "the port is complete" means.
+
+**Against a baseline (D-048).** Once `main` carries a known failure, "nothing fails" stops being the merge rule; D-048's
+is "no check that passes on `main` stops passing". `--write-baseline <file>` records every check of a run by part, file
+and name; `--baseline <file>` then judges a candidate against it: **red** when a check that passed in the baseline does
+not pass now (a check that disappeared counts — a rename must not hide a lost pass) or a file gives no verdict, **green**
+otherwise, with the newly passing count and every failing check listed so the status table can name each with its owner.
+
+```bash
+HEDDLE_BIN=<main's binary>      node _tools_/verify-runner/lane.mjs --write-baseline base.json <part> ...
+HEDDLE_BIN=<candidate's binary> node _tools_/verify-runner/lane.mjs --baseline base.json <part> ...
+```
 
 ## The library a check imports
 

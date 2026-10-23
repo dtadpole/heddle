@@ -1,6 +1,6 @@
 ---
 title: The heddle binary crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port's binary and composition root — the command line the verifiers run through HEDDLE_BIN, the boot that starts every crate behind its API, its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -41,12 +41,13 @@ tested.
 | `heddle` (`lib.rs`) | `Invocation { argv, env, cwd }`, `Exit { Success = 0, Failure = 1, Unported = 2 }`, `run(&Invocation, &mut Output) -> Exit` |
 | `cli` | `Args` (one field per TypeScript `Args` field, quirks kept), `CommandWord`, `Subcommand`, `UsageError`, `parse_args(argv)`, `layer_options` (→ `heddle_config::LayerOptions`), `config_args` (→ `heddle_config::command::ConfigArgs`), `root_overrides` (→ an inline `NamedLayer`), `names_a_tree` |
 | `usage` | `Capability`, `SERVED`, `GATE_WORDS`, `LINES`, `usage(served)` — the help, gated by what is wired |
-| `boot` | `FiberState` (Cordis's numbering and names), `Entry`, `BootOptions { layers, overrides, target, env }`, `BootError`, `Boot { rows: Vec<ComposedRow>, entries, services, anchor }`, `boot`, `load`, `settle`, `failed_entries`, `describe_entries` |
+| `boot` | `FiberState` (Cordis's numbering and names), `Entry`, `BootOptions { layers, overrides, target, env }`, `BootError`, `Boot { rows: Vec<ComposedRow>, entries, services, anchor }`, `boot`, `load` (which makes the run's one `heddle-events` bus first), `settle`, `failed_entries`, `failure_lines`, `describe_entries` |
 | `builtins` | `Builtin`, `BuiltinSpec`, `BUILTINS`, `ComponentRef { Builtin, Outside, Unresolved }`, `resolve_component(&ComponentName)`, `Component { requires, schema, start }`, `Catalog`, `BuiltinCatalog::new(env)` (also `heddle_config::ComponentCatalog`, for `--validate`) |
-| `adapters` | one adapter per built-in over the owning crate's own types: `ModelComponent` (`heddle-llm`'s service from the row, the layers and the machine's file), `SandboxComponent` and `ApprovalsComponent` (`heddle-sandbox`'s services from their rows and the run's directory and harness home) |
+| `adapters` | one adapter per built-in over the owning crate's own types — `ModelComponent`, `SandboxComponent`, `ApprovalsComponent`, `SessionComponent`, `WorkspaceComponent`, `ToolsComponent`, `TodoComponent`, `TodoToolComponent`, `GoalComponent`, `GoalToolComponent`, `GoalDriverComponent`, `TurnsComponent`, `ContextComponent` (`Context = ContextService<SessionStore>`), `SubagentToolComponent`, `TeamComponent`, `InCrateComponent` (console, greeting, announce) — plus `OutsideRow` for a `./x.component.yml` row, `StoreLog`, `bus_hooks` |
+| `runtime` | `tokio()` (the process's one multi-thread runtime), `agent_runtime(&Services)`, `shared_runtime(&mut Services)` — `heddle-agent`'s `AgentRuntime` from its own adapters over the booted services |
 | `services` | `Services`: a service is a name with typed views — `provide`, `get`, `provides`, `withdraw`, and one accessor per port (`session()`, `model()`, …) |
 | `ports` | the consumer contract: one trait per service the commands read (below), `SessionHandle`, `Record = serde_json::Value`, `PortError`, `DEFAULT_WEB_PORT = 3082` |
-| `commands` | `dispatch`, `config_command`, `booted_command`, `bare_application`, `turn`, `web`, `HOOK_POINTS`, `describe_hooks` |
+| `commands` | `dispatch`, `config_command`, `booted_command` (each word → its owner's `command::run`), `turn` (→ `heddle_agent::command::run`), `web`, `bare_application` |
 | `output` | `Output` (both streams), `Captured` (for tests), `stringify` (`JSON.stringify(value, null, 2)`) |
 
 ### How a row becomes a running crate
@@ -132,18 +133,18 @@ The library shape is complete and every module below compiles with its unit test
 |---|---|
 | `cli::parse_args` and the layer helpers | implemented, tested against `parseArgs`'s quirks and sentences |
 | `usage` (the gated help) and `main` | implemented: `--help` prints `usage(SERVED)`, a usage error exits 1, an unported request exits 2 naming itself |
-| `commands::config_command` | implemented: `profiles` and `config` are `heddle_config::command::run`'s, exit code mapped |
-| `boot::boot`, `load`, `settle`, `failed_entries`, `dispose` | implemented: composition through `heddle-config`, the loader swept to a fixed point, tested with a stub catalog and a profile fixture |
-| `commands::booted_command` and every non-turn command | implemented against the ports, tested with doubles: `models`, `tools`, `commands`, `sessions`, `transcript`, `hooks`, `workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file`, `session new`, `goal`, `context` |
-| `builtins::BuiltinCatalog` | implemented over the built-in table and, for an outside row, `heddle-config`'s component manifest; it builds an adapter per built-in, and one whose adapter is not written yet answers `None` |
-| `adapters::ModelComponent` | implemented and measured end to end: a profile naming the `model` row boots it and `models` answers from `heddle-llm` over `heddle-config`'s resolved endpoints |
-| `adapters::SandboxComponent`, `ApprovalsComponent` | implemented: each row's config deserialises into the crate's own type (an unknown mode refused, never widened), and the crate's handle plus, for the sandbox, the `SandboxPort` view are registered |
-| the adapters, `commands::web`, `turn`, `bare_application` | declared; they answer once the crates they compose exist |
-| `boot.rs`'s `heddle/ready` announcement | waits for `heddle-events`' bus, which every plugin will log through |
+| `boot::boot`, `load`, `settle`, `failed_entries`, `dispose` | implemented; `load` makes one `heddle-events` bus per run and exposes its catalog before any row starts |
+| every command word | dispatched to its owner's D-043 entry point: `profiles`/`config` (`heddle-config`), `models` (`heddle-llm`), `tools`/`commands` (`heddle-tools`), `hooks` (`heddle-events`), `goal` (`heddle-goal`), `context` (`heddle-context`), `sessions`/`transcript` (`heddle-session`), `workspaces`, `workspace …`, `tree`, `file`, `session new` (`heddle-workspace`) |
+| `--turn` | dispatched to `heddle_agent::command::run` on `runtime::tokio()`, after the pending check and the allow list; `--stream` not wired yet |
+| every built-in row of the repository profile | composes through `adapters.rs`; the hook points (`model/request`, `tools/pre-execute`/`post-execute`, `agent/pre-step`, `session/event`) reach the bus |
+| an outside component (`./x.component.yml`) | starts through `heddle_tools::OutsideComponent`; its tools join the registry, its listeners attach to the bus |
+| `web` | on `hd/developer-two-web`: `heddle_server::command::run` over a harness from the boot (sessions, turns, models, sandbox); 90 passes 9/9 there |
+| `bare_application` | declared; the three-plugin application of `src/app.ts` is the last unported request |
 
-`usage::SERVED` is the one line that says which capabilities answer: today `Always` and `Config`. A
-capability is added only when its command answers through the real crate, so a verifier reports
-unjudged rather than failing on a part that is not wired.
+`usage::SERVED` is the one line that says which capabilities the help advertises: today `Always`,
+`Config`, `Sessions`, `Workspaces` and `Goal`. A command that answers is routed whether or not it is
+advertised; a capability joins `SERVED` only when every verifier its gate words open runs with no
+failure (measured: 05 10/10, 70 11 pass / 0 fail / 34 unjudged).
 
 ## Command entry points in the owning crate (D-043)
 

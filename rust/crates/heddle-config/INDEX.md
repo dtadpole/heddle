@@ -1,6 +1,8 @@
 ---
 title: The heddle-config crate
-version: 0.3.1
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T06:45:36Z
+version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -59,11 +61,12 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 ## The config-boot contract
 
 What a caller does to turn command-line flags into rows, and what it may rely on afterwards. The binary follows it
-today: every command that boots goes through `rust/crates/heddle/src/commands.rs` `boot_then`, which builds
-`cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `profiles` and `config` pass
-`cli::config_args` to `command::run`. **`web` boots exactly as a run does** — the TypeScript `runWeb` calls
-`bootFromArgs` — so wiring it needs nothing new from this crate: boot through the same path as `boot_then` (steps 1–5
-below), then hand the server what step 7 lists. As of main `480d9b8`, the binary's `web` is still `todo!()`.
+today: every command that boots, `web` included, goes through `rust/crates/heddle/src/commands.rs` `boot_tree`, which
+builds `cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `boot_then` answers a booted command from
+it, and `web` hands it to `crate::web::web`. `profiles` and `config` pass `cli::config_args` to `command::run`.
+**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `e3f9d91` it is
+routed but not yet listed in `--help`; it takes the launch secret's directory from `heddle_home(&invocation.env)`
+(step 7), and an unknown `--profile` or a missing `--config` reaches the user as this crate's sentence with exit 1.
 
 ### 1. One environment, built once
 
@@ -158,7 +161,7 @@ The label is the row's `id`, else its `name`. A non-number where a number belong
 `05-config-system` matches for row `alpha` and field `count`. A value of the wrong type is reported once, and no other
 keyword is checked against it. The exit code is 1 when there is any problem.
 
-The binary's `BuiltinCatalog` answers a built-in with its adapter's schema, or `NoSchema` until the adapter exists;
+The binary's `BuiltinCatalog` answers a built-in with its adapter's schema, or `NoSchema` when the adapter declares none;
 answers a path with `ManifestCatalog::new().lookup(row, anchor)`, which reads `<name>.component.yml` (`program`,
 optional `args`, an inline `config` JSON Schema) without starting anything; and answers anything else as
 `Unresolvable`. **Keep the path arm delegating to `ManifestCatalog`**: answering `Unresolvable` there makes check 7 of
@@ -167,8 +170,8 @@ optional `args`, an inline `config` JSON Schema) without starting anything; and 
 To answer a built-in, the catalog constructs that built-in's component and asks `schema()`; it never calls `start`.
 `--validate` therefore starts nothing only while **a component's constructor merely stores its inputs and its
 `schema()` is a pure value** — no file, directory, process or network touched. A new adapter keeps both, or
-`config --validate` begins doing work on a tree it was only asked to describe. As of lane `1221b3e`, every built-in
-constructor stores `env` and `cwd` only, and none of the 13 `schema()` bodies does I/O.
+`config --validate` begins doing work on a tree it was only asked to describe. As of lane `40906af` every built-in has
+an adapter; each constructor stores `env`, `cwd` or nothing, and none of the 20 `schema()` bodies does I/O.
 
 ### 7. What the server reads after boot
 
@@ -188,6 +191,26 @@ of both rules (`HEDDLE_HOME ?? ~/.heddle`, and a `~` expansion that looks only a
 copies `token.ts` faithfully therefore answers `~user/x` as `<home>user/x` where `expand_home` leaves it unchanged —
 the one place this crate's deliberate difference (see *Where it differs on purpose*) shows inside one binary. Call
 `heddle_home` and `expand_home` there too, and the server has one rule for each.
+
+### 8. Starting an outside component
+
+How the binary turns an outside row into a process, as of main `67c2587` (`rust/crates/heddle/src/adapters.rs`,
+`OutsideRow`). `--validate` and the start read the manifest through the same `read_component_manifest`, so a manifest
+that validates is one that starts.
+
+| Part | Where it comes from |
+|---|---|
+| the manifest file | the row's name through step 5: `./x.component.yml` resolves against `anchor_dir`, the **first** file layer's directory, not the directory of the layer that wrote the row |
+| the program | `program` starting with `.` resolves lexically against the manifest's folder; anything else is used as written — an absolute path, or a bare name the system finds on `PATH`. `~` is not expanded |
+| the arguments | `args` as written, none when absent |
+| the working directory | the manifest's folder, because a manifest writes its `args` relative to itself (`args: [./shout-tool.mjs]`); only that folder keeps a manifest portable wherever it is referenced from, a later layer included |
+| the configuration | the row's composed `config`, handed over in `initialize`; `{}` when the row writes none or `null` (step 4) |
+| the name in `initialize`, errors and logs | **the row's `id`**, the same name `config --validate` and the boot's `N row(s) failed to load: <id>` use, so one broken row has one name everywhere |
+
+The two last rows are agreed with developer-five, who owns the process protocol (2026-10-22). **Where the binary still
+differs:** as of main `43fd346` it names the running component by the manifest's file name without `.component.yml`,
+so `id: alpha` naming `./shout.component.yml` says `shout` once running. `Catalog::component(&ComponentRef)` does not
+carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change is developer-two's.
 
 ### Keeping `05-config-system` judged
 
@@ -217,6 +240,13 @@ before any other work. Each check leans on the steps above:
 | a profile that does not exist says which ones do | 3 |
 
 One line per run, oldest first: the candidate, the command as run (with the binary it judged), and the result.
+**Measured and inferred are kept apart** (constitution C5): a row whose command column says *the … run above stands*
+is an **inference** — no Rust source, lockfile version, 05 verifier or runner differed, so the earlier binary was the
+candidate's — not a fresh run. From main `8072846` on, every row is a fresh run with a binary built from the commit
+it judges. A row that also names a later main (*now main …*, *re-made as …*) covers it by measured identity: every
+crate `cargo tree -p heddle` lists **at that commit**, the workspace manifest and every lockfile version are unchanged.
+The tree is read per commit, never from a fixed list: since `web` was wired it includes `heddle-server` and the
+`heddle-web-*` crates.
 
 | Date | Candidate | Command, and the binary it judged | Result |
 |---|---|---|---|
@@ -236,6 +266,36 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | main `29cec5b` (`5615f07` plus status docs and three lockfile lines filling in `heddle-events`' path dependencies, which its manifest already declared; no external version moved) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
 | 2026-10-22 | main `c572061` (the tools verifier writes each outside tool as a process; no Rust source, lockfile, 05 verifier or runner changed since `29cec5b`) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
 | 2026-10-22 | main `7ee5f90` (two public-hygiene gate fixes; no Rust source, lockfile, 05 verifier or runner changed since `c572061`) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
+| 2026-10-22 | main `a2d4ae4` (the UI lane: `heddle-server` and three `heddle-web-*` crates, all outside the binary's dependency tree; the lockfile only adds their packages and qualifies `r-efi` as `r-efi 6.0.0`, no existing version moved) | the `5615f07` run above stands: `HEDDLE_BIN=<debug build of exactly 5615f07> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
+| 2026-10-22 | lane `6bfcc5f` (the binary dispatches the owners' entry points and the turn: `commands.rs` largely rewritten, a new `runtime.rs`) | `HEDDLE_BIN=<debug build of exactly 6bfcc5f> sh _verifiers_/05-config-system/verify.sh --json`; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; `heddle config --validate` on the repository's own profile: 16 rows checked, 0 problems |
+| 2026-10-22 | main `5d1d8f3` (`6bfcc5f` plus status docs and two lockfile lines filling in the binary's declared `heddle-events` and `tokio` dependencies) | the `6bfcc5f` run above stands: `HEDDLE_BIN=<debug build of exactly 6bfcc5f> sh _verifiers_/05-config-system/verify.sh --json` | 10/10 passed, verdict 0, same binary |
+| 2026-10-22 | lane `a36a4c0` (the binary starts an outside component a row declares by manifest, through `read_component_manifest`) | `HEDDLE_BIN=<debug build of exactly a36a4c0> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, built after the candidate on a clean lane | 10/10 passed, verdict 0, both binaries |
+| 2026-10-22 | main `67c2587` (`a36a4c0` plus the lane gate and status docs; no Rust changed, so the lane release build is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and `HEDDLE_BIN=<lane release build> node _tools_/verify-runner/lane.mjs 05-config-system` | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `4e504df` (agent increment: each goal round answered with a real agent turn; `heddle-agent` and `heddle-goal` changed) | `HEDDLE_BIN=<debug build of exactly 4e504df> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | main `8072846` (`4e504df` plus four lockfile lines filling in `heddle-goal`'s declared path dependencies; the lane release build was made after `4e504df`, so it is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `40906af` (every built-in has an adapter: the subagent-tool, goal-driver and team rows; `--validate` now asks 20 schemas) | `HEDDLE_BIN=<debug build of exactly 40906af> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
+| 2026-10-22 | main `6a809e3` (the lane's `40906af` re-made as `b2ee1f6`, a verify-runner fix so a check returns once its harness exits, and the lockfile; `6a809e3` itself only adds a status doc to `8ec2a71`) | `HEDDLE_BIN=<debug build of exactly 8ec2a71> sh _verifiers_/05-config-system/verify.sh --json` from that tree, with main's new runner, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `c94d6b1` (the binary advertises the session, workspace and goal commands: `usage.rs` and `main.rs` changed; `--help` still lists `--profile`, `profiles` and `config`) | `HEDDLE_BIN=<debug build of exactly c94d6b1> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane tree held a modified lockfile when its release build was made, so I built the commit myself | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
+| 2026-10-22 | lane `cdea647` (`c94d6b1` plus hook and tool process tests in the 40 and 60 verifiers, and six lockfile lines with no version moved; 05 and the runner untouched) | `HEDDLE_BIN=<debug build of exactly cdea647> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | main `0e7ffea` (`12b21d1`, one event bus per run and the hook points over it, plus a status doc) | `HEDDLE_BIN=<debug build of exactly 12b21d1> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `95708c4` (the turn's hooks chain the overflow recovery after the bus; the binary changed) | `HEDDLE_BIN=<debug build of exactly 95708c4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | main `43fd346` (`3f8f744`: agent, team and events increments, a real outside component driven through the listeners, and the lockfile; `43fd346` adds a status doc) | `HEDDLE_BIN=<debug build of exactly 3f8f744> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated `3f8f744` and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
+| 2026-10-22 | lane `325cb67` (`ContextReport` has a `Default`; `heddle-context` changed) | `HEDDLE_BIN=<debug build of exactly 325cb67> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, made after the candidate on a clean lane; the lane gate with each | 10/10 passed, verdict 0, both binaries; lane gate green |
+| 2026-10-22 | lane `ee5fa0d` (the LLM crate's adapter-call entry point for the endpoint validator, and the shell's confinement on the real Seatbelt backend; `heddle-llm` and `heddle-tools` changed, no new `heddle-config` calls) | `HEDDLE_BIN=<debug build of exactly ee5fa0d> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `5612131` (the agent's `ContextReport` is `heddle-context`'s own; `heddle-agent`, `heddle-events` and `heddle-team` changed) | `HEDDLE_BIN=<debug build of exactly 5612131> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `e1d2fc0` (an unanswered escalated retry tested through the real services; `heddle-tools/src/adapters.rs` changed) | `HEDDLE_BIN=<debug build of exactly e1d2fc0> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `b61b4e8` (goal chains run on a pinned runtime so the trigger works from any thread; `heddle-goal` changed) | `HEDDLE_BIN=<debug build of exactly b61b4e8> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | main `6be6ccd` (UI-verifier fixes and readings over `db3d76d`; no Rust changed, so the lane release build, made at 22:37:53 on a clean `db3d76d`, is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `6aee707` (`heddle web` over `heddle-server`, routed and not yet advertised; seven binary files) | `HEDDLE_BIN=<debug build of exactly 6aee707> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots the repository's own profile, and an unknown `--profile` or a missing `--config` through `web` gives this crate's sentence and exit 1 |
+| 2026-10-22 | lane `b71715e`, now main `73bf9f6` (web mounts the files and trajectory routers and the ledger view, in `web.rs`; main adds a lockfile regeneration that moves no version, and a status doc) | `HEDDLE_BIN=<debug build of exactly b71715e> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` still boots the repository's own profile |
+| 2026-10-22 | lane `a3e1ad5`, re-made on main as `6fbf0f8` with identical binary inputs (web mounts the composer and composes the workspace and approvals rows; the standalone `web.rs` is retired in favour of main's) | `HEDDLE_BIN=<debug build of exactly a3e1ad5> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web.rs` takes every home directory from `heddle_home` on the invocation's `Env` |
+| 2026-10-22 | lane `d212c1a`, now main `d836e5b` (web composes the goal, todo and team rows and recovers teams at start; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly d212c1a> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, home directories still from `heddle_home` on the invocation's `Env` |
+| 2026-10-22 | lane `74fccb4`, now main `5d9d0f9` (web drives goals, following session events and resuming at start; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 74fccb4> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, made after the candidate on a clean lane; the lane gate with each | 10/10 passed, verdict 0, both binaries; lane gate green; `web --dry-run` boots |
+| 2026-10-22 | main `97f7435` (a `heddle-server` fix: a turn in a folder adopts it instead of requiring a workspace; `heddle-server` is in the binary's tree since `web` was wired) | `HEDDLE_BIN=<debug build of exactly 97f7435> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
+| 2026-10-22 | lane `b8c3d6e`, now main `3c12b45` (web always carries the markdown renderer; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly b8c3d6e> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
+| 2026-10-22 | lane `27157e4`, now main `999984c` (web composes the statistics and uploads; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 27157e4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane had moved on when its release build was checked, so that build was not counted | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and the uploads directory comes from `heddle_home` on the invocation's `Env` (step 7) |
+| 2026-10-22 | main `5c2ca91` (`5e164c4`: a model switched mid-turn lands on that turn's next model call, in `web.rs`; then a status doc) | `HEDDLE_BIN=<debug build of exactly 5c2ca91> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots; the new `Env::default()` and `default_endpoints()` calls are test-only |
+| 2026-10-22 | lane `e9a0836` (D-048: the binary advertises web, the turn, context, tools, hooks and models) | `HEDDLE_BIN=<debug build of exactly e9a0836> sh _verifiers_/05-config-system/verify.sh --json`, and with the same binary the backend lane `lane.mjs --json 05-config-system 10-llm-backends 20-streaming 30-context-management 40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints` | 10/10 passed, verdict 0 — no passing check turns into a failure for part 0. Backend lane: 117 checks, 101 pass, 7 fail, 9 unjudged; the 7 failures (50 teams, 70 session ordering, 75 sandbox enforcement) are none of this crate's: the sandbox row's configuration reaches the binary intact |
 
 ## Decisions the contract makes
 

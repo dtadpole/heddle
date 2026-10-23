@@ -1,6 +1,8 @@
 ---
 title: The heddle-tools crate
-version: 0.4.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:36:39Z
+version: 0.5.2
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -46,7 +48,7 @@ never fails: every refusal is a result the model reads.
 
 ## Where the port stands
 
-As of 2026-10-22, branch `hd/developer-five`. Every body is ported; no `todo!()` and no mirror type is left (the
+As of 2026-10-22, branch `hd/developer-five-clean`. Every body is ported; no `todo!()` and no mirror type is left (the
 sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76, green, with the workspace gate
 (`fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `test --workspace`).
 
@@ -54,9 +56,12 @@ sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76
   (including `notify`), the gate ports over the real `heddle-sandbox` and `heddle-session` services
   (`adapters::{Sandbox, SandboxApprovals, SessionModes, gates_over}`), and the D-043 `tools`/`commands` entry point
   (`command::run`).
-- **Open, not in this crate:** `40-pluggable-tools` answers through `HEDDLE_BIN` once the binary dispatches
-  `tools`/`--turn` to the entry points and composes the tools row with `gates_over`; its malformed-spec check also
-  needs the boot to print an outside component's `OutsideError::Registration` with the failed row.
+- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule, at main `cfa6a2b` and again at main
+  `db3d76d`, which carries this branch, and only `usage::SERVED` edited to add Tools and Turn):** `40-pluggable-tools`' `check-tools.mjs`
+  **6/6** — the outside tool plugged in and used, the displacement, and the malformed spec refused at registration
+  (the binary prints the row's own error before its failed-row summary, as the TypeScript loader logs it).
+- **Open, not in this crate:** the binary serving `Capability::Tools` and `Capability::Turn`, so the verifier judges
+  through `HEDDLE_BIN` in the lane.
 - **Hooks are not this crate's to adapt:** `heddle-events` depends on this crate and implements `ToolHooks` over the
   bus itself (`BusHooks`, with this crate's mapping: a refusal is `PreExecute::Refused`, a failure `ToolHookError`,
   a failing post-execute `TOOL_FAILED`) and attaches an outside component's listeners over its connection

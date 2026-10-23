@@ -49,6 +49,9 @@ pub enum CommandWord {
     Profiles,
     /// `config [--validate] [--origins]`: the composed tree.
     Config,
+    /// `adapter-call`: one model call through a Rust adapter, `{endpoint, request}` on stdin. Hidden: it is
+    /// not in the help and has no capability; `_tools_/model-validation` drives it for 98-model-endpoints.
+    AdapterCall,
 }
 
 impl CommandWord {
@@ -71,6 +74,7 @@ impl CommandWord {
             Self::Hooks => "hooks",
             Self::Profiles => "profiles",
             Self::Config => "config",
+            Self::AdapterCall => "adapter-call",
         }
     }
 }
@@ -219,6 +223,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, UsageError> {
             "hooks" => args.command = Some(CommandWord::Hooks),
             "profiles" => args.command = Some(CommandWord::Profiles),
             "config" => args.command = Some(CommandWord::Config),
+            "adapter-call" => args.command = Some(CommandWord::AdapterCall),
             // `transcript` and `context` take a session id, and consume the next token the way
             // `parseArgs` does — even a flag, which is the TypeScript build's quirk, kept here.
             "transcript" => {
@@ -441,6 +446,15 @@ mod tests {
         parse_args(&argv)
             .expect_err("the command line is refused")
             .0
+    }
+
+    #[test]
+    fn adapter_call_is_a_hidden_command_word() {
+        let argv = vec!["adapter-call".to_owned()];
+        let args = parse_args(&argv).expect("parses");
+        assert_eq!(args.command, Some(CommandWord::AdapterCall));
+        assert_eq!(CommandWord::AdapterCall.as_str(), "adapter-call");
+        assert!(!crate::usage::usage(crate::usage::SERVED).contains("adapter-call"));
     }
 
     #[test]
