@@ -31,7 +31,15 @@ and what is cited from them is written below.
 | 2026-10-22 | TypeScript build as a stand-in on the build host, through the forward | `http://localhost:8081/` | `meta[name=heddle-page]` = `dd6d45d28567` | 401 without the token; with it title `Heddle`, composer present, no workspaces, seat `scripted` |
 | — | Rust heddle, same address | `http://localhost:8081/` | `meta[name=heddle-page]` | not yet served |
 
+The `8081` forward is gone with the devservers (D-020). The team's live address is now
+`http://127.0.0.1:8082/`: the heddle Web Gate over the deployed server on `127.0.0.1:3082`, from
+`~/heddle-live`. The monitor's own passes against it are pinned in
+[`live-health.md`](live-health.md) and [`live-health.jsonl`](live-health.jsonl), and its first record
+is the gate serving the app at 20:15:44 on 2026-10-22 (marker `dd6d45d28567` = the checkout's built
+`dist/server/page.html`) and the gate answering `502` from 20:16:49 while the deployed server was down.
+
 ## Read next
 
 [`../../rust/ULTIMATE_GOAL.md`](../../rust/ULTIMATE_GOAL.md) for what the port must satisfy;
-[`../../rust/INDEX.md`](../../rust/INDEX.md) for the forward and the build host.
+[`../../rust/INDEX.md`](../../rust/INDEX.md) for the forward and the build host;
+[`live-health.md`](live-health.md) for the live deployment's pinned passes.
