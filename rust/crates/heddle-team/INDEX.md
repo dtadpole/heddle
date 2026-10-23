@@ -18,7 +18,8 @@ The Rust port of durable teams, their policy, state and tool.
 | Judged by | `_verifiers_/50-agentic-loop` (check-teams), `_verifiers_/80-web-ui` (check-team-view), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-team --all-features` |
-| State | **ported** (2026-10-22): `state`, `service`, `tool`, `plugin` and `api` implemented behind the declared API; 78 unit tests pass, and `clippy -D warnings` and `fmt` are clean. M5 — the adapters composed in the binary and the server's route — waits on `heddle-session`, `heddle-agent`, `heddle`, `heddle-server` and `heddle-llm` |
+| Integration tests | [`tests/session_store.rs`](tests/session_store.rs): the team layer over the real `heddle-session` store (dev-dependency only) — the recorded check-teams store recovered byte for byte, and the first check's journal driven through the nine tools and read back from disk, restart included |
+| State | **ported and on `main`** (merged as `d5956c5`, 2026-10-22): `state`, `service`, `tool`, `plugin` and `api` behind the declared API; 80 unit and 2 integration tests pass, and `fmt`, `clippy -D warnings` and `rustdoc -D warnings` are clean. M5 — the binary composing the `team` row and `heddle-server`'s route — is the binary's and the server's |
 
 **A team is the Lead's session**; every teammate is a session of its own; everything the team shares is a
 `team/*` event in the Lead's log, folded on demand. The design decisions are the TypeScript build's, recorded
@@ -91,7 +92,9 @@ member's endpoint and model (else the profile's default endpoint), `purpose: "te
 | M5 | adapters composed in the binary as the owning crates land; `check-teams` and `check-team-view` through `HEDDLE_BIN` | the two verifiers |
 
 M1–M4 landed on 2026-10-22; M5 is composition in the binary (`heddle`) and the route in `heddle-server`, so it
-lands with those owners rather than in this crate.
+lands with those owners rather than in this crate. What the crate can rehearse of M5 without them it does in
+`tests/session_store.rs`, whose `SessionTeamStore` is the `TeamStore` adapter the binary needs, written against
+`heddle-session`'s public API.
 
 ## Open questions
 
@@ -100,9 +103,10 @@ lands with those owners rather than in this crate.
   the fix (no admission caps in the fold) would be a deliberate divergence and is the coordinator's call.
 - **A member named `lead`** is not refused by the TypeScript build and is shadowed by the Lead in resolution.
   Ported as is.
-- **Key order in the log.** The records are built in the TypeScript key order, but `serde_json::Value` sorts
-  keys unless serde_json's `preserve_order` feature is on. Byte-compatibility of the session log is
-  `heddle-session`'s concern; the workspace setting is rust/Cargo.toml's owner's.
+- **Key order in the log** — settled. The records are built in the TypeScript key order, and `heddle-session` and
+  `heddle-llm` turn on serde_json's `preserve_order`, which Cargo unifies across any build that holds them — the
+  binary's included. `tests/session_store.rs` asserts the journaled lines on disk keep the TypeScript order
+  (`type`, payload, `version`, `teamId`; a member as `id, name, description, context, phase`).
 - **`uuid`** is a crate-local dependency until it is hoisted into the workspace dependencies.
 
 ## Read next
