@@ -20,7 +20,7 @@
 //! | [`ports`] | the seams to the session store, the agent loop and the live-turn registry |
 //! | `testing` | in-memory doubles of the ports (feature `test-doubles`) |
 //!
-//! The contract landed first; bodies that are not yet ported are `todo!()` (see the crate's `INDEX.md`).
+//! The contract landed first; the implementation follows it module by module, with unit tests beside the code.
 
 pub mod api;
 pub mod error;

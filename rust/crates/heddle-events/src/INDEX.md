@@ -1,6 +1,6 @@
 ---
 title: The heddle-events sources
-version: 0.1.0
+version: 0.2.0
 description: The sources of the heddle-events crate, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -12,7 +12,14 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 
 | File | What it is |
 |---|---|
-| [`lib.rs`](lib.rs) | the crate root and its documentation |
+| [`lib.rs`](lib.rs) | the crate root, its documentation and a compiled example, and the re-exports |
+| [`event.rs`](event.rs) | the `Event` trait and the five mode traits |
+| [`mode.rs`](mode.rs) | `Mode`, serialized as Cordis names the modes |
+| [`bus.rs`](bus.rs) | `EventBus`, `Scope`, `Listener`, `ListenOptions`, `HookFuture` |
+| [`waterfall.rs`](waterfall.rs) | `Next`, the continuation a waterfall listener receives |
+| [`error.rs`](error.rs) | `HookError` (refused or failed, attributed), `ParallelError` |
+| [`points.rs`](points.rs) | the point names, the `heddle hooks` catalog, the lifecycle events |
+| [`outside.rs`](outside.rs) | outside listeners: message shapes, the `JsonListener` seam, bridges, the stdio transport |
 
 ## Read next
 

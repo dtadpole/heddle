@@ -6,9 +6,24 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# A library and a thin binary: the library holds the command line, the boot and every command, so each is
+# unit-tested in-process; `main.rs` only hands it the process's arguments, environment and streams.
+[lib]
+name = "heddle"
+path = "src/lib.rs"
+
 [[bin]]
 name = "heddle"
 path = "src/main.rs"
+
+[dependencies]
+futures.workspace = true
+heddle-config.workspace = true
+heddle-llm.workspace = true
+heddle-sandbox.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
