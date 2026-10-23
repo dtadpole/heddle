@@ -12,7 +12,7 @@
 //! | [`heddle_agent::ModelPort`] | `adapters::LlmModel` | `heddle-llm`'s `ModelService` |
 //! | [`heddle_agent::SessionPort`] | `adapters::Sessions` | `heddle-session`'s `SessionService` |
 //! | [`heddle_agent::ContextPort`] | `adapters::Context` | `heddle-context`'s service on the session store |
-//! | [`heddle_agent::TurnHooks`] | [`heddle_agent::NoTurnHooks`] | until `heddle-events`' bus is mounted |
+//! | [`heddle_agent::TurnHooks`] | `BusHooks`, then `adapters::ContextRecovery` | the run's bus, then the overflow recovery |
 
 use std::sync::{Arc, OnceLock};
 
@@ -45,6 +45,20 @@ pub fn shared_runtime(services: &mut Services) -> Result<Arc<AgentRuntime>, Stri
     Ok(runtime)
 }
 
+/// The turn's hook points: the bus's listeners (`agent/pre-step`, and `agent/request-error` from an
+/// outside component), then the context service's overflow recovery on `agent/request-error`, as the
+/// TypeScript context plugin attaches it — one forced reduction and one retry on a refused window.
+fn turn_hooks(services: &Services, context: &Arc<Context>) -> Arc<dyn heddle_agent::TurnHooks> {
+    let mut hooks: Vec<Arc<dyn heddle_agent::TurnHooks>> = Vec::new();
+    if let Some(bus) = crate::adapters::bus_hooks(services) {
+        hooks.push(Arc::new(bus));
+    }
+    hooks.push(Arc::new(
+        heddle_agent::adapters::ContextRecovery::over_session_handles(Arc::clone(context)),
+    ));
+    Arc::new(heddle_agent::ChainedTurnHooks::new(hooks))
+}
+
 /// The runtime a turn runs on, from what the boot provided; the sentence naming the first missing
 /// service otherwise, as the TypeScript build's `ctx.<service>` lookups would fail.
 pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
@@ -60,6 +74,7 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
     let tools = services
         .get::<Arc<heddle_tools::ToolRegistry>>("tools")
         .ok_or("this profile does not load the tools plugin")?;
+    let hooks = turn_hooks(services, &context);
     Ok(AgentRuntime {
         model: Arc::new(heddle_agent::adapters::LlmModel::new(models)),
         session: Arc::new(heddle_agent::adapters::Sessions::new(sessions)),
@@ -67,7 +82,7 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
             context,
         )),
         tools,
-        hooks: Arc::new(heddle_agent::NoTurnHooks),
+        hooks,
         turns: services.get::<heddle_agent::TurnRegistry>("turns"),
     })
 }

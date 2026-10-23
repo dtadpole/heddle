@@ -1,6 +1,8 @@
 ---
 title: The heddle-context sources
-version: 0.3.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:01:07Z
+version: 0.3.1
 description: The sources of the heddle-context crate, one file per TypeScript module plus the port's own seams, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
