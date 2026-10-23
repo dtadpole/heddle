@@ -97,6 +97,13 @@ corrected in the record. A note must never be kinder than the checks.
 page's own `showSession` selects it when it is not), so the owner's session list does not fill with
 monitor rows.
 
+**Open finding, ui lane: a failed model call is silent.** Passes 20:21 to 20:29 showed what a person
+sees when the model boundary fails: the user row, then nothing — no answer row, no turn notice, a clean
+console. The server recorded the failure (`compaction/recovery code=SCRIPT`) and the `/api/turn` stream
+ended after the user event without an error event. The deployment cause is fixed (the fixture answers),
+but the UI gap remains: a turn that fails at the model boundary should become a visible row or notice.
+Reported to integrator-two with the evidence on 2026-10-22; owned by the ui lane, not by this seat.
+
 **What the record does not carry.** No session ids and no absolute home paths: the repository is
 public, paths are stated under `~`, and the repository's public-hygiene gate checks both before main.
 
