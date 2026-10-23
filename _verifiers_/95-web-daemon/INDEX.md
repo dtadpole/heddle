@@ -72,7 +72,7 @@ installed. The served build is [`96-deployment`](../96-deployment/INDEX.md)'s cl
 the repository's `src/server/page.html` rather than a `dist/` copy.
 
 **The Rust branch today, rehearsed.** `HEDDLE_BIN=<binary> sh _tools_/web-daemon/rehearse.sh` installs exactly that
-service on a scratch agent. Run 2026-10-22 at 21:23 PDT with the ui and backend lanes' release binary (sha256
+service on a scratch agent. Run 2026-10-22 at about 21:20 PDT with the ui and backend lanes' release binary (sha256
 `a355a0aa1fc4…`, built 21:14 PDT): **started failed** in 20 s, and the scratch log says why — `heddle: not ported to
 Rust yet: web`, exit 2 after 4 ms, retried by the supervisor with backoff; the other five claims, this verifier's
 four checks among them, are **unjudged**, because there is no server to judge. So part 11 through `HEDDLE_BIN` is
