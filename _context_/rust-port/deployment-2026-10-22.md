@@ -148,8 +148,11 @@ While measuring the restart windows, `install.sh --restart` was run against the 
 seat's push had moved `origin/main` (the refs are shared by every worktree, and a `git fetch` in the base clone had
 just brought it in). The installer **booted the live agent out first**, then rendered the definition, and the render
 refused: the deployment was one commit behind the freshly fetched tip. It exited with nothing loaded. `8082`
-answered 502 for about forty seconds, until the agent was bootstrapped from its unchanged plist and kickstarted by
-hand at 03:58:35Z; the deployment was then moved to the new `main` (`0a10ceb`) the normal way.
+answered 502 until the agent was bootstrapped from its unchanged plist and kickstarted by hand at 03:58:35Z; the
+deployment was then moved to the new `main` (`0a10ceb`) the normal way. Measured from outside by live-monitor, the
+page was unreachable for about **70 s** (plist rewritten 03:57:36Z, answering 03:58:47Z): the window began with a
+deliberate `kickstart -k` of a four-second-old job — the throttle measurement below — and the refused reinstall
+extended it.
 
 The bug is the ordering, not the refusal — the refusal is correct. `install.sh` now renders (and refuses) **before**
 it stops anything, so a refused reinstall leaves the running agent and the installed file exactly as they were. The
@@ -166,6 +169,23 @@ Two smaller readings from the same measurement, for whoever next restarts this b
 
 So a restorer that kicks a freshly started job does not shorten an outage, it lengthens one — another reason the
 guard acts on the job state rather than on a silent port.
+
+## Who acts on the service, and the guard's state (D-045)
+
+**No guard is scheduled or running.** The crontab has no guard line (it is TCC-blocked anyway), no LaunchAgent runs
+one, and no process runs `guard.sh`; verified 21:02 PDT. The interim 15-second loop from this session was stopped
+at about 03:44Z, before the supervisor's kill test. The old port-only `guard.sh` was run only by hand, in the
+measurements at 03:36:39Z and 03:53:17Z. So until the job-aware guard is on `main`, the deployment runs
+**the supervisor alone**, which is what the coordinator's D-045 asks.
+
+Everything that has touched the service tonight, so a restart in `web.log` can be attributed:
+
+| Actor | What it does | Since |
+|---|---|---|
+| this seat | redeploys (`install.sh --restart` after `checkout --detach origin/main`), the measurements recorded here | throughout |
+| `supervisor.mjs` | restarts a server that exits, in about a second | the tooling merge, 20:44 PDT |
+| live-monitor `--restore` | one `kickstart`, delegated by this seat; used at 03:42:20Z and 03:54:07Z, the second inside an install window, where it killed a freshly started server. Now gated (live-monitor `d842a8d`): only when launchd reports the agent not running, no build or plist change within 180 s, and still silent after a 10 s grace; scheduled pass only | gated 03:58Z |
+| the ui lane gate | runs `95-web-daemon` against the deployment, whose stays-up check kills the server by design | each gate |
 
 ## The flap at 20:49–20:50, and the guard race it exposed
 
@@ -233,6 +253,7 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 20:50 | `1bcff7e` (backend merges under the status-docs commits) | `1bcff7e`, clean | 95 **4/4** and 96 **3/3** from the deployment; page unchanged (same marker and byte counts); gate 200, healthz 200 |
 | 20:54 | `59fd96f` (component manifest) | `59fd96f`, clean | 95 **4/4**, 96 **3/3** from the deployment |
 | 20:59 | `0a10ceb` (part 0 passes through the binary) | `0a10ceb`, clean | after the 20:57–20:58 outage below; redeploy silence 288 ms; 95 **4/4**, 96 **3/3**; marker `dd6d45d28567` |
+| 21:02 | `480d9b8` (a served command routes through the boot) | `480d9b8`, clean | 95 **4/4**, 96 **3/3** from the deployment; marker `dd6d45d28567`; the binary's `web` still exits 2, so the page is still the TypeScript oracle |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
