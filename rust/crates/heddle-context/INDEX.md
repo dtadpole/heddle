@@ -1,8 +1,8 @@
 ---
 title: The heddle-context crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:01:07Z
-version: 0.7.1
+modified: 2026-10-23T05:14:35Z
+version: 0.8.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -57,7 +57,9 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
   The boot builds one `ContextService` from the profile's context row (`ContextConfig` deserialises its `config`;
   an absent row is `{}` and takes every default), the session store, `HEDDLE_HOME`, and `heddle_llm::ModelService`
   itself as the `ModelAccess` (this crate implements it: the endpoint's declared window, one `generate` with
-  `purpose: compaction`), and registers `recover_overflow` on `agent/request-error`.
+  `purpose: compaction`). The turn's `request_error` hook is `heddle_agent::adapters::ContextRecovery`, which calls
+  `recover_overflow`, chained after the run's bus hooks so it answers in the waterfall order the TypeScript build's
+  `agent/request-error` listeners have.
 - **The composer's context view** (`heddle-web-composer`) reads `assemble`'s report, and the recorded
   `breakdown` on `model/request`.
 - **The store the binary names**: `heddle_session::SessionStore` behind an `Arc`. `ContextService<S:
@@ -72,7 +74,7 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | `heddle-llm` | `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, and the endpoint window behind `ModelAccess` | **taken**: `types` re-exports `heddle_llm`'s under the same names, plus one helper, `text_message`; the dependency is on `main` |
 | `heddle-session` | the store: read, count, surface fold, node derivation, append with a surface operation | **taken**: `impl ContextStore for heddle_session::SessionStore` lives in `session_store`. It is a straight pass-through — the session crate re-exports `heddle-llm`'s message types, so a node's message crosses without a conversion |
 | `heddle-config` | the context row's `config` handed over for deserialising; `heddle_home()` | `ContextConfig: Deserialize`; `ContextDependencies::heddle_home`; the profile row is the boot's to hand over |
-| `heddle-events` | registering `recover_overflow` on the `agent/request-error` waterfall | a plain async method; the boot wires it |
+| `heddle-agent` | answering a refused call: one forced reduction, a retry only when it landed | `recover_overflow` is a plain async method; `heddle_agent::adapters::ContextRecovery` calls it from the turn's `request_error`, and the binary chains it after the bus |
 
 ## What `30-context-management` needs, and from whom
 
@@ -107,8 +109,10 @@ the TypeScript tests named.
    SessionStore` binds the real store, with three tests on a real on-disk session (write and read back, the
    pruner's rewrite, a compaction whose log keeps its span) and one that replays the TypeScript build's record of a
    landed compaction through it, event for event.
-6. **The verifier**: with the loop and the command line composed, `30-context-management` through `HEDDLE_BIN`,
-   reported to the lane integrator with the command and the date. **Waiting** on the loop and the command line.
+6. **The verifier**: rehearsed through a binary that serves `context` and `--turn` — the binary crate's branch at
+   `3df3cc6` with this crate merged and only the served capabilities widened in a throwaway worktree — **9 of 9
+   checks pass, verdict 0**, on two runs (2026-10-22 22:13 PDT). It passes on `main`'s binary once that serves the
+   `context` and `--turn` capabilities, which is the binary crate's step.
 
 ## Deliberate differences from the TypeScript build
 
@@ -122,11 +126,8 @@ the TypeScript tests named.
 
 ## Open questions
 
-- **One check of `30-context-management` still reads `dist/`.** *Compacted more than once, and the reader still
-  sees the conversation* folds the log with `transcriptTurns` from `dist/server/web.js`, so under `HEDDLE_BIN` with
-  no TypeScript build it fails rather than skips once the binary serves `context`. The fold's oracle is the
-  verifier owner's and the coordinator's to settle (raised by integrator-one, 2026-10-22); this crate's side of the
-  claim — notes are `context/note`, never `message` — is tested here.
+- **Settled:** *compacted more than once, and the reader still sees the conversation* no longer reads `dist/`; it
+  passes through the binary in the rehearsal above.
 - **Settled:** the in-process check of the cut and the refusal is now two command-line checks (main `cc09a59`).
   `command.rs` replays that exact fixture through this crate (`the_verifiers_cut_pair_scenario_…`,
   `the_verifiers_cut_refused_scenario_…`). Through the command line the system prompt is a note appended when the

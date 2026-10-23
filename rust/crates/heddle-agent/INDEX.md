@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:05:53Z
-version: 0.6.0
+modified: 2026-10-23T05:17:14Z
+version: 0.6.2
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -50,20 +50,23 @@ included), `assistant/chunk`, the `tool` message (`error (<code>): <message>`, t
 
 ## Where the port stands
 
-As of 2026-10-22, branch `hd/developer-five`. Every body is ported; no `todo!()` is left. The model types are
-`heddle-llm`'s own and `SessionEvent` is `heddle-session`'s; the session-meta, create-session and context-report
-records are still this crate's, converted at the seam. Unit tests: 74, green, with the workspace gate.
+As of 2026-10-22, branch `hd/developer-five-clean`. Every body is ported; no `todo!()` is left. The model types are
+`heddle-llm`'s own, `SessionEvent` is `heddle-session`'s, and the context records `ContextSummary`, `RuntimeContextSection`
+and `ContextBreakdown` are `heddle-context`'s. `ContextReport` stays a mirror until the context crate's report derives
+`Default`, which `heddle-goal`'s tests construct it with. Three more shapes stay this crate's on purpose:
+`PrepareOptions` (owned, where the context crate's borrows), `SurfaceView` (the two generations and the node list
+the loop reads), and the session-meta and create-session records, converted at the session seam. Unit tests: 74, green, with the workspace gate.
 
 - **Done:** `run_turn` and `begin_turn`, the live-turn registry, delegation and the `delegate` tool, the ports over
   the real crates (`adapters::{LlmModel, Sessions, SessionSubagents, Context}`; `Context::over_session_handles` binds
   `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
   `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
-- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule — a scratch worktree at the
-  binary owner's tip `4e4e30e` with this branch merged, only `usage::SERVED` edited to add Tools and Turn, a debug
-  build, the verifiers through `HEDDLE_BIN`):** `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs`
-  **1/1** pass with the binary's own `subagent-tool`, `goal-driver` and `team` rows; `check-teams.mjs` is unjudged
-  (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed the delegation limit
-  (`maxActive` never triggered, so a child's replayed `delegate` made a grandchild session).
+- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule — a scratch worktree at main
+  `cfa6a2b`, whose turn hooks chain the context service's overflow recovery after the event bus, with this branch
+  merged and only `usage::SERVED` edited to add Tools and Turn, a debug build, the verifiers through `HEDDLE_BIN`):**
+  `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs` **1/1** pass with the binary's own rows;
+  `check-teams.mjs` is unjudged (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed
+  the delegation limit (`maxActive` never triggered, so a child's replayed `delegate` made a grandchild session).
 - **Open, not in this crate:** serving `Capability::Turn` in the binary, and the Web UI serving a turn with tools
   for `check-teams.mjs`.
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
