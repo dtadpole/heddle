@@ -1,9 +1,9 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-22T20:20:00Z
-modified: 2026-10-22T20:20:00Z
+modified: 2026-10-23T03:52:00Z
 level: L3
-version: 1.0.0
+version: 1.4.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
 status: unverified
 grounded_in:
@@ -174,10 +174,43 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 20:12 | `a5b0c66` | `a5b0c66`, clean | 8082 200, page 533,283 bytes against 533,280, marker `dd6d45d28567`; 96 3/3 with the branch's checks, 2/3 with main's |
 | 20:29 | `b4f8abf` (Rust lockfile chore) | `b4f8abf`, clean | 8082 200, healthz 200, page identical (533,283 / 533,280, same marker); 96 3/3 with the branch's checks, 2/3 with main's |
 | 20:31 | `eaaa6bb` (Rust status run) | `eaaa6bb`, clean | 8082 200, healthz 200, page identical; a turn answers with the labelled offline fixture (D-030), 0 errors; 96 3/3 with the branch's checks, 2/3 with main's |
+| 20:44 | `51f198b` (the tooling merge landed as `085caaf`) | `51f198b`, clean | installed by the deployment's own `install.sh` with **no override** (it accepts detached-at-`origin/main` now); the agent runs `supervisor.mjs`; **95 4/4 and 96 3/3, both run from `~/heddle-live`**; a SIGKILL of the port's process left a new pid answering within **one second** with no guard running |
+| 20:47 | `c67f5ad` (Rust lockfile chore) | `c67f5ad`, clean | 95 **4/4** (949 ms) and 96 **3/3** (521 ms) from the deployment; page unchanged (533,283 / 533,280, marker `dd6d45d28567`); a turn answers with the fixture, 0 errors |
+| 20:50 | `1bcff7e` (backend merges under the status-docs commits) | `1bcff7e`, clean | 95 **4/4** and 96 **3/3** from the deployment; page unchanged (same marker and byte counts); gate 200, healthz 200 |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when
 `main` carries it. Neither build changed `dist/server/page.html`, which is why the marker is the same across them.
+
+## On main: the deployment judged from itself
+
+The tooling merge reached `main` as `085caaf` and main moved to `51f198b`. `~/heddle-live` was moved to it, rebuilt,
+and installed by **its own** `_tools_/web-daemon/install.sh` — no `HEDDLE_ALLOW_DIRTY_INSTALL` — because the
+installer now accepts the one shape a deployment worktree can have: clean and detached exactly at `origin/main`.
+
+| Reading | Value |
+|---|---|
+| deployed commit | `51f198bc7cd69a9513715fbc139191054317f55f`, `~/heddle-live` clean, `origin/main`'s tip |
+| agent program | `node ~/heddle-live/_tools_/web-daemon/supervisor.mjs -- node ~/heddle-live/dist/cli.js web --host 127.0.0.1 --port 3082 --config ~/heddle-live/cordis.yml` |
+| `_verifiers_/95-web-daemon` from `~/heddle-live` | **4 checks, 4 passed**, 767 ms — the first time this verifier passes on main on this host |
+| `_verifiers_/96-deployment` from `~/heddle-live` | **3 checks, 3 passed**, 372 ms — the third check passes on main for the first time |
+| a SIGKILL of the process owning 3082, no guard running | a **new** pid answering 200 within **one second** (50845 → 51830), 8 s of polling |
+| `install.sh --guard` | exits 1, `crontab: tmp/…: Operation not permitted`; the crontab is untouched, so the cron line is still one owner action away |
+| `guard.sh --status` | `port 3082: answering`, `service: loaded` |
+
+That is the arrangement the deployment keeps: **launchd starts the agent at login, `supervisor.mjs` keeps the
+server up inside it, and `guard.sh` is the outer layer the moment the account lets a cron line be installed.** The
+interim 15-second loop from this session was stopped before the kill test, so the one-second recovery above is the
+supervisor's alone.
+
+**The install window is visible from outside, and live-monitor saw it.** Its 03:42:20Z pass found `3082` silent
+while `install.sh` had the job booted out, used the restore authority once (`launchctl kickstart -k`, answering again
+in 507 ms), and then failed its door check because a relaunched server mints a new launch token and the pass still
+held the old one — live-monitor's bug, fixed by re-reading `~/.heddle/web.log` after a restore. Neither is a
+deployment fault: a 3082 that is silent *after* the supervisor is installed comes back by itself in under a second,
+and the restore authority stays for the case where the whole agent is gone (bootout, or a login whose launchd did
+not start it). `guard.log` entries at 03:36:39–03:40:50Z are the same windows: my hand-installs and bootout/kickstart
+tests, not a crash loop.
 
 ## Redeploying, when an integrator moves main
 
