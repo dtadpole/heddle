@@ -37,3 +37,4 @@
 {"at": "2026-10-23T00:03-07:00", "deployed": "d171876", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; main's binary now advertises web; the preview rebuilt from d171876; rehearse.sh with that binary 8 of 8, 95 4/4"}
 {"at": "2026-10-23T00:11-07:00", "deployed": "f7b2c5e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T00:17-07:00", "deployed": "bc3ce8b", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T00:41-07:00", "deployed": "9319116", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt from 9319116, every checked route 200, its own store"}
