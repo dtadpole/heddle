@@ -1690,11 +1690,13 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                     match frame {
                         Some(frame) => {
                             if sender.send(frame).is_err() {
-                                // The reader is gone; the turn itself still runs to its end.
-                                break None;
+                                // The reader is gone (the page reloaded or navigated away); the turn is the
+                                // server's, not the request's, so it runs to its end and records its
+                                // completion. Only the forwarding stops.
+                                break Some(running.as_mut().await);
                             }
                         }
-                        None => break None,
+                        None => break Some(running.as_mut().await),
                     }
                 }
                 result = &mut running => break Some(result),
@@ -2577,6 +2579,106 @@ mod tests {
             .to_bytes()
             .to_vec();
         (status, bytes)
+    }
+
+    /// A runner that waits for a signal, publishes one event, then finishes a moment later.
+    struct DetachedTurns {
+        hub: Arc<std::sync::OnceLock<EventHub>>,
+        release: Arc<tokio::sync::Notify>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TurnRunner for DetachedTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let hub = Arc::clone(&self.hub);
+            let release = Arc::clone(&self.release);
+            let finished = Arc::clone(&self.finished);
+            Box::pin(async move {
+                release.notified().await;
+                if let Some(hub) = hub.get() {
+                    hub.publish_session_event(
+                        &request.session,
+                        &serde_json::json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "x"}}),
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(TurnOutcome {
+                    text: "x".into(),
+                    finish_reason: "stop".into(),
+                    rounds: 1,
+                    denials: Vec::new(),
+                    ended: None,
+                    usage: None,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_runs_to_its_end_after_its_reader_goes_away() {
+        // web.ts: a page that reloads mid-turn drops the request, not the turn; the turn completes and the
+        // list reports it finished (80 check-chat-view, the weaving clock).
+        let runner = Arc::new(DetachedTurns {
+            hub: Arc::new(std::sync::OnceLock::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let mut harness = harness();
+        harness.turns = Arc::clone(&runner) as Arc<dyn TurnRunner>;
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached")),
+                ..ServerOptions::default()
+            },
+        );
+        let _ = runner.hub.set(builder.events());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/turn")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"weave"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // The page reloads: the response is dropped before the turn says anything.
+        drop(response);
+        runner.release.notify_one();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !runner.finished.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn was cancelled when its reader went away"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // And once it has finished, the session is no longer running and its completion is recorded.
+        let session = state.harness().sessions.list()[0].id.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.runs().is_running(&session) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session stayed running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(state.runs().completed_at(&session).is_some());
     }
 
     #[tokio::test]
