@@ -696,10 +696,10 @@ mod tests {
     fn the_one_attribute_this_project_writes_survives_and_no_other_data_attribute_does() {
         assert_eq!(
             sanitize_html(
-                "<a href=\"/x\" data-heddle-path=\"/Users/zhenc/heddle/README.md\">x</a>",
+                "<a href=\"/x\" data-heddle-path=\"/workspace/heddle/README.md\">x</a>",
                 SanitizeOptions::default()
             ),
-            "<a href=\"/x\" data-heddle-path=\"/Users/zhenc/heddle/README.md\">x</a>"
+            "<a href=\"/x\" data-heddle-path=\"/workspace/heddle/README.md\">x</a>"
         );
         assert_eq!(
             sanitize_html(
