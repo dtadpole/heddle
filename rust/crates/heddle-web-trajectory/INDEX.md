@@ -20,7 +20,7 @@ key order kept), so it depends on no session type.
 | Ported from | `src/server/ledger.ts`, `src/server/log-download.ts`, `src/server/tool-inspector.ts` |
 | Judged by | `_verifiers_/85-trajectory-view`, `_verifiers_/80-web-ui` (check-trajectory-view; the ledger half of check-runtime-context; the dock of check-composer), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and unit-tested — 69 tests here; served through the real `heddle-server` router in a probe (below); the binary's `web` composition is the remaining step** |
+| Status | **implemented and tested — 69 unit tests and 4 verifier-expectation tests; served through the real `heddle-server` router in a probe (below); the binary's `web` composition is the remaining step** |
 
 ## Public API
 
@@ -94,15 +94,24 @@ key order kept), so it depends on no session type.
   adversarial case (float and exponent arguments, non-JSON arguments, markup in results, a quoted CJK title) —
   were compared with the same answers built from `src/server/web.ts`: `stats`, the `/log` body,
   `content-disposition` and `content-length` **identical in 27/27**; `?view=ledger` **identical as text in
-  27/27**, and byte-identical in 22/27. The five that differ do so only in the highlight classes
-  `render_code` emits (highlight.js marks JSON punctuation and `true`/`null` differently), which is
-  heddle-web-files' renderer, not this crate. The refusals answer `400 {"error":"not a session id"}` and
+  27/27**, and byte-identical in 22/27. The five that differed did so only in the highlight classes
+  `render_code` emitted for JSON; with heddle-web-files' JSON classifier fix (9b68230) the same probe gives
+  **27/27 identical, inspection HTML included** (re-run 2026-10-22). The refusals answer `400 {"error":"not a session id"}` and
   `404 {"error":"no session <id>"}` on both routes.
 - **Two divergences this probe found and fixed**: `serde_json` reads a float one ulp off without its
-  `float_roundtrip` feature (a logged `0.9999551342447491` downloaded as `…492`), now enabled on this crate's
-  dependency and therefore across the binary; and `serde_json` prints an integral double as `1.0` where
+  `float_roundtrip` feature (a logged `0.9999551342447491` downloaded as `…492`), now carried by the workspace's
+  `serde_json` entry and pinned by a test here; and `serde_json` prints an integral double as `1.0` where
   `JSON.stringify` prints `1`, so the inspector payload, the schema parameters, an unknown event's body and the
   `/log` lines now go through [`js_json`](src/js_json.rs), which formats numbers by `Number#toString`.
+
+- **The verifiers' own expectations** ([`tests/verifier_expectations.rs`](tests/verifier_expectations.rs)): the
+  TypeScript build ran `85-trajectory-view`'s scripted turn and `80-web-ui check-trajectory-view`'s two-turn
+  `list_dir` session from source, and the logs it wrote are checked in as [`tests/fixtures/`](tests/fixtures/INDEX.md).
+  Every API assertion those checks and `check-runtime-context` make about `?view=ledger` holds on this crate's
+  projection of those logs, and the same logs projected by `src/server/ledger.ts` give identical answers. So
+  when the binary records what the TypeScript build records, the trajectory half of those checks passes; the
+  agent loop's `model/request` record (`heddle-agent`'s `ModelRequestRecord`) already has the same fields in
+  the same order as the recorded one.
 
 ### How to repeat the differential
 
