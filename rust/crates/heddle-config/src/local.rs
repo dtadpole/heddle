@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use crate::endpoints::EndpointPatch;
 use crate::env::Env;
 use crate::error::ConfigError;
+use crate::home::heddle_home;
 
 /// The local file's contents.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -41,8 +42,32 @@ impl LocalConfig {
     /// (The TypeScript doc comment showed a mapping by name, but the model plugin iterated it as a list
     /// and every verifier writes a list; a mapping crashed there, and is refused here with a sentence.)
     pub fn endpoint_patches(&self, path: &Path) -> Result<Vec<EndpointPatch>, ConfigError> {
-        let _ = path;
-        todo!("heddle-config: LocalConfig::endpoint_patches")
+        let Some(value) = &self.endpoints else {
+            return Ok(Vec::new());
+        };
+        let Value::Array(items) = value else {
+            return Err(ConfigError::one(format!(
+                "{}: endpoints must be a list of endpoint objects",
+                path.display()
+            )));
+        };
+        let mut patches = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            if !item.is_object() {
+                return Err(ConfigError::one(format!(
+                    "{}: endpoints[{index}] is not an endpoint object",
+                    path.display()
+                )));
+            }
+            let patch = serde_json::from_value(item.clone()).map_err(|error| {
+                ConfigError::one(format!(
+                    "{}: endpoints[{index}] is not an endpoint object: {error}",
+                    path.display()
+                ))
+            })?;
+            patches.push(patch);
+        }
+        Ok(patches)
     }
 }
 
@@ -58,8 +83,12 @@ pub struct LocalConfigLocation {
 /// The candidate files, in precedence order: `$HEDDLE_CONFIG` when non-empty, then
 /// `$HEDDLE_HOME/heddle.json`, or `{home}/.heddle/heddle.json` when `HEDDLE_HOME` is unset.
 pub fn local_config_candidates(env: &Env) -> Vec<PathBuf> {
-    let _ = env;
-    todo!("heddle-config: local_config_candidates")
+    let mut candidates = Vec::new();
+    if let Some(path) = env.non_empty("HEDDLE_CONFIG") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(heddle_home(env).join("heddle.json"));
+    candidates
 }
 
 /// The first candidate that exists, read; `Ok(None)` when none does.
@@ -70,6 +99,154 @@ pub fn local_config_candidates(env: &Env) -> Vec<PathBuf> {
 pub fn read_local_config(
     candidates: &[PathBuf],
 ) -> Result<Option<LocalConfigLocation>, ConfigError> {
-    let _ = candidates;
-    todo!("heddle-config: read_local_config")
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let parsed: Value = serde_json::from_str(&text).map_err(|error| {
+            ConfigError::one(format!("{}: not valid JSON — {error}", path.display()))
+        })?;
+        if !parsed.is_object() {
+            return Err(ConfigError::one(format!(
+                "{}: expected a JSON object at the top level",
+                path.display()
+            )));
+        }
+        let config: LocalConfig = serde_json::from_value(parsed).map_err(|error| {
+            ConfigError::one(format!("{}: not valid JSON — {error}", path.display()))
+        })?;
+        return Ok(Some(LocalConfigLocation {
+            path: path.clone(),
+            config,
+        }));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "heddle-config-local-{}-{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn candidates_are_heddle_config_then_the_heddle_home_file() {
+        let env = Env::default()
+            .with("HOME", "/home/someone")
+            .with("HEDDLE_CONFIG", "/etc/heddle.json")
+            .with("HEDDLE_HOME", "/home/someone/.heddle");
+        assert_eq!(
+            local_config_candidates(&env),
+            [
+                PathBuf::from("/etc/heddle.json"),
+                PathBuf::from("/home/someone/.heddle/heddle.json"),
+            ]
+        );
+
+        let plain = Env::default().with("HOME", "/home/someone");
+        assert_eq!(
+            local_config_candidates(&plain),
+            [PathBuf::from("/home/someone/.heddle/heddle.json")]
+        );
+    }
+
+    #[test]
+    fn an_empty_heddle_config_is_not_a_candidate() {
+        let env = Env::default()
+            .with("HOME", "/home/someone")
+            .with("HEDDLE_CONFIG", "");
+        assert_eq!(local_config_candidates(&env).len(), 1);
+    }
+
+    #[test]
+    fn the_first_candidate_that_exists_is_read() {
+        let root = scratch("first");
+        let missing = root.join("missing.json");
+        let real = root.join("heddle.json");
+        write(
+            &real,
+            r#"{"default":"scripted","endpoints":[{"name":"scripted"}]}"#,
+        );
+        let found = read_local_config(&[missing, real.clone()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.path, real);
+        assert_eq!(found.config.default.as_deref(), Some("scripted"));
+        assert_eq!(found.config.endpoint_patches(&found.path).unwrap().len(), 1);
+
+        assert!(read_local_config(&[]).unwrap().is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_malformed_file_fails_loudly_and_names_its_path() {
+        let root = scratch("malformed");
+        let path = root.join("heddle.json");
+        write(&path, "{ not json");
+        let error = read_local_config(std::slice::from_ref(&path)).unwrap_err();
+        assert!(error.problems()[0].starts_with(&format!("{}: not valid JSON", path.display())));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_top_level_that_is_not_an_object_is_refused() {
+        let root = scratch("array");
+        let path = root.join("heddle.json");
+        write(&path, "[]");
+        let error = read_local_config(std::slice::from_ref(&path)).unwrap_err();
+        assert_eq!(
+            error.problems(),
+            [format!(
+                "{}: expected a JSON object at the top level",
+                path.display()
+            )]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn endpoints_must_be_a_list_of_objects() {
+        let root = scratch("endpoints");
+        let path = root.join("heddle.json");
+        let config: LocalConfig =
+            serde_json::from_str(r#"{"endpoints":{"scripted":{"model":"x"}}}"#).unwrap();
+        assert_eq!(
+            config.endpoint_patches(&path).unwrap_err().problems(),
+            [format!(
+                "{}: endpoints must be a list of endpoint objects",
+                path.display()
+            )]
+        );
+
+        let config: LocalConfig = serde_json::from_str(r#"{"endpoints":["scripted"]}"#).unwrap();
+        assert_eq!(
+            config.endpoint_patches(&path).unwrap_err().problems(),
+            [format!(
+                "{}: endpoints[0] is not an endpoint object",
+                path.display()
+            )]
+        );
+
+        let config: LocalConfig = serde_json::from_str(r#"{"endpoints":[{"name":"a"}]}"#).unwrap();
+        assert_eq!(
+            config.endpoint_patches(&path).unwrap()[0].name.as_deref(),
+            Some("a")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

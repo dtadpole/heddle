@@ -19,7 +19,7 @@ the path rules, the machine's local file, and endpoint configuration.
 | Ported from | `src/config/`, `src/local-config.ts`, `src/paths.ts`, `src/endpoints.ts`; the configuration half of `src/llm/types.ts`; `runConfigCommand` and `baseLayer` of `src/cli.ts` |
 | Judged by | `_verifiers_/05-config-system`, through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| State | **contract landed**: every public item declared and documented; `Env`, `ConfigError`, home, paths, `LayerValue` and the serde shapes implemented with tests; the rest `todo!()` |
+| State | **implemented**: every public item declared and documented is now implemented, with unit tests (steps 1–8), including the outside-component manifest catalog for `--validate`; the last step is `05-config-system` through the binary (developer-two wires `command::run`, integrator-one adds the verifier's HEDDLE_BIN manifest branch) |
 
 ## The public API
 
@@ -38,7 +38,7 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `compose` | `EntryRow` (`label`, `component`), `ComponentName`, `Provenance`, `ComposedRow` (`to_report`), `compose`, `origin_of` | `compose`, `provenanceOf`, `originOf` |
 | `profile` | `ProfileInfo`, `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions` (`for_run`, `for_inspection`), `default_layers` | `listProfiles`, `resolveProfile`, `defaultLayers`, cli `baseLayer` |
 | `schema` | `Schema` (a JSON Schema subset), `SchemaType`, `TypeSet`, `Additional`, `SchemaProblem` | Schemastery, as the validator used it |
-| `validate` | `ComponentCatalog` (trait), `SchemaLookup`, `StaticCatalog`, `ValidationResult`, `validate_rows` | `validate.ts` |
+| `validate` | `ComponentCatalog` (trait), `SchemaLookup`, `StaticCatalog`, `ComponentManifest`, `ManifestCatalog`, `read_component_manifest`, `ValidationResult`, `validate_rows` | `validate.ts`; the manifest catalog is the part-0 shape for outside components |
 | `local` | `LocalConfig` (`endpoint_patches`), `LocalConfigLocation`, `local_config_candidates`, `read_local_config` | `src/local-config.ts` |
 | `endpoints` | `EndpointConfig` (catalogue methods), `EndpointPatch`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel(s)`, `ReasoningValue`, `default_endpoints`, `environment_override`, `merge_endpoint`, `read_key_file`, `materialize_key`, `resolve_endpoints`, `describe_endpoint(s)`, `EndpointsView`, `selection_problem`, `config_paths` | `src/endpoints.ts`, `src/llm/types.ts` |
 | `command` | `ConfigCommand`, `ConfigArgs`, `CommandContext`, `run` — `heddle profiles` and `heddle config [--json] [--origins] [--validate]`, output and exit codes | `runConfigCommand` |
@@ -93,25 +93,27 @@ because each later step is checked through the earlier ones.
 | Step | Bodies | Tests that can fail |
 |---|---|---|
 | 1 | done: `Env`, `ConfigError`, home, paths, `LayerValue`, serde shapes | 27 |
-| 2 | `references_in`, `parse_scalar`, `resolve_env` | `!env` keeps a number's type; `${A}${A}` substitutes both; a missing name is an error naming it; `!include` in a value is refused |
-| 3 | `read_layer`, `NamedLayer::read`, `anchor_dir` — a YAML reader that keeps `!env` / `!include` tags | include order; list includes; a cycle names every file; non-array, bad key, non-path include, empty file |
-| 4 | `compose`, `origin_of`, `ComposedRow::to_report`, `EntryRow::component` | last write wins; patch replaces `config` whole; provenance drops only restated fields; remove keeps the row; duplicate insert; patch/remove of a missing row; every problem collected |
-| 5 | `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions`, `default_layers` | a symlinked profile is listed; unknown profile lists the known ones; absolute directory accepted; project patch beside the base, not the cwd |
-| 6 | `Schema::check`, `validate_rows` | the number sentence; required, `additionalProperties: false`, `enum`, `anyOf`; disabled rows skipped; no-schema not counted |
-| 7 | `command::run` | each text and JSON shape against the TypeScript output; exit codes |
-| 8 | `local`, `endpoints` | candidate order; malformed file fails; env override only on a merge; new endpoint needs kind and baseUrl; exclude after merge; sort by name; no secret in `describe_endpoint`; each `selection_problem` sentence |
-| 9 | `05-config-system` through `HEDDLE_BIN`, once the binary delegates to `command::run` | the verifier |
+| 2 | done: `references_in`, `parse_scalar`, `resolve_env` | 11 |
+| 3 | done: `read_layer`, `NamedLayer::read` on saphyr 0.0.6; `anchor_dir` landed early in step 6 | 12 new |
+| 4 | done: `compose`, `origin_of`, `ComposedRow::to_report`, `EntryRow::component` | 11 new |
+| 5 | done: `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions`, `default_layers` | 13 new |
+| 6 | done: `Schema::check`, `validate_rows`; `anchor_dir` landed early because validation anchors through it | 13 new |
+| 7 | done: `command::run` | 5 new |
+| 8 | done: `local`, `endpoints` | 17 new |
+| 9 | `05-config-system` through `HEDDLE_BIN`, once the binary delegates to `command::run` and the verifier's HEDDLE_BIN branch writes component manifests | the verifier |
 
 ### Open questions
 
 1. **The `--validate` check's fixture names `./alpha.ts`**, a TypeScript module with a Schemastery schema. Under
-   `HEDDLE_BIN` no Rust catalog can read it, so that one check cannot pass unchanged; the other nine do not read
-   the name. Proposed, as part 0's sanctioned shape: an outside component is named by a manifest beside the
-   profile (`./alpha.component.yml`: `command`, and `config` as a JSON Schema), `--validate` reads the manifest
-   without starting anything, and the verifier's `HEDDLE_BIN` branch writes manifests instead of `.ts` files. It
-   touches part 4's outside-process protocol, so it is agreed with `heddle-tools` before it is built.
-2. **YAML reader.** Step 3 needs one that exposes tags; the candidates are a maintained `serde_yaml` fork and
-   `saphyr`. It goes into `[workspace.dependencies]` through the workspace's owner.
+   `HEDDLE_BIN` no Rust catalog can read it. Agreed with integrator-one and acked by developer-five, 2026-10-22: an outside component is named by a
+   manifest beside the profile (`./alpha.component.yml`: a `program` string, an optional `args` list, and an inline
+   `config` JSON Schema — the same shape `OutsideComponentSpec` spells, so one manifest can later serve both
+   `--validate` and the spec source). `--validate` reads the manifest without starting anything, and the verifier's
+   `HEDDLE_BIN` branch writes manifests instead of `.ts` files. `ManifestCatalog` and `read_component_manifest`
+   implement the heddle-config side; the verifier branch is integrator-one's, and the process protocol stays
+   heddle-tools's.
+2. **YAML reader.** *Resolved*: `saphyr` 0.0.6 (MIT OR Apache-2.0, YAML 1.2, exposes tagged nodes as
+   `Yaml::Tagged(Tag, Box<Yaml>)`), added to `[workspace.dependencies]` by integrator-one (7ea2a3e).
 3. **`serde_json`'s `preserve_order`.** Off here. Features unify across the workspace, so turning it on changes
    every crate's map order; whichever crate needs byte-compatible JSON (the session log) asks for it workspace-wide.
 

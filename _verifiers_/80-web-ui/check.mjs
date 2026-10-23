@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { chatDouble, fixtureDir, httpConfig, isolatedHome, parseJson, removeDir, runCli, runCliSource, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, removeDir, runCli, runCliSource, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -67,7 +67,7 @@ function startCli(args, options) {
       const { spawn } = await import('node:child_process')
       const { join } = await import('node:path')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const child = spawn(process.execPath, [join(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: options.cwd ?? repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...(options.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -172,7 +172,11 @@ test('the server takes the documented default port when none is named', async (c
    * behaviour, a server refusing to pretend it owns a port someone else has. Two checks cannot both own
    * the port; ownership is judged there, and the choice is judged here.
    */
-  const { DEFAULT_PORT } = await import('../../dist/server/web.js')
+  /**
+   * The constant the documentation names, read from the source rather than `dist/`: a check that runs a binary
+   * through `HEDDLE_BIN` has no TypeScript build to import, and `src/` is what `dist/` is compiled from.
+   */
+  const { DEFAULT_PORT } = await import('../../src/server/web.ts')
   assert.equal(DEFAULT_PORT, 3082, 'the server exports the documented default')
   const readme = await import('node:fs').then((fs) => fs.readFileSync(new URL('../../README.md', import.meta.url), 'utf8'))
   const goal = await import('node:fs').then((fs) => fs.readFileSync(new URL('../../ULTIMATE_GOAL.md', import.meta.url), 'utf8'))

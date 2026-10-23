@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { writeFileSync } from 'node:fs'
 
-import { fixtureDir, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — one preview surface.
@@ -33,7 +33,7 @@ function startCli(args, env) {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const { join: joinPath } = await import('node:path')
-      const child = spawn(process.execPath, [joinPath(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
         stdio: ['ignore', 'pipe', 'pipe'],

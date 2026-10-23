@@ -85,7 +85,7 @@ async function turn(server, body) {
 
 async function supportsWeb() {
   const help = await runCli(['--help'])
-  return /--profile/.test(help.stdout)
+  return /^  web\b/m.test(help.stdout)
 }
 
 test('a mode change appends a superseding snapshot after the one the earlier step read', async (context) => {

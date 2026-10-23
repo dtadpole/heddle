@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — the resizable panels.
@@ -29,7 +29,7 @@ function startCli(args, env) {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
       const { join: joinPath } = await import('node:path')
-      const child = spawn(process.execPath, [joinPath(repoRoot, 'dist', 'cli.js'), ...args], {
+      const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -99,12 +99,13 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
 
     /**
      * **Which build is this?** The served page carries its own file's hash in `meta[name=heddle-page]`; the check
-     * recomputes it from `dist/server/page.html`, the file this server serves. Measured failure this prevents: the
+     * recomputes it from `src/server/page.html`, the source of the one page both builds serve (the TypeScript
+     * build copies it into `dist/`). Measured failure this prevents: the
      * live daemon ran a deployment checkout an hour behind the source, and a row's geometry read as "not
      * implemented" while the source and the claim were already correct. A page that predates a rebuild must say so
      * rather than look like a missing feature.
      */
-    const pageHash = createHash('sha256').update(readFileSync(join(repoRoot, 'dist', 'server', 'page.html'))).digest('hex').slice(0, 12)
+    const pageHash = createHash('sha256').update(readFileSync(join(repoRoot, 'src', 'server', 'page.html'))).digest('hex').slice(0, 12)
     const servedHash = await browser.evaluate(`document.querySelector('meta[name="heddle-page"]')?.getAttribute('content') ?? null`)
     assert.equal(servedHash, pageHash, `the served page states the build it is (${pageHash})`)
 

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, repoRoot, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The team view: a Lead's session shows its roster, the shared board and the mailbox ledger.
@@ -19,8 +19,7 @@ const CAPABILITY = 'the Web UI'
 
 function startServer(home, work, config) {
   const child = spawn(
-    process.execPath,
-    [join(repoRoot, 'dist/cli.js'), 'web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')]),
     { cwd: work, env: { ...process.env, HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
   )
   let output = ''
@@ -55,7 +54,12 @@ test('a team session renders its roster, board and mailbox; a session with no te
   const work = fixtureDir('team-view-work')
   const root = join(home, 'sessions')
   const { config } = scriptedConfig({ home, steps: [{ text: 'idle' }] })
-  const { SessionStore } = await import('../../dist/session/store.js')
+  /**
+   * The fixture's session state is written by the TypeScript store — the implementation the log format is —
+   * imported from the source rather than `dist/`, so the check can build its fixture when only a binary is
+   * under test and no TypeScript build exists. On the TypeScript build `src/` and `dist/` are the same code.
+   */
+  const { SessionStore } = await import('../../src/session/store.ts')
   const sessions = new SessionStore(root)
   try {
     /**
