@@ -2,10 +2,19 @@
 //!
 //! # Mounting
 //!
+//! One call, for the server or the binary:
+//!
 //! ```ignore
-//! let files = heddle_web_files::routes::FilesRoutes::new(Arc::new(my_host)).router();
-//! let app = server_router.merge(files).layer(token_layer); // the token layer covers these routes too
+//! // the server: its own state applied, its token layer already over the merged result
+//! let app = heddle_web_files::routes::mount(server_router_with_state_applied, Arc::new(my_host));
+//! let app = app.layer(token_layer);
 //! ```
+//!
+//! [`mount`] exists rather than "call [`FilesRoutes::router`] and merge it" because axum only merges two routers
+//! that carry the **same** state type, and these routes own theirs ([`FilesRoutes`]): the caller must apply its own
+//! state first, which yields `axum::Router<()>`, and then merge. The types a caller reads the answers through are
+//! [`FileAnswer`], [`MarkdownAnswer`], [`ErrorAnswer`] and [`SavedUpload`], all public and serialized exactly as the
+//! routes write them.
 //!
 //! The router does **no authentication**: in `web.ts` every one of these routes sits after the token decision, which
 //! answers `401` (`unauthorized\n` as `text/plain` for `/api/…`) before any route runs. The server keeps that
@@ -100,22 +109,64 @@ impl FilesRoutes {
     }
 }
 
+/// Mount the file routes into a router whose own state is already applied.
+///
+/// This is the one call a server makes. The caller applies its state first (`axum::Router<()>`), passes the router
+/// and the [`FilesHost`] it implements, and puts its token layer over the result: these routes do no authentication
+/// of their own, exactly as the TypeScript build's file routes sit after the token decision.
+///
+/// `Router::merge` panics when a path collides, and the server registers `GET /api/html` and
+/// `/vendor/purify.js` itself, so [`ROUTES`] lists only what this call adds; a server can assert the two sets are
+/// disjoint at boot instead of meeting the panic.
+pub fn mount(router: axum::Router, host: Arc<dyn FilesHost>) -> axum::Router {
+    mount_routes(router, FilesRoutes::new(host))
+}
+
+/// The same, with the routes configured by the caller — the folder dialog replaced, or a host that has none.
+pub fn mount_routes(router: axum::Router, routes: FilesRoutes) -> axum::Router {
+    router.merge(routes.router())
+}
+
+/// `{"error": <sentence>}`: what every refusal answers, with a newline after the object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorAnswer {
+    pub error: String,
+}
+
+/// `POST /api/markdown`'s request: `{"text": …}`. Anything else is `400`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkdownRequest {
+    pub text: String,
+}
+
+/// `POST /api/markdown`'s answer: the document, compact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkdownAnswer {
+    pub html: String,
+}
+
 /// The query every route that names a file reads. A missing `path` is an answer of its own, not an error.
 #[derive(Debug, Default, Deserialize)]
-struct Params {
+pub struct FileQuery {
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
-    name: Option<String>,
+    pub name: Option<String>,
 }
 
+/// The same query, read by the upload route (it uses `name`; the rest ignore it).
+pub(crate) type Params = FileQuery;
+
 /// `GET /api/file`'s answer: the reading, then the renderer's decision, flattened into one object.
-#[derive(Debug, Serialize)]
-struct FileAnswer {
+///
+/// The fields are `path`, `name`, `bytes`, `lines`, `text`, `truncated`, then `renderer` and, when the renderer has
+/// them, `language` and `html` — absent rather than `null` for a file that has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileAnswer {
     #[serde(flatten)]
-    reading: FileReading,
+    pub reading: FileReading,
     #[serde(flatten)]
-    rendered: Rendered,
+    pub rendered: Rendered,
 }
 
 /// `GET /api/html`'s answer.
@@ -403,7 +454,10 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         status,
         &format!(
             "{}\n",
-            serde_json::to_string(&serde_json::json!({ "error": message })).unwrap_or_default()
+            serde_json::to_string(&ErrorAnswer {
+                error: message.to_string()
+            })
+            .unwrap_or_default()
         ),
     )
 }
@@ -1038,78 +1092,196 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base2);
     }
 
+    /// A layer the caller might put over the merged router — the token decision, in miniature.
+    async fn stamp(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+        let mut response = next.run(request).await;
+        response.headers_mut().insert(
+            axum::http::header::HeaderName::from_static("x-stamped"),
+            axum::http::HeaderValue::from_static("yes"),
+        );
+        response
+    }
+
     #[tokio::test]
-    async fn a_page_comes_back_with_its_resources_rewritten_and_its_policy() {
-        let (base, host) = scratch("html");
-        let path = host.root.join("page.html");
-        let (status, _, bytes) = call(
-            routes_of(host),
-            "GET",
-            &format!(
-                "/api/html?path={}",
-                crate::markdown::percent_encode(&path.to_string_lossy())
-            ),
-            None,
-        )
-        .await;
+    async fn mount_merges_into_a_router_whose_own_state_is_applied_and_a_layer_covers_both() {
+        // The one call the server makes: its state applied, then mount, then its token layer over the result.
+        let (base, host) = scratch("mount");
+        let document = host.root.join("AGENTS.md");
+        let caller = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .with_state(());
+        let app =
+            crate::routes::mount(caller, Arc::new(host)).layer(axum::middleware::from_fn(stamp));
+
+        let (status, headers, bytes) = call(app.clone(), "GET", "/api/health", None).await;
         assert_eq!(status, Status::OK);
-        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(answer["path"], path.to_string_lossy().to_string());
-        assert!(
-            answer["html"].as_str().unwrap().contains("/api/raw?path="),
-            "{answer}"
+        assert_eq!(body_text(&bytes), "ok");
+        assert_eq!(
+            headers.get("x-stamped").unwrap().to_str().unwrap(),
+            "yes",
+            "the caller's layer covers its own route"
         );
-        assert!(
-            answer["csp"]
-                .as_str()
-                .unwrap()
-                .contains("script-src 'none'"),
-            "{answer}"
+        let (status, headers, _) =
+            call(app, "GET", &query(&document.to_string_lossy()), None).await;
+        assert_eq!(status, Status::OK, "and the mounted file routes answer");
+        assert_eq!(
+            headers.get("x-stamped").unwrap().to_str().unwrap(),
+            "yes",
+            "the caller's layer covers the mounted routes too"
         );
-        assert_eq!(answer["bytes"], std::fs::metadata(&path).unwrap().len());
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
-    async fn a_page_outside_every_root_or_not_a_file_is_refused() {
-        let (base, host) = scratch("html-refusals");
-        let root = host.root.clone();
-        let routes = routes_of(host);
-        let (status, _, bytes) = call(routes.clone(), "GET", "/api/html", None).await;
-        assert_eq!(status, Status::BAD_REQUEST);
-        assert_eq!(body_text(&bytes), "{\"error\":\"a path is required\"}\n");
-        let (status, _, bytes) = call(
-            routes.clone(),
-            "GET",
-            &format!(
-                "/api/html?path={}",
-                crate::markdown::percent_encode("/etc/passwd")
-            ),
-            None,
-        )
-        .await;
-        assert_eq!(status, Status::NOT_FOUND);
+    async fn mount_routes_takes_the_routes_the_caller_configured() {
+        let (base, host) = scratch("mount-routes");
+        let routes = FilesRoutes::new(Arc::new(host)).with_picker(
+            Platform::MacOs,
+            Arc::new(AnsweringRunner {
+                answers: [(
+                    "osascript",
+                    CommandResult {
+                        stdout: "/Users/me/picked\n".into(),
+                        stderr: String::new(),
+                        code: 0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+        );
+        let app = crate::routes::mount_routes(Router::new(), routes);
+        let (status, _, bytes) = call(app, "POST", "/api/workspaces/pick", None).await;
+        assert_eq!(status, Status::OK);
         assert!(
-            body_text(&bytes).contains("not under any workspace root"),
+            body_text(&bytes).contains("/Users/me/picked"),
             "{}",
             body_text(&bytes)
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_route_list_leaves_the_servers_own_paths_alone() {
+        // developer-ten registers these in heddle-server; an overlap would panic in `Router::merge`.
+        for (method, path) in [("GET", "/api/html"), ("GET", "/vendor/purify.js")] {
+            assert!(
+                !ROUTES.contains(&(method, path)),
+                "{method} {path} is the server's route, not this crate's"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_file_answer_has_the_documented_fields_in_order() {
+        let (base, host) = scratch("shape");
+        let document = host.root.join("AGENTS.md");
         let (status, _, bytes) = call(
-            routes,
+            routes_of(host),
             "GET",
-            &format!(
-                "/api/html?path={}",
-                crate::markdown::percent_encode(&root.join("folder").to_string_lossy())
-            ),
+            &query(&document.to_string_lossy()),
             None,
         )
         .await;
-        assert_eq!(status, Status::NOT_FOUND);
+        assert_eq!(status, Status::OK);
+        let body = body_text(&bytes);
+        // One object: the reading's six fields, then the renderer's, in the order the page reads them.
+        assert!(body.starts_with("{\n  \"path\": "), "{body}");
+        let order = [
+            "\"name\"",
+            "\"bytes\"",
+            "\"lines\"",
+            "\"text\"",
+            "\"truncated\"",
+            "\"renderer\"",
+            "\"html\"",
+        ];
+        let mut at = 0usize;
+        for field in order {
+            let found = body[at..]
+                .find(field)
+                .map(|offset| at + offset)
+                .unwrap_or_else(|| panic!("{field} missing from {body}"));
+            assert!(found >= at, "{field} is out of order in {body}");
+            at = found + field.len();
+        }
+        // And the typed shape the server reads it through round-trips.
+        let answer: FileAnswer = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            answer.rendered.renderer,
+            crate::code::RendererName::Markdown
+        );
+        assert_eq!(answer.reading.name, "AGENTS.md");
+        let again: FileAnswer =
+            serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
+        assert_eq!(again, answer);
+        let error: ErrorAnswer =
+            serde_json::from_str("{\"error\":\"a path is required\"}").unwrap();
+        assert_eq!(error.error, "a path is required");
+        let request: MarkdownRequest = serde_json::from_str("{\"text\":\"# Hi\"}").unwrap();
+        assert_eq!(request.text, "# Hi");
+        assert_eq!(
+            serde_json::to_string(&MarkdownAnswer {
+                html: "<h1>Hi</h1>\n".into()
+            })
+            .unwrap(),
+            "{\"html\":\"<h1>Hi</h1>\\n\"}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn an_upload_over_the_ceiling_is_refused_with_the_ceiling_named() {
+        let (base, host) = scratch("upload-too-large");
+        let oversized = vec![b'a'; crate::uploads::MAX_UPLOAD_BYTES as usize + 1];
+        let (status, _, bytes) = call(
+            routes_of(host),
+            "POST",
+            "/api/uploads?name=big.bin",
+            Some(oversized),
+        )
+        .await;
+        assert_eq!(status, Status::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            body_text(&bytes),
+            "the file is larger than this server accepts (50 MiB)\n"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn an_upload_that_cannot_be_stored_says_so() {
+        let (base, host) = scratch("upload-failure");
+        // A file where the upload directory should be: the store cannot be created, which is the 500 path.
+        std::fs::write(host.home.join("uploads"), b"in the way").unwrap();
+        let (status, _, bytes) = call(
+            routes_of(host),
+            "POST",
+            "/api/uploads?name=a.txt",
+            Some(b"x".to_vec()),
+        )
+        .await;
+        assert_eq!(status, Status::INTERNAL_SERVER_ERROR);
         assert!(
-            body_text(&bytes).contains("not a file"),
+            body_text(&bytes).starts_with("the file could not be stored: "),
             "{}",
             body_text(&bytes)
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_upload_leaf_that_is_a_symlink_out_of_the_directory_is_not_served() {
+        let (base, host) = scratch("upload-symlink");
+        let directory = host.home.join("uploads");
+        std::fs::create_dir_all(&directory).unwrap();
+        let outside = base.join("secret.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("link.txt")).unwrap();
+        let (status, _, bytes) = call(routes_of(host), "GET", "/api/uploads/link.txt", None).await;
+        assert_eq!(status, Status::NOT_FOUND);
+        assert_eq!(body_text(&bytes), "no such asset\n");
         let _ = std::fs::remove_dir_all(&base);
     }
 

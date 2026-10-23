@@ -31,10 +31,18 @@ its server through `heddleCommand` instead of `node dist/cli.js` (integrator-two
 
 Three findings are recorded where they were made, because each changes a decision:
 
-- **An XSS in the TypeScript sanitizer, fixed rather than ported.** `sanitize.ts` reads a tag closed by `/>` as
-  *unterminated* and writes the rest of the input back as text, so `<img src="x" onerror="alert(1)"/>` reached the
-  page with its handler intact — the allow-list never saw it. [`sanitize`](src/sanitize.rs) treats `/>` as the tag's
-  end; the divergence is stated in the module and pinned by a test.
+- **A live allow-list bypass in `sanitize.ts`, fixed rather than ported.** The exact input, measured on `main` on
+  2026-10-22 by running the TypeScript function itself: a document whose last block is a self-closed tag ending the
+  string, e.g. `# A`, a blank line, then `<img src="x" onerror="alert(1)"/>`. `marked` answers
+  `<h1>A</h1>\n<img src="x" onerror="alert(1)"/>` — `/>` at the end, no trailing newline — and the TypeScript
+  scanner reads that close as an *unterminated* text node, so it copies the input from the `<` to the end of the
+  string and the attribute allow-list never runs. The page assigns that answer to `innerHTML`
+  (`src/server/page.html:9126` and `:4887`), so the handler reaches the DOM and the browser runs it when `src="x"`
+  fails to load: `sanitizeHtml('<img src="x" onerror="alert(1)"/>')` returns its input unchanged. The same branch
+  also corrupts what follows such a tag — `<p>Hello <img …/></p>\n` came back as `<p>Hello <img … />/p>\n`, the
+  `</p>`'s `<` consumed. [`sanitize`](src/sanitize.rs) ends a tag at `/>`, so both are fixed and pinned by
+  `a_self_closed_tag_is_reduced_and_never_passed_through_whole`; on this input the port is stricter than
+  `sanitize.ts`, not different. The TypeScript tree on `main` still carries it (2026-10-22).
 - **`comrak` cannot emit an attribute**, and a link to a workspace file needs `data-heddle-path` while a refused link
   must lose its anchor. Both are done in one pass over the rendered document
   ([`markdown::rewrite_anchors`](src/markdown.rs)), with a marker only this crate can write as the signal.
@@ -58,7 +66,7 @@ JSON the TypeScript build writes; the tests assert the strings.
 | [`picker`](src/picker.rs) | `picker.ts` | `pick_folder(&Platform, &dyn CommandRunner) -> PickerOutcome`, `PickerOutcome`, `CommandRunner`, `CommandResult`, `SystemRunner`, `Platform`, `PICK_TIMEOUT` |
 | [`docs`](src/docs.rs) | `docs.ts` | `find_docs`, `read_doc`, `is_inside`, `DocEntry`, `DocError`, `FindDocsOptions`, `MAX_DOC_BYTES` |
 | [`host`](src/host.rs) | the seam | `trait FilesHost { heddle_home, workspace_owner, read_file_text }`, `WorkspaceAnswer`, `FileReading`, `FileReadError` |
-| [`routes`](src/routes.rs) | the file routes of `web.ts` | `FilesRoutes::new(Arc<dyn FilesHost>).with_picker(..).router() -> axum::Router`, `ROUTES` |
+| [`routes`](src/routes.rs) | the file routes of `web.ts` | `mount(axum::Router, Arc<dyn FilesHost>) -> axum::Router`, `mount_routes`, `FilesRoutes::new(..).with_picker(..).router()`, `ROUTES`, and the answer shapes `FileAnswer`, `MarkdownRequest`, `MarkdownAnswer`, `ErrorAnswer`, `FileQuery` |
 
 ### The routes
 
@@ -67,6 +75,16 @@ JSON the TypeScript build writes; the tests assert the strings.
 tabled in [`src/routes.rs`](src/routes.rs). The router does no authentication and has no fallback: the server merges
 it and puts its token layer over the result, exactly as every one of these routes sits after the token decision in
 `web.ts`.
+
+### Mounting
+
+The router is merged, not constructed by the server: `heddle_web_files::routes::mount(router, Arc::new(host))` takes
+a router whose own state is already applied (`axum::Router<()>`) and answers `axum::Router<()>` with the file routes
+in it, so a caller applies its state, mounts, and then puts its token layer over the result. `mount_routes` takes
+the routes already configured (a replaced folder dialog). axum only merges routers of the same state type, which is
+why this is a call rather than "build the router and merge it". The shapes a caller reads the answers through are
+public and serialized exactly as the routes write them: `FileAnswer` (the reading flattened with the renderer's
+decision), `MarkdownAnswer`, `ErrorAnswer`, and `SavedUpload`/`PickerOutcome` for the other two.
 
 ### Who calls what
 

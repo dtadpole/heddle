@@ -7,10 +7,10 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// What the File panel should do with a file. Serialized lower-case, as the page reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RendererName {
     /// A document: rendered by [`crate::markdown`].
@@ -35,12 +35,12 @@ pub struct RendererDecision {
 ///
 /// Serialized as `{"renderer": …, "language"?: …, "html"?: …}`: `language` only for code, `html` for markdown and
 /// code. Absent fields are **absent**, not `null` — the verifiers assert `html === undefined` for text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rendered {
     pub renderer: RendererName,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
 }
 
