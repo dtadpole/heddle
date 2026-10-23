@@ -1,5 +1,7 @@
 ---
 title: The heddle-events crate
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:06:23Z
 version: 0.3.0
 description: The Rust port crate for the event bus and the named hook points, with Cordis's emit, parallel, serial, bail and waterfall modes — its public API, who uses which part, and the port plan.
 grounded_in:

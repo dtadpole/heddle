@@ -653,4 +653,192 @@ mod tests {
             "the configured double was never reached"
         );
     }
+
+    /// A part-4 component in `/bin/sh`: it declares `declared` in `initialize`, refuses `write_file` at
+    /// `tools/pre-execute`, passes everything else, and appends each `session/event` notification to `$EVENTS`.
+    fn component_script(declared: &str) -> String {
+        format!(
+            r#"while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[],"listeners":{declared}}}}}\n' "$id" ;;
+    *'"point":"session/event"'*) printf '%s\n' "$line" >> "$EVENTS" ;;
+    *'"method":"hooks/call"'*write_file*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"kind":"replace","value":{{"allowed":false,"reason":"this hook refuses writes"}}}}}}\n' "$id" ;;
+    *'"method":"hooks/call"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"kind":"next"}}}}\n' "$id" ;;
+    *'"method":"shutdown"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":null}}\n' "$id" ;;
+    *'"method":"exit"'*) exit 0 ;;
+    *'"id":'*) printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32601,"message":"no such method"}}}}\n' "$id" ;;
+  esac
+done
+"#
+        )
+    }
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(label: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!(
+            "heddle-events-component-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    async fn start_component(dir: &std::path::Path, declared: &str) -> Arc<OutsideComponent> {
+        let config: heddle_sandbox::SandboxConfig = serde_json::from_value(json!({
+            "mode": "workspace-write",
+            "workspaceRoot": dir.display().to_string(),
+            "backend": "none"
+        }))
+        .unwrap();
+        let host = heddle_sandbox::SandboxHost::detect(dir.join("home")).unwrap();
+        let gate: Arc<dyn heddle_tools::SandboxGate> =
+            Arc::new(heddle_tools::adapters::Sandbox::new(Arc::new(
+                heddle_sandbox::SandboxService::new(&config, &host),
+            )));
+        let mut spec = heddle_tools::OutsideComponentSpec::new("hook-1", "/bin/sh", dir);
+        spec.args = vec!["-c".to_owned(), component_script(declared)];
+        spec.env = vec![(
+            "EVENTS".to_owned(),
+            dir.join("events.jsonl").display().to_string(),
+        )];
+        Arc::new(
+            OutsideComponent::start(spec, gate)
+                .await
+                .expect("the component starts"),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_real_components_declared_listeners_answer_the_tool_port_from_the_turns_threads() {
+        let dir = scratch("listeners");
+        let component = start_component(
+            &dir.0,
+            r#"[{"point":"tools/pre-execute"},{"point":"session/event"}]"#,
+        )
+        .await;
+        let bus = EventBus::new();
+        bridge::expose_catalog(&bus);
+        let scope = bus.scope("hook-1");
+        let listeners = attach_component_listeners(&scope, component.clone()).unwrap();
+        assert_eq!(listeners.len(), 2, "one listener per declared point");
+        let hooks = BusHooks::new(bus.clone());
+
+        // From the thread that block_on runs the turn on, as `heddle --turn` does.
+        let write = args("should-not-exist.txt");
+        assert_eq!(
+            hooks.pre_execute(&ToolCall {
+                name: "write_file",
+                args: &write
+            }),
+            Ok(PreExecute::Refused {
+                reason: Some("this hook refuses writes".into())
+            })
+        );
+        let read = args("present.txt");
+        assert_eq!(
+            hooks.pre_execute(&ToolCall {
+                name: "read_file",
+                args: &read
+            }),
+            Ok(PreExecute::Allowed)
+        );
+
+        // From a worker, as a spawned turn (a goal round, the server's) does.
+        let from_worker = tokio::spawn({
+            let hooks = hooks.clone();
+            async move {
+                let write = args("x");
+                hooks.pre_execute(&ToolCall {
+                    name: "write_file",
+                    args: &write,
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(from_worker, Ok(PreExecute::Refused { .. })),
+            "{from_worker:?}"
+        );
+
+        // An emit point reaches the process as a notification.
+        bridge::session_event(&bus, "s1", &json!({"seq": 3, "type": "todo/write"}));
+        let events = dir.0.join("events.jsonl");
+        let mut seen = String::new();
+        for _ in 0..50 {
+            seen = std::fs::read_to_string(&events).unwrap_or_default();
+            if !seen.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(seen.contains(r#""point":"session/event""#), "{seen}");
+        assert!(
+            !seen.contains(r#""id":"#),
+            "an emit point is a notification, without an id: {seen}"
+        );
+        assert!(seen.contains(r#""session":"s1""#), "{seen}");
+
+        // The handles do not own the listeners; the row's scope does.
+        drop(listeners);
+        assert_eq!(
+            bus.listener_count(points::TOOLS_PRE_EXECUTE),
+            1,
+            "a dropped handle leaves the listener"
+        );
+        drop(scope);
+        assert_eq!(
+            bus.listener_count(points::TOOLS_PRE_EXECUTE),
+            0,
+            "dropping the row's scope detaches every listener the component declared"
+        );
+        assert_eq!(bus.listener_count(points::SESSION_EVENT), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_component_with_no_listeners_attaches_nothing_and_a_bad_declaration_attaches_none() {
+        let dir = scratch("declarations");
+        let bus = EventBus::new();
+        bridge::expose_catalog(&bus);
+        let scope = bus.scope("hook-1");
+
+        let tools_only = start_component(&dir.0, "[]").await;
+        assert!(
+            attach_component_listeners(&scope, tools_only)
+                .unwrap()
+                .is_empty()
+        );
+
+        let unknown = start_component(
+            &dir.0,
+            r#"[{"point":"tools/pre-execute"},{"point":"model/strem"}]"#,
+        )
+        .await;
+        let error = attach_component_listeners(&scope, unknown).unwrap_err();
+        assert!(error.to_string().contains("model/strem"), "{error}");
+        assert_eq!(
+            bus.listener_count(points::TOOLS_PRE_EXECUTE),
+            0,
+            "every point is checked before any is attached"
+        );
+
+        let malformed =
+            start_component(&dir.0, r#"[{"point":"tools/pre-execute","order":1}]"#).await;
+        assert!(
+            attach_component_listeners(&scope, malformed).is_err(),
+            "unknown keys fail the row"
+        );
+    }
 }

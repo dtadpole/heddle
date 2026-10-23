@@ -1,10 +1,10 @@
 ---
 title: The heddle-team sources
-version: 0.4.0
+version: 0.4.1
 description: The sources of the heddle-team crate, with unit tests beside the code.
 grounded_in:
-  - source: rust/ULTIMATE_GOAL.md
-  - source: src/team/ and src/plugins/team.ts in the TypeScript build
+  - source: rust/ULTIMATE_GOAL.md@0.1.0
+  - source: src/team/@ed183ea and src/plugins/team.ts@fc8d929 in the TypeScript build
 ---
 
 # `rust/crates/heddle-team/src`

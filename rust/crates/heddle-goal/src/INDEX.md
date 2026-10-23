@@ -1,6 +1,8 @@
 ---
 title: The heddle-goal sources
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:06:23Z
+version: 0.3.0
 description: The sources of the heddle-goal crate, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
