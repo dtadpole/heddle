@@ -1,0 +1,11 @@
+{
+  "id": "session-recover-active",
+  "created": "2026-10-23T03:23:32.855Z",
+  "cwd": "/tmp/heddle-recorded-team-recover",
+  "parentSession": "session-recover-lead",
+  "origin": "subagent",
+  "delegationDepth": 1,
+  "teamId": "session-recover-lead",
+  "turns": 1,
+  "updated": "2026-10-23T03:23:32.856Z"
+}
