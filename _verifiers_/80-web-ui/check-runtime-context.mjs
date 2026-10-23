@@ -82,7 +82,7 @@ async function startServer(label) {
         child.kill('SIGKILL')
         reject(new Error(`the server printed no URL within 15s\n${output}`))
       }
-    }, 15_000)
+    }, 15_000).unref()
   })
 }
 
