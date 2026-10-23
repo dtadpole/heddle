@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:19:23Z
-version: 0.4.1
+modified: 2026-10-23T07:27:19Z
+version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -131,6 +131,8 @@ as `runConfigCommand` did not.
 - **No config is `None`.** A row that writes no `config`, or writes `config: null`, composes to `config: None`, and
   a patch writing `config: null` clears it. Validation checks `None` as `{}`; a caller starting a component hands it
   `{}`, as a Cordis plugin received, so its schema's defaults apply — never `null`, which every typed config refuses.
+  `config --json` still prints a *written* `config: null` back, after `name`, as the TypeScript row kept it; the
+  written null is known by its `config` origin, which an absent config does not have.
 - **Provenance** is one entry per leaf field, naming only the layer that won; `origin_of` answers a parent field
   (`config`) with the first leaf beneath it.
 - **Every problem is collected** before it fails (a duplicate insert, a patch or remove naming a row no earlier layer
@@ -300,6 +302,24 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `b72cc1a` (rebuilt without `e9a0836`: developer-two's branch with `--stream` through the stream hub, models and streaming advertised, the hidden adapter-call command, and the team row through `start_row`) | `HEDDLE_BIN=<debug build of exactly b72cc1a> sh _verifiers_/05-config-system/verify.sh --json`, and the backend lane with the same binary | 10/10 passed, verdict 0. Backend lane: 117 checks, 108 pass, 5 fail, 4 unjudged; the team failures are gone, and the five left (70 session ordering, 75 sandbox enforcement) are none of this crate's. `web --dry-run` boots; the repository's own profile validates, 16 rows checked, 0 problems |
 | 2026-10-22 | lane `f7b2c5e` (the lane gate judges a candidate against a per-check baseline, D-048; no Rust changed since `b72cc1a`, now main `d171876`) | `HEDDLE_BIN=<debug build of exactly f7b2c5e> sh _verifiers_/05-config-system/verify.sh --json`; the new `lane.mjs 05-config-system`; then `lane.mjs --write-baseline <file> 05-config-system` and `lane.mjs --baseline <file> 05-config-system` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline: 0 newly passing, 0 regressed. The baseline lists part 0's ten checks by name, all `pass` |
 | 2026-10-23 | lane `ffd5f27` (the bare application and the printed tree, the binary's last unported paths; the printed tree boots through `boot_tree`) | `HEDDLE_BIN=<debug build of exactly ffd5f27> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; an unknown `--profile` or a missing `--config` on the bare path gives this crate's sentence and exit 1. A third probe found this crate refusing a `null` layer document that `readLayer` reads as no layers; fixed in `a042777` |
+
+## Known differences from the TypeScript build
+
+Measured 2026-10-23 by running the same 39 edge-case layer files through `heddle --config <file> config --json` on
+both builds (the TypeScript `dist/cli.js` and a release build of this crate's branch), comparing exit codes, rows and
+the first error line. 34 agree; the other five come down to four differences kept on purpose (two cases show the key
+order):
+
+| Case | TypeScript | Rust | Why it stays |
+|---|---|---|---|
+| `insert` written as a mapping | a JavaScript `TypeError` ("object is not iterable") | `layer 0: insert must be a list` | the TypeScript text is a crash, not a sentence; both exit 1 |
+| row key order in `config --json` | the order the layer wrote the row's keys | `id`, `name`, `config`, `group`, `disabled`, `inject`, then other keys in written order | same values; every consumer parses the JSON |
+| an `id` that is a number | accepted and printed as `7` | `a row's 'id' must be a string` | rows are addressed by string `id`; a number could not be patched by name |
+| a layer file that does not exist | Node's `ENOENT: no such file or directory, open '…'` | the OS's `No such file or directory (os error 2)` | each runtime's own I/O text; the sentence around it is the same |
+
+Closed by the same measurement: a `null` layer document (`a042777`), a written `config: null` printed back, the
+two-document and top-level `!include` sentences, and keys kept in written order without relying on another crate's
+`preserve_order`.
 
 ## Decisions the contract makes
 
