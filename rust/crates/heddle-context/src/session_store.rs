@@ -10,7 +10,9 @@
 
 use heddle_session::{SessionHandle, SessionStore};
 
-use crate::store::{AppendOptions, ContextStore, LogEvent, StoreError, SurfaceNode, SurfaceState};
+use crate::store::{
+    AppendOptions, ContextStore, EventRef, LogEvent, StoreError, SurfaceNode, SurfaceState,
+};
 use crate::types::Message;
 
 impl ContextStore for SessionStore {
@@ -63,6 +65,26 @@ impl ContextStore for SessionStore {
                 message: heddle_session::derive_message(&by_seq, *seq),
             })
             .collect())
+    }
+
+    /// The store's snapshot is shared, so a scan borrows its events instead of copying the log.
+    fn visit_newest_first(
+        &self,
+        session: &SessionHandle,
+        visit: &mut dyn FnMut(EventRef<'_>) -> bool,
+    ) -> Result<(), StoreError> {
+        let events = SessionStore::read(self, session).map_err(to_store_error)?;
+        for event in events.iter().rev() {
+            let borrowed = EventRef {
+                seq: event.seq,
+                kind: &event.kind,
+                fields: &event.fields,
+            };
+            if !visit(borrowed) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn derive_messages(&self, session: &SessionHandle) -> Result<Vec<Message>, StoreError> {

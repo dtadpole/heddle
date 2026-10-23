@@ -1,6 +1,6 @@
 ---
 title: The heddle-context crate
-version: 0.6.1
+version: 0.7.0
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -36,7 +36,7 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | `command` | `src/cli.ts` (the `context` branch) | the command's entry point under D-043: `Command::Context`, `Args { target, json, endpoint, model }`, `Context { cwd, sessions, context, tools, workspace_root }`, `run(command, args, context, out, err) -> i32` |
 | `service` | `service.ts` | `ContextService<S: ContextStore>::{budget, measure, record_runtime_context, ensure_context, assemble, prepare, recover_overflow}`; `ContextConfig` (the profile row's `config`), `ContextReport` with `summary()` and `view()`, the `ModelAccess` trait |
 | `events` | the log vocabulary | `ContextEvent`: the `context/note` and `compaction/*` events this crate writes, typed |
-| `store` | `PrunableStore` | the `ContextStore` trait this crate needs from the session store; `LogEvent`, `SurfaceState`, `SurfaceOp`, `AppendOptions` |
+| `store` | `PrunableStore` | the `ContextStore` trait this crate needs from the session store; `LogEvent`, `EventRef` (a borrowed event for the scans), `SurfaceState`, `SurfaceOp`, `AppendOptions`. A round asks for the surface with `derive_surface` and scans the log with `visit_newest_first`, never node by node and never by copying the log |
 | `types` | `src/llm/types.ts` | `heddle-llm`'s `Message`, `ContentPart`, `Role`, `ToolSpec`, `TokenUsage`, `describe_content`, `CONTEXT_WINDOW_EXCEEDED`, re-exported under the same names; plus `text_message` for the single-block notes this crate writes |
 | `testing` | — | `MemoryStore`, an in-memory `ContextStore` with the TypeScript fold rules; behind the `testing` feature |
 | `session_store` | `PrunableStore` | the real store bound to this crate's trait: `impl ContextStore for heddle_session::SessionStore`, a mapping only |
