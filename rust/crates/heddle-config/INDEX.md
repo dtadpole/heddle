@@ -19,7 +19,7 @@ the path rules, the machine's local file, and endpoint configuration.
 | Ported from | `src/config/`, `src/local-config.ts`, `src/paths.ts`, `src/endpoints.ts`; the configuration half of `src/llm/types.ts`; `runConfigCommand` and `baseLayer` of `src/cli.ts` |
 | Judged by | `_verifiers_/05-config-system`, through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| State | **contract landed**: every public item declared and documented; `Env`, `ConfigError`, home, paths, `LayerValue`, the serde shapes and environment references implemented with tests (steps 1–2), composition with provenance and component names (step 4), profile discovery and layer options (step 5), and schema validation plus `anchor_dir` (step 6); steps 3 and `default_layers` wait on the YAML reader; the rest `todo!()` |
+| State | **contract landed**: every public item declared and documented; `Env`, `ConfigError`, home, paths, `LayerValue`, the serde shapes and environment references implemented with tests (steps 1–2), composition with provenance and component names (step 4), profile discovery and layer options (step 5), schema validation plus `anchor_dir` (step 6), and the machine's local file and endpoint resolution (step 8); steps 3, `default_layers` and `command::run` wait on the YAML reader; `command::run` is the last `todo!()` |
 
 ## The public API
 
@@ -99,7 +99,7 @@ because each later step is checked through the earlier ones.
 | 5 | partly done: `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions`; `default_layers` waits on step 3 | 9 new |
 | 6 | done: `Schema::check`, `validate_rows`; `anchor_dir` landed early because validation anchors through it | 13 new |
 | 7 | `command::run` | each text and JSON shape against the TypeScript output; exit codes |
-| 8 | `local`, `endpoints` | candidate order; malformed file fails; env override only on a merge; new endpoint needs kind and baseUrl; exclude after merge; sort by name; no secret in `describe_endpoint`; each `selection_problem` sentence |
+| 8 | done: `local`, `endpoints` | 17 new |
 | 9 | `05-config-system` through `HEDDLE_BIN`, once the binary delegates to `command::run` | the verifier |
 
 ### Open questions

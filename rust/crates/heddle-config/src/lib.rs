@@ -42,9 +42,11 @@
 //! [`LayerValue`], the serde shapes of rows, schemas and endpoints, the environment references
 //! ([`references_in`], [`parse_scalar`], [`resolve_env`]), composition with provenance
 //! ([`compose`], [`origin_of`], [`ComposedRow::to_report`], [`EntryRow::component`]), validation
-//! against a [`Schema`] ([`Schema::check`], [`validate_rows`]), and profile discovery and layer
-//! options ([`list_profiles`], [`resolve_profile`], [`profile_argument`], [`LayerOptions`]). Every
-//! other body is `todo!()` and lands in the order the crate's `INDEX.md` states.
+//! against a [`Schema`] ([`Schema::check`], [`validate_rows`]), profile discovery and layer options
+//! ([`list_profiles`], [`resolve_profile`], [`profile_argument`], [`LayerOptions`]), and the machine's
+//! local file and endpoint resolution ([`read_local_config`], [`resolve_endpoints`],
+//! [`describe_endpoint`]). Every other body is `todo!()` and lands in the order the crate's `INDEX.md`
+//! states.
 
 pub mod command;
 mod compose;
