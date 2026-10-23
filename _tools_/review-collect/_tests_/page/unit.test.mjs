@@ -328,6 +328,24 @@ test('the page carries every section a review needs', (t) => {
   assert.match(r.output, /scope       include: rust\/crates\/fake-crate\//)
 })
 
+test('the page shows the pushed branch beside local HEAD: not pushed, then partly pushed', (t) => {
+  const w = world(t)
+  const unpushed = cli(w)
+  assert.equal(unpushed.status, OK, unpushed.output)
+  assert.match(unpushed.output, /pushed      NOT PUSHED: no origin\/hd\/fake-seat; every commit below is local only/)
+
+  // Push only the first of the three commits: the page must say 1 pushed, 2 local.
+  git(w.seat, ['push', '-q', 'origin', 'HEAD~2:refs/heads/hd/fake-seat'])
+  const partly = cli(w)
+  assert.equal(partly.status, OK, partly.output)
+  assert.match(partly.output, /tip         3 ahead, 0 behind/)
+  assert.match(partly.output, /pushed      origin\/hd\/fake-seat [0-9a-f]{7}: 1 ahead, 0 behind origin\/main; local HEAD has 2 unpushed commit\(s\)/)
+
+  git(w.seat, ['push', '-q', 'origin', 'HEAD:refs/heads/hd/fake-seat'])
+  const all = cli(w)
+  assert.match(all.output, /pushed      origin\/hd\/fake-seat [0-9a-f]{7}: 3 ahead, 0 behind origin\/main; local HEAD is the pushed tip/)
+})
+
 test('a seat whose work is all in scope reads clean', (t) => {
   const w = world(t)
   git(w.seat, ['reset', '-q', '--hard', 'HEAD~2'])

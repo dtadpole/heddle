@@ -516,6 +516,7 @@ export function collectReview({ seat, team = process.env.HEDDLE_TEAM_FILE || nul
     main: { ref: mainRef, sha: mainSha, date: git(reviewerRepo, ['show', '-s', '--format=%cI', mainSha], { allowFailure: true }).stdout.trim() },
     notes,
     tip: null,
+    pushed: null,
     base: null,
     ahead: 0,
     behind: 0,
@@ -565,6 +566,26 @@ export function collectReview({ seat, team = process.env.HEDDLE_TEAM_FILE || nul
   const files = changed.map((path) => ({ path, ...classifyPath(path, scopes), group: groupPath(path).key }))
   const uncommitted = status.map((entry) => ({ ...entry, ...classifyPath(entry.path, scopes), group: groupPath(entry.path).key }))
 
+  // The pushed branch, read from the reviewer's freshly fetched clone: a seat's local
+  // commits are not a review's evidence until they are on origin.
+  const pushedRef = `origin/${branchName}`
+  const pushedResult = git(reviewerRepo, ['rev-parse', '--verify', '-q', pushedRef], { allowFailure: true })
+  if (pushedResult.status === 0) {
+    const pushedSha = pushedResult.stdout.trim()
+    const vsMain = git(reviewerRepo, ['rev-list', '--left-right', '--count', `${mainSha}...${pushedSha}`], { allowFailure: true })
+    const [pushedBehind, pushedAhead] = vsMain.status === 0 ? vsMain.stdout.trim().split(/\s+/).map(Number) : [null, null]
+    let unpushed = null
+    let localBehind = null
+    if (git(seatWorktree, ['cat-file', '-e', `${pushedSha}^{commit}`], { allowFailure: true }).status === 0) {
+      const vsLocal = git(seatWorktree, ['rev-list', '--left-right', '--count', `${pushedSha}...HEAD`]).stdout.trim().split(/\s+/).map(Number)
+      ;[localBehind, unpushed] = vsLocal
+    } else {
+      notes.push(`the seat clone lacks ${pushedRef} ${pushedSha.slice(0, 7)}; local and pushed are not compared`)
+    }
+    result.pushed = { ref: pushedRef, sha: pushedSha, ahead: pushedAhead, behind: pushedBehind, unpushed, localBehind }
+  } else {
+    result.pushed = { ref: pushedRef, sha: null }
+  }
   result.tip = { sha: tip, branch: branchNow }
   result.base = base
   result.behind = behind
@@ -593,6 +614,18 @@ export function render(result) {
   } else {
     push(`worktree    ${tilde(result.worktree)}  branch ${result.branch}  HEAD ${result.tip.sha.slice(0, 12)}${result.tip.branch !== result.branch ? `  (on ${result.tip.branch || 'detached'})` : ''}`)
     push(`tip         ${result.ahead} ahead, ${result.behind} behind  ${result.main.ref} ${result.main.sha.slice(0, 7)}${result.main.date ? ` (${result.main.date})` : ''}${result.fetched ? '' : '  [fetch failed]'}`)
+    const pushed = result.pushed
+    if (pushed === null || pushed.sha === null) {
+      push(`pushed      NOT PUSHED: no ${pushed?.ref ?? 'origin branch'}; every commit below is local only`)
+    } else {
+      const local =
+        pushed.unpushed === null
+          ? 'local HEAD not compared'
+          : pushed.unpushed === 0 && pushed.localBehind === 0
+            ? 'local HEAD is the pushed tip'
+            : `local HEAD has ${pushed.unpushed} unpushed commit(s)${pushed.localBehind ? ` and is ${pushed.localBehind} behind the pushed tip` : ''}`
+      push(`pushed      ${pushed.ref} ${pushed.sha.slice(0, 7)}: ${pushed.ahead ?? '?'} ahead, ${pushed.behind ?? '?'} behind ${result.main.ref}; ${local}`)
+    }
     const off = (entries) => entries.filter((entry) => entry.verdict === 'outside' || entry.verdict === 'excluded')
     const offCommitted = off(result.files)
     const offUncommitted = off(result.uncommitted)
