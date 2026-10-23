@@ -1,11 +1,11 @@
 ---
 title: The heddle-sandbox crate
-version: 0.3.1
+version: 0.4.0
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
-  - source: rust/ULTIMATE_GOAL.md
-  - source: src/sandbox/*.ts and src/approvals/service.ts, read 2026-10-22
-  - source: _verifiers_/75-permission-sandbox and _verifiers_/80-web-ui/check-approval.mjs, read 2026-10-22
+  - source: rust/ULTIMATE_GOAL.md at 5c113e8
+  - source: src/sandbox/*.ts at 8047667 and src/approvals/service.ts at 4d4075f (each one's last change), read 2026-10-22
+  - source: _verifiers_/75-permission-sandbox at d649349 and _verifiers_/80-web-ui/check-approval.mjs at 5ed8deb, run 2026-10-22
 ---
 
 # `rust/crates/heddle-sandbox`
@@ -98,6 +98,26 @@ It classifies the real exit code and stderr, one test per claim `check-shell-con
 - `backend: none` fails closed without running anything.
 A mutation that turns the profile's `(deny file-write*)` into `allow` fails the `workspace-write` and `read-only`
 cases, so the tests can fail.
+
+## Task 7, measured before it is judged
+
+Not yet a verdict: `main`'s binary advertises neither `--turn` nor `web` (`usage::SERVED`), so the lane's status run
+reports 75 as unjudged. Both runs below are rehearsals, on 2026-10-22, with
+`HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs <check> --json` and the verifiers at `d649349` (75) and
+`5ed8deb` (check-approval).
+
+| Binary | 75-permission-sandbox | check-approval |
+|---|---|---|
+| The backend lane's release build of candidate `e5f2e80`. A shim adds only the `--turn` help line and passes every other call through | 10 pass (`check.mjs` 5, `check-shell-confinement` 4, unattended `check-escalation` 1), 7 unjudged | not run |
+| Debug build of `hd/developer-two` `f45993a` with `hd/developer-two-web` `b6995b6` and `hd/integrator-two` `7d26c6b` merged in. Scratch-only edits: `SERVED` gains `Turn`, and the web branch's sandbox port takes `Option<&Value>` as the server's trait does | 10 pass, 7 fail | 3 fail |
+
+**All ten failures have one cause outside this crate**, reproduced by hand. The `web` command gives the server only
+the models and sandbox services, so `POST /api/turn` answers `400 {"error":"this service is not loaded yet"}`. No
+turn runs, so no approval question is ever asked.
+
+**Run 75 from a checkout outside the host temp areas.** Its "outside" paths are folders under
+`<checkout>/.heddle-tmp/`. From a checkout under `/tmp` those folders are inside a root `workspace-write` admits.
+With the same binary, three checks failed from `/tmp` and none from `~/heddle--developer-seven`.
 
 ## Risks, stated now
 

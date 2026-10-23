@@ -1,10 +1,10 @@
 ---
 title: The heddle-sandbox fixtures
-version: 0.3.0
+version: 0.3.1
 description: A recorded approval question, its exact SSE frame and the two answer bodies, a sample the Web UI checks compare a live server against.
 grounded_in:
   - source: src/approvals/service.ts and src/server/page.html at origin/main 1bcff7e, read 2026-10-22
-  - source: _verifiers_/80-web-ui/check-approval.mjs, read 2026-10-22
+  - source: _verifiers_/80-web-ui/check-approval.mjs at origin/main 1bcff7e, read 2026-10-22
 ---
 
 # `rust/crates/heddle-sandbox/fixtures`
