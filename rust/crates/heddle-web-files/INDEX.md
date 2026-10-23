@@ -15,31 +15,16 @@ HTTP routes the File panel, the composer's `+ → File` and the workspace column
 
 | | |
 |---|---|
-| Ported from | `src/server/attachments.ts`, `src/server/uploads.ts`, `src/server/picker.ts`, `src/server/code.ts`, `src/server/docs.ts`, `src/server/markdown.ts`, `src/server/highlight.ts`, `src/server/sanitize.ts`; the file routes of `src/server/web.ts` (not `html.ts`, which stayed with `heddle-server`) |
+| Ported from | `src/server/attachments.ts`, `src/server/uploads.ts`, `src/server/picker.ts`, `src/server/code.ts`, `src/server/docs.ts`, `src/server/markdown.ts`, `src/server/highlight.ts`, `src/server/sanitize.ts`; the file routes of `src/server/web.ts`; **proposed**: `src/server/html.ts` (see "Open questions") |
 | Judged by | `_verifiers_/88-file-preview`, `_verifiers_/80-web-ui` (check-file-view), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-web-files` |
 
 ## Status
 
-**Ported** (2026-10-22): every item of the contract is implemented and tested beside its code — 138 unit tests in
-`cargo test -p heddle-web-files`, with `cargo fmt` and `cargo clippy --all-targets` clean. The port plan below is
-complete except for its last step, which is not this crate's to finish: `_verifiers_/88-file-preview` cannot judge
-anything through `HEDDLE_BIN` until the `heddle` binary answers `web` (developer-two) and the server mounts
-[`routes::FilesRoutes::router`](src/routes.rs) behind its token layer (developer-ten), and until the check itself runs
-its server through `heddleCommand` instead of `node dist/cli.js` (integrator-two, open question 5).
-
-Three findings are recorded where they were made, because each changes a decision:
-
-- **An XSS in the TypeScript sanitizer, fixed rather than ported.** `sanitize.ts` reads a tag closed by `/>` as
-  *unterminated* and writes the rest of the input back as text, so `<img src="x" onerror="alert(1)"/>` reached the
-  page with its handler intact — the allow-list never saw it. [`sanitize`](src/sanitize.rs) treats `/>` as the tag's
-  end; the divergence is stated in the module and pinned by a test.
-- **`comrak` cannot emit an attribute**, and a link to a workspace file needs `data-heddle-path` while a refused link
-  must lose its anchor. Both are done in one pass over the rendered document
-  ([`markdown::rewrite_anchors`](src/markdown.rs)), with a marker only this crate can write as the signal.
-- **The highlighter's JSON keys are `meta.mapping.key.*` scopes**, not `meta.structure.dictionary.*`; the mapping was
-  measured against the syntax set rather than assumed.
+**Contract landed** (2026-10-22): every public item is declared and documented in [`src/`](src/INDEX.md). The wire
+shapes (serde derives), constants, tables, the renderer decision, `escape_html`, `safe_url`, `supports_language` and
+the inline content-type table are real and tested (28 tests); every other body is `todo!()` until its step below.
 
 ## The public API
 
@@ -52,6 +37,7 @@ JSON the TypeScript build writes; the tests assert the strings.
 | [`highlight`](src/highlight.rs) | `highlight.ts` | `highlight_code(code, Option<&str>) -> String` (inner HTML, `hljs-*` classes), `supports_language(&str) -> bool` |
 | [`markdown`](src/markdown.rs) | `markdown.ts` | `render_markdown(source, MarkdownOptions { base }) -> String`, `render_inline(text) -> String`, `escape_html`, `safe_url`, `LINK_DATA_ATTRIBUTE` |
 | [`code`](src/code.rs) | `code.ts` | `renderer_for(&Path) -> RendererDecision`, `language_for`, `render_code(source, language, CodeOptions { gutter }) -> String`, `render_source(&Path, text) -> Rendered`, `RendererName`, `Rendered` |
+| [`html_preview`](src/html_preview.rs) | `html.ts` (proposed) | `rewrite_resources(html, base, serve) -> String`, `PREVIEW_CSP`, `ALLOWED_TAGS`, `ALLOWED_ATTRS`, `ALLOWED_URI`, `MAX_HTML_PREVIEW_BYTES` |
 | [`uploads`](src/uploads.rs) | `uploads.ts` | `save_upload(home, name, data, now) -> io::Result<SavedUpload>`, `safe_upload_name`, `upload_stamp`, `upload_directory`, `MAX_UPLOAD_BYTES`, `SavedUpload` |
 | [`attachments`](src/attachments.rs) | `attachments.ts`; `attachmentsOf` of `web.ts` | `read_attachments(upload_dir, Option<&Value>) -> Result<Vec<AttachmentPart>, AttachmentInputError>`, `read_attachment`, `display_name_for_stored`, `attachments_of(&[Value]) -> Vec<TurnAttachment>`, `AttachmentPart`, `ImageMediaType`, `TurnAttachment`, `MAX_ATTACHMENTS` |
 | [`picker`](src/picker.rs) | `picker.ts` | `pick_folder(&Platform, &dyn CommandRunner) -> PickerOutcome`, `PickerOutcome`, `CommandRunner`, `CommandResult`, `SystemRunner`, `Platform`, `PICK_TIMEOUT` |
@@ -62,8 +48,7 @@ JSON the TypeScript build writes; the tests assert the strings.
 ### The routes
 
 `FilesRoutes::router()` answers `GET /api/file`, `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`,
-`POST /api/markdown` and `POST /api/workspaces/pick` — not `GET /api/html`, which is `heddle-server`'s. Each status,
-body and header is
+`POST /api/markdown`, `POST /api/workspaces/pick` and (proposed) `GET /api/html`. Each status, body and header is
 tabled in [`src/routes.rs`](src/routes.rs). The router does no authentication and has no fallback: the server merges
 it and puts its token layer over the result, exactly as every one of these routes sits after the token decision in
 `web.ts`.
@@ -100,39 +85,33 @@ rather than a port of it.
 
 ## Port plan
 
-Each step landed with its unit tests (ported from the TypeScript suite named) and was pushed on its own. Steps 1-9
-are done; step 10 is blocked on other seats and is named there.
+Each step lands with its unit tests (ported from the TypeScript suite named) and is pushed on its own.
 
 | # | Step | Tests ported from | Done when |
 |---|---|---|---|
-| 1 ✅ | `sanitize_html` | `test/sanitize.test.ts` | the allow-list, numeric attributes, drop-with-content, comments, stray `<`, unterminated tags, URL policy sites |
-| 2 ✅ | `highlight` over syntect: the scope table, `highlight_pieces`, `highlight_code` | `test/highlight.test.ts` | every registered language and alias; the three verifier strings above; exact text (strip spans + decode = input) for every grammar; no `&#x27;`-style residue |
-| 3 ✅ | `render_code`, `render_source` | `test/render.test.ts` (code half) | rows = newlines + 1; gutter starts at 1; `<script>` arrives as `&lt;script&gt;`; a block comment spanning lines keeps its class on both rows |
-| 4 ✅ | `render_markdown`, `render_inline` | `test/markdown.test.ts`, `test/render.test.ts` (markdown half) | frontmatter section; `_tools_` keeps its underscores outside code; refused links and images; relative links → `/api/raw?path=…` + `data-heddle-path`; raw `<img>` resolved; fences carry `language-*` and `hljs-*` |
-| 5 ✅ | `uploads`, `attachments` | `test/uploads.test.ts`, `test/attachments.test.ts`, `test/server-attachments.test.ts` | safe names; collision suffixes; `0600`; symlink escape refused; batch limit; sha256 |
-| 6 ✅ | `pick_folder`, `SystemRunner` | `test/picker.test.ts` | every platform branch through a fake runner: picked, cancelled, missing command, failure reason |
-| 7 ↔️ | `rewrite_resources` | `test/html.test.ts` | **moved** to `heddle-server/src/preview.rs` with `GET /api/html`: the server owner had already ported and tested it there, and two implementations of one rewrite is worse than one. The eight tests written here went with it (developer-ten has the equivalent in-process tests) |
-| 8 ✅ | `FilesRoutes::router` | the route rows of `test/web.test.ts` | one `tower::ServiceExt::oneshot` test per row of the routes table, over a `FilesHost` double |
-| 9 ✅ | `docs` | — (no TypeScript test; no caller) | ported rather than deleted: no one has ruled it dead, and it is 4 tests |
-| 10 ⛔ | verifiers | — | blocked: `88-file-preview` fails before it reaches any route — `spawn …/rust/target/release/heddle ENOENT` (no release binary; `heddle web` is unported, developer-two) — and its `startCli` still spawns `node dist/cli.js`, so even a built binary would not be the server under test until integrator-two moves it to `heddleCommand`; the server mount is developer-ten's |
+| 1 | `sanitize_html` | `test/sanitize.test.ts` | the allow-list, numeric attributes, drop-with-content, comments, stray `<`, unterminated tags, URL policy sites |
+| 2 | `highlight` over syntect: the scope table, `highlight_pieces`, `highlight_code` | `test/highlight.test.ts` | every registered language and alias; the three verifier strings above; exact text (strip spans + decode = input) for every grammar; no `&#x27;`-style residue |
+| 3 | `render_code`, `render_source` | `test/render.test.ts` (code half) | rows = newlines + 1; gutter starts at 1; `<script>` arrives as `&lt;script&gt;`; a block comment spanning lines keeps its class on both rows |
+| 4 | `render_markdown`, `render_inline` | `test/markdown.test.ts`, `test/render.test.ts` (markdown half) | frontmatter section; `_tools_` keeps its underscores outside code; refused links and images; relative links → `/api/raw?path=…` + `data-heddle-path`; raw `<img>` resolved; fences carry `language-*` and `hljs-*` |
+| 5 | `uploads`, `attachments` | `test/uploads.test.ts`, `test/attachments.test.ts`, `test/server-attachments.test.ts` | safe names; collision suffixes; `0600`; symlink escape refused; batch limit; sha256 |
+| 6 | `pick_folder`, `SystemRunner` | `test/picker.test.ts` | every platform branch through a fake runner: picked, cancelled, missing command, failure reason |
+| 7 | `rewrite_resources` | `test/html.test.ts` | quoted `src`/`href`/`srcset`, fragments, `..` above the root, absolute and remote untouched |
+| 8 | `FilesRoutes::router` | the route rows of `test/web.test.ts` | one `tower::ServiceExt::oneshot` test per row of the routes table, over a `FilesHost` double |
+| 9 | `docs` | — (no TypeScript test; no caller) | ported, or deleted if ruled dead |
+| 10 | verifiers | — | `88-file-preview` and `80-web-ui check-file-view` pass through `HEDDLE_BIN` once the server mounts the router and those checks run through `HEDDLE_BIN`; merged by the ui-lane integrator |
 
 ## Open questions
 
-1. **`/api/html` and `html.ts` — resolved** (2026-10-22): they stay in `heddle-server`
-   (`src/preview.rs`, registered in its `CORE_ROUTES`). `GET /api/html` is removed from this crate's `ROUTES` and
-   `src/html_preview.rs` is deleted, since `Router::merge` rejects an overlap and the server route is live.
-2. **`/vendor/purify.js` — resolved**: a server page asset, served from `ServerOptions::asset_roots`; no route here.
+1. **`/api/html` and `html.ts`** (the server crate's owner): proposed here, since `88-file-preview` is its only
+   judge. If the server keeps it, [`src/html_preview.rs`](src/html_preview.rs) and the route move there unchanged.
+2. **`/vendor/purify.js`** (the server crate's owner): the browser-side sanitiser the html preview loads. Left with
+   the server as a page asset beside the embedded `page.html`; the Rust build has to vendor the DOMPurify bundle,
+   since the TypeScript build reads it from `node_modules` at request time.
 3. **`FileReading`** (the session crate's owner): declared in [`src/host.rs`](src/host.rs) with the TypeScript field
    order. When the session tree's `read_file_text` lands, this crate re-exports that type if its JSON is identical.
-4. **`docs.ts`**: ported, since no one ruled it dead; it still has no caller and can be deleted in one commit if the
-   coordinator rules it out.
-5. **The two verifiers** (integrator-two): `88-file-preview` and `80-web-ui check-file-view` spawn `dist/cli.js`
-   directly rather than through `heddleCommand`, and `88-file-preview` registers `/Users/zhenc/heddle` as its
-   workspace, which does not exist on this Mac. Both are in the integrator's write scope; the port is otherwise
-   unjudgeable through `HEDDLE_BIN`.
-6. **The `heddle` binary** (developer-two, planned): `rust/crates/heddle/src/main.rs` exits 2 for every command,
-   and `heddle-server` has no routes, so no file route is reachable from a binary yet. The router is ready to be
-   merged (`routes::ROUTES` lists its paths for the overlap assertion at boot).
+4. **`docs.ts`**: it has no caller since the Docs tab was removed; port it or drop it.
+5. **The two verifiers**: both spawn `dist/cli.js` directly rather than through `heddleCommand`, and
+   `88-file-preview` registers `/Users/zhenc/heddle` as its workspace, which does not exist on a Linux build host.
 
 ## Read next
 
