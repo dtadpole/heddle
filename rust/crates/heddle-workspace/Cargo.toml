@@ -10,3 +10,14 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+heddle-config.workspace = true
+heddle-session.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+# Not yet in `[workspace.dependencies]`; the integrator is asked to hoist them.
+indexmap = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
