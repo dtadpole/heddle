@@ -116,6 +116,10 @@ impl Component for ModelComponent {
             heddle_llm::ModelService::from_configuration(endpoints, config.default.as_deref())
                 .map_err(|error| error.to_string())?;
         let service = Arc::new(service);
+        // `model/request` reaches the bus, where a hook may rewrite the request.
+        if let Some(hooks) = bus_hooks(services) {
+            service.add_hooks(Arc::new(hooks));
+        }
         services.provide("model", Arc::clone(&service));
         services.provide(
             "model",
@@ -288,8 +292,19 @@ impl Component for SessionComponent {
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
         let config: heddle_session::SessionConfig =
             serde_json::from_value(config.clone()).map_err(|error| format!("session: {error}"))?;
+        // Every appended event is emitted as `session/event` on the bus, as the TypeScript store does.
+        let listener = services
+            .get::<heddle_events::EventBus>("events")
+            .map(|bus| {
+                Arc::new(
+                    move |handle: &heddle_session::SessionHandle,
+                          event: &heddle_session::SessionEvent| {
+                        heddle_events::bridge::session_event(&bus, &handle.id, &event.to_value());
+                    },
+                ) as heddle_session::EventListener
+            });
         let service = Arc::new(heddle_session::SessionService::new(
-            &config, &self.env, None,
+            &config, &self.env, listener,
         ));
         services.provide("session", Arc::clone(&service));
         services.provide(
@@ -798,7 +813,11 @@ impl Component for ToolsComponent {
             .ok_or_else(|| "tools: the sandbox service is not provided".to_owned())?;
         let sessions = session_service(services, "tools")?;
         // The sandbox, the approval policy and each session's recorded mode, as heddle-tools composes them.
-        let gates = heddle_tools::adapters::gates_over(sandbox, approvals, sessions);
+        let mut gates = heddle_tools::adapters::gates_over(sandbox, approvals, sessions);
+        // `tools/pre-execute` and `tools/post-execute` reach the bus.
+        if let Some(hooks) = bus_hooks(services) {
+            gates.hooks = Arc::new(hooks);
+        }
         let registry = Arc::new(heddle_tools::ToolRegistry::from_config(gates, &config));
         services.provide("tools", Arc::clone(&registry));
         services.provide(
@@ -1227,21 +1246,45 @@ impl Component for OutsideRow {
         let registry = services
             .get::<Arc<heddle_tools::ToolRegistry>>("tools")
             .ok_or_else(|| "the tool registry is not provided".to_owned())?;
-        let gate: Arc<dyn heddle_tools::SandboxGate> =
-            Arc::new(heddle_tools::adapters::Sandbox::new(sandbox));
-        let component = crate::runtime::tokio()
-            .block_on(heddle_tools::OutsideComponent::start(spec, gate))
-            .map_err(|error| error.to_string())?;
+        let _ = sandbox;
+        // The registry's own gate, so the component's calls are confined exactly as the built-ins'.
+        let gate = Arc::clone(registry.sandbox());
+        let row = spec.row.clone();
+        let component = Arc::new(
+            crate::runtime::tokio()
+                .block_on(heddle_tools::OutsideComponent::start(spec, gate))
+                .map_err(|error| error.to_string())?,
+        );
         component
             .register_into(&registry)
             .map_err(|error| error.to_string())?;
-        // The process lives as long as the run: its handle stays registered under its manifest.
+        // The listeners it declared in `initialize` attach to the bus under its own scope.
+        let listeners = match services.get::<heddle_events::EventBus>("events") {
+            Some(bus) => {
+                let scope = bus.scope(row);
+                let listeners = heddle_events::ports::attach_component_listeners(
+                    &scope,
+                    Arc::clone(&component),
+                )
+                .map_err(|error| error.to_string())?;
+                Some((scope, listeners))
+            }
+            None => None,
+        };
+        // The process, its scope and its listeners live as long as the run.
         services.provide(
             &format!("outside:{}", self.manifest.display()),
-            Arc::new(component),
+            Arc::new((component, listeners)),
         );
         Ok(())
     }
+}
+
+/// The hook points over the run's bus, when the boot made one.
+pub fn bus_hooks(services: &Services) -> Option<heddle_events::ports::BusHooks> {
+    services
+        .get::<heddle_events::EventBus>("events")
+        .map(heddle_events::ports::BusHooks::new)
 }
 
 /// The services every agent row waits for: what the shared runtime is built from.
