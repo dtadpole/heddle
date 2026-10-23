@@ -69,6 +69,26 @@ key order kept), so it depends on no session type.
    `TrajectoryHost`, `85-trajectory-view` and `80-web-ui check-trajectory-view` through `HEDDLE_BIN`, and a
    byte comparison of `?view=ledger` and `/log` with the TypeScript build on the same session log.
 
+## Verification so far
+
+- **Unit tests**: 61 here (95 with `heddle-web-composer`). `cargo test -p heddle-web-trajectory -p
+  heddle-web-composer` is green; every case of `test/ledger.test.ts`, `test/usage.test.ts`,
+  `test/tool-catalog.test.ts`, `test/log-download.test.ts` and `test/tool-inspector.test.ts` is ported.
+  `cargo fmt --check` and `cargo clippy --all-targets` are clean; `cargo check --workspace` is green.
+- **Differential against the TypeScript build** (2026-10-22, temporary harness, not committed): 15 scenarios
+  covering turn/step boundaries, prologue folding, tool pairing by id and by newest-open, refusals, orphan
+  results, context notes, unknown events, unfinished streams, usage merging, two-turn axes, a running axis and
+  the stats rows were projected by both `src/server/ledger.ts` (run from source with Node 24) and this crate.
+  Ledger, rows, timeline and stats were **semantically identical** in all 15.
+- **The download body**: re-serialising the three recorded stores in
+  `_verifiers_/50-agentic-loop/fixtures/team-recover/` through `ndjson` is **byte-identical** to the decoded
+  TypeScript logs (`session-recover-{lead,active,ghost}.v2.jsonl.zstd`).
+
+`?view=ledger` is not yet byte-identical to the TypeScript build: `TimelineSpan::start`/`end` are `f64` and
+`serde_json` writes an integral one as `0.0` where JavaScript writes `0` (the page parses both as numbers), and
+a record's key order follows this crate's structs rather than the object literal that built it. Both are
+harmless to the page, which reads fields; the download, where bytes matter, is identical.
+
 ## Known divergences
 
 - `Date.parse` of a timestamp without a zone is read as UTC (JavaScript reads it as local time); the log writes
