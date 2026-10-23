@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (124 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (134 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -45,6 +45,7 @@ their checks are judged against the TypeScript build.
 | `runs` | `RunRegistry` and `TurnGuard`: running counts, the per-turn clock, completion times, stop by `CancellationToken` |
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
+| `adapters` | the trait implementations over the real crates, as each crate's API reaches `main`: `StoreSessions` (`SessionService` over `heddle_session::SessionService`) and `session_event_listener` (the store's event listener, publishing into the `EventHub`) |
 | `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
 | `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
@@ -124,7 +125,7 @@ Each step lands with its unit tests and is pushed; the verifier rows say what it
 | 4 | `transcript`, `selection`, and the session routes: list, chat view, create, `folders/session`, fork, flags, title, permission, steer, stop, and `/api/turn` streaming | done, unit-tested |
 | 5 | workspace routes (`/api/tree`, `/api/workspaces`) | done, unit-tested through the trait |
 | 6 | approvals, goal, todo, team, `/api/html`, `/vendor/purify.js` | done, unit-tested through the traits |
-| 7 | adapters over the real session, workspace and events crates as their APIs land; wiring `heddle web` with the binary's owner | **not started**: the binary crate owns it, and the server has no real `Harness` until those crates land |
+| 7 | adapters over the real session, workspace and events crates as their APIs land; wiring `heddle web` with the binary's owner | **in progress**: `adapters::StoreSessions` over `heddle-session` (on `main`) is done and tested against a real store, and the routes are tested over it; the workspace, model, turn and sandbox adapters follow as those APIs land; `web`'s entry point moves into this crate under D-043 once the binary's convention is published |
 
 **What the binary must do to make the verifiers pass through `HEDDLE_BIN`** (the exact checklist sent
 to the binary's owner):
@@ -135,15 +136,19 @@ to the binary's owner):
    `asset_roots` `[repository root, working directory]` for `/vendor/purify.js`.
 2. `--dry-run --json` prints [`DryRunPlan::for_options`] as one JSON object and exits 0 without binding;
    the human form prints [`DryRunPlan::announce`].
-3. Compose the harness with [`Harness::builder`] (or `HarnessBuilder`): the four required services, the
+3. Create the hub first, `let hub = EventHub::new()`, and build the session store with
+   `heddle_session::SessionService::new(&config, &env, Some(adapters::session_event_listener(hub.clone())))`
+   — the store takes its listener when it is built, before the server exists. Wrap it as
+   `adapters::StoreSessions::new(service)`.
+   Compose the harness with [`Harness::builder`] (or `HarnessBuilder`): the four required services, the
    optional ones the profile loaded, and the process's working directory. For an early `web` bring-up
    before those services exist, [`Harness::unavailable`] serves the door (`/healthz`, the token
    handshake, the page) and refuses every service route honestly; `--dry-run` needs no harness at all. `attachment_reader`,
    `markdown_renderer` and `stats_projector` wrap a function as the optional file/renderer/statistics
    services when the owner crate offers one.
-4. `ServerBuilder::new(harness, options)`, take `events()` **before** `start()`, and register
-   `stream::session_event_forwarder(hub)` and `stream::approval_request_forwarder(hub)` as the bus's
-   `session/event` and `approval/request` listeners; register `running_turn_selection` as the
+4. `ServerBuilder::new(harness, options).with_event_hub(hub)`, so the server streams from the hub the
+   store publishes into. If the approval service does not implement `subscribe`, register
+   `stream::approval_request_forwarder(hub)` as the bus's `approval/request` listener; register `running_turn_selection` as the
    `model/request` waterfall listener. Mount each feature crate with `mount`, or a state-applied `Router<()>` with `mount_router`.
 5. `start().await`, then print `announce()[0]` — `heddle web: <url>`, the line the verifiers wait for —
    and, when asked, `announce_json()`. On shutdown call `close()`, which ends the open streams.

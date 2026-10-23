@@ -298,6 +298,16 @@ impl ServerBuilder {
         self.events.clone()
     }
 
+    /// Stream from a hub the binary created first.
+    ///
+    /// The session store takes its event listener when it is built, which is before the harness and
+    /// so before this builder exists. Create the hub, give the store
+    /// [`crate::adapters::session_event_listener`] over it, then hand the same hub here.
+    pub fn with_event_hub(mut self, hub: EventHub) -> Self {
+        self.events = hub;
+        self
+    }
+
     /// The run registry, shared with anything that needs to know which sessions are running.
     pub fn runs(&self) -> RunRegistry {
         self.runs.clone()
@@ -3024,6 +3034,95 @@ mod tests {
         // The router keeps answering after the panic.
         let (status, _, _) = call(&router, Method::GET, "/healthz", None).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The routes over the real session store: what the store records is what the chat view draws,
+    /// and the store's own events reach the hub the server streams from.
+    #[tokio::test]
+    async fn the_routes_read_a_real_session_store() {
+        use crate::adapters::{StoreSessions, session_event_listener};
+        use crate::services::SessionService as _;
+
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-store-routes-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+
+        let hub = EventHub::new();
+        let sessions = StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            Some(session_event_listener(hub.clone())),
+        ));
+        let harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("store-routes")),
+                ..ServerOptions::default()
+            },
+        )
+        .with_event_hub(hub.clone());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let mut frames = state.events().subscribe();
+
+        let id = sessions
+            .start(StartSession {
+                cwd: Some(scratch.clone()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        sessions
+            .user_content(
+                &id,
+                vec![serde_json::json!({"type": "text", "text": "remember the word loom"})],
+            )
+            .unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next_frame())
+            .await
+            .expect("the store's event reached the server's hub")
+            .expect("the hub is open");
+        assert_eq!(frame.session_id().as_deref(), Some(id.as_str()));
+
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(listed[0]["id"], id.as_str());
+        assert_eq!(listed[0]["running"], false);
+
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{id}"),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["id"], id.as_str());
+        assert_eq!(view["permission"]["mode"], "workspace-write");
+        let turns = view["turns"].as_array().unwrap();
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
+            "{turns:?}"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     struct DuplicateFeature;

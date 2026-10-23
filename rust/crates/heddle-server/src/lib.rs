@@ -29,6 +29,7 @@
 //! The public API landed first (contract first) and every body is now ported, in the order the crate's
 //! `INDEX.md` gives. The tests beside the code are the evidence the rules hold.
 
+pub mod adapters;
 pub mod fence;
 pub mod page;
 pub mod preview;
