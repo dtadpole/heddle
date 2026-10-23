@@ -80,9 +80,14 @@ key order kept), so it depends on no session type.
   results, context notes, unknown events, unfinished streams, usage merging, two-turn axes, a running axis and
   the stats rows were projected by both `src/server/ledger.ts` (run from source with Node 24) and this crate.
   Ledger, rows, timeline and stats were **semantically identical** in all 15.
+- **Against the live deployment's own sessions** (2026-10-22): the eight session logs the TypeScript build
+  wrote under `~/.heddle/sessions/--Users-zhenchen-heddle-live--/` (129 events, one to twelve turns, runtime
+  context notes, compaction/recovery records) were projected by both sides: ledger, rows, timeline and stats
+  were **semantically identical** in all eight.
 - **The download body**: re-serialising the three recorded stores in
-  `_verifiers_/50-agentic-loop/fixtures/team-recover/` through `ndjson` is **byte-identical** to the decoded
-  TypeScript logs (`session-recover-{lead,active,ghost}.v2.jsonl.zstd`).
+  `_verifiers_/50-agentic-loop/fixtures/team-recover/` and the eight live sessions through `ndjson` is
+  **byte-identical** to the decoded TypeScript logs (`session-recover-{lead,active,ghost}.v2.jsonl.zstd`;
+  `~/.heddle/sessions/--Users-zhenchen-heddle-live--/*.v2.jsonl.zstd`).
 
 `?view=ledger` is not yet byte-identical to the TypeScript build: `TimelineSpan::start`/`end` are `f64` and
 `serde_json` writes an integral one as `0.0` where JavaScript writes `0` (the page parses both as numbers), and
