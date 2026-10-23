@@ -135,6 +135,12 @@ recovery was `_verifiers_/95-web-daemon` (main's checks) **passing 3 of 3 in 731
 15-second probe happened to land in the same second as the kill: a real pass, but not a repeatable one, and not
 launchd's. Until the supervisor is on main, main's 95 result on this host depends on the guard.
 
+**The supervisor was also judged under launchd itself** (20:38 PDT), on a scratch label and a scratch port so the
+live agent was untouched: an agent whose `ProgramArguments` are `node supervisor.mjs -- node <checkout>/dist/cli.js
+web … --port 3098`, started with `launchctl kickstart -k`, answered `/healthz` 200 on 3098; a SIGKILL of the server
+it held left a **new** pid serving 3098 and 200 again within four seconds. That is the arrangement this branch
+installs for 3082, measured end to end rather than argued.
+
 **What restarts it today.** Until this branch reaches `main`, the answer is an interim guard run from this
 session: every 15 s it probes `3082/healthz` and runs `launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`
 when the port is silent (`~/.heddle/guard.log`). That is a hand, not a design — it dies with the session, and after
