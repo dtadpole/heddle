@@ -19,7 +19,7 @@ the path rules, the machine's local file, and endpoint configuration.
 | Ported from | `src/config/`, `src/local-config.ts`, `src/paths.ts`, `src/endpoints.ts`; the configuration half of `src/llm/types.ts`; `runConfigCommand` and `baseLayer` of `src/cli.ts` |
 | Judged by | `_verifiers_/05-config-system`, through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| State | **contract landed**: every public item declared and documented; `Env`, `ConfigError`, home, paths, `LayerValue`, the serde shapes and environment references implemented with tests (steps 1–2); the rest `todo!()` |
+| State | **contract landed**: every public item declared and documented; `Env`, `ConfigError`, home, paths, `LayerValue`, the serde shapes and environment references implemented with tests (steps 1–2), and composition with provenance and component names (step 4); step 3 waits on the YAML reader; the rest `todo!()` |
 
 ## The public API
 
@@ -95,7 +95,7 @@ because each later step is checked through the earlier ones.
 | 1 | done: `Env`, `ConfigError`, home, paths, `LayerValue`, serde shapes | 27 |
 | 2 | done: `references_in`, `parse_scalar`, `resolve_env` | 11 |
 | 3 | `read_layer`, `NamedLayer::read`, `anchor_dir` — a YAML reader that keeps `!env` / `!include` tags | include order; list includes; a cycle names every file; non-array, bad key, non-path include, empty file |
-| 4 | `compose`, `origin_of`, `ComposedRow::to_report`, `EntryRow::component` | last write wins; patch replaces `config` whole; provenance drops only restated fields; remove keeps the row; duplicate insert; patch/remove of a missing row; every problem collected |
+| 4 | done: `compose`, `origin_of`, `ComposedRow::to_report`, `EntryRow::component` | 11 new |
 | 5 | `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions`, `default_layers` | a symlinked profile is listed; unknown profile lists the known ones; absolute directory accepted; project patch beside the base, not the cwd |
 | 6 | `Schema::check`, `validate_rows` | the number sentence; required, `additionalProperties: false`, `enum`, `anyOf`; disabled rows skipped; no-schema not counted |
 | 7 | `command::run` | each text and JSON shape against the TypeScript output; exit codes |
