@@ -1,6 +1,6 @@
 ---
 title: The heddle-web-files crate
-version: 0.2.0
+version: 0.3.0
 description: The Rust port crate for attachments, uploads, the picker, file previews, markdown, highlighting and sanitizing — its public contract, its seams, and the order it is ported in.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -184,13 +184,14 @@ are done; step 10 is blocked on other seats and is named there.
    coordinator rules it out.
 5. **The two verifiers — resolved by integrator-two.** Both `88-file-preview` and `80-web-ui check-file-view` start
    their server through `heddleCommand` on `main`, so `HEDDLE_BIN` is the server under test. `88-file-preview` used
-   to register a project checkout at a fixed path from another machine as its workspace; on the ui lane it now writes
-   its own fixture workspace and passes 3/3 on the TypeScript build, so it is judgeable on any machine once that
-   change reaches `main` (not yet as of `480d9b8`).
-6. **The `heddle` binary** (developer-two): on `main` `480d9b8` the `web` command word parses, but `heddle web`
-   still answers `not ported to Rust yet: web` with exit 2 (`commands::web` is a `todo!`), so no file route is
-   reachable from a binary yet. The router is ready to be merged (`routes::ROUTES` lists its paths for the overlap
-   assertion at boot).
+   to register a project checkout at a fixed path from another machine as its workspace; on `main` it now writes its
+   own fixture workspace, so it is judgeable on any machine.
+6. **The `heddle` binary — resolved.** `heddle web` answers on `main` and mounts this crate's router
+   (`rust/crates/heddle/src/web.rs`). Through `HEDDLE_BIN` (debug build, 2026-10-23): `80-web-ui check-file-view`
+   was 1/2 on the ui lane `5f51a02` — `hostile.js`'s `<script>` split across highlight spans — and 2/2 with
+   `4a04861` (JavaScript and TypeScript operators and plain names left unclassed, as highlight.js leaves them).
+   A known divergence remains, recorded in that test and not pinned: after `<`, syntect's JavaScript grammar reads
+   `/script>` as a regular expression to the next line's end, where highlight.js does not.
 
 ## Read next
 
