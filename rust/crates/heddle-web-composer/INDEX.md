@@ -92,6 +92,29 @@ handles. Until then the server can implement the traits itself.
    route is judged against a host double, so the adapter work is a mapping over the crates' own APIs – the four
    host crates (`heddle-context`, `heddle-config`, `heddle-llm`, `heddle-session`) are still `todo!()` on `main`.
 
+## The routes against the checks' API expectations
+
+Run against the real router through a stand-in host (a throwaway binary that implements the four traits over fixed
+data and mounts `router`; not part of the repository): **13 of 13 hold**, each the exact status, sentence or body a
+check asserts —
+
+| Expectation (and the check that needs it) | Answer |
+|---|---|
+| `GET /api/status` is compact, `{"sandbox":{"mode"},"cwd"}` (composer) | holds |
+| `GET /api/context` without a session is `400 a session is required` (context-view) | holds |
+| `GET /api/context?session=<unknown>` is `404 no session <id>` (context-view) | holds |
+| `GET /api/context?session=<known>` carries session, instructions, contextWindow, thresholdTokens, surface and a `null` endpoint (context-view) | holds |
+| `GET /api/endpoints` is pretty, with the nominated default and each endpoint's entry (model-switcher) | holds |
+| `POST /api/sessions/<malformed>/model` is `400 not a session id` (model-switcher) | holds |
+| a model switch refuses an unconfigured endpoint, then an undeclared model, then records a valid one (model-switcher) | holds |
+| `POST /api/sessions/<malformed>/steer` is `400`, and a steer with no running turn is `409 session/steer-unavailable`, with `a prompt is required` decided first (composer) | holds |
+| `POST /api/sessions/<id>/stop` answers `{"stopped":0,"session":…}` (composer) | holds |
+
+What is left for the four checks to run through `HEDDLE_BIN` is not in these routes: a binary that answers
+`heddle web`, the server mounting `router` behind its token and fence layers, and a host implementation over the
+session/context/model/turn crates (their APIs are still `todo!()` on `main`, so the adapters are a mapping that
+cannot be written against them yet).
+
 ## Read next
 
 [`../INDEX.md`](../INDEX.md) for the other crates; [`../heddle-web-trajectory/`](../heddle-web-trajectory/INDEX.md)
