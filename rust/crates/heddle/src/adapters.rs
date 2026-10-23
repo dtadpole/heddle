@@ -25,8 +25,8 @@ use serde_json::Value;
 
 use crate::builtins::Component;
 use crate::ports::{
-    CreateAt, ModelPort, OpenAt, PortError, PortResult, Record, SandboxPort, SessionDefinition,
-    SessionHandle, SessionPort, TreeRoot, WorkspacePort,
+    CreateAt, GoalPort, ModelPort, OpenAt, PortError, PortResult, Record, SandboxPort,
+    SessionDefinition, SessionHandle, SessionPort, ToolsPort, TreeRoot, WorkspacePort,
 };
 use crate::services::Services;
 
@@ -584,6 +584,456 @@ impl WorkspacePort for WorkspaceView {
     }
 }
 
+/// A component that provides at most one plain service and needs nothing: the binary's own built-ins.
+///
+/// `console-exporter` sends plugin log lines to the terminal, which the binary's two streams already do,
+/// so it provides nothing; `greeting` provides the greeting service; `announce` waits for it. Their
+/// `heddle/ready` behaviour belongs to the bare application (port plan step 4).
+pub struct InCrateComponent {
+    provides: Option<&'static str>,
+    requires: &'static [&'static str],
+}
+
+impl InCrateComponent {
+    /// `src/plugins/console-exporter.ts`.
+    pub fn console() -> Self {
+        Self {
+            provides: None,
+            requires: &[],
+        }
+    }
+
+    /// `src/plugins/greeting.ts`.
+    pub fn greeting() -> Self {
+        Self {
+            provides: Some("greeting"),
+            requires: &[],
+        }
+    }
+
+    /// `src/plugins/announce.ts`.
+    pub fn announce() -> Self {
+        Self {
+            provides: None,
+            requires: &["greeting"],
+        }
+    }
+}
+
+/// The greeting service: `greet(who)` is `hello, <who><punctuation>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Greeting {
+    punctuation: String,
+}
+
+impl Greeting {
+    /// Build the greeting this service exists to produce.
+    pub fn greet(&self, who: &str) -> String {
+        format!("hello, {who}{}", self.punctuation)
+    }
+}
+
+impl Component for InCrateComponent {
+    fn requires(&self) -> Vec<String> {
+        self.requires
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        if self.provides == Some("greeting") {
+            let punctuation = config
+                .get("punctuation")
+                .and_then(Value::as_str)
+                .unwrap_or("!")
+                .to_owned();
+            services.provide("greeting", Arc::new(Greeting { punctuation }));
+        }
+        Ok(())
+    }
+}
+
+/// `heddle-session`'s store as the event log `heddle-goal` and `heddle-todo` fold their state from.
+#[derive(Clone)]
+pub struct StoreLog {
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+impl StoreLog {
+    fn open(&self, id: &str) -> Option<String> {
+        self.sessions.open(id).map(|handle| handle.id.to_string())
+    }
+
+    fn read(&self, session: &str) -> Result<Vec<Value>, String> {
+        let handle = self
+            .sessions
+            .open(session)
+            .ok_or_else(|| format!("no session '{session}'"))?;
+        let events = self
+            .sessions
+            .events(&handle)
+            .map_err(|error| error.to_string())?;
+        Ok(events.iter().map(|event| event.to_value()).collect())
+    }
+
+    fn append(
+        &self,
+        session: &str,
+        mut event: serde_json::Map<String, Value>,
+    ) -> Result<Value, String> {
+        let handle = self
+            .sessions
+            .open(session)
+            .ok_or_else(|| format!("no session '{session}'"))?;
+        let kind = match event.remove("type") {
+            Some(Value::String(kind)) => kind,
+            _ => return Err("an event needs a string type".to_owned()),
+        };
+        let written = self
+            .sessions
+            .store()
+            .append(
+                &handle,
+                heddle_session::NewEvent {
+                    kind,
+                    fields: event,
+                },
+                heddle_session::AppendOptions::default(),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(written.to_value())
+    }
+}
+
+impl heddle_todo::SessionLog for StoreLog {
+    fn open(&self, id: &str) -> Option<String> {
+        StoreLog::open(self, id)
+    }
+
+    fn read(&self, session: &str) -> Result<Vec<Value>, heddle_todo::LogError> {
+        StoreLog::read(self, session).map_err(heddle_todo::LogError)
+    }
+
+    fn append(
+        &self,
+        session: &str,
+        event: serde_json::Map<String, Value>,
+    ) -> Result<Value, heddle_todo::LogError> {
+        StoreLog::append(self, session, event).map_err(heddle_todo::LogError)
+    }
+}
+
+impl heddle_goal::SessionLog for StoreLog {
+    fn open(&self, id: &str) -> Option<String> {
+        StoreLog::open(self, id)
+    }
+
+    fn read(&self, session: &str) -> Result<Vec<Value>, heddle_goal::LogError> {
+        StoreLog::read(self, session).map_err(heddle_goal::LogError)
+    }
+
+    fn append(
+        &self,
+        session: &str,
+        event: serde_json::Map<String, Value>,
+    ) -> Result<Value, heddle_goal::LogError> {
+        StoreLog::append(self, session, event).map_err(heddle_goal::LogError)
+    }
+}
+
+/// The session service a row injects, or the sentence naming it.
+fn session_service(
+    services: &Services,
+    row: &str,
+) -> Result<Arc<heddle_session::SessionService>, String> {
+    services
+        .get::<Arc<heddle_session::SessionService>>("session")
+        .ok_or_else(|| format!("{row}: the session service is not provided"))
+}
+
+/// `src/plugins/tools.ts`: the tool registry, gated by the deployment's sandbox and approvals.
+pub struct ToolsComponent;
+
+impl Component for ToolsComponent {
+    fn requires(&self) -> Vec<String> {
+        vec![
+            "approvals".to_owned(),
+            "sandbox".to_owned(),
+            "session".to_owned(),
+        ]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        heddle_config::Schema::from_json(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "allow": { "type": "array", "items": { "type": "string" } },
+                "includeBuiltins": { "type": "boolean" },
+                "bashTimeoutMs": { "type": "number" },
+            },
+        }))
+        .ok()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config = heddle_tools::ToolsConfig::from_row(config)
+            .map_err(|error| format!("tools: {error}"))?;
+        let approvals = services
+            .get::<Arc<heddle_sandbox::ApprovalService>>("approvals")
+            .ok_or_else(|| "tools: the approvals service is not provided".to_owned())?;
+        let sandbox = services
+            .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
+            .ok_or_else(|| "tools: the sandbox service is not provided".to_owned())?;
+        let gates = heddle_tools::ToolGates {
+            approvals: Arc::new(heddle_tools::adapters::SandboxApprovals::new(approvals)),
+            sandbox: Arc::new(heddle_tools::adapters::Sandbox::new(sandbox)),
+            // The deployment's mode until the per-session mode resolver over heddle-session lands.
+            modes: Arc::new(heddle_tools::DefaultModes),
+            hooks: Arc::new(heddle_tools::NoToolHooks),
+        };
+        let registry = Arc::new(heddle_tools::ToolRegistry::from_config(gates, &config));
+        services.provide("tools", Arc::clone(&registry));
+        services.provide(
+            "tools",
+            Arc::new(ToolsView { registry }) as Arc<dyn ToolsPort>,
+        );
+        Ok(())
+    }
+}
+
+/// `ctx.tools` over the registry.
+struct ToolsView {
+    registry: Arc<heddle_tools::ToolRegistry>,
+}
+
+impl ToolsPort for ToolsView {
+    fn describe(&self) -> Vec<Record> {
+        self.registry
+            .describe()
+            .iter()
+            .filter_map(|spec| serde_json::to_value(spec).ok())
+            .collect()
+    }
+
+    fn describe_commands(&self) -> Vec<Record> {
+        self.registry
+            .describe_commands()
+            .iter()
+            .filter_map(|summary| serde_json::to_value(summary).ok())
+            .collect()
+    }
+
+    fn allow_list(&self) -> Vec<String> {
+        self.registry.allow_list().to_vec()
+    }
+
+    fn filter_to(&self, allow: &[String]) {
+        self.registry.filter_to(allow);
+    }
+
+    fn missing(&self) -> Vec<String> {
+        self.registry.missing()
+    }
+}
+
+/// A tool another crate defines as a spec and a run function, registered with the tool registry.
+fn register_answering<F>(
+    registry: &heddle_tools::ToolRegistry,
+    spec: Value,
+    run: F,
+) -> Result<(), String>
+where
+    F: Fn(Option<&str>, &Value) -> Value + Send + Sync + 'static,
+{
+    let spec: heddle_tools::ToolSpec =
+        serde_json::from_value(spec).map_err(|error| format!("a tool spec: {error}"))?;
+    let run = Arc::new(run);
+    let tool = heddle_tools::tool_fn(spec, move |args, context| {
+        let run = Arc::clone(&run);
+        Box::pin(async move {
+            let session = context
+                .context()
+                .session
+                .as_ref()
+                .map(|handle| handle.id.clone());
+            let answer = run(session.as_deref(), &Value::Object(args));
+            // The crates' answers are the TypeScript `ToolResult`: output, error?, data?.
+            Ok(
+                serde_json::from_value::<heddle_tools::ToolResult>(answer).unwrap_or_else(
+                    |error| heddle_tools::ToolResult {
+                        output: String::new(),
+                        error: Some(heddle_tools::ToolError {
+                            code: "TOOL_ERROR".to_owned(),
+                            message: format!("the tool's answer could not be read: {error}"),
+                        }),
+                        data: None,
+                    },
+                ),
+            )
+        })
+    });
+    registry.register(tool).map_err(|error| error.to_string())
+}
+
+/// `src/todo/service.ts`: a session's todo list, folded from its log.
+pub struct TodoComponent;
+
+impl Component for TodoComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_todo::TodoConfig =
+            serde_json::from_value(config.clone()).map_err(|error| format!("todo: {error}"))?;
+        let log = StoreLog {
+            sessions: session_service(services, "todo")?,
+        };
+        services.provide(
+            "todo",
+            Arc::new(heddle_todo::TodoService::new(Arc::new(log), config)),
+        );
+        Ok(())
+    }
+}
+
+/// `src/plugins/todo-tool.ts`: `todo_write` and `todo_read` in the registry.
+pub struct TodoToolComponent;
+
+impl Component for TodoToolComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["todo".to_owned(), "tools".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let todo = services
+            .get::<Arc<heddle_todo::TodoService>>("todo")
+            .ok_or_else(|| "todo-tool: the todo service is not provided".to_owned())?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "todo-tool: the tool registry is not provided".to_owned())?;
+        for spec in heddle_todo::tool::todo_tool_specs() {
+            let name = spec.name.clone();
+            let todo = Arc::clone(&todo);
+            let spec = serde_json::to_value(&spec).map_err(|error| error.to_string())?;
+            register_answering(&registry, spec, move |session, args| {
+                let answer = if name == "todo_read" {
+                    heddle_todo::tool::run_todo_read(&todo, session)
+                } else {
+                    heddle_todo::tool::run_todo_write(&todo, session, args)
+                };
+                serde_json::to_value(answer).unwrap_or(Value::Null)
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// `src/goal/service.ts`: the goal a session works toward, folded from its log.
+pub struct GoalComponent;
+
+impl Component for GoalComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_goal::GoalConfig =
+            serde_json::from_value(config.clone()).map_err(|error| format!("goal: {error}"))?;
+        let log = StoreLog {
+            sessions: session_service(services, "goal")?,
+        };
+        let service = Arc::new(heddle_goal::GoalService::new(Arc::new(log), config));
+        services.provide("goal", Arc::clone(&service));
+        services.provide("goal", Arc::new(GoalView { service }) as Arc<dyn GoalPort>);
+        Ok(())
+    }
+}
+
+/// `ctx.goal` over the goal service.
+struct GoalView {
+    service: Arc<heddle_goal::GoalService>,
+}
+
+impl GoalPort for GoalView {
+    fn get(&self, handle: &SessionHandle) -> PortResult<Option<Record>> {
+        let view = self.service.get(&handle.id).map_err(port_error)?;
+        view.map(|view| serde_json::to_value(view).map_err(port_error))
+            .transpose()
+    }
+}
+
+/// `src/plugins/goal-tool.ts`: `create_goal`, `get_goal` and `update_goal` in the registry.
+pub struct GoalToolComponent;
+
+impl Component for GoalToolComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["goal".to_owned(), "tools".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let goals = services
+            .get::<Arc<heddle_goal::GoalService>>("goal")
+            .ok_or_else(|| "goal-tool: the goal service is not provided".to_owned())?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "goal-tool: the tool registry is not provided".to_owned())?;
+        for spec in heddle_goal::tool::goal_tool_specs() {
+            let name = spec.name.clone();
+            let goals = Arc::clone(&goals);
+            let spec = serde_json::to_value(&spec).map_err(|error| error.to_string())?;
+            register_answering(&registry, spec, move |session, args| {
+                let answer = match name.as_str() {
+                    "create_goal" => heddle_goal::tool::run_create_goal(&goals, session, args),
+                    "update_goal" => heddle_goal::tool::run_update_goal(&goals, session, args),
+                    _ => heddle_goal::tool::run_get_goal(&goals, session),
+                };
+                serde_json::to_value(answer).unwrap_or(Value::Null)
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// `src/plugins/turns.ts`: the live-turn registry, which the server's stop and a team's abort ask.
+pub struct TurnsComponent;
+
+impl Component for TurnsComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        services.provide("turns", heddle_agent::TurnRegistry::new());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,6 +1375,112 @@ mod tests {
             .tree(Some(&project), &roots, &[], &workspace.generated())
             .expect("the tree answers");
         assert!(node["children"].is_array(), "{node}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_tool_rows_compose_and_the_crates_tools_join_the_registry() {
+        use crate::builtins::{BuiltinCatalog, Catalog, ComponentRef, resolve_component};
+        let home = scratch("tools");
+        let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+        let mut services = Services::new();
+        let rows = [
+            ("session", json!({ "root": home.join("sessions") })),
+            ("sandbox", json!({})),
+            ("approvals", json!({})),
+            ("tools", json!({})),
+            ("todo", json!({})),
+            ("todo-tool", json!({})),
+            ("goal", json!({})),
+            ("goal-tool", json!({})),
+            ("turns", json!({})),
+            ("greeting", json!({ "punctuation": "?" })),
+            ("announce", json!({})),
+            ("console", json!({})),
+        ];
+        for (bare, config) in rows {
+            let reference = resolve_component(&heddle_config::ComponentName::Bare(bare.to_owned()));
+            assert!(matches!(reference, ComponentRef::Builtin(_)), "{bare}");
+            let component = catalog
+                .component(&reference)
+                .unwrap_or_else(|| panic!("{bare} has an adapter"));
+            for name in component.requires() {
+                assert!(
+                    services.provides(&name),
+                    "{bare} waits for {name}, started earlier"
+                );
+            }
+            component
+                .start(&config, &mut services)
+                .unwrap_or_else(|error| panic!("{bare} starts: {error}"));
+        }
+        let tools = services.tools().expect("ctx.tools");
+        let names: Vec<String> = tools
+            .describe()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+        for expected in [
+            "write_file",
+            "read_file",
+            "list_dir",
+            "bash",
+            "todo_write",
+            "todo_read",
+            "create_goal",
+            "get_goal",
+            "update_goal",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "{expected} in {names:?}"
+            );
+        }
+        assert!(services.goal().is_some());
+        assert!(services.provides("turns"));
+        let greeting = services
+            .get::<Arc<Greeting>>("greeting")
+            .expect("the greeting service");
+        assert_eq!(greeting.greet("heddle"), "hello, heddle?");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_store_log_appends_and_reads_back_an_event_for_the_goal_and_todo_crates() {
+        let home = scratch("store-log");
+        let sessions = Arc::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(home.join("sessions").to_string_lossy().into_owned()),
+            },
+            &env_at(&home),
+            None,
+        ));
+        let handle = sessions
+            .start(heddle_session::StartOptions {
+                cwd: Some(home.to_string_lossy().into_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .expect("a session starts");
+        let log = StoreLog {
+            sessions: Arc::clone(&sessions),
+        };
+        let id = handle.id.to_string();
+        assert_eq!(heddle_todo::SessionLog::open(&log, &id), Some(id.clone()));
+        assert_eq!(heddle_todo::SessionLog::open(&log, "nowhere"), None);
+        let mut event = serde_json::Map::new();
+        event.insert("type".to_owned(), json!("todo/write"));
+        event.insert("items".to_owned(), json!([]));
+        let written = heddle_goal::SessionLog::append(&log, &id, event).expect("the event lands");
+        assert_eq!(written["type"], "todo/write");
+        assert!(
+            written.get("seq").is_some(),
+            "the store assigns seq: {written}"
+        );
+        let read = heddle_todo::SessionLog::read(&log, &id).expect("the log reads");
+        assert_eq!(
+            read.last().map(|event| event["type"].clone()),
+            Some(json!("todo/write"))
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
