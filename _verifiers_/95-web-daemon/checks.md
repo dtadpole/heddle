@@ -1,9 +1,9 @@
 ---
 title: 95-web-daemon — the four checks, the scratch service and the Rust branch
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T04:42:38Z
+modified: 2026-10-23T05:30:26Z
 level: L3
-version: 1.0.0
+version: 1.1.0
 description: What each of the four checks in check.mjs asserts, how the verifier judges a scratch service instead of the deployment, and why the Rust binary needs no second definition.
 status: unverified
 grounded_in:
@@ -25,7 +25,9 @@ grounded_in:
    8082 gate, 8082 on Linux), binds loopback, answers `/healthz` with this service's name and port, and still refuses
    the page and the API without a session. No installed service is unjudged.
 4. **It stays up**: the process owning the port is killed and a new pid must answer within 20 s. Which layer replaces
-   it — launchd, systemd, or `supervisor.mjs` — is not this check's business.
+   it — launchd, systemd, or `supervisor.mjs` — is not this check's business. Against the deployment it is
+   **unjudged** unless `HEDDLE_95_KILL_DEPLOYMENT=1` says the kill is meant: four seats killed the owner's page by
+   running 95 the plain way on 2026-10-22, the last a verifier loop at 22:20.
 
 **Judging it without killing the owner's server.** Check 4 is a real kill, so against the deployment it is an outage
 (the lane gate stopped that under D-042). When `HEDDLE_WEB_LABEL` names a scratch service, all four checks judge it

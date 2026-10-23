@@ -8,6 +8,8 @@
 //! `JSON.stringify(value, null, 2)` plus a newline.
 //!
 //! - [`run`] with [`Command::Models`] answers `models` from the model row's [`ModelService`].
+//! - [`adapter_call`] answers the hidden `adapter-call`: one adapter call, streamed as JSON lines, which is how the
+//!   endpoint validator behind `98-model-endpoints` exercises the Rust adapters instead of the TypeScript ones.
 //! - `--turn` is `heddle-agent`'s command; its entry point calls [`turn_endpoint`] before it opens the session and,
 //!   with `--stream`, starts [`print_stream`] before the turn and feeds it every `session/event` of that session.
 //!
@@ -21,12 +23,18 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 
+use futures::StreamExt;
+use heddle_config::EndpointConfig;
+
+use crate::adapter::adapter_for;
+use crate::error::ModelError;
 use crate::printer::{StreamPrinter, StreamPrinterOptions};
 use crate::service::ModelService;
+use crate::types::{Chunk, GenerateRequest};
 
 /// The command words this crate answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,6 +250,174 @@ impl StreamView {
     }
 }
 
+/// What `adapter-call` reads on standard input: one endpoint, as the machine's configuration states it with its key
+/// already materialised, and one request.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdapterCallInput {
+    endpoint: EndpointConfig,
+    request: Value,
+}
+
+/// Parse `adapter-call`'s input. The request's `endpoint` defaults to the endpoint's name, as the TypeScript
+/// validator's `{ endpoint: endpoint.name, model, ...request }` builds it; a request naming another endpoint is
+/// refused rather than silently sent to this one.
+pub fn adapter_call_input(input: &str) -> Result<(EndpointConfig, GenerateRequest), String> {
+    let parsed: AdapterCallInput = serde_json::from_str(input).map_err(|error| {
+        format!("adapter-call reads {{\"endpoint\": …, \"request\": …}} — {error}")
+    })?;
+    let mut request = parsed.request;
+    let Some(fields) = request.as_object_mut() else {
+        return Err("adapter-call's request must be a JSON object".to_string());
+    };
+    match fields.get("endpoint") {
+        None => {
+            fields.insert(
+                "endpoint".to_string(),
+                Value::String(parsed.endpoint.name.clone()),
+            );
+        }
+        Some(Value::String(named)) if *named == parsed.endpoint.name => {}
+        Some(other) => {
+            return Err(format!(
+                "adapter-call's request names endpoint {other}, but the endpoint given is '{}'",
+                parsed.endpoint.name
+            ));
+        }
+    }
+    let request: GenerateRequest = serde_json::from_value(request)
+        .map_err(|error| format!("adapter-call's request is not a request — {error}"))?;
+    Ok((parsed.endpoint, request))
+}
+
+/// One chunk as `adapter-call` prints it: the chunk's JSON on one line, in the TypeScript shape the validator reads
+/// (`{"type":"text-delta","text":…}`, `{"type":"tool-call","id":…,"name":…,"arguments":…}`, `{"type":"done",…}`).
+pub fn chunk_line(chunk: &Chunk) -> String {
+    serde_json::to_string(chunk).unwrap_or_else(|error| {
+        error_line(&ModelError::new(
+            format!("a chunk could not be written — {error}"),
+            "",
+            "BAD_CHUNK",
+        ))
+    })
+}
+
+/// A failure as `adapter-call` prints it: `{"type":"error","code":…,"message":…}`, with `status` when the provider
+/// answered with one — the line the validator records as the call's failure.
+pub fn error_line(error: &ModelError) -> String {
+    let mut line = serde_json::Map::new();
+    line.insert("type".to_string(), Value::String("error".to_string()));
+    line.insert("code".to_string(), Value::String(error.code.clone()));
+    line.insert("message".to_string(), Value::String(error.message.clone()));
+    if let Some(status) = error.status {
+        line.insert("status".to_string(), Value::from(status));
+    }
+    Value::Object(line).to_string()
+}
+
+/// `adapter-call` (hidden): run one adapter call and print each chunk as it arrives.
+///
+/// `input` is standard input, read whole by the binary. Every line is flushed when written, because the validator
+/// times the deltas (first, last, span) and an answer printed at the end would read as an unstreamed one. Exit `0`
+/// when the stream ends; `1` with `heddle: <sentence>` on `err` for unreadable input, or with an error line on `out`
+/// as well when the adapter or the provider fails.
+pub async fn adapter_call(input: &str, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let (endpoint, request) = match adapter_call_input(input) {
+        Ok(parsed) => parsed,
+        Err(sentence) => {
+            let _ = writeln!(err, "heddle: {sentence}");
+            return 1;
+        }
+    };
+    let fail = |error: ModelError, out: &mut dyn Write, err: &mut dyn Write| {
+        let _ = writeln!(out, "{}", error_line(&error));
+        let _ = out.flush();
+        let _ = writeln!(err, "heddle: {}", error.message);
+        1
+    };
+    let adapter = match adapter_for(endpoint) {
+        Ok(adapter) => adapter,
+        Err(error) => return fail(error, out, err),
+    };
+    let mut stream = adapter.stream(request);
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(chunk) => {
+                if writeln!(out, "{}", chunk_line(&chunk)).is_err() || out.flush().is_err() {
+                    // The reader went away; nothing left to tell it.
+                    return 1;
+                }
+            }
+            Err(error) => return fail(error, out, err),
+        }
+    }
+    0
+}
+
+/// Where the session store's listener meets the views `--stream` starts.
+///
+/// The TypeScript `printStream` subscribes to the bus's `session/event`. Here the session service takes one
+/// listener when it is built, before any turn exists, while each turn starts its own view once its session is
+/// open; the hub sits between them. The boot builds one hub, gives the session service a listener that calls
+/// [`StreamHub::observe`] with every appended event, and the turn's starter calls [`StreamHub::start`].
+///
+/// It holds its views weakly: a view the turn drops is pruned on the next event, so a long-lived process (`web`)
+/// does not accumulate them. Events are forwarded outside the hub's lock.
+#[derive(Default)]
+pub struct StreamHub {
+    views: Mutex<Vec<(String, Weak<StreamView>)>>,
+}
+
+impl StreamHub {
+    /// An empty hub.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start a view for `session` that the hub feeds from now on ([`print_stream`] plus the subscription).
+    pub fn start(&self, session: &str, stderr: Box<dyn Write + Send>) -> Arc<StreamView> {
+        let view = Arc::new(print_stream(session, stderr));
+        self.views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((session.to_string(), Arc::downgrade(&view)));
+        view
+    }
+
+    /// One appended event of `session` — the whole event object (`SessionEvent::to_value` in heddle-session:
+    /// `{"seq","at","type",…}`). Every live view of that session receives it; dropped views are pruned.
+    pub fn observe(&self, session: &str, event: &Value) {
+        let live: Vec<Arc<StreamView>> = {
+            let mut views = self
+                .views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            views.retain(|(_, view)| view.strong_count() > 0);
+            views
+                .iter()
+                .filter(|(owner, _)| owner == session)
+                .filter_map(|(_, view)| view.upgrade())
+                .collect()
+        };
+        for view in live {
+            view.observe_value(session, event);
+        }
+    }
+
+    /// How many views the hub still holds, dropped ones not yet pruned included.
+    pub fn len(&self) -> usize {
+        self.views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Whether the hub holds no views.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +453,92 @@ mod tests {
             String::from_utf8(out).expect("utf-8"),
             String::from_utf8(err).expect("utf-8"),
         )
+    }
+
+    #[test]
+    fn adapter_call_input_takes_the_endpoint_and_names_it_in_the_request() {
+        let (endpoint, request) = adapter_call_input(
+            r#"{"endpoint":{"name":"chat","kind":"openai-chat","baseUrl":"http://h/v1","model":"m","apiKey":"k"},
+                "request":{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+                           "reasoningEffort":"high"}}"#,
+        )
+        .expect("the validator's shape parses");
+        assert_eq!(endpoint.name, "chat");
+        assert_eq!(
+            endpoint.api_key.as_deref(),
+            Some("k"),
+            "the materialised key travels"
+        );
+        assert_eq!(
+            request.endpoint, "chat",
+            "the request is addressed to the endpoint given"
+        );
+        assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    #[test]
+    fn adapter_call_input_refuses_what_is_not_one_endpoint_and_one_request() {
+        for (input, says) in [
+            ("not json", "adapter-call reads"),
+            (
+                r#"{"endpoint":{"name":"a","kind":"scripted","baseUrl":"s.json"}}"#,
+                "adapter-call reads",
+            ),
+            (
+                r#"{"endpoint":{"name":"a","kind":"scripted","baseUrl":"s.json"},"request":[]}"#,
+                "must be a JSON object",
+            ),
+            (
+                r#"{"endpoint":{"name":"a","kind":"scripted","baseUrl":"s.json"},"request":{"endpoint":"b","messages":[]}}"#,
+                "names endpoint \"b\"",
+            ),
+            (
+                r#"{"endpoint":{"name":"a","kind":"scripted","baseUrl":"s.json"},"request":{"messages":"no"}}"#,
+                "is not a request",
+            ),
+            (
+                r#"{"endpoint":{"name":"a","kind":"scripted","baseUrl":"s.json"},"request":{"messages":[]},"extra":1}"#,
+                "adapter-call reads",
+            ),
+        ] {
+            match adapter_call_input(input) {
+                Ok(_) => panic!("{input} should be refused"),
+                Err(sentence) => assert!(sentence.contains(says), "{input}: {sentence}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_chunk_line_is_the_typescript_shape_the_validator_reads() {
+        let text = chunk_line(&Chunk::TextDelta { text: "one".into() });
+        assert_eq!(text, r#"{"type":"text-delta","text":"one"}"#);
+        let call: Value =
+            serde_json::from_str(&chunk_line(&Chunk::ToolCall(crate::types::ToolCall {
+                id: "c1".into(),
+                name: "probe_echo".into(),
+                arguments: r#"{"value":"hello"}"#.into(),
+            })))
+            .expect("JSON");
+        assert_eq!(call["type"], "tool-call");
+        assert_eq!(call["name"], "probe_echo", "read as chunk.name");
+        assert_eq!(
+            call["arguments"], r#"{"value":"hello"}"#,
+            "read as chunk.arguments"
+        );
+        assert!(!text.contains('\n'), "one line");
+    }
+
+    #[test]
+    fn an_error_line_carries_code_message_and_status_when_there_is_one() {
+        let mut error = ModelError::new("the provider refused", "chat", "HTTP_ERROR");
+        assert_eq!(
+            error_line(&error),
+            r#"{"type":"error","code":"HTTP_ERROR","message":"the provider refused"}"#
+        );
+        error.status = Some(500);
+        let line: Value = serde_json::from_str(&error_line(&error)).expect("JSON");
+        assert_eq!(line["status"], 500);
     }
 
     #[test]
@@ -587,6 +849,76 @@ mod tests {
         assert_eq!(summary["reasoningDeltas"], serde_json::json!(1));
         assert_eq!(summary["completed"], serde_json::json!(true));
         assert!(stderr.text().contains("[reasoning] r"), "{}", stderr.text());
+    }
+
+    fn event(kind: &str, text: &str) -> Value {
+        serde_json::json!({
+            "seq": 7,
+            "at": "2026-10-22T00:00:00.000Z",
+            "type": "assistant/chunk",
+            "chunk": { "type": kind, "text": text }
+        })
+    }
+
+    #[test]
+    fn the_hub_feeds_a_started_view_every_event_of_its_session_and_no_other() {
+        let hub = StreamHub::new();
+        let mine = Captured::default();
+        let other = Captured::default();
+        let view = hub.start("s1", Box::new(mine.clone()));
+        let _elsewhere = hub.start("s2", Box::new(other.clone()));
+        hub.observe("s1", &event("reasoning-delta", "thinking"));
+        hub.observe("s1", &event("text-delta", "answer"));
+        hub.observe(
+            "s1",
+            &serde_json::json!({ "seq": 9, "at": "x", "type": "assistant/completed" }),
+        );
+        assert!(
+            mine.text().contains("[reasoning] thinking"),
+            "{}",
+            mine.text()
+        );
+        assert!(mine.text().contains("answer"));
+        assert_eq!(other.text(), "", "another session's view saw nothing");
+        view.dispose();
+        let summary = view.summary();
+        assert_eq!(summary["textDeltas"], serde_json::json!(1));
+        assert_eq!(summary["reasoningDeltas"], serde_json::json!(1));
+        assert_eq!(summary["completed"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_hub_prunes_a_dropped_view_and_a_disposed_view_prints_nothing_more() {
+        let hub = StreamHub::new();
+        let printed = Captured::default();
+        let view = hub.start("s1", Box::new(printed.clone()));
+        view.dispose();
+        hub.observe("s1", &event("text-delta", "after dispose"));
+        assert_eq!(printed.text(), "", "a disposed view prints nothing");
+        drop(view);
+        assert_eq!(hub.len(), 1, "not pruned until the next event");
+        hub.observe("s1", &event("text-delta", "after drop"));
+        assert!(hub.is_empty(), "a dropped view is pruned");
+    }
+
+    #[test]
+    fn the_hub_is_fed_from_the_listeners_thread_while_the_turn_holds_the_view() {
+        fn assert_shareable<T: Send + Sync>() {}
+        assert_shareable::<StreamHub>();
+        let hub = Arc::new(StreamHub::new());
+        let printed = Captured::default();
+        let view = hub.start("s1", Box::new(printed.clone()));
+        let listener = {
+            let hub = Arc::clone(&hub);
+            std::thread::spawn(move || {
+                hub.observe("s1", &event("reasoning-delta", "r"));
+                hub.observe("s1", &event("text-delta", "t"));
+            })
+        };
+        listener.join().expect("the listener ran");
+        view.dispose();
+        assert_eq!(view.summary()["textDeltas"], serde_json::json!(1));
+        assert!(printed.text().contains("[reasoning] r"));
     }
 
     #[test]

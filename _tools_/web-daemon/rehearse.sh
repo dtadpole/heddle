@@ -22,6 +22,8 @@
 #   guard          a guard run during that restart takes no action (it acts on the job, not on the port)
 #   reinstall      install.sh --restart leaves the port silent for less than 5 s
 #   agent gone     after a bootout, one guard run brings the service back within 20 s
+#   supervisor killed  the server keeps answering, and one guard run brings back a supervisor that reclaims it
+#   server hung    a stopped server (port bound, nothing answering) is replaced by the supervisor's health probe
 #   95-web-daemon  the verifier itself, judging the scratch service (its stays-up check kills the scratch server)
 # Exit 0 when every claim held, 1 when one failed, 2 when the rehearsal refused to start, 3 when this host
 # cannot be judged (no supervisor command).
@@ -76,7 +78,8 @@ port_pid() {
 scratch() {
   HEDDLE_WEB_LABEL="$label" HEDDLE_WEB_UNIT="$unit" HEDDLE_WEB_PORT="$port" \
     HEDDLE_WEB_HOME="$home" HEDDLE_WEB_LOG="$home/web.log" HEDDLE_WEB_PLATFORM="$platform" \
-    HEDDLE_ALLOW_DIRTY_INSTALL=1 HEDDLE_ALLOW_NO_LINGER="${HEDDLE_ALLOW_NO_LINGER:-0}" "$@"
+    HEDDLE_ALLOW_DIRTY_INSTALL=1 HEDDLE_ALLOW_NO_LINGER="${HEDDLE_ALLOW_NO_LINGER:-0}" \
+    HEDDLE_HEALTH_EVERY="${HEDDLE_HEALTH_EVERY:-2}" "$@"
 }
 
 cleanup() {
@@ -109,7 +112,7 @@ failed=0
 unjudged=0
 result() {
   # result <claim> <held|failed|unjudged> <detail>
-  printf '%-14s %-8s %s\n' "$1" "$2" "$3"
+  printf '%-17s %-8s %s\n' "$1" "$2" "$3"
   case "$2" in
     held) held=$((held + 1)) ;;
     unjudged) unjudged=$((unjudged + 1)) ;;
@@ -132,7 +135,9 @@ echo "rehearsal: label $label, port $port, state $home"
 echo "program:   ${HEDDLE_BIN:-node $(CDPATH= cd -- "$here/../.." && pwd)/dist/cli.js}"
 
 # started
-scratch sh "$here/install.sh" >/dev/null 2>"$home/install.err" || { cat "$home/install.err" >&2; exit 1; }
+# The rehearsal judges "started" itself, with the server's own reason when it fails, so the installer's own start check
+# is skipped here (HEDDLE_START_WAIT=0); every later install in this file keeps it.
+HEDDLE_START_WAIT=0 scratch sh "$here/install.sh" >/dev/null 2>"$home/install.err" || { cat "$home/install.err" >&2; exit 1; }
 if ms=$(wait_answer "${HEDDLE_REHEARSE_START_MS:-20000}"); then
   result started held "${ms} ms after install"
 else
@@ -143,7 +148,7 @@ else
     echo "why: the scratch log ends with:"
     grep -v '^heddle-supervisor: restarting in' "$home/web.log" | tail -3 | sed 's/^/  /'
   fi
-  for claim in kill guard reinstall "agent gone" 95-web-daemon; do result "$claim" unjudged "no server to judge"; done
+  for claim in kill guard reinstall "agent gone" "supervisor killed" "server hung" 95-web-daemon; do result "$claim" unjudged "no server to judge"; done
   echo "verdict: $held held, $failed failed, $unjudged unjudged"
   exit 1
 fi
@@ -207,6 +212,65 @@ sleep 1
 start=$(now_ms)
 scratch sh "$here/guard.sh" >/dev/null 2>&1 || true
 if ms=$(wait_answer 20000); then result "agent gone" held "guard restored it, $(( $(now_ms) - start )) ms"; else result "agent gone" failed "not answering 20 s after the guard ran"; fi
+
+# supervisor killed: launchd kills a dead job's process group unless the job abandons it, and on this Mac it never
+# restarts the job; measured 2026-10-22, a SIGKILL of the supervisor took the server with it and the port stayed
+# silent. With AbandonProcessGroup the server must keep answering, and one guard run must start a supervisor that
+# reclaims the orphan (same command on our port) and serves again.
+answering_new() { pid=$(port_pid); [ -n "$pid" ] && [ "$pid" != "$1" ] && answering; }
+sleep 6
+srv=$(port_pid)
+sup=""
+if [ -n "$srv" ]; then sup=$(ps -o ppid= -p "$srv" 2>/dev/null | tr -d ' '); fi
+if [ "$platform" != darwin ]; then
+  result "supervisor killed" unjudged "systemd supervises the server directly on Linux"
+elif [ -z "$sup" ] || [ "$sup" = 1 ]; then
+  result "supervisor killed" failed "no supervisor found above the server (pid ${srv:-none})"
+else
+  kill -9 "$sup" 2>/dev/null || true
+  sleep 2
+  if answering && [ "$(port_pid)" = "$srv" ]; then survived=yes; else survived=no; fi
+  start=$(now_ms)
+  # Through env, not as an assignment in front of the function: /bin/sh does not export that to the function's
+  # commands, and the guard then skipped on its 20 s cooldown from the claim before (measured 2026-10-22).
+  scratch env HEDDLE_GUARD_COOLDOWN=0 sh "$here/guard.sh" >/dev/null 2>&1 || true
+  back=""
+  while [ $(( $(now_ms) - start )) -lt 15000 ]; do
+    if answering_new "$srv"; then back=$(port_pid); break; fi
+    sleep 0.1
+  done
+  if [ "$survived" = no ]; then
+    result "supervisor killed" failed "the server died with its supervisor"
+  elif [ -z "$back" ]; then
+    result "supervisor killed" failed "the server survived, but no new supervisor took over within 15 s"
+  else
+    result "supervisor killed" held "the server kept answering; the guard's supervisor reclaimed it in $(( $(now_ms) - start )) ms ($srv -> $back)"
+  fi
+fi
+
+# server hung: a stopped server keeps its port bound and answers nothing, so no exit ever reaches the supervisor;
+# its health probe must notice and replace the server.
+sleep 6
+srv=$(port_pid)
+if [ "$platform" != darwin ]; then
+  result "server hung" unjudged "systemd does not probe the server's health on Linux"
+elif [ -z "$srv" ]; then
+  result "server hung" failed "nothing owns port $port"
+else
+  kill -STOP "$srv" 2>/dev/null || true
+  start=$(now_ms)
+  back=""
+  while [ $(( $(now_ms) - start )) -lt 40000 ]; do
+    if answering_new "$srv"; then back=$(port_pid); break; fi
+    sleep 0.2
+  done
+  if [ -n "$back" ]; then
+    result "server hung" held "replaced in $(( $(now_ms) - start )) ms ($srv -> $back)"
+  else
+    kill -CONT "$srv" 2>/dev/null || true
+    result "server hung" failed "still hung 40 s after it stopped answering"
+  fi
+fi
 
 # 95-web-daemon: the verifier, pointed at the scratch service, so its kill never lands on the owner's page (D-042).
 repo=$(CDPATH= cd -- "$here/../.." && pwd)

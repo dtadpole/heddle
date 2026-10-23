@@ -635,6 +635,7 @@ dependencies = [
 name = "heddle"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "futures",
  "heddle-agent",
  "heddle-config",
@@ -648,6 +649,9 @@ dependencies = [
  "heddle-team",
  "heddle-todo",
  "heddle-tools",
+ "heddle-web-composer",
+ "heddle-web-files",
+ "heddle-web-trajectory",
  "heddle-workspace",
  "serde",
  "serde_json",
@@ -705,6 +709,7 @@ dependencies = [
  "futures",
  "heddle-agent",
  "heddle-llm",
+ "heddle-sandbox",
  "heddle-tools",
  "serde",
  "serde_json",
@@ -796,8 +801,14 @@ dependencies = [
 name = "heddle-team"
 version = "0.0.1"
 dependencies = [
+ "heddle-agent",
  "heddle-config",
+ "heddle-context",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-server",
  "heddle-session",
+ "heddle-tools",
  "serde",
  "serde_json",
  "thiserror",

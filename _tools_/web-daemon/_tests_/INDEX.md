@@ -1,5 +1,7 @@
 ---
 title: Web daemon component tests
+created: 2026-10-23T01:37:16Z
+modified: 2026-10-23T06:03:13Z
 version: 1.4.0
 description: The component suites of the web-daemon tool, one folder per suite.
 grounded_in:
@@ -21,6 +23,7 @@ judged on either platform.
 | [`guard-rules/`](guard-rules/INDEX.md) | the guard acts on the job, not the port: nothing while a supervisor is mid-restart, a kickstart when the job is gone, and a cooldown |
 | [`rehearse-rules/`](rehearse-rules/INDEX.md) | a rehearsal aimed at the deployment's label, unit or ports, or at a port in use, refuses before it calls anything |
 | [`redeploy-rules/`](redeploy-rules/INDEX.md) | the one order of a redeploy — fetch, move, build, install with the new checkout's installer, probe, judge — and what it refuses |
+| [`preview-rules/`](preview-rules/INDEX.md) | when and in which order the Rust preview is rebuilt from main, and what a failure leaves serving |
 
 ```bash
 node --test _tools_/web-daemon/_tests_/*/unit.test.mjs

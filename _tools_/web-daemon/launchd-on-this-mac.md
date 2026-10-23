@@ -24,10 +24,12 @@ host, not to this service.
 | `crontab -` from automation answers `Operation not permitted` (TCC) | `install.sh --guard` fails loudly; the account owner adds the cron line |
 | `bootout` returns before the job is gone; a `bootstrap` in that window fails with `5: Input/output error` | `install.sh` waits up to 10 s for the old job, retries a refused bootstrap ten times, then exits 1 saying the agent is not loaded |
 | `kickstart -k` on a job younger than `ThrottleInterval` (10 s) waits out the throttle: about 10 s of silence | a restorer must not kick a job that is already restarting |
+| a SIGKILL or SIGTERM of the job's process takes its process group down and the job stays `not running` | `AbandonProcessGroup`: the server outlives a killed supervisor; the next supervisor reclaims it |
+| a hung server keeps its port and the job reads `running` | the supervisor probes `/healthz` and replaces a server that misses three probes |
 
-**The supervisor** restarts at once after a run that lasted, with backoff for failed starts. After ten failures it
-retries every 60 s rather than exiting, because here an exit is permanent; `--give-up` restores the bounded
-behaviour for a platform that restarts jobs.
+**The supervisor** restarts at once after a run that lasted, with backoff for failed starts, and retries every 60 s
+after ten failures, because here an exit is permanent. Before each start it reclaims a listener on its port running
+exactly its command, and a pidfile lock keeps a second supervisor of the service from running beside it.
 
 **The guard acts on the job, not the port.** A silent port with the job running is the supervisor mid-restart;
 kicking it then kills the fresh server. On 2026-10-23 a port-only guard produced three restores 75 s and 15 s apart.

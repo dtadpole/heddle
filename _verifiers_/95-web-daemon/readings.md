@@ -1,9 +1,9 @@
 ---
 title: 95-web-daemon — readings
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T04:44:23Z
+modified: 2026-10-23T05:44:09Z
 level: L3
-version: 1.0.0
+version: 1.1.0
 description: The measured verdicts of 95-web-daemon on the Linux host and on the owner's Mac, against the deployment, an absent service, a scratch service and the Rust binary.
 status: unverified
 grounded_in:
@@ -20,10 +20,12 @@ grounded_in:
 | 21:19 and 21:34 | a scratch service installed by `rehearse.sh` | 4 of 4, the live server's pid unchanged |
 | about 21:20 | the lanes' release binary through `HEDDLE_BIN`, by `rehearse.sh` | not judged: the service never started (`heddle: not ported to Rust yet: web`, exit 2), so all four checks were unjudged |
 | 21:43 | main's own binary (`a2d4ae4`, heddle-server merged; sha256 `b9decd764dba…`) | the same: `web` exits 2 after 6 ms, all four checks unjudged |
+| 22:42 | main's binary after `heddle web` merged (`e3f9d91`, built in integrator-one's lane at `452c02b`; sha256 `934f4604699c…`) | **4 of 4 on the scratch service**; the rehearsal's eight claims all held, the hung binary replaced in 7,952 ms |
 
-**Part 11 through `HEDDLE_BIN` is therefore not met, and cannot be judged until the binary serves `web`.** When it
-does, `HEDDLE_BIN=<binary> sh _tools_/web-daemon/rehearse.sh` is the first reading, and the deployment switches with
-`HEDDLE_BIN=… sh _tools_/web-daemon/install.sh --restart` from `~/heddle-live`.
+**Part 11 through `HEDDLE_BIN` holds since 22:42**, judged on a scratch service with
+`HEDDLE_BIN=<binary> sh _tools_/web-daemon/rehearse.sh`. Serving the binary on the owner's page, which is what
+`96-deployment` would then judge, switches with `HEDDLE_BIN=… sh _tools_/web-daemon/install.sh --restart` from
+`~/heddle-live`.
 
 Before the supervisor, 95 could not pass reliably on the Mac: launchd did not restart a killed agent, and one 3-of-3
 pass came from an interim guard's probe landing in the same second as the kill. That history and the measurements

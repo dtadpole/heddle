@@ -1,11 +1,13 @@
 ---
 title: The heddle-sandbox crate
-version: 0.3.1
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T06:17:35Z
+version: 0.6.0
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
-  - source: rust/ULTIMATE_GOAL.md
-  - source: src/sandbox/*.ts and src/approvals/service.ts, read 2026-10-22
-  - source: _verifiers_/75-permission-sandbox and _verifiers_/80-web-ui/check-approval.mjs, read 2026-10-22
+  - source: rust/ULTIMATE_GOAL.md at 5c113e8
+  - source: src/sandbox/*.ts at 8047667 and src/approvals/service.ts at 4d4075f (each one's last change), read 2026-10-22
+  - source: _verifiers_/75-permission-sandbox at d649349 and _verifiers_/80-web-ui/check-approval.mjs at 5ed8deb, run 2026-10-22
 ---
 
 # `rust/crates/heddle-sandbox`
@@ -98,6 +100,36 @@ It classifies the real exit code and stderr, one test per claim `check-shell-con
 - `backend: none` fails closed without running anything.
 A mutation that turns the profile's `(deny file-write*)` into `allow` fails the `workspace-write` and `read-only`
 cases, so the tests can fail.
+
+## Task 7, measured before it is judged
+
+Not yet a verdict: `main`'s binary advertises neither `--turn` nor `web` (`usage::SERVED`), so the lane's status run
+reports 75 as unjudged. All three runs below are rehearsals, with
+`HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs <check> --json`. The first two ran on 2026-10-22 with
+the verifiers at `d649349` (75) and `5ed8deb` (check-approval). The third and fourth ran on 2026-10-23 UTC with them at
+`d649349` and `b71a1f0`.
+
+| Binary | 75-permission-sandbox | check-approval |
+|---|---|---|
+| The backend lane's release build of candidate `e5f2e80`. A shim adds only the `--turn` help line and passes every other call through | 10 pass (`check.mjs` 5, `check-shell-confinement` 4, unattended `check-escalation` 1), 7 unjudged | not run |
+| Debug build of `hd/developer-two` `f45993a` with `hd/developer-two-web` `b6995b6` and `hd/integrator-two` `7d26c6b` merged in. Scratch-only edits: `SERVED` gains `Turn`, and the web branch's sandbox port takes `Option<&Value>` as the server's trait does | 10 pass, 7 fail | 3 fail |
+| The backend lane's release build of 22:40 PDT, after `heddle web` was served on `main` in `e3f9d91` (sha256 prefix `934f4604699ca7b7`). A shim adds only the `--turn` and `web` help lines | 13 pass, 4 fail | 3 fail |
+| A debug build of unmodified `main` `97f7435`, which has the approvals service (`5e431f6`) and the session-log route (`c93d2f4`) (sha256 prefix `436ce3c2f569f4d1`). The same help-line shim. Run twice | **17 pass, 0 fail, twice** | **3 pass, twice** |
+
+**On `main` `97f7435` both verifiers pass in full**, apart from the advertisement. `usage::SERVED` still lacks `Turn`
+and `Web`, so the lane's probes skip. Adding them is the binary owner's switch. The failures of the earlier runs were
+all outside this crate:
+- In the second run, the `web` command gave the server only the models and sandbox services, so `POST /api/turn`
+  answered `400 {"error":"this service is not loaded yet"}` (reproduced by hand).
+- In the third run, sessions and turns are served, and the two `check-session-mode` checks pass. Two gaps remain:
+  - the server is given no approvals service, so `check-escalation`'s two web cases and all three `check-approval`
+    checks never see an approval question;
+  - the server has no `GET /api/sessions/<id>/log` route (TypeScript serves it at `src/server/web.ts:1203`), so
+    one `check-policy-context` and one `check-runtime-context` check read `not found`.
+
+**Run 75 from a checkout outside the host temp areas.** Its "outside" paths are folders under
+`<checkout>/.heddle-tmp/`. From a checkout under `/tmp` those folders are inside a root `workspace-write` admits.
+With the same binary, three checks failed from `/tmp` and none from `~/heddle--developer-seven`.
 
 ## Risks, stated now
 

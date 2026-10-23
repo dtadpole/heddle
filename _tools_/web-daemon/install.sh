@@ -150,7 +150,12 @@ render_plist() {
   args=$(mktemp "${TMPDIR:-/tmp}/heddle-web-args.XXXXXX") || exit 2
   trap 'rm -f "$args"' EXIT HUP INT TERM
   if [ "$supervise" = yes ]; then
-    xml_strings "$node" "$here/supervisor.mjs" -- >> "$args"
+    # The supervisor watches the server's health route (a hung server keeps its port and answers nothing), reclaims a
+    # leftover of this same command on the port (the agent abandons its process group, so a killed supervisor leaves
+    # its server serving), and holds a lock so no second supervisor of this service ever runs beside it.
+    xml_strings "$node" "$here/supervisor.mjs" \
+      --health-url "http://127.0.0.1:$port/healthz" --health-every "${HEDDLE_HEALTH_EVERY:-5}" \
+      --reclaim-port "$port" --lock "$heddle_home/web-supervisor.$port.lock" -- >> "$args"
   fi
   xml_strings "$exe" >> "$args"
   if [ -n "$cli" ]; then xml_strings "$cli" >> "$args"; fi
@@ -294,6 +299,50 @@ name() {
   if [ "$platform" = darwin ]; then printf 'agent %s' "$label"; else printf 'unit %s' "$unit"; fi
 }
 
+# The agent abandons its process group, so a server whose supervisor died outlives a bootout. Uninstalling stops such a
+# leftover, but only one running this checkout's server on this port: its command line ends with exactly the
+# arguments this service renders. Anything else on the port is somebody else's, and is named and left alone.
+stop_leftover() {
+  lsof_bin="${HEDDLE_LSOF:-/usr/sbin/lsof}"; [ -x "$lsof_bin" ] || lsof_bin=lsof
+  pid=$("$lsof_bin" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+  [ -n "$pid" ] || return 0
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+  case "$cmd" in
+    *" web --host 127.0.0.1 --port $port --config $repo/cordis.yml")
+      kill "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do sleep 0.1; waited=$((waited + 1)); done
+      kill -9 "$pid" 2>/dev/null || true
+      echo "stopped the server this service left on port $port (pid $pid), which outlived its supervisor"
+      ;;
+    *) echo "port $port is held by pid $pid ($cmd), which is not this service; left alone" ;;
+  esac
+}
+
+# A start that is not verified is not a start (shared core-conventions/process-supervision.md): wait, bounded, for the
+# service to answer on its port, and exit 1 with the end of its log when it does not, rather than reporting an install
+# that is not running. HEDDLE_START_WAIT is the bound in seconds (default 15); 0 skips the check and says so.
+verify_start() {
+  bound="${HEDDLE_START_WAIT:-15}"
+  case "$bound" in ''|*[!0-9]*) echo "install.sh: HEDDLE_START_WAIT must be a number of seconds, got '$bound'" >&2; exit 2 ;; esac
+  if [ "$bound" -eq 0 ]; then
+    echo "not verified: HEDDLE_START_WAIT=0 skipped the check that port $port answers"
+    return 0
+  fi
+  tries=$((bound * 4))
+  attempt=0
+  until curl -fsS -m 1 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge "$tries" ]; then
+      echo "install.sh: $(name) is installed but port $port did not answer within ${bound} s; the end of its log:" >&2
+      tail -5 "$log" 2>/dev/null >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+  echo "verified: port $port answers"
+}
+
 # The guard line, and the crontab edits. Cron is the one scheduler this Mac was measured to run while launchd left
 # a bootstrapped agent's nondemand spawn pending: an agent that is not started at login has nothing to bring it
 # back, and no platform timer is available to ask. The line is added by exact match, so running --guard twice
@@ -329,11 +378,13 @@ case "${1:-}" in
   --restart)
     load
     echo "restarted $(name)"
+    verify_start
     ;;
   --uninstall)
     if [ "$platform" = darwin ]; then
       if loaded; then launchctl bootout "$domain/$label" >/dev/null 2>&1 || true; fi
       rm -f "$target"
+      stop_leftover
     else
       systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
       rm -f "$target"
@@ -356,6 +407,7 @@ case "${1:-}" in
   "")
     load
     echo "loaded $(name) on port $port"
+    verify_start
     echo "log:  $log"
     # The token is minted per process and printed once, into the log — it is deliberately not stored, so
     # the log line is where a person gets it. Say that rather than printing a URL without one.

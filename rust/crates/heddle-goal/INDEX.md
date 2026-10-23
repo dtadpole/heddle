@@ -1,6 +1,8 @@
 ---
 title: The heddle-goal crate
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:32:22Z
+version: 0.4.0
 description: The Rust port crate for session goals — the event-sourced state machine, the model's three verbs, the round driver and its trigger, and the goal routes — its public API and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -27,11 +29,11 @@ The Rust port of session goals, their driver and their tools.
 | `GoalChange`, `GoalOperation`, `FoldedGoal`, `decode_goal_change`, `fold_goal`, `goal_change_event` | the strict fold and the `goal/change` body, clear tombstones included; admitted rounds counted from attributed user messages |
 | `GoalService`, `GoalConfig`, `CreateGoal`, `EditGoal`, `GoalIds` | `get`, `disarm`, `create`, `edit`, `pause`, `resume`, `complete`, `block`, `clear` — each a compare-and-set on `GoalRef`, serialized per service so two writers cannot both write revision n+1 |
 | `GoalError`, `GoalErrorCode` | the nine `GOAL_*` codes, or a log failure |
-| `GoalDriver`, `RoundRunner`, `GoalRoundSource`, `DriverRun`, `DriverOutcome`, `ResumeReport` | the reconciler: one chain per session on a spawned task, `request`/`advance` join it, `resume_at_start` is the server's boot sweep |
+| `GoalDriver`, `RoundRunner`, `GoalRoundSource`, `DriverRun`, `DriverOutcome`, `ResumeReport` | the reconciler: one chain per session on a spawned task, `request`/`advance` join it, `resume_at_start` is the server's boot sweep. `GoalDriver::with_runtime` pins the runtime chains run on, so a request from any thread works; with none at all a request answers `no-runtime` (`NO_RUNTIME_SENTENCE`) instead of panicking |
 | `decide_goal_round`, `render_goal_round_prompt`, `RoundDecision`, `ROUND_LIMIT_CODE` | the pure decision and DSH's round prompt |
 | `round::{AgentRoundRunner, round_target}` | the rounds over `heddle-agent`'s real turn: the session's endpoint and model, else the default endpoint, the round's `source` on the prompt |
 | `DriverTrigger`, `SessionEdge`, `classify_session_event` | the goal-driver plugin's edges: `turn/completed`, turn activity, `goal/change` at rest |
-| `tool::{goal_tool_specs, run_create_goal, run_get_goal, run_update_goal, tool_view, end_of_run}` | the three verbs; the mirrors `ToolSpec`/`ToolAnswer` go when `heddle-tools`' API lands |
+| `tool::{goal_tool_specs, run_create_goal, run_get_goal, run_update_goal, tool_view, end_of_run}` | the three verbs over std and serde types; the boot wraps them as `heddle-tools` registry tools, so this crate needs no tools dependency |
 | `http::{get_goal, post_goal}`, `cli::{goal_json, goal_text}` | the person's verbs and the `heddle goal` command, as exact bytes |
 | `SessionLog`, `LogError`, `Clock`, `iso_timestamp` | the same ports as `heddle-todo`'s, kept separate so either plugin loads alone |
 

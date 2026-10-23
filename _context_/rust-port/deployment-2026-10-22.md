@@ -1,14 +1,14 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:48:13Z
+modified: 2026-10-23T06:04:13Z
 level: L3
 version: 2.0.0
-description: 'What serves the owner''s page at 127.0.0.1:8082, how it is redeployed, rehearsed and restored, who acts on it, and what is still open.'
+description: What serves the owner's page on loopback port 8082, how it is redeployed, rehearsed and restored, who acts on it, and what is still open.
 status: unverified
 grounded_in:
   - source: D-020 (the team resumed on the owner's Mac; no devservers, no SSH forward)
-  - source: owner statement in the dsh session, 2026-10-22, asking that heddle be served locally at 127.0.0.1:8082
+  - source: owner statement in the dsh session, 2026-10-22, asking that heddle be served locally on loopback port 8082
   - source: D-015, D-030, D-035, D-042, D-045
 ---
 
@@ -23,6 +23,7 @@ The owner's page is `http://127.0.0.1:8082/`, the TypeScript build as the oracle
 | gate | dsh-web-ops' agent `ai.reflection.heddle-web-gate`, 8082 → 3082, token read from `~/.heddle/web.log` (mode 600) |
 | endpoint | D-030 offline fixture: `~/.heddle/heddle.json` points `scripted` at `~/.heddle/deployment-scripted.json`; replies open `scripted endpoint: offline fixture reply, not a model` |
 | page marker | `dd6d45d28567`, unchanged through every redeploy so far |
+| Rust preview (separate) | agent `com.dtadpole.heddle-web-rust-preview` on 3097, main's release binary, rebuilt by `preview.sh` on every main that changes `rust/crates/heddle` or `heddle-server` (the commit is in `~/.heddle-rust-preview/built-from-main`); own `HEDDLE_HOME` `~/.heddle-rust-preview`; no gate, so a token link; stop with `launchctl bootout` of its label |
 
 ## Operating it
 

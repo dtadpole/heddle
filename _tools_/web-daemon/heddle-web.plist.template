@@ -21,7 +21,7 @@
 
     One element per argument is why a plist needs no quoting and no shell: a checkout path with a space stays one
     string, and launchd resolves nothing through a shim. The list either runs the supervisor
-    (`supervisor.mjs --`, on macOS, where launchd was measured not to restart a job) or the program directly.
+    (`supervisor.mjs`, on macOS, where launchd was measured not to restart a job) or the program directly.
   -->
   <key>ProgramArguments</key>
   <array>
@@ -51,6 +51,15 @@
     survives a reboot on a healthy host, and the supervisor is what survives a crash on this one.
   -->
   <key>KeepAlive</key>
+  <true/>
+
+  <!--
+    The server outlives its supervisor. By default launchd kills the job's whole process group when the job's process
+    dies, and on this Mac it then never restarts the job: measured 2026-10-22 on a scratch agent, a SIGKILL of the
+    supervisor took the server down with it and left the port silent. Abandoned, the server keeps serving; the next
+    supervisor (a guard, a redeploy, a login) reclaims it through the supervisor's reclaim-port option.
+  -->
+  <key>AbandonProcessGroup</key>
   <true/>
 
   <!-- A crash loop is bounded: launchd throttles restarts rather than spinning. -->

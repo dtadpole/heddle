@@ -1,5 +1,7 @@
 ---
 title: The heddle-config sources
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:03:00Z
 version: 0.2.0
 description: The sources of the heddle-config crate, one file per TypeScript concern, with unit tests beside the code.
 grounded_in:

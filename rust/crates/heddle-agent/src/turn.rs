@@ -164,19 +164,8 @@ pub struct Denial {
     pub message: String,
 }
 
-/// The last round's context budget, so a caller can report it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextSummary {
-    /// The request's estimated size.
-    pub estimated_tokens: u64,
-    /// The reduction trigger.
-    pub threshold_tokens: u64,
-    /// Tool results rewritten.
-    pub pruned: u64,
-    /// Whether a summary landed.
-    pub compacted: bool,
-}
+/// The last round's context budget, so a caller can report it: the context service's own summary.
+pub use heddle_context::ContextSummary;
 
 /// What happened in one turn, including what was refused. Serialized in the TypeScript shape.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -737,7 +726,7 @@ pub fn is_abnormal_finish(finish_reason: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
 
     use super::*;
@@ -1182,7 +1171,10 @@ mod tests {
                 context_window: 1_000,
                 threshold_tokens: 800,
                 messages,
-                ..ContextReport::default()
+                pruned: 0,
+                compacted: false,
+                instructions: Vec::new(),
+                breakdown: Default::default(),
             }
         }
     }
@@ -1298,7 +1290,7 @@ mod tests {
         }
     }
 
-    fn registry_with(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
+    pub(crate) fn registry_with(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
         let registry = ToolRegistry::new(ToolGates {
             approvals: Arc::new(AllowAll),
             sandbox: Arc::new(FlatSandbox),

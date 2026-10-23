@@ -1,6 +1,8 @@
 ---
 title: The heddle-goal sources
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:32:22Z
+version: 0.3.1
 description: The sources of the heddle-goal crate, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -14,7 +16,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 |---|---|
 | [`lib.rs`](lib.rs) | the crate root, its documentation and the re-exports |
 | [`service.rs`](service.rs) | the shapes, the strict fold, the `goal/change` body and `GoalService` |
-| [`driver.rs`](driver.rs) | the round decision and prompt, `GoalDriver`, `DriverTrigger` |
+| [`driver.rs`](driver.rs) | the round decision and prompt, `GoalDriver` (on a pinned runtime, so the trigger can be fed from any thread), `DriverTrigger` |
 | [`log.rs`](log.rs) | the `SessionLog` and `Clock` ports and `iso_timestamp` |
 | [`round.rs`](round.rs) | `AgentRoundRunner`: each round answered by one real `heddle-agent` turn, tested end to end on a scripted endpoint |
 | [`store.rs`](store.rs) | `SessionLog` for `heddle-session`'s `SessionStore`, tested against a real store on disk |

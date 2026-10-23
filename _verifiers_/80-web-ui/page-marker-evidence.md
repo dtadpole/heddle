@@ -1,9 +1,11 @@
 ---
 title: Page Marker Regression Evidence
-level: L0
-version: 1.0.0
+created: 2026-10-18T09:03:29Z
+modified: 2026-10-23T05:04:11Z
+level: L3
+version: 1.0.1
 description: Records the minimap verifier migration from a static rail label to the served page hash contract.
-status: verified
+status: unverified
 grounded_in:
   - source: markedPage in src/server/web.ts and the targeted minimap browser check
   - source: test/web.test.ts and the deployment and resizable-panel verifier hash assertions
