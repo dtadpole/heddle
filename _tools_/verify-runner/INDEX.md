@@ -15,6 +15,7 @@ Holds the two halves of one job — making a verifier's result **honest** and ma
 |---|---|
 | [`run.mjs`](run.mjs) | the judge: runs a check under Node's test runner, reads the TAP stream, and exits with the project's verdict |
 | [`lib.mjs`](lib.mjs) | the library every check imports: the CLI runners, the scripted config and model doubles, isolated fixtures, transcript and session finding, `skipUnless` |
+| [`lane.mjs`](lane.mjs) | the lane gate: runs every check file of the parts named, and is red when a check fails or a file gives no verdict — unjudged checks do not block a merge (D-042) |
 | [`browser.mjs`](browser.mjs) | the one-page wrapper over [`browser-use/`](../browser-use/INDEX.md) that the checks needing a page import |
 | [`lib.d.mts`](lib.d.mts) | the names a TypeScript test may import from the library |
 | [`_tests_/`](_tests_/INDEX.md) | both component suites — the verdict mapping and the library's rules |
@@ -49,6 +50,21 @@ The mapping itself is component-tested without running a check:
 ```bash
 node --test _tools_/verify-runner/_tests_/verdict-rules/unit.test.mjs
 ```
+
+## The lane gate
+
+An integrator asks a different question from "does every part hold": **does this merge candidate break anything?**
+`lane.mjs` answers it over the parts a lane owns, with the binary under test named by `HEDDLE_BIN`:
+
+```bash
+HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs 05-config-system 10-llm-backends ...
+node _tools_/verify-runner/lane.mjs --json --timeout 400 <part> ...
+```
+
+It is **green** when no check failed and every check file gave a verdict, however many checks were unjudged, and
+**red** when a check fails, a file's verdict is `1`, or a file times out or crashes. A file with no verdict is never
+read as unjudged: a half-wired binary that stalls every turn would otherwise pass the gate. `all.mjs` keeps the
+stricter question — an unjudged part is a failure there — because that is what "the port is complete" means.
 
 ## The library a check imports
 

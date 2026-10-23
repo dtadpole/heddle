@@ -53,8 +53,13 @@ records are still this crate's, converted at the seam. Unit tests: 74, green, wi
   the real crates (`adapters::{LlmModel, Sessions, SessionSubagents, Context}`; `Context::over_session_handles` binds
   `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
   `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
-- **Open, not in this crate:** `50-agentic-loop` answers through `HEDDLE_BIN` once the binary dispatches `--turn` to
-  `command::run` with an `AgentRuntime` composed from those adapters (its owner has the exact lines).
+- **Measured through the binary (2026-10-22, local experiment, not committed):** with the binary's `--turn` branch
+  dispatching to `command::run`, the runtime composed from these adapters and the `subagent-tool` row composed from
+  this crate, `50-agentic-loop`'s `check.mjs` passes 6/6 and `check-subagents.mjs` 1/1 — once the default tree's
+  `goal-driver` and `team` rows, which the binary cannot load yet, are stood in for. Without them, `--turn` refuses
+  the run as the TypeScript does (`the configuration names row 'goal-driver' … which nothing registered`).
+- **Open, not in this crate:** the binary's `--turn` dispatch, the `subagent-tool` row adapter, and the `goal-driver`
+  and `team` rows (their owners have the exact lines).
 - **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
   runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
   starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.

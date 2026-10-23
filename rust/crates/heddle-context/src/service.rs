@@ -2225,4 +2225,40 @@ mod tests {
             crate::meter::BaselineKind::Estimated
         );
     }
+
+    /// The agent loop boxes these futures as `BoxFuture` (`Send`) for its context port and its
+    /// `request_error` listener, so they must stay `Send`; this fails to compile otherwise.
+    #[test]
+    fn the_round_and_the_recovery_futures_can_cross_threads() {
+        fn assert_send<T: Send>(_: &T) {}
+        let scratch = Scratch::new("send");
+        let (store, service) = build_service(
+            ContextConfig {
+                instructions: false,
+                ..ContextConfig::default()
+            },
+            dependencies(scratch.path(), None),
+        );
+        let session = store.open("s");
+        let options = PrepareOptions {
+            cwd: scratch.path(),
+            endpoint: "local",
+            model: None,
+            tools: &[],
+            system: None,
+            summarizer: None,
+            force: false,
+        };
+        let prepare = service.prepare(&session, &options);
+        assert_send(&prepare);
+        let request = OverflowRequest {
+            error_code: crate::types::CONTEXT_WINDOW_EXCEEDED,
+            cwd: scratch.path(),
+            endpoint: "local",
+            model: None,
+            tools: &[],
+        };
+        let recover = service.recover_overflow(&session, &request);
+        assert_send(&recover);
+    }
 }
