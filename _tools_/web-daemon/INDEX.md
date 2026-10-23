@@ -83,7 +83,12 @@ So, and each is a rule in this folder:
 - [`guard.sh`](guard.sh) is the outer layer, because a job that launchd never starts at login cannot be restarted
   by the supervisor living inside it. `install.sh --guard` adds one cron line (`* * * * * /bin/sh <checkout>/_tools_/web-daemon/guard.sh`);
   the probe answers on a host where the platform starts the job, so the line is harmless on Linux too. Every action
-  it takes is written to `~/.heddle/guard.log` with the reading that caused it;
+  it takes is written to `~/.heddle/guard.log` with the reading that caused it. **Installing that line needs the
+  account's crontab permission**: measured 2026-10-22, `crontab -` from this repository's automation answered
+  `Operation not permitted` (macOS TCC), so `install.sh --guard` fails loudly there and the line has to be added by
+  the account owner or from a context that holds the permission. On such a host the layers above the cron line are
+  the supervisor and the agent's start at login; `guard.sh` can also be run by hand, which is what an operator does
+  after a 502;
 - `95-web-daemon`'s stays-up check kills the process that **owns the port** and requires a new one within twenty
   seconds, because that is the process whose death is an outage, whichever layer is charged with replacing it.
 

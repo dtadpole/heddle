@@ -137,7 +137,18 @@ launchd's. Until the supervisor is on main, main's 95 result on this host depend
 
 **What restarts it today.** Until this branch reaches `main`, the answer is an interim guard run from this
 session: every 15 s it probes `3082/healthz` and runs `launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`
-when the port is silent (`~/.heddle/guard.log`). That is a hand, not a design — it dies with the session. The
+when the port is silent (`~/.heddle/guard.log`). That is a hand, not a design — it dies with the session, and after
+a reboot nothing starts it again until someone does.
+
+`guard.sh` was also tested by hand and works in the case it exists for: `launchctl bootout` the agent, and it
+bootstraps from the plist, kickstarts it and records `port 3082 answering again` about a second later. What it
+cannot do yet is run on a timer: adding the cron line needs the account's crontab permission, and
+`crontab -` from this automation answered **`Operation not permitted`** (macOS TCC), so the crontab is untouched
+and `install.sh --guard` will fail loudly there until the line is added by the account owner or from a context that
+holds the permission. **The outer layer is therefore the supervisor and, at login, launchd; the cron line is
+one owner action away.**
+
+The
 landed answer is [`_tools_/web-daemon/supervisor.mjs`](../../_tools_/web-daemon/supervisor.mjs), which the agent
 runs so the server is restarted inside the service, plus
 [`_tools_/web-daemon/guard.sh`](../../_tools_/web-daemon/guard.sh) and `install.sh --guard`, one cron line for the
