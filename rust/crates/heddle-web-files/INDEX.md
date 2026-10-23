@@ -107,7 +107,7 @@ decision), `MarkdownAnswer`, `ErrorAnswer`, and `SavedUpload`/`PickerOutcome` fo
 |---|---|
 | `heddle-server` | mounts `FilesRoutes::router()` behind the token layer and implements `FilesHost`; `render_markdown(text, MarkdownOptions::default())` for each settled assistant row of `GET /api/sessions/{id}`; `read_attachments` for `POST /api/turn` and `…/steer` (`AttachmentInputError` → `400`); `attachments_of` for the transcript cards |
 | `heddle-web-trajectory` | `render_code(json, "json", CodeOptions { gutter: false })` and `escape_html` for the tool inspector |
-| the `FilesHost` implementation | `heddle_home` from `heddle-config`; `workspace_owner` from `heddle-workspace`'s `owner(path)`; `read_file_text` from the session tree's `readFileText` |
+| the `FilesHost` implementation | `heddle_home` from `heddle-config`; `workspace_owner` from `heddle-workspace`'s `owner(path)`; `read_file_text` from the session tree's `readFileText`. The routes resolve a requested path (realpath, or `path.resolve` when it is gone) **before** asking `workspace_owner`, and then read or serve the resolved path, so the host is asked about a path that is already canonical |
 
 ## Library decisions
 
