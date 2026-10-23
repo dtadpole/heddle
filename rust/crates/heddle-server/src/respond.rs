@@ -5,7 +5,7 @@
 //! followed by a newline, and reads bodies through `readJson`. A feature crate that answers through these
 //! helpers answers byte-for-byte as the route it ported did, which is what lets a verifier judge both builds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath, Request};
@@ -179,6 +179,39 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
             Err(_) => Err(text(StatusCode::BAD_REQUEST, "the body must be JSON\n")),
         }
     }
+}
+
+/// A canonical absolute path, as `canonicalPath` in `src/paths.ts` returns it: the `realpath` when
+/// the path exists, the lexically resolved absolute path when it does not.
+///
+/// Routes canonicalize **before** asking a workspace whether it owns a path: `/a/b/../etc` and a
+/// symlinked spelling are not a different folder, and a containment check on the raw string is a
+/// containment check a caller can walk out of. A relative path is resolved from the server's working
+/// directory, `.` is dropped and `..` pops but never above the root.
+pub fn canonical_path(path: impl AsRef<Path>) -> PathBuf {
+    use std::path::Component;
+
+    let path = path.as_ref();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+    std::fs::canonicalize(&normalized).unwrap_or(normalized)
 }
 
 /// A session id: `session-` followed by 36 characters of hex digits and dashes, case-insensitive.
@@ -488,6 +521,45 @@ mod tests {
             body_of(response).await.2,
             "{\"error\":\"not a session id\"}\n"
         );
+    }
+
+    #[test]
+    fn canonical_path_resolves_and_normalizes() {
+        let current = std::env::current_dir().unwrap();
+        assert_eq!(
+            canonical_path("."),
+            std::fs::canonicalize(&current).unwrap()
+        );
+        assert_eq!(canonical_path(current.join("a/../b")), current.join("b"));
+        assert_eq!(canonical_path("/a/../b"), PathBuf::from("/b"));
+        // `..` at the root cannot climb above it.
+        assert_eq!(canonical_path("/../a"), PathBuf::from("/a"));
+        // An existing directory is the real path, so a symlink and its target compare equal.
+        let root = std::env::temp_dir().join(format!(
+            "heddle-canonical-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = root.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            canonical_path(&target),
+            std::fs::canonicalize(&target).unwrap()
+        );
+        #[cfg(unix)]
+        assert_eq!(canonical_path(&link), canonical_path(&target));
+        // A path that does not exist is still absolute and normalized.
+        assert_eq!(
+            canonical_path(root.join("missing/../new")),
+            root.join("new")
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

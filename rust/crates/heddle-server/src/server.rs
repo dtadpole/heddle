@@ -55,7 +55,7 @@ use tokio::sync::mpsc;
 use crate::fence;
 use crate::page;
 use crate::preview;
-use crate::respond::{self, JsonBody, SessionId, SessionPath};
+use crate::respond::{self, JsonBody, SessionId, SessionPath, canonical_path};
 use crate::runs::{RunRegistry, iso_time};
 use crate::selection::{SessionSelection, session_request_selection, turn_selection};
 use crate::services::{
@@ -775,18 +775,14 @@ fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
     }
 }
 
-fn path_of(value: &str) -> PathBuf {
-    PathBuf::from(value)
-}
-
 async fn create_session(State(state): State<AppState>, body: JsonBody) -> Response {
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
     let branch = body
         .non_empty("branch")
-        .map(path_of)
-        .unwrap_or_else(|| state.harness().cwd.clone());
+        .map(canonical_path)
+        .unwrap_or_else(|| canonical_path(&state.harness().cwd));
     if !workspaces.owns(&branch) {
         return respond::error(
             StatusCode::BAD_REQUEST,
@@ -816,7 +812,7 @@ async fn folder_session(State(state): State<AppState>, body: JsonBody) -> Respon
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
-    let folder = body.non_empty("folder").map(path_of);
+    let folder = body.non_empty("folder").map(canonical_path);
     let Some(folder) = folder.filter(|folder| workspaces.owns(folder)) else {
         return respond::error(
             StatusCode::BAD_REQUEST,
@@ -957,10 +953,13 @@ async fn flags_session(
     }
     if archived == Some(true) && state.runs().is_running(id.as_str()) {
         if body.bool("stop") != Some(true) {
-            return respond::error_with_code(
+            return respond::json(
                 StatusCode::CONFLICT,
-                format!("session {id} is running; pass stop: true to stop it and archive"),
-                "active",
+                &json!({
+                    "error": format!("session {id} is running; pass stop: true to stop it and archive"),
+                    "code": "active",
+                    "running": state.runs().running(id.as_str()),
+                }),
             );
         }
         state.runs().abort(id.as_str());
@@ -988,7 +987,7 @@ async fn title_session(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     let title = title.to_owned();
-    let folder = body.non_empty("folder").map(path_of);
+    let folder = body.non_empty("folder").map(canonical_path);
     if let Some(folder) = folder.as_ref()
         && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
     {
@@ -1102,7 +1101,7 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
-    let path = query.get("path").map(|path| path_of(path));
+    let path = query.get("path").map(canonical_path);
     let archived =
         crate::services::ArchivedFilter::from_query(query.get("archived").map(String::as_str));
     let sessions = state.harness().sessions.list();
@@ -1129,7 +1128,7 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let path = token::expand_home(raw, &home);
+    let path = canonical_path(token::expand_home(raw, &home));
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(_) => {
@@ -1217,8 +1216,13 @@ async fn answer_approval(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: JsonBody,
 ) -> Response {
+    // The TypeScript route answers a question nobody is holding as a conflict, not as a missing
+    // plugin: a profile without the approval service simply has no question to answer.
     let Some(service) = state.harness().approvals.as_ref() else {
-        return respond::plugin_missing("approval");
+        return respond::error(
+            StatusCode::CONFLICT,
+            "that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it",
+        );
     };
     let looks_like_approval = id.strip_prefix("approval-").is_some_and(|rest| {
         rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
@@ -1372,13 +1376,18 @@ async fn html_preview(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(workspaces) = state.harness().workspaces.as_ref() else {
-        return respond::plugin_missing("workspace");
-    };
     let Some(wanted) = query.get("path").filter(|path| !path.is_empty()) else {
         return respond::error(StatusCode::BAD_REQUEST, "a path is required");
     };
-    let path = PathBuf::from(wanted);
+    // A profile without the workspace plugin has no roots, so every path is outside them: the
+    // TypeScript route answers that, not a plugin-missing error.
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::error(
+            StatusCode::NOT_FOUND,
+            "that path is not under any workspace root",
+        );
+    };
+    let path = canonical_path(wanted);
     if !workspaces.owns(&path) {
         return respond::error(
             StatusCode::NOT_FOUND,
@@ -1404,12 +1413,20 @@ async fn html_preview(
 }
 
 async fn purify(State(state): State<AppState>) -> Response {
-    match preview::purify_path(&state.options().asset_roots) {
-        Some(path) => match std::fs::read(&path) {
-            Ok(bytes) => respond::file_bytes(&path, "purify.min.js", bytes),
-            Err(_) => respond::error(StatusCode::NOT_FOUND, "the sanitiser is not installed"),
-        },
-        None => respond::error(StatusCode::NOT_FOUND, "the sanitiser is not installed"),
+    // The browser loads this as a script, so it is served as JavaScript rather than through the
+    // inline/download file answer: an `attachment` content-disposition here would leave the preview
+    // page without a sanitiser.
+    let Some(path) = preview::purify_path(&state.options().asset_roots) else {
+        return respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n");
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(bytes))
+            .expect("a response builder with static headers"),
+        Err(_) => respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n"),
     }
 }
 
@@ -1451,14 +1468,16 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
-    let folder = body.non_empty("folder").map(path_of);
+    let folder = body.non_empty("folder").map(canonical_path);
     let title: String = prompt.chars().take(60).collect();
     let session = if let Some(resume) = resume {
+        // A resumed session keeps the selection it recorded; only a session this request creates is
+        // born with the request's choice (web.ts passes `{ resume }` alone).
         sessions.start(StartSession {
             resume: Some(resume.to_owned()),
             cwd: None,
             title: None,
-            selection: born.clone(),
+            selection: SessionSelection::default(),
         })
     } else if let Some(folder) = folder.as_ref() {
         let Some(workspaces) = state.harness().workspaces.as_ref() else {
@@ -2423,6 +2442,94 @@ mod tests {
         assert!(fenced.starts_with("HTTP/1.1 403"), "{fenced}");
 
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_sanitiser_is_javascript_or_a_plain_404() {
+        // Not installed: the TypeScript sentence, in plain text rather than a JSON error.
+        let (router, _) = app("purify-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, headers, bytes) =
+            call(&router, Method::GET, "/vendor/purify.js", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(headers["content-type"], "text/plain");
+        assert_eq!(body_text(&bytes), "the sanitiser is not installed\n");
+
+        // Installed under an asset root: served as a script a browser will run, not as a download.
+        let root = std::env::temp_dir().join(format!(
+            "heddle-purify-route-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        let nested = root.join("node_modules").join("dompurify").join("dist");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("purify.min.js"), "// purify").unwrap();
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("purify-installed")),
+                asset_roots: vec![root.clone()],
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, headers, bytes) =
+            call(&router, Method::GET, "/vendor/purify.js", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(body_text(&bytes), "// purify");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unanswerable_approval_and_an_html_path_without_a_workspace_are_refusals_not_plugin_errors()
+     {
+        let mut without_approvals = harness();
+        without_approvals.approvals = None;
+        let builder = ServerBuilder::new(
+            without_approvals,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("without-plugins")),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, bytes) = post_json(
+            &router,
+            "/api/approvals/approval-00000000-0000-0000-0000-000000000000",
+            &cookie,
+            r#"{"outcome":"allowed-once"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body_text(&bytes).contains("no longer waiting"));
+
+        // No workspace service: /api/html reports the path as outside every root, as web.ts does.
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/html?path=%2Fwork%2Fa.html")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"that path is not under any workspace root\"}\n"
+        );
     }
 
     struct DuplicateFeature;

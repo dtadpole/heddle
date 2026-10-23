@@ -9,7 +9,7 @@ grounded_in:
 
 # `rust/crates/heddle-server/src`
 
-The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code. 111 tests pass with
+The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code. 114 tests pass with
 `cargo test --manifest-path rust/Cargo.toml -p heddle-server`.
 
 | File | What it is |

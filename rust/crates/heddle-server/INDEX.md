@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (111 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (114 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -40,7 +40,7 @@ their checks are judged against the TypeScript build.
 | `fence` | `is_loopback`, `reject_untrusted` (Host and Origin), the cross-site write rule, the bind refusal |
 | `page` | the embedded page and its `heddle-page` build marker, the favicon, `page_access`, `token_form_page` |
 | `preview` | `html.ts`: the preview allow-lists, `PREVIEW_CSP`, `rewrite_resources`, `/api/html`'s prepared document, where `purify.min.js` is found |
-| `respond` | the response shapes every route answers with (`json`, `json_compact`, `text`, `html`, `error`, …), `JsonBody` (the `readJson` rules), `SessionId` / `SessionPath` (the `session-<36>` rule), `inline_content_type`, `file_bytes` |
+| `respond` | the response shapes every route answers with (`json`, `json_compact`, `text`, `html`, `error`, …), `JsonBody` (the `readJson` rules), `SessionId` / `SessionPath` (the `session-<36>` rule), `canonical_path` (the `canonicalPath` every workspace-bound route applies before `owns`), `inline_content_type`, `file_bytes` |
 | `stream` | `EventHub` (every session event and approval question, delivered to each subscriber unbounded), `SseFrame`, `sse_response`, `session_event_forwarder` / `approval_request_forwarder` for the binary's bus listeners |
 | `runs` | `RunRegistry` and `TurnGuard`: running counts, the per-turn clock, completion times, stop by `CancellationToken` |
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
@@ -94,7 +94,7 @@ to confirm or move a row.
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |
 | `GET`, `POST /api/goal`, `GET /api/todo`, `GET /api/team` | heddle-server | over the goal, todo and team traits |
 | `GET /api/endpoints`, `GET /api/context` | heddle-web-composer | |
-| `GET /api/html`, `GET /vendor/purify.js` | heddle-server | `html.ts` is this crate's |
+| `GET /api/html`, `GET /vendor/purify.js` | heddle-server | `html.ts` is this crate's; the sanitiser is served as `text/javascript` so the preview page can run it |
 | `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`, `GET /api/file`, `POST /api/markdown` | heddle-web-files | use `respond::file_bytes` and `inline_content_type` |
 
 The chat view needs two things other ui-lane crates own, injected through `Harness`: the markdown renderer
