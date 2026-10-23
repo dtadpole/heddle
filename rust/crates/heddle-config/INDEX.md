@@ -200,9 +200,14 @@ that validates is one that starts.
 | the manifest file | the row's name through step 5: `./x.component.yml` resolves against `anchor_dir`, the **first** file layer's directory, not the directory of the layer that wrote the row |
 | the program | `program` starting with `.` resolves lexically against the manifest's folder; anything else is used as written — an absolute path, or a bare name the system finds on `PATH`. `~` is not expanded |
 | the arguments | `args` as written, none when absent |
-| the working directory | the manifest's folder |
+| the working directory | the manifest's folder, because a manifest writes its `args` relative to itself (`args: [./shout-tool.mjs]`); only that folder keeps a manifest portable wherever it is referenced from, a later layer included |
 | the configuration | the row's composed `config`, handed over in `initialize`; `{}` when the row writes none or `null` (step 4) |
-| the name in errors and logs | the manifest's file name without `.component.yml`, not the row's `id` — so `id: alpha` naming `./shout.component.yml` reads `alpha:` in `--validate` problems but `shout` once running |
+| the name in `initialize`, errors and logs | **the row's `id`**, the same name `config --validate` and the boot's `N row(s) failed to load: <id>` use, so one broken row has one name everywhere |
+
+The two last rows are agreed with developer-five, who owns the process protocol (2026-10-22). **Where the binary still
+differs:** as of main `8072846` it names the running component by the manifest's file name without `.component.yml`,
+so `id: alpha` naming `./shout.component.yml` says `shout` once running. `Catalog::component(&ComponentRef)` does not
+carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change is developer-two's.
 
 ### Keeping `05-config-system` judged
 
