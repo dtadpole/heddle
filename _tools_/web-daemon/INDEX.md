@@ -1,7 +1,7 @@
 ---
 title: Web Daemon
 created: 2026-10-11T20:54:23Z
-modified: 2026-10-23T06:03:13Z
+modified: 2026-10-23T07:47:29Z
 version: 2.2.0
 description: The supervised user service that keeps the heddle Web UI running at its documented port, with either build, and the tools that install, rehearse and redeploy it.
 grounded_in:
@@ -24,7 +24,7 @@ macOS, systemd on Linux), [`supervisor.mjs`](supervisor.mjs) restarts the server
 | [`service.mjs`](service.mjs) | the reader `95-web-daemon` and `96-deployment` share |
 | [`rehearse.sh`](rehearse.sh) | every experiment, on a scratch agent: six claims, including 95 |
 | [`redeploy.sh`](redeploy.sh) | the deployment's redeploy, in its one order, judged by 96 |
-| [`preview.sh`](preview.sh) | rebuilds the Rust preview (3097) from main when the binary's crates changed |
+| [`preview.sh`](preview.sh) | rebuilds the Rust preview (3097) from main when anything it serves changed |
 | [`_tests_/`](_tests_/INDEX.md) | the component suites |
 
 ## Read next

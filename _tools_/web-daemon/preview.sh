@@ -1,7 +1,7 @@
 #!/bin/sh
 # Rebuild the Rust preview from main when main changed the binary, and restart it.
 #
-#   ./preview.sh            rebuild and restart when main changed rust/crates/heddle or heddle-server since the build
+#   ./preview.sh            rebuild and restart when main changed anything the preview serves since its build
 #   ./preview.sh --check    say whether the preview is behind, and change nothing (exit 10 when it is)
 #   ./preview.sh --force    rebuild and restart even when nothing it serves changed
 #
@@ -32,14 +32,19 @@ tip=$(git_at rev-parse refs/remotes/origin/main)
 built=$(cat "$home/built-from-main" 2>/dev/null || true)
 short() { printf '%s' "$1" | cut -c1-7; }
 
-# What the binary is made of: the two crates the coordinator named, and the lockfile that pins their dependencies.
+# What the preview serves: every crate's code and manifest (the binary links them all; watching only rust/crates/heddle
+# and heddle-server left the preview behind a heddle-config fix while it read "current", measured 2026-10-23), the
+# workspace manifest and lockfile, the page and icon the binary embeds, and the profile it loads from the checkout.
+# Markdown under the crates is not code, so a documentation commit never costs the owner a new link.
 changed=""
 if [ -z "$built" ]; then
   changed="no recorded build"
 elif ! git_at cat-file -e "$built^{commit}" 2>/dev/null; then
   changed="recorded build $(short "$built") is unknown here"
 else
-  changed=$(git_at diff --name-only "$built" "$tip" -- rust/crates/heddle rust/crates/heddle-server rust/Cargo.lock | head -3)
+  changed=$(git_at diff --name-only "$built" "$tip" -- rust/Cargo.lock rust/Cargo.toml \
+    ':(glob)rust/crates/*/Cargo.toml' ':(glob)rust/crates/*/src/**' ':(exclude,glob)rust/crates/**/*.md' \
+    src/server/page.html heddle.svg cordis.yml heddle.patch.yml | head -3)
 fi
 
 if [ "$mode" = --check ]; then

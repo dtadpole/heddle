@@ -1,8 +1,8 @@
 ---
 title: Web daemon preview rules
 created: 2026-10-23T06:03:13Z
-modified: 2026-10-23T06:03:13Z
-version: 1.0.0
+modified: 2026-10-23T07:47:29Z
+version: 1.1.0
 description: Component tests for preview.sh — when the Rust preview is rebuilt from main, the order it is rebuilt in, and what a failure leaves serving.
 grounded_in:
   - source: _tools_/web-daemon/preview.sh
@@ -18,8 +18,9 @@ and the installer, all recording their calls.
 | Case | Expected |
 |---|---|
 | no recorded build | build in a slot, dry-run `web`, swap the binary, reinstall on 3097, record the commit, print the link |
-| main changed `rust/crates/heddle` | `--check` exits 10 and names the file; nothing runs |
-| main changed only docs | current: no build, no restart, the owner keeps the link; `--force` rebuilds |
+| main changed any crate's code or manifest, the lockfile, the embedded page, or the profile | `--check` exits 10 and names the file; nothing runs |
+| main changed only Markdown, inside a crate or out | current: no build, the owner keeps the link |
+| `--force` | rebuilds even when current |
 | the build or the dry run fails | exit 1; the served binary and the recorded commit are unchanged |
 | a dirty checkout, the deployment's port or label, an unknown option | exit 2, nothing runs |
 
