@@ -17,14 +17,14 @@
 //!
 //! ```text
 //! let plugin = heddle_team::compose::start_row(heddle_team::compose::TeamRow {
-//!     config, sessions, models, runtime: crate::runtime::agent_runtime(services)?, emit_changed: None, warn,
+//!     config, sessions, models, runtime: crate::runtime::shared_runtime(services)?, emit_changed: None, warn,
 //! })?;
 //! services.provide("team", Arc::clone(&plugin.service));
 //! // web: harness.team = Some(Arc::new(ServerTeam(service))); and before it starts,
 //! //      if let Some(note) = heddle_team::command::web_start_note(&service).await { notes.push(note) }
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use heddle_agent::{AgentRuntime, RunTurnOptions, TurnRegistry};
 use heddle_llm::ModelService;
@@ -51,8 +51,10 @@ pub struct TeamRow<'a> {
     /// The `model` service, for the default endpoint of a member whose session names none.
     pub models: Arc<ModelService>,
     /// The runtime a turn runs on — the same one the Lead's turn uses, so a teammate's turn has the same tools
-    /// (the nine team tools among them, once registered here) and the same live-turn registry.
-    pub runtime: AgentRuntime,
+    /// (the nine team tools among them, once registered here) and the same live-turn registry. The team keeps only
+    /// a weak reference: the runtime's registry holds the team's tools, which hold the service, so a strong one
+    /// would be a cycle that never drops. Whoever owns the run keeps the `Arc`.
+    pub runtime: Arc<AgentRuntime>,
     /// Announces `team/changed` on the event bus, when the binary mounts one.
     pub emit_changed: Option<TeamNotify>,
     /// Where a recovery failure is reported (the TypeScript build logs `team: <message>` at warn).
@@ -75,7 +77,7 @@ pub fn start_row(row: TeamRow<'_>) -> Result<TeamPlugin, String> {
     let plugin = TeamPlugin::install(TeamPluginDeps {
         store: Arc::new(SessionTeamStore::new(Arc::clone(&store))),
         agent: Arc::new(RuntimeAgent {
-            runtime: row.runtime,
+            runtime: Arc::downgrade(&row.runtime),
             store,
             models: row.models,
         }),
@@ -260,13 +262,17 @@ impl TeamStore for SessionTeamStore {
 
 /// [`TeamAgent`] over `heddle-agent`: a member's turn begins on the shared runtime with purpose `team`.
 struct RuntimeAgent {
-    runtime: AgentRuntime,
+    runtime: Weak<AgentRuntime>,
     store: Arc<SessionStore>,
     models: Arc<ModelService>,
 }
 
 impl TeamAgent for RuntimeAgent {
     fn begin_turn(&self, request: TeamTurnRequest) -> Result<TurnFuture, String> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or("the run that owned this team has ended")?;
         let handle = self
             .store
             .open(&request.session)
@@ -278,7 +284,7 @@ impl TeamAgent for RuntimeAgent {
         // begin_turn writes the prompt and registers the turn live before it returns: the ordering the team's
         // delivery proof and its boot recovery read the member's log for.
         let begun =
-            heddle_agent::begin_turn(&self.runtime, options).map_err(|error| error.to_string())?;
+            heddle_agent::begin_turn(&runtime, options).map_err(|error| error.to_string())?;
         Ok(Box::pin(async move {
             begun
                 .run()
