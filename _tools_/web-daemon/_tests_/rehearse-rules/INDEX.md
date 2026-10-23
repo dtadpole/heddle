@@ -1,6 +1,8 @@
 ---
 title: Web daemon rehearsal rules
-version: 1.1.0
+created: 2026-10-23T04:13:56Z
+modified: 2026-10-23T05:30:26Z
+version: 1.2.0
 description: Component tests for rehearse.sh's refusals — a rehearsal pointed at the deployment's label, unit or ports, or at a port already in use, refuses before it calls anything.
 grounded_in:
   - source: _tools_/web-daemon/rehearse.sh
@@ -21,7 +23,7 @@ aimed at the deployment refuses before it calls anything.**
 | a port something already answers on | exit 2, no agent file written |
 | `--cleanup` with nothing installed; an unknown option | exit 0 with a sentence; exit 2 |
 | a platform with no supervisor | exit 3, unjudged |
-| a service that never answers (the Rust binary's `web` today) | `started` failed, the other claims unjudged, exit 1, and the scratch agent removed |
+| a service that never answers (the Rust binary's `web` today) | `started` failed, the other six claims unjudged, exit 1, and the scratch agent removed |
 
 ```bash
 node --test _tools_/web-daemon/_tests_/rehearse-rules/unit.test.mjs

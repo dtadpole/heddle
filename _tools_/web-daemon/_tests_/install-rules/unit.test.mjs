@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -87,6 +87,9 @@ function fixture({ name = 'repo' } = {}) {
     ].join('\n'),
   )
   record('loginctl', 'echo "${FAKE_LINGER:-yes}"\n')
+  // The post-start check probes the port; this stand-in answers unless told not to, and records nothing.
+  writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit "${FAKE_CURL_EXIT:-0}"\n')
+  chmodSync(join(bin, 'curl'), 0o755)
   // The account's crontab, kept in a file so the --guard edits can be read back like a real one.
   record(
     'crontab',
@@ -156,7 +159,8 @@ test('macOS renders the supervisor in front of the server, and asks not to only 
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
-  assert.deepEqual(args, [process.execPath, supervisor, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which runs the server')
+  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--', process.execPath, `${f.repo}/dist/cli.js`, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'launchd runs the supervisor, which watches, reclaims and runs the server')
+  assert.match(stdout, /<key>AbandonProcessGroup<\/key>\s*<true\/>/, 'the server outlives a killed supervisor')
 
   const bare = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_WEB_SUPERVISOR: '0' })
   assert.equal(bare.status, 0, bare.stderr)
@@ -175,7 +179,7 @@ test('the Rust branch of part 11 is the same service with the binary in front of
   assert.equal(status, 0, stderr)
   const args = [...stdout.split('<key>ProgramArguments</key>')[1].split('</array>')[0].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
   const supervisor = join(f.repo, '_tools_', 'web-daemon', 'supervisor.mjs')
-  assert.deepEqual(args, [process.execPath, supervisor, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
+  assert.deepEqual(args, [process.execPath, supervisor, '--health-url', 'http://127.0.0.1:3082/healthz', '--health-every', '5', '--reclaim-port', '3082', '--lock', `${f.home}/.heddle/web-supervisor.3082.lock`, '--', f.heddleBin, 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], 'the binary is the server the supervisor holds')
   assert.doesNotMatch(stdout, /dist\/cli\.js/, 'nothing node-runs-a-CLI remains in the definition')
 
   const described = describeCommand(args, f.repo)
@@ -426,4 +430,59 @@ test('an unknown platform and an unknown option are refused', () => {
   const option = install(f, ['--frobnicate'], { HEDDLE_WEB_PLATFORM: 'linux' })
   assert.equal(option.status, 2)
   assert.match(option.stderr, /unknown option --frobnicate/)
+})
+
+test('an install is verified: a service that never answers on its port fails loudly instead of reporting success', () => {
+  const f = fixture()
+  const answered = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin' })
+  assert.equal(answered.status, 0, answered.stderr)
+  assert.match(answered.stdout, /verified: port 3082 answers/)
+
+  const silent = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_CURL_EXIT: '7', HEDDLE_START_WAIT: '1' })
+  assert.equal(silent.status, 1, 'a start that is not verified is not a start')
+  assert.match(silent.stderr, /is installed but port 3082 did not answer within 1 s/)
+
+  const skipped = install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_CURL_EXIT: '7', HEDDLE_START_WAIT: '0' })
+  assert.equal(skipped.status, 0)
+  assert.match(skipped.stdout, /not verified: HEDDLE_START_WAIT=0/, 'skipping is said, never silent')
+})
+
+test('the rendered agent is well-formed XML, which no comment may break with a double hyphen', () => {
+  const f = fixture()
+  const { status, stdout } = install(f, ['--print'], { HEDDLE_WEB_PLATFORM: 'darwin' })
+  assert.equal(status, 0)
+  for (const comment of stdout.matchAll(/<!--([\s\S]*?)-->/g)) {
+    assert.doesNotMatch(comment[1], /--/, `a comment holds "--", which XML forbids: ${comment[1].trim().slice(0, 60)}`)
+  }
+})
+
+test('uninstalling stops a server this service left behind on its port, and nothing else on it', async () => {
+  // The agent abandons its process group, so a server whose supervisor died outlives the bootout: measured 2026-10-22,
+  // an uninstall left one serving on the scratch port until it was stopped by hand.
+  const f = fixture()
+  const ours = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'web', '--host', '127.0.0.1', '--port', '3082', '--config', `${f.repo}/cordis.yml`], { stdio: 'ignore' })
+  const theirs = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'serve', '--port', '3082'], { stdio: 'ignore' })
+  const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+  const lsof = join(f.base, 'lsof-stand-in')
+  const listening = (pid) => {
+    writeFileSync(lsof, `#!/bin/sh\necho ${pid}\n`)
+    chmodSync(lsof, 0o755)
+  }
+  try {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    listening(theirs.pid)
+    const stranger = install(f, ['--uninstall'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_LSOF: lsof })
+    assert.equal(stranger.status, 0, stranger.stderr)
+    assert.match(stranger.stdout, new RegExp(`port 3082 is held by pid ${theirs.pid} .*not this service; left alone`))
+    assert.ok(alive(theirs.pid), 'a stranger is never stopped')
+
+    listening(ours.pid)
+    const leftover = install(f, ['--uninstall'], { HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_LSOF: lsof })
+    assert.equal(leftover.status, 0, leftover.stderr)
+    assert.match(leftover.stdout, new RegExp(`stopped the server this service left on port 3082 \\(pid ${ours.pid}\\)`))
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    assert.ok(!alive(ours.pid), 'the leftover of this checkout and port is gone')
+  } finally {
+    for (const child of [ours, theirs]) child.kill('SIGKILL')
+  }
 })

@@ -91,7 +91,18 @@ if [ "${1:-}" = "--status" ]; then
   exit 0
 fi
 
-if [ "$(probe)" = answering ]; then exit 0; fi
+if [ "$(probe)" = answering ]; then
+  # Answering, with the agent loaded but **not running**, is a server whose supervisor died: the agent abandons its
+  # process group, so the server outlives the supervisor and serves on, unsupervised — a later crash or hang would then
+  # have nothing to restart it. Starting the job gives it a supervisor again, which reclaims the server (one restart).
+  # Only that exact reading acts: not loaded is an install in progress, and running is supervised.
+  if [ "$platform" = darwin ] && loaded && [ "$(job_state)" = "not running" ] && ! within_cooldown; then
+    say "port $port answering but the agent is not running (an unsupervised server); starting it so a supervisor reclaims the server"
+    date +%s > "$stamp"
+    launchctl kickstart "gui/$(id -u)/$label" >> "$log" 2>&1 || true
+  fi
+  exit 0
+fi
 
 state=$(job_state)
 case "$state" in
