@@ -1031,7 +1031,7 @@ fn raw_url(resolved: &Subresource) -> String {
 }
 
 /// `encodeURIComponent`: every byte but an unreserved one is percent-encoded, upper-case hex.
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric()
