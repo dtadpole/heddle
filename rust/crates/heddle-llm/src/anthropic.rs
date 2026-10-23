@@ -58,14 +58,104 @@ pub fn anthropic_call(
 
 /// One message's content (`toAnthropicContent`): text blocks and base64 image blocks.
 pub fn to_anthropic_content(parts: &[ContentPart]) -> Vec<Value> {
-    let _ = parts;
-    todo!("port toAnthropicContent")
+    let mut content = Vec::new();
+    for part in parts {
+        match part {
+            ContentPart::Text { text } => content.push(serde_json::json!({
+                "type": "text",
+                "text": text
+            })),
+            ContentPart::Image(image) => {
+                if let Some(data) = &image.data {
+                    // A publisher route carries image input as a base64 source block, with no file reference.
+                    content.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.mime_type.as_str(),
+                            "data": data
+                        }
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    content
+}
+
+/// A tool call's recorded arguments as the provider expects them: parsed JSON, or an empty object.
+fn parsed_tool_input(arguments: &str) -> Value {
+    serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// The message list as Anthropic reads it (`toAnthropicMessages`), the system prompt left to the top-level field.
 pub fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
-    let _ = messages;
-    todo!("port toAnthropicMessages")
+    // Turns must alternate, so adjacent same-role turns are merged in place: a tool result follows an assistant
+    // turn directly and is a user turn.
+    let mut turns: Vec<(&'static str, Vec<Value>)> = Vec::new();
+    let mut push = |role: &'static str, content: Vec<Value>| {
+        if content.is_empty() {
+            return;
+        }
+        if let Some((last_role, last_content)) = turns.last_mut()
+            && *last_role == role
+        {
+            last_content.extend(content);
+            return;
+        }
+        turns.push((role, content));
+    };
+
+    for message in messages {
+        match message.role {
+            crate::types::Role::System => continue,
+            crate::types::Role::Assistant => {
+                let mut content = Vec::new();
+                for part in &message.content {
+                    match part {
+                        ContentPart::Text { text } => content.push(serde_json::json!({
+                            "type": "text",
+                            "text": text
+                        })),
+                        ContentPart::ToolCall(call) => content.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": call.id,
+                            "name": call.name,
+                            "input": parsed_tool_input(&call.arguments)
+                        })),
+                        // Reasoning is deliberately not sent: a thinking block needs the provider's signature.
+                        _ => {}
+                    }
+                }
+                push("assistant", content);
+            }
+            crate::types::Role::Tool => {
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                push(
+                    "user",
+                    vec![serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
+                        "content": text
+                    })],
+                );
+            }
+            crate::types::Role::User => push("user", to_anthropic_content(&message.content)),
+        }
+    }
+    turns
+        .into_iter()
+        .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
+        .collect()
 }
 
 /// The event-stream fold (`anthropicChunks`): `text_delta`, `thinking_delta`, `tool_use` blocks with
@@ -417,5 +507,108 @@ mod tests {
             .expect("skips");
         assert!(folded.chunks.is_empty());
         assert!(!folded.finished);
+    }
+
+    #[test]
+    fn content_blocks_are_text_and_base64_images() {
+        use crate::types::{ImageMediaType, ImagePart};
+
+        let image = ImagePart {
+            name: "shot.png".into(),
+            mime_type: ImageMediaType::Jpeg,
+            path: "/u/shot.jpg".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            data: Some("AAAA".into()),
+        };
+        assert_eq!(
+            to_anthropic_content(&[ContentPart::text("look"), ContentPart::Image(image)]),
+            vec![
+                serde_json::json!({ "type": "text", "text": "look" }),
+                serde_json::json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": "image/jpeg", "data": "AAAA" }
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_conversation_becomes_alternating_turns_with_tool_blocks_and_no_system_message() {
+        let messages = vec![
+            Message::new(
+                crate::types::Role::System,
+                vec![ContentPart::text("be brief")],
+            ),
+            Message::new(
+                crate::types::Role::User,
+                vec![ContentPart::text("what is here?")],
+            ),
+            Message::new(
+                crate::types::Role::Assistant,
+                vec![
+                    ContentPart::text("checking"),
+                    ContentPart::reasoning("the user wants a listing"),
+                    ContentPart::ToolCall(ToolCall {
+                        id: "call-1".into(),
+                        name: "list_dir".into(),
+                        arguments: r#"{"path":"."}"#.into(),
+                    }),
+                ],
+            ),
+            Message {
+                role: crate::types::Role::Tool,
+                tool_call_id: Some("call-1".into()),
+                content: vec![ContentPart::text("AGENTS.md")],
+                source: None,
+            },
+        ];
+        let turns = to_anthropic_messages(&messages);
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| turn["role"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                serde_json::json!("user"),
+                serde_json::json!("assistant"),
+                serde_json::json!("user")
+            ],
+            "the system prompt is not a turn, and the tool result is a user turn"
+        );
+        assert_eq!(
+            turns[1]["content"],
+            serde_json::json!([
+                { "type": "text", "text": "checking" },
+                { "type": "tool_use", "id": "call-1", "name": "list_dir", "input": { "path": "." } }
+            ]),
+            "a recorded tool call becomes a tool_use block with parsed input"
+        );
+        assert_eq!(
+            turns[2]["content"],
+            serde_json::json!([
+                { "type": "tool_result", "tool_use_id": "call-1", "content": "AGENTS.md" }
+            ])
+        );
+        // Reasoning is never sent back: a thinking block without the provider's signature is refused.
+        let serialized = serde_json::to_string(&turns).expect("serializes");
+        assert!(!serialized.contains("the user wants a listing"));
+    }
+
+    #[test]
+    fn adjacent_turns_of_the_same_role_are_merged_into_one() {
+        let messages = vec![
+            Message::new(crate::types::Role::User, vec![ContentPart::text("one")]),
+            Message::new(crate::types::Role::User, vec![ContentPart::text("two")]),
+        ];
+        let turns = to_anthropic_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0]["content"],
+            serde_json::json!([
+                { "type": "text", "text": "one" },
+                { "type": "text", "text": "two" }
+            ])
+        );
     }
 }

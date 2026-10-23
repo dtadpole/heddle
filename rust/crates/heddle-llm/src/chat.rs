@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold};
 use crate::error::ModelError;
 use crate::sse::SseEvent;
-use crate::types::{Chunk, GenerateRequest, Message};
+use crate::types::{Chunk, ContentPart, GenerateRequest, Message};
 use heddle_config::EndpointConfig;
 
 /// The Chat Completions adapter for one endpoint.
@@ -52,14 +52,146 @@ pub fn chat_request(
 /// is none); a message with images switches to typed parts with `image_url` data URLs; tool calls become
 /// `tool_calls`; a tool result carries `tool_call_id`.
 pub fn to_chat_message(message: &Message) -> Value {
-    let _ = message;
-    todo!("port toChatMessage")
+    let text = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        // Separate text blocks are separate blocks on the wire; a newline keeps them apart in this form.
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls: Vec<&crate::types::ToolCall> = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    let images: Vec<&crate::types::ImagePart> = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Image(image) if image.data.is_some() => Some(image),
+            _ => None,
+        })
+        .collect();
+
+    let content = if images.is_empty() {
+        if text.is_empty() {
+            Value::Null
+        } else {
+            Value::String(text)
+        }
+    } else {
+        // A message carrying images switches to the typed-parts form, the only shape that can carry an
+        // `image_url`.
+        let mut parts: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(serde_json::json!({ "type": "text", "text": text }));
+        }
+        for image in images {
+            let data = image.data.as_deref().unwrap_or_default();
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{data}", image.mime_type.as_str())
+                }
+            }));
+        }
+        Value::Array(parts)
+    };
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "role".into(),
+        serde_json::to_value(message.role).unwrap_or(Value::Null),
+    );
+    object.insert("content".into(), content);
+    if !calls.is_empty() {
+        object.insert(
+            "tool_calls".into(),
+            Value::Array(
+                calls
+                    .iter()
+                    .map(|call| {
+                        serde_json::json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": { "name": call.name, "arguments": call.arguments }
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(tool_call_id) = &message.tool_call_id {
+        object.insert("tool_call_id".into(), Value::String(tool_call_id.clone()));
+    }
+    Value::Object(object)
 }
 
 /// A non-streamed answer reduced to the same chunks (`finishFromChatMessage`).
 pub fn chunks_from_chat_json(answer: &Value) -> Vec<Chunk> {
-    let _ = answer;
-    todo!("port finishFromChatMessage")
+    let choice = answer
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first());
+    let message = choice.and_then(|choice| choice.get("message"));
+    let mut chunks = Vec::new();
+    if let Some(reasoning) = message
+        .and_then(|message| message.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        chunks.push(Chunk::ReasoningDelta {
+            text: reasoning.to_string(),
+        });
+    }
+    if let Some(text) = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        chunks.push(Chunk::TextDelta {
+            text: text.to_string(),
+        });
+    }
+    let calls: Vec<&Value> = message
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+        .map(|calls| calls.iter().collect())
+        .unwrap_or_default();
+    for call in &calls {
+        let function = call.get("function");
+        chunks.push(Chunk::ToolCall(crate::types::ToolCall {
+            id: call
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: function
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            arguments: function
+                .and_then(|function| function.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }));
+    }
+    let finish = choice
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str);
+    chunks.push(Chunk::Done {
+        finish_reason: crate::types::canonical_finish_reason(finish, calls.len()),
+        usage: crate::usage::openai_chat_usage(answer.get("usage").unwrap_or(&Value::Null)),
+    });
+    chunks
 }
 
 /// The streamed fold: deltas, live tool-call fragments, assembly by `index`, `done` on `finish_reason` with usage
@@ -370,5 +502,152 @@ mod tests {
         let folded = ChatFold::new().event(&sse("not json")).expect("skips");
         assert!(folded.chunks.is_empty());
         assert!(!folded.finished);
+    }
+
+    #[test]
+    fn a_text_only_message_keeps_the_string_content_and_joins_its_text_blocks() {
+        use crate::types::Role;
+
+        let message = Message::new(
+            Role::User,
+            vec![ContentPart::text("one"), ContentPart::text("two")],
+        );
+        assert_eq!(
+            to_chat_message(&message),
+            serde_json::json!({ "role": "user", "content": "one\ntwo" })
+        );
+        // A message with nothing to say carries `null`, not an empty string.
+        assert_eq!(
+            to_chat_message(&Message::new(Role::Assistant, Vec::new())),
+            serde_json::json!({ "role": "assistant", "content": null })
+        );
+        // Reasoning contributes no text, because it is not replayed.
+        assert_eq!(
+            to_chat_message(&Message::new(
+                Role::Assistant,
+                vec![ContentPart::reasoning("hm")]
+            )),
+            serde_json::json!({ "role": "assistant", "content": null })
+        );
+    }
+
+    #[test]
+    fn a_message_with_an_image_switches_to_typed_parts_with_a_data_url() {
+        use crate::types::{ImageMediaType, ImagePart, Role};
+
+        let image = ImagePart {
+            name: "shot.png".into(),
+            mime_type: ImageMediaType::Png,
+            path: "/u/shot.png".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            data: Some("AAAA".into()),
+        };
+        let message = Message::new(
+            Role::User,
+            vec![ContentPart::text("look"), ContentPart::Image(image)],
+        );
+        assert_eq!(
+            to_chat_message(&message),
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "look" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            })
+        );
+        // An image that never got its bytes (the recorded reference alone) is not sent as one.
+        let recorded = ImagePart {
+            name: "shot.png".into(),
+            mime_type: ImageMediaType::Png,
+            path: "/u/shot.png".into(),
+            bytes: 3,
+            sha256: "ab".into(),
+            data: None,
+        };
+        assert_eq!(
+            to_chat_message(&Message::new(
+                Role::User,
+                vec![ContentPart::Image(recorded)]
+            )),
+            serde_json::json!({ "role": "user", "content": null })
+        );
+    }
+
+    #[test]
+    fn a_tool_call_and_a_tool_result_keep_their_identity() {
+        use crate::types::{Role, ToolCall};
+
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                ContentPart::text("checking"),
+                ContentPart::ToolCall(ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }),
+            ],
+        );
+        assert_eq!(
+            to_chat_message(&assistant),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    { "id": "call-1", "type": "function", "function": { "name": "bash", "arguments": "{}" } }
+                ]
+            })
+        );
+        let result = Message {
+            role: Role::Tool,
+            tool_call_id: Some("call-1".into()),
+            content: vec![ContentPart::text("hi")],
+            source: None,
+        };
+        assert_eq!(
+            to_chat_message(&result),
+            serde_json::json!({
+                "role": "tool",
+                "content": "hi",
+                "tool_call_id": "call-1"
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_streamed_answer_reduces_to_the_same_chunks() {
+        let answer = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "reasoning_content": "hm",
+                    "content": "ok",
+                    "tool_calls": [{ "id": "c1", "function": { "name": "bash", "arguments": "{}" } }]
+                },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
+        });
+        assert_eq!(
+            chunks_from_chat_json(&answer),
+            vec![
+                Chunk::ReasoningDelta { text: "hm".into() },
+                Chunk::TextDelta { text: "ok".into() },
+                Chunk::ToolCall(crate::types::ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }),
+                Chunk::Done {
+                    finish_reason: "max_output_tokens".into(),
+                    usage: Some(crate::usage::TokenUsage {
+                        input_tokens: Some(3),
+                        output_tokens: Some(2),
+                        ..crate::usage::TokenUsage::default()
+                    }),
+                },
+            ]
+        );
     }
 }

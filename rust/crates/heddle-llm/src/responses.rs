@@ -58,16 +58,83 @@ pub fn responses_request(
 /// One message's content (`toResponsesContent`): text as `input_text` (or `output_text` for an assistant), an image
 /// with data as `input_image` with a data URL; everything else dropped.
 pub fn to_responses_content(parts: &[ContentPart], role: ResponsesRole) -> Vec<Value> {
-    let _ = (parts, role);
-    todo!("port toResponsesContent")
+    // The part's type depends on who is speaking: an assistant's text is `output_text`, and the route refuses
+    // `input_text` there.
+    let text_type = if role == ResponsesRole::Assistant {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    let mut content = Vec::new();
+    for part in parts {
+        match part {
+            ContentPart::Text { text } => {
+                content.push(serde_json::json!({ "type": text_type, "text": text }));
+            }
+            ContentPart::Image(image) => {
+                if let Some(data) = &image.data {
+                    content.push(serde_json::json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{data}", image.mime_type.as_str())
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    content
 }
 
 /// The `input` list (`toResponsesInput`): a tool result is a `function_call_output` item, a tool call a
 /// `function_call` item beside its message, `system` speaks as `developer`, and an assistant message with no
 /// content is not sent.
 pub fn to_responses_input(messages: &[Message]) -> Vec<Value> {
-    let _ = messages;
-    todo!("port toResponsesInput")
+    let mut items = Vec::new();
+    for message in messages {
+        if message.role == crate::types::Role::Tool {
+            let output = message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            items.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id.clone().unwrap_or_default(),
+                "output": output
+            }));
+            continue;
+        }
+        let role = match message.role {
+            crate::types::Role::System => ResponsesRole::Developer,
+            crate::types::Role::Assistant => ResponsesRole::Assistant,
+            _ => ResponsesRole::User,
+        };
+        let content = to_responses_content(&message.content, role);
+        if !content.is_empty() {
+            let role = match role {
+                ResponsesRole::User => "user",
+                ResponsesRole::Assistant => "assistant",
+                ResponsesRole::Developer => "developer",
+            };
+            items.push(serde_json::json!({ "role": role, "content": content }));
+        }
+        // A tool call is an item beside the message, because this shape has no content part for one.
+        for part in &message.content {
+            if let ContentPart::ToolCall(call) = part {
+                items.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments
+                }));
+            }
+        }
+    }
+    items
 }
 
 /// The loop's finish reason for a terminal event (`responsesFinishReason`): `response.incomplete` reports its own
@@ -486,5 +553,95 @@ mod tests {
             .expect("folds");
         assert!(folded.chunks.is_empty());
         assert!(!folded.finished);
+    }
+
+    #[test]
+    fn an_assistant_message_is_output_text_and_every_other_role_is_input_text() {
+        assert_eq!(
+            to_responses_content(&[ContentPart::text("hi")], ResponsesRole::Assistant),
+            vec![serde_json::json!({ "type": "output_text", "text": "hi" })]
+        );
+        assert_eq!(
+            to_responses_content(&[ContentPart::text("hi")], ResponsesRole::User),
+            vec![serde_json::json!({ "type": "input_text", "text": "hi" })]
+        );
+        assert_eq!(
+            to_responses_content(&[ContentPart::text("hi")], ResponsesRole::Developer),
+            vec![serde_json::json!({ "type": "input_text", "text": "hi" })]
+        );
+    }
+
+    #[test]
+    fn a_conversation_becomes_messages_function_calls_and_function_results_in_order() {
+        let messages = vec![
+            Message::new(
+                crate::types::Role::System,
+                vec![ContentPart::text("be brief")],
+            ),
+            Message::new(crate::types::Role::User, vec![ContentPart::text("run it")]),
+            Message::new(
+                crate::types::Role::Assistant,
+                vec![ContentPart::ToolCall(crate::types::ToolCall {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"echo hi"}"#.into(),
+                })],
+            ),
+            Message {
+                role: crate::types::Role::Tool,
+                tool_call_id: Some("call_1".into()),
+                content: vec![ContentPart::text("hi")],
+                source: None,
+            },
+            Message::new(
+                crate::types::Role::Assistant,
+                vec![ContentPart::text("it printed hi")],
+            ),
+        ];
+        assert_eq!(
+            to_responses_input(&messages),
+            vec![
+                serde_json::json!({ "role": "developer", "content": [{ "type": "input_text", "text": "be brief" }] }),
+                serde_json::json!({ "role": "user", "content": [{ "type": "input_text", "text": "run it" }] }),
+                serde_json::json!({ "type": "function_call", "call_id": "call_1", "name": "bash", "arguments": "{\"command\":\"echo hi\"}" }),
+                serde_json::json!({ "type": "function_call_output", "call_id": "call_1", "output": "hi" }),
+                serde_json::json!({ "role": "assistant", "content": [{ "type": "output_text", "text": "it printed hi" }] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_assistant_turn_made_only_of_reasoning_is_not_sent_as_an_empty_message() {
+        let messages = vec![
+            Message::new(crate::types::Role::User, vec![ContentPart::text("hello")]),
+            Message::new(
+                crate::types::Role::Assistant,
+                vec![ContentPart::reasoning("one word")],
+            ),
+        ];
+        assert_eq!(
+            to_responses_input(&messages),
+            vec![
+                serde_json::json!({ "role": "user", "content": [{ "type": "input_text", "text": "hello" }] })
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_result_with_several_text_blocks_keeps_them_apart() {
+        let messages = vec![Message {
+            role: crate::types::Role::Tool,
+            tool_call_id: Some("call_9".into()),
+            content: vec![ContentPart::text("line one"), ContentPart::text("line two")],
+            source: None,
+        }];
+        assert_eq!(
+            to_responses_input(&messages),
+            vec![serde_json::json!({
+                "type": "function_call_output",
+                "call_id": "call_9",
+                "output": "line one\nline two"
+            })]
+        );
     }
 }
