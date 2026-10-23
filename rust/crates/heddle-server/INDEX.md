@@ -150,6 +150,14 @@ The verifiers named here start the server as `node dist/cli.js` and import `dist
 `dist/server/token.js`; they judge the Rust binary once the lane integrator has moved them onto `HEDDLE_BIN`.
 The cookie format is kept byte-compatible so the TypeScript token module can stay the oracle there.
 
+## A door-only example
+
+`examples/web_door.rs` boots [`Harness::unavailable`] behind the real [`server`] builder: it prints the
+URL, answers `/healthz`, the token handshake and the page, and refuses every service route. It exists so
+the server crate can be driven as a real process before `heddle web` exists, and so a verifier's
+`HEDDLE_BIN` path can be exercised without the harness. It is **not the harness**: a check that needs a
+turn, a session or a model judges nothing against it and fails, which is the honest result.
+
 ## Read next
 
 [`../INDEX.md`](../INDEX.md) for the other crates; [`../../ULTIMATE_GOAL.md`](../../ULTIMATE_GOAL.md) for the parts.
