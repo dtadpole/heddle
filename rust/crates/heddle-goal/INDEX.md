@@ -1,6 +1,8 @@
 ---
 title: The heddle-goal crate
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:06:23Z
+version: 0.3.0
 description: The Rust port crate for session goals — the event-sourced state machine, the model's three verbs, the round driver and its trigger, and the goal routes — its public API and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
