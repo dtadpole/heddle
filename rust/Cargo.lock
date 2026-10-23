@@ -428,7 +428,10 @@ name = "heddle-context"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "heddle-config",
+ "heddle-context",
  "heddle-llm",
+ "heddle-session",
  "serde",
  "serde_json",
  "sha1",
@@ -506,6 +509,8 @@ dependencies = [
 name = "heddle-team"
 version = "0.0.1"
 dependencies = [
+ "heddle-config",
+ "heddle-session",
  "serde",
  "serde_json",
  "thiserror",

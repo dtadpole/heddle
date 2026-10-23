@@ -21,6 +21,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`policy.rs`](policy.rs) | the collaboration policy and its durable note |
 | [`plugin.rs`](plugin.rs) | the `team` profile row: composition, policy upkeep, `team/changed`, boot recovery |
 | [`api.rs`](api.rs) | the `GET /api/team` answer |
+| [`command.rs`](command.rs) | the D-043 entry point: the team half of `web`'s startup edge |
 | [`ports.rs`](ports.rs) | the seams to the session store, the agent loop and the live-turn registry |
 | [`testing.rs`](testing.rs) | in-memory doubles of the ports (feature `test-doubles`) |
 

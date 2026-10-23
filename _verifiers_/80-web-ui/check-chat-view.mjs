@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
@@ -19,6 +19,28 @@ import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoo
  * Judged at both layers, because each can be wrong while the other looks right: the API fold can merge
  * while the client draws two rows, and the client can draw one row while the fold never paired anything.
  */
+
+/**
+ * Every local listener this file opens — a model double, or a server a check stands up — so a harness that fails to
+ * start cannot leave one listening. A failed start rejects before the check reaches its own `finally`, the leaked
+ * listener keeps this file's process alive, and the runner, which sets no test timeout, then waits forever instead of
+ * reporting the failure: measured on 2026-10-22, four checks of `80-web-ui` never exited against a binary that does
+ * not serve. `after` closes whatever is still open; a listener a check already closed is closed again harmlessly.
+ */
+const listeners = new Set()
+function held(listener) {
+  listeners.add(listener)
+  return listener
+}
+after(() =>
+  Promise.all(
+    [...listeners].map((listener) =>
+      typeof listener.close === 'function'
+        ? listener.close()
+        : new Promise((resolve) => listener.server.close(() => resolve())),
+    ),
+  ),
+)
 
 const CAPABILITY = 'the Web UI'
 
@@ -1971,7 +1993,7 @@ test('a provider that streams blank lines between tokens still reads as prose', 
    * page drops them. The double below is exactly that shape.
    */
   const chunks = ['检', '\n\n\n', '测', '\n\n\n', '器', '\n\n\n', '抓', '\n\n\n', '到', '\n\n\n', '了', '。', '\n\n', '下一段。']
-  const double = await new Promise((resolve) => {
+  const double = held(await new Promise((resolve) => {
     const server = createServer((request, response) => {
       request.resume()
       request.on('end', () => {
@@ -1985,7 +2007,7 @@ test('a provider that streams blank lines between tokens still reads as prose', 
       })
     })
     server.listen(0, '127.0.0.1', () => resolve({ server, baseUrl: `http://127.0.0.1:${server.address().port}` }))
-  })
+  }))
   const server = await startServer('stream-artifact', undefined, { doubleUrl: double.baseUrl })
   const browser = await openBrowser()
   try {
@@ -2067,7 +2089,7 @@ test('a tool call being written is drawn at its first fragment and grows in plac
    */
   const fragments = ['{"command":"echo ', 'one ', 'two ', 'three ', 'four ', 'five ', 'six', '"}']
   let requests = 0
-  const double = await new Promise((resolve) => {
+  const double = held(await new Promise((resolve) => {
     const server = createServer((request, response) => {
       request.resume()
       request.on('end', async () => {
@@ -2100,7 +2122,7 @@ test('a tool call being written is drawn at its first fragment and grows in plac
       })
     })
     server.listen(0, '127.0.0.1', () => resolve({ server, baseUrl: `http://127.0.0.1:${server.address().port}` }))
-  })
+  }))
   const server = await startServer('tool-call-live', undefined, { doubleUrl: double.baseUrl, sandboxRoot: true })
   const browser = await openBrowser()
   try {

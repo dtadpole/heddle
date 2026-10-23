@@ -21,7 +21,7 @@ The Rust port of the permission modes, their enforcement backends, escalation an
 
 ## The public API
 
-Landed first, so dependent crates build against it; bodies marked `todo!()` are being ported. `cargo doc -p
+Landed first, so dependent crates build against it, and implemented behind it; `cargo doc -p
 heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 
 | Item | Who calls it | TypeScript |
@@ -74,7 +74,7 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 | 6 | the ladder | `escalation.rs` (`approve_escalation`) | the same mode needs no ask; not-wider and malformed refusals; the ask's reason and display reason carry the justification verbatim; each outcome maps to its refusal sentence; it runs with `ApprovalService` as the channel |
 | 7 | judged through the binary | none here | once tools, server, session and boot compose it: `75-permission-sandbox` and `80-web-ui` check-approval through `HEDDLE_BIN`, recorded with the command and date |
 
-**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (103 tests at 2026-10-22, `cargo test -p
+**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (108 tests at 2026-10-22, `cargo test -p
 heddle-sandbox`), including the task 6 ladder through `ApprovalService` as its channel. Task 7 is the judged-through-
 the-binary row, which needs the tools, server, session and boot crates. The real Seatbelt profile was checked on
 macOS: the read-only profile accepts `/usr/bin/true`, a write under it is denied with `Operation not permitted`, and
