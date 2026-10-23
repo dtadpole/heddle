@@ -64,7 +64,7 @@ pub fn config_command(args: &Args, invocation: &Invocation, out: &mut Output<'_>
         _ => ConfigCommand::Config,
     };
     let config_args = crate::cli::config_args(args, &invocation.cwd, &invocation.env);
-    let catalog = BuiltinCatalog::new(invocation.env.clone());
+    let catalog = BuiltinCatalog::new(invocation.env.clone(), invocation.cwd.clone());
     let context = CommandContext {
         env: &invocation.env,
         cwd: invocation.cwd.clone(),
@@ -1858,8 +1858,8 @@ mod tests {
             target: "heddle".to_owned(),
             env: env.clone(),
         };
-        let boot = crate::boot::boot(&options, &crate::builtins::BuiltinCatalog::new(env))
-            .expect("the profile composes");
+        let catalog = crate::builtins::BuiltinCatalog::new(env, home.clone());
+        let boot = crate::boot::boot(&options, &catalog).expect("the profile composes");
         assert_eq!(
             boot.entries
                 .iter()

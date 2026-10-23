@@ -369,12 +369,13 @@ pub trait Catalog {
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinCatalog {
     env: Env,
+    cwd: PathBuf,
 }
 
 impl BuiltinCatalog {
-    /// The catalog for a run with this environment.
-    pub fn new(env: Env) -> Self {
-        Self { env }
+    /// The catalog for a run with this environment, started in `cwd`.
+    pub fn new(env: Env, cwd: PathBuf) -> Self {
+        Self { env, cwd }
     }
 }
 
@@ -384,6 +385,12 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Model) => Some(Box::new(
                 crate::adapters::ModelComponent::new(self.env.clone()),
             )),
+            ComponentRef::Builtin(Builtin::Sandbox) => Some(Box::new(
+                crate::adapters::SandboxComponent::new(self.env.clone(), self.cwd.clone()),
+            )),
+            ComponentRef::Builtin(Builtin::Approvals) => {
+                Some(Box::new(crate::adapters::ApprovalsComponent))
+            }
             // The rest land with their crate's API: a built-in with no adapter answers `None`, so its
             // row fails naming itself rather than starting nothing.
             ComponentRef::Builtin(_) | ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => {

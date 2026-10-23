@@ -43,7 +43,7 @@ tested.
 | `usage` | `Capability`, `SERVED`, `GATE_WORDS`, `LINES`, `usage(served)` — the help, gated by what is wired |
 | `boot` | `FiberState` (Cordis's numbering and names), `Entry`, `BootOptions { layers, overrides, target, env }`, `BootError`, `Boot { rows: Vec<ComposedRow>, entries, services, anchor }`, `boot`, `load`, `settle`, `failed_entries`, `describe_entries` |
 | `builtins` | `Builtin`, `BuiltinSpec`, `BUILTINS`, `ComponentRef { Builtin, Outside, Unresolved }`, `resolve_component(&ComponentName)`, `Component { requires, schema, start }`, `Catalog`, `BuiltinCatalog::new(env)` (also `heddle_config::ComponentCatalog`, for `--validate`) |
-| `adapters` | one adapter per built-in over the owning crate's own types; `ModelComponent` so far, which composes `heddle-llm`'s service from the row, the layers and the machine's file |
+| `adapters` | one adapter per built-in over the owning crate's own types: `ModelComponent` (`heddle-llm`'s service from the row, the layers and the machine's file), `SandboxComponent` and `ApprovalsComponent` (`heddle-sandbox`'s services from their rows and the run's directory and harness home) |
 | `services` | `Services`: a service is a name with typed views — `provide`, `get`, `provides`, `withdraw`, and one accessor per port (`session()`, `model()`, …) |
 | `ports` | the consumer contract: one trait per service the commands read (below), `SessionHandle`, `Record = serde_json::Value`, `PortError`, `DEFAULT_WEB_PORT = 3082` |
 | `commands` | `dispatch`, `config_command`, `booted_command`, `bare_application`, `turn`, `web`, `HOOK_POINTS`, `describe_hooks` |
@@ -137,6 +137,7 @@ The library shape is complete and every module below compiles with its unit test
 | `commands::booted_command` and every non-turn command | implemented against the ports, tested with doubles: `models`, `tools`, `commands`, `sessions`, `transcript`, `hooks`, `workspaces`, `workspace add\|list\|remove\|rename`, `tree`, `file`, `session new`, `goal`, `context` |
 | `builtins::BuiltinCatalog` | implemented over the built-in table and, for an outside row, `heddle-config`'s component manifest; it builds an adapter per built-in, and one whose adapter is not written yet answers `None` |
 | `adapters::ModelComponent` | implemented and measured end to end: a profile naming the `model` row boots it and `models` answers from `heddle-llm` over `heddle-config`'s resolved endpoints |
+| `adapters::SandboxComponent`, `ApprovalsComponent` | implemented: each row's config deserialises into the crate's own type (an unknown mode refused, never widened), and the crate's handle plus, for the sandbox, the `SandboxPort` view are registered |
 | the adapters, `commands::web`, `turn`, `bare_application` | declared; they answer once the crates they compose exist |
 | `boot.rs`'s `heddle/ready` announcement | waits for `heddle-events`' bus, which every plugin will log through |
 

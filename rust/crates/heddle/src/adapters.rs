@@ -11,16 +11,20 @@
 //! lives outside the checkout. Each one lands as its crate's API does; the catalog returns `None` for a
 //! built-in whose adapter is not written yet, which leaves that row failed rather than silently absent.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use heddle_config::{
-    EndpointPatch, Env, local_config_candidates, read_local_config, resolve_endpoints,
+    EndpointPatch, Env, heddle_home, local_config_candidates, read_local_config, resolve_endpoints,
+};
+use heddle_sandbox::{
+    ApprovalService, ApprovalsConfig, SandboxConfig, SandboxHost, SandboxService,
 };
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::builtins::Component;
-use crate::ports::{ModelPort, Record};
+use crate::ports::{ModelPort, Record, SandboxPort};
 use crate::services::Services;
 
 /// `src/plugins/model.ts`: one model service over the endpoints the layers and the machine declare.
@@ -139,6 +143,112 @@ impl ModelPort for ModelView {
 
     fn default_endpoint(&self) -> Option<String> {
         self.service.default_endpoint(None)
+    }
+}
+
+/// `src/sandbox/service.ts`: the fence every file and shell effect passes through.
+pub struct SandboxComponent {
+    env: Env,
+    cwd: PathBuf,
+}
+
+impl SandboxComponent {
+    /// The adapter for a run started in `cwd`, whose harness home is `env`'s.
+    pub fn new(env: Env, cwd: PathBuf) -> Self {
+        Self { env, cwd }
+    }
+}
+
+/// The sandbox row's schema: the words and paths `--validate` can check without starting a backend.
+fn sandbox_schema() -> Option<heddle_config::Schema> {
+    heddle_config::Schema::from_json(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "mode": { "type": "string" },
+            "workspaceRoot": { "type": "string" },
+            "extraWritableRoots": { "type": "array" },
+            "backend": { "type": "string" },
+            "landlockRunner": { "type": "string" },
+        },
+    }))
+    .ok()
+}
+
+impl Component for SandboxComponent {
+    fn requires(&self) -> Vec<String> {
+        // The sandbox plugin injects nothing; it is the fence the others ask.
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        sandbox_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // A mode outside the vocabulary is a deserialisation error on purpose: papering over it would
+        // turn the fail-closed profile into a silently permissive one.
+        let config: SandboxConfig =
+            serde_json::from_value(config.clone()).map_err(|error| format!("sandbox: {error}"))?;
+        let host = SandboxHost {
+            cwd: self.cwd.clone(),
+            harness_home: heddle_home(&self.env),
+            platform: heddle_sandbox::Platform::current(),
+        };
+        let service = Arc::new(SandboxService::new(&config, &host));
+        services.provide("sandbox", Arc::clone(&service));
+        services.provide(
+            "sandbox",
+            Arc::new(SandboxView {
+                service: Arc::clone(&service),
+            }) as Arc<dyn SandboxPort>,
+        );
+        Ok(())
+    }
+}
+
+/// `ctx.sandbox` over the crate's service: the commands' narrow view.
+struct SandboxView {
+    service: Arc<SandboxService>,
+}
+
+impl SandboxPort for SandboxView {
+    fn workspace_root(&self) -> PathBuf {
+        self.service.workspace_root().to_path_buf()
+    }
+}
+
+/// `src/approvals/service.ts`: the standing policy and the question channel.
+pub struct ApprovalsComponent;
+
+/// The approvals row's schema.
+fn approvals_schema() -> Option<heddle_config::Schema> {
+    heddle_config::Schema::from_json(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "mode": { "type": "string" },
+            "deny": { "type": "array" },
+            "allow": { "type": "array" },
+            "unanswered": { "type": "string" },
+            "answerTimeoutMs": { "type": "number" },
+        },
+    }))
+    .ok()
+}
+
+impl Component for ApprovalsComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        approvals_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: ApprovalsConfig = serde_json::from_value(config.clone())
+            .map_err(|error| format!("approvals: {error}"))?;
+        services.provide("approvals", Arc::new(ApprovalService::new(config)));
+        Ok(())
     }
 }
 
@@ -332,6 +442,102 @@ mod tests {
             .expect_err("an unknown kind is refused");
         assert!(error.to_lowercase().contains("no-such-kind"), "{error}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_sandbox_row_builds_the_service_and_answers_its_root() {
+        let home = scratch("sandbox");
+        let component = SandboxComponent::new(env_at(&home), home.clone());
+        let mut services = Services::new();
+        component
+            .start(
+                &json!({ "mode": "workspace-write", "workspaceRoot": "/work" }),
+                &mut services,
+            )
+            .expect("the sandbox row starts");
+        let sandbox = services.sandbox().expect("ctx.sandbox is provided");
+        assert_eq!(sandbox.workspace_root(), std::path::PathBuf::from("/work"));
+        assert!(
+            services
+                .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
+                .is_some(),
+            "the crate's own handle is registered for the tools and the server"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_workspace_root_falls_back_to_the_runs_directory() {
+        let home = scratch("sandbox-cwd");
+        let component = SandboxComponent::new(env_at(&home), home.clone());
+        let mut services = Services::new();
+        component
+            .start(&json!({}), &mut services)
+            .expect("the sandbox row starts");
+        let sandbox = services.sandbox().expect("ctx.sandbox is provided");
+        // The service canonicalises its roots (`/var` is `/private/var` on macOS), so the fallback is
+        // the run's directory as the filesystem names it.
+        assert_eq!(
+            sandbox.workspace_root(),
+            std::fs::canonicalize(&home).expect("the scratch directory exists")
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_mode_outside_the_vocabulary_is_refused_rather_than_widened() {
+        let home = scratch("sandbox-mode");
+        let component = SandboxComponent::new(env_at(&home), home.clone());
+        let mut services = Services::new();
+        let error = component
+            .start(&json!({ "mode": "wide-open" }), &mut services)
+            .expect_err("an unknown mode is refused");
+        assert!(error.starts_with("sandbox:"), "{error}");
+        assert!(error.contains("wide-open"), "{error}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_approvals_row_builds_the_policy_service() {
+        let component = ApprovalsComponent;
+        let mut services = Services::new();
+        component
+            .start(
+                &json!({ "mode": "deny", "allow": ["read_file"], "answerTimeoutMs": 1000 }),
+                &mut services,
+            )
+            .expect("the approvals row starts");
+        assert!(
+            services
+                .get::<Arc<heddle_sandbox::ApprovalService>>("approvals")
+                .is_some(),
+            "the standing policy is registered for the tools and the server"
+        );
+    }
+
+    #[test]
+    fn an_approvals_mode_outside_the_vocabulary_is_refused() {
+        let mut services = Services::new();
+        let error = ApprovalsComponent
+            .start(&json!({ "mode": "sometimes" }), &mut services)
+            .expect_err("an unknown approvals mode is refused");
+        assert!(error.starts_with("approvals:"), "{error}");
+    }
+
+    #[test]
+    fn the_sandbox_row_declares_the_schema_validate_checks_it_against() {
+        let schema = sandbox_schema().expect("the sandbox schema parses");
+        assert!(
+            schema
+                .check(&json!({ "mode": "read-only", "backend": "none" }))
+                .is_empty()
+        );
+        assert_eq!(
+            schema
+                .check(&json!({ "extraWritableRoots": "not a list" }))
+                .len(),
+            1
+        );
     }
 
     #[test]
