@@ -162,9 +162,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     let mut harness = harness(&boot, invocation.cwd.clone());
     compose_uploads(&mut harness, &heddle_config::heddle_home(&invocation.env));
     let runtime = crate::runtime::tokio();
-    // The goal driver follows the sessions' events for as long as the server runs, so a goal keeps
-    // pushing after each turn; then the boot sweep resumes the goals a previous process left active.
-    let goal_edges = drive_goals(&boot);
+    // The boot's goal-driver row follows the sessions' events in every process; web adds only the
+    // start sweep (`boot_notes`), which resumes the goals a previous process left active.
     // A switch made while a turn runs lands on that turn's next model call.
     let selection_rule = follow_session_selection(&boot, Arc::clone(&harness.models));
     let notes = runtime.block_on(boot_notes(&boot));
@@ -202,7 +201,6 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         stdout,
         stderr,
     ));
-    drop(goal_edges);
     if let Some((service, id)) = selection_rule {
         service.remove_hooks(id);
     }
@@ -905,41 +903,6 @@ fn follow_session_selection(
     Some((service, id))
 }
 
-/// The goal driver's trigger on the run's bus. Dropping it detaches the listener.
-pub struct GoalEdges {
-    _listener: heddle_events::Listener,
-    _scope: heddle_events::Scope,
-}
-
-/// Forward every `session/event` on the bus to the goal driver's trigger, which requests a round on the
-/// edges that can make one due (a completed turn, a goal change). `None` without a driver or a bus.
-pub fn drive_goals(boot: &Boot) -> Option<GoalEdges> {
-    let driver = boot
-        .services
-        .get::<Arc<heddle_goal::GoalDriver>>("goalDriver")?;
-    let bus = boot.services.get::<heddle_events::EventBus>("events")?;
-    let trigger = heddle_goal::DriverTrigger::new(driver);
-    let scope = bus.scope("web-goal-driver");
-    let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
-        move |payload: &Value| {
-            let session = payload.get("session").and_then(Value::as_str);
-            let kind = payload
-                .get("event")
-                .and_then(|event| event.get("type"))
-                .and_then(Value::as_str);
-            if let (Some(session), Some(kind)) = (session, kind) {
-                // The chain is not awaited: a turn is not held open by the rounds it starts.
-                drop(trigger.on_session_event(session, kind));
-            }
-        },
-        heddle_events::ListenOptions::default(),
-    );
-    Some(GoalEdges {
-        _listener: listener,
-        _scope: scope,
-    })
-}
-
 fn to_json(value: impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
@@ -1344,15 +1307,6 @@ mod tests {
             "a session with no record keeps the request"
         );
         std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_boot_without_a_goal_driver_attaches_no_goal_edges() {
-        let mut boot = empty_boot();
-        assert!(drive_goals(&boot).is_none());
-        boot.services
-            .provide("events", heddle_events::EventBus::new());
-        assert!(drive_goals(&boot).is_none(), "a bus alone is not a driver");
     }
 
     #[tokio::test]
