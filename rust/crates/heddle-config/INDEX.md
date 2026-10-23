@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:43:18Z
+modified: 2026-10-23T07:45:56Z
 version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -64,9 +64,10 @@ What a caller does to turn command-line flags into rows, and what it may rely on
 today: every command that boots, `web` included, goes through `rust/crates/heddle/src/commands.rs` `boot_tree`, which
 builds `cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `boot_then` answers a booted command from
 it, and `web` hands it to `crate::web::web`. `profiles` and `config` pass `cli::config_args` to `command::run`.
-**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `e3f9d91` it is
-routed but not yet listed in `--help`; it takes the launch secret's directory from `heddle_home(&invocation.env)`
-(step 7), and an unknown `--profile` or a missing `--config` reaches the user as this crate's sentence with exit 1.
+**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `c072e63` it is
+served and listed in `--help` (D-048), and the binary has no `todo!(` left; `web` takes the launch secret's directory
+from `heddle_home(&invocation.env)` (step 7), and an unknown `--profile` or a missing `--config` reaches the user as
+this crate's sentence with exit 1.
 
 ### 1. One environment, built once
 
@@ -197,7 +198,7 @@ the one place this crate's deliberate difference (see *Where it differs on purpo
 
 ### 8. Starting an outside component
 
-How the binary turns an outside row into a process, as of main `67c2587` (`rust/crates/heddle/src/adapters.rs`,
+How the binary turns an outside row into a process, as of main `c072e63` (`rust/crates/heddle/src/adapters.rs`,
 `OutsideRow`). `--validate` and the start read the manifest through the same `read_component_manifest`, so a manifest
 that validates is one that starts.
 
@@ -211,7 +212,7 @@ that validates is one that starts.
 | the name in `initialize`, errors and logs | **the row's `id`**, the same name `config --validate` and the boot's `N row(s) failed to load: <id>` use, so one broken row has one name everywhere |
 
 The two last rows are agreed with developer-five, who owns the process protocol (2026-10-22). **Where the binary still
-differs:** as of main `43fd346` it names the running component by the manifest's file name without `.component.yml`,
+differs:** as of main `c072e63` it names the running component by the manifest's file name without `.component.yml`,
 so `id: alpha` naming `./shout.component.yml` says `shout` once running. `Catalog::component(&ComponentRef)` does not
 carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change is developer-two's.
 
@@ -302,7 +303,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-22 | lane `b72cc1a` (rebuilt without `e9a0836`: developer-two's branch with `--stream` through the stream hub, models and streaming advertised, the hidden adapter-call command, and the team row through `start_row`) | `HEDDLE_BIN=<debug build of exactly b72cc1a> sh _verifiers_/05-config-system/verify.sh --json`, and the backend lane with the same binary | 10/10 passed, verdict 0. Backend lane: 117 checks, 108 pass, 5 fail, 4 unjudged; the team failures are gone, and the five left (70 session ordering, 75 sandbox enforcement) are none of this crate's. `web --dry-run` boots; the repository's own profile validates, 16 rows checked, 0 problems |
 | 2026-10-22 | lane `f7b2c5e` (the lane gate judges a candidate against a per-check baseline, D-048; no Rust changed since `b72cc1a`, now main `d171876`) | `HEDDLE_BIN=<debug build of exactly f7b2c5e> sh _verifiers_/05-config-system/verify.sh --json`; the new `lane.mjs 05-config-system`; then `lane.mjs --write-baseline <file> 05-config-system` and `lane.mjs --baseline <file> 05-config-system` with the same binary | 10/10 passed, verdict 0; lane gate green; against the baseline: 0 newly passing, 0 regressed. The baseline lists part 0's ten checks by name, all `pass` |
 | 2026-10-23 | lane `ffd5f27` (the bare application and the printed tree, the binary's last unported paths; the printed tree boots through `boot_tree`) | `HEDDLE_BIN=<debug build of exactly ffd5f27> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; an unknown `--profile` or a missing `--config` on the bare path gives this crate's sentence and exit 1. A third probe found this crate refusing a `null` layer document that `readLayer` reads as no layers; fixed in `a042777` |
-| 2026-10-23 | lane `46b727a` (this crate's fidelity fixes `a042777` and `e31f096` over lane `9319116`) | `HEDDLE_BIN=<debug build of exactly 46b727a> sh _verifiers_/05-config-system/verify.sh --json`; the backend lane written as a baseline from a debug build of `9319116`, then `lane.mjs --baseline` with `46b727a` in the same tree (the binary checked to carry the fix: a `null` layer reads as 0 rows) | 10/10 passed, verdict 0; backend lane 108 pass, 5 fail, 4 unjudged, against the baseline 0 newly passing and 0 regressed — this crate's change turns no passing check anywhere into a failure (D-048) |
+| 2026-10-23 | lane `46b727a`, now main `c072e63` (this crate's fidelity fixes `a042777` and `e31f096` over lane `9319116`; main adds a status doc) | `HEDDLE_BIN=<debug build of exactly 46b727a> sh _verifiers_/05-config-system/verify.sh --json`; the backend lane written as a baseline from a debug build of `9319116`, then `lane.mjs --baseline` with `46b727a` in the same tree (the binary checked to carry the fix: a `null` layer reads as 0 rows) | 10/10 passed, verdict 0; backend lane 108 pass, 5 fail, 4 unjudged, against the baseline 0 newly passing and 0 regressed — this crate's change turns no passing check anywhere into a failure (D-048) |
 
 ## Known differences from the TypeScript build
 
