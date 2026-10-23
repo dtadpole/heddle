@@ -172,14 +172,15 @@ pub fn turn_endpoint(
 /// The live view `--stream` starts: one session's reasoning and content deltas, written to the writer it was given
 /// (standard error in the binary) as each event is appended, and counted for `--json`.
 pub struct StreamView {
-    printer: StreamPrinter,
-    disposed: bool,
+    printer: Mutex<StreamPrinter>,
+    disposed: std::sync::atomic::AtomicBool,
 }
 
 /// Start printing one session's stream (`printStream(ctx, { session })`).
 ///
 /// Every write is flushed at once, because a terminal that receives the answer at the end is exactly the failure
-/// `20-streaming` exists to catch.
+/// `20-streaming` exists to catch. The view is shared — the session's event listener feeds it while the turn runs,
+/// and the turn disposes it and reads its summary — so every method takes `&self`; wrap it in an `Arc`.
 pub fn print_stream(session: &str, stderr: Box<dyn Write + Send>) -> StreamView {
     let sink = Arc::new(Mutex::new(stderr));
     let printer = StreamPrinter::with_writer(StreamPrinterOptions::new(session), move |text| {
@@ -191,8 +192,8 @@ pub fn print_stream(session: &str, stderr: Box<dyn Write + Send>) -> StreamView 
         let _ = sink.flush();
     });
     StreamView {
-        printer,
-        disposed: false,
+        printer: Mutex::new(printer),
+        disposed: std::sync::atomic::AtomicBool::new(false),
     }
 }
 
@@ -201,24 +202,43 @@ impl StreamView {
     /// (`{"type":"assistant/chunk","chunk":{…}}`, `{"type":"assistant/completed",…}`, `{"type":"message",…}`).
     /// Another session's events, an event it does not show and a line that is not JSON are ignored, as is
     /// everything after [`StreamView::dispose`].
-    pub fn observe(&mut self, session: &str, event_json: &str) {
-        if self.disposed {
-            return;
-        }
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(event_json) {
-            self.printer.observe(session, &event);
+    pub fn observe(&self, session: &str, event_json: &str) {
+        if let Ok(event) = serde_json::from_str::<Value>(event_json) {
+            self.observe_value(session, &event);
         }
     }
 
+    /// [`StreamView::observe`] for an event that is already parsed.
+    pub fn observe_value(&self, session: &str, event: &Value) {
+        if self.disposed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        self.printer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe(session, event);
+    }
+
     /// Stop printing; the summary keeps what was seen.
-    pub fn dispose(&mut self) {
-        self.disposed = true;
+    pub fn dispose(&self) {
+        self.disposed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// The summary `--json` prints under `stream`:
     /// `{"textDeltas":…,"reasoningDeltas":…,"toolCalls":…,"spanMs":…,"completed":…}`.
+    pub fn summary(&self) -> Value {
+        let summary = self
+            .printer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .summary();
+        serde_json::to_value(summary).unwrap_or(Value::Null)
+    }
+
+    /// [`StreamView::summary`] as JSON text.
     pub fn summary_json(&self) -> String {
-        serde_json::to_string(&self.printer.summary()).unwrap_or_else(|_| "{}".to_string())
+        self.summary().to_string()
     }
 }
 
@@ -472,7 +492,7 @@ mod tests {
     #[test]
     fn reasoning_and_content_reach_stderr_as_separate_deltas_in_the_order_they_arrived() {
         let stderr = Captured::default();
-        let mut view = print_stream("s1", Box::new(stderr.clone()));
+        let view = print_stream("s1", Box::new(stderr.clone()));
         view.observe("s1", &chunk("reasoning-delta", "thinking about it"));
         // Written the moment it is observed, not at the end of the turn.
         assert!(
@@ -495,7 +515,7 @@ mod tests {
 
     #[test]
     fn the_summary_is_what_json_prints_under_stream() {
-        let mut view = print_stream("s1", Box::new(Captured::default()));
+        let view = print_stream("s1", Box::new(Captured::default()));
         view.observe("s1", &chunk("reasoning-delta", "r"));
         view.observe("s1", &chunk("text-delta", "a"));
         view.observe("s1", &chunk("text-delta", "b"));
@@ -529,7 +549,7 @@ mod tests {
     #[test]
     fn another_sessions_events_a_bad_line_and_anything_after_dispose_are_ignored() {
         let stderr = Captured::default();
-        let mut view = print_stream("s1", Box::new(stderr.clone()));
+        let view = print_stream("s1", Box::new(stderr.clone()));
         view.observe("s2", &chunk("text-delta", "not mine"));
         view.observe("s1", "not json");
         view.dispose();
@@ -542,11 +562,39 @@ mod tests {
     }
 
     #[test]
+    fn the_view_is_shared_between_the_event_listener_and_the_turn() {
+        // The binary's session listener feeds the view on another thread while the turn holds it to dispose it
+        // and read the summary; both see one view.
+        fn assert_shareable<T: Send + Sync>() {}
+        assert_shareable::<StreamView>();
+        let stderr = Captured::default();
+        let view = Arc::new(print_stream("s1", Box::new(stderr.clone())));
+        let listener = {
+            let view = view.clone();
+            std::thread::spawn(move || {
+                view.observe("s1", &chunk("reasoning-delta", "r"));
+                view.observe("s1", &chunk("text-delta", "t"));
+                view.observe(
+                    "s1",
+                    &serde_json::json!({ "type": "assistant/completed" }).to_string(),
+                );
+            })
+        };
+        listener.join().expect("the listener ran");
+        view.dispose();
+        let summary = view.summary();
+        assert_eq!(summary["textDeltas"], serde_json::json!(1));
+        assert_eq!(summary["reasoningDeltas"], serde_json::json!(1));
+        assert_eq!(summary["completed"], serde_json::json!(true));
+        assert!(stderr.text().contains("[reasoning] r"), "{}", stderr.text());
+    }
+
+    #[test]
     fn every_turn_of_a_resumed_session_is_counted_by_its_own_view() {
         // 20-streaming runs two turns in one session and requires both to report deltas: each turn starts its
         // own view, so the second turn's summary is not the first's left over.
         for _turn in 0..2 {
-            let mut view = print_stream("s1", Box::new(Captured::default()));
+            let view = print_stream("s1", Box::new(Captured::default()));
             view.observe("s1", &chunk("reasoning-delta", "r"));
             view.observe("s1", &chunk("text-delta", "t"));
             view.dispose();
