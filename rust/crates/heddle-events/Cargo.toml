@@ -11,6 +11,11 @@ workspace = true
 
 [dependencies]
 futures.workspace = true
+# The hook ports `ports::BusHooks` implements over the bus. The direction is fixed: these crates keep their
+# ports precisely so they never depend on this one.
+heddle-agent.workspace = true
+heddle-llm.workspace = true
+heddle-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
