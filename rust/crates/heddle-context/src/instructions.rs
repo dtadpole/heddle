@@ -193,9 +193,9 @@ pub fn render_instruction_baseline_with_home(
             path: last.path,
             text: format!(
                 "{}\n… [truncated to fit the instruction budget]",
-                // A JavaScript byte slice may end inside a character and read back as U+FFFD;
-                // a Rust `String` cannot, so the cut backs up to the nearest character
-                // boundary instead.
+                // `Buffer.subarray(0, allowance).toString('utf8')`: a cut inside a character
+                // reads back as one U+FFFD, and the digest is taken over that text, so the cut
+                // is spelled the same way here.
                 truncate_utf8(&last.text, allowance)
             ),
         };
@@ -225,16 +225,22 @@ pub fn render_instruction_baseline_with_home(
     }
 }
 
-/// `text` cut to at most `max_bytes` of UTF-8, on a character boundary.
-fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+/// `text` cut to its first `max_bytes` bytes of UTF-8 and decoded the way Node decodes the cut:
+/// the whole characters, then one U+FFFD when the cut fell inside a character (the incomplete
+/// sequence a valid text leaves is one maximal subpart, so one replacement).
+fn truncate_utf8(text: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
     if text.len() <= max_bytes {
-        return text;
+        return std::borrow::Cow::Borrowed(text);
     }
     let mut end = max_bytes;
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    if end == max_bytes {
+        std::borrow::Cow::Borrowed(&text[..end])
+    } else {
+        std::borrow::Cow::Owned(format!("{}\u{FFFD}", &text[..end]))
+    }
 }
 
 /// The one line that says what the budget did, or nothing when it had to do nothing.
@@ -448,13 +454,28 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_never_splits_a_character_even_when_the_budget_lands_mid_character() {
+    fn a_cut_inside_a_character_reads_back_as_one_replacement_character_as_node_reads_it() {
         let files = [file(Path::new("/p/AGENTS.md"), &"é".repeat(300))];
-        // Allowance is 201 bytes; the 101st character needs two, so 100 whole characters stay.
+        // Allowance is 201 bytes: 100 whole characters and the first byte of the 101st, which
+        // Node's decoder turns into one U+FFFD.
         let baseline = render_instruction_baseline_with_home(&files, 401, None);
         assert!(baseline.truncated);
-        assert!(baseline.text.contains(&"é".repeat(100)));
+        assert!(
+            baseline
+                .text
+                .contains(&format!("{}\u{FFFD}\n… [truncated", "é".repeat(100)))
+        );
         assert!(!baseline.text.contains(&"é".repeat(101)));
+
+        // A cut on a boundary adds nothing.
+        let files = [file(Path::new("/p/AGENTS.md"), &"é".repeat(300))];
+        let baseline = render_instruction_baseline_with_home(&files, 400, None);
+        assert!(
+            baseline
+                .text
+                .contains(&format!("{}\n… [truncated", "é".repeat(100)))
+        );
+        assert!(!baseline.text.contains('\u{FFFD}'));
     }
 
     #[test]
