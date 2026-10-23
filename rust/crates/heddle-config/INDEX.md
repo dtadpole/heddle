@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:05:58Z
+modified: 2026-10-23T08:17:17Z
 version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -329,6 +329,15 @@ A second measurement the same night, 13 cases, agrees on every one, output and e
 `--json` with no profiles directory, an empty one, and one mixing two real profiles with a directory holding no layer
 and a stray file; `--profile` by name, by absolute directory, and unknown (with other profiles present, and with
 none); `config` text output and `--origins`; and `config --validate` on a checkout's own profile.
+
+A third measurement covers endpoint configuration through `heddle models` and `models --json`, with a profile that
+loads the model row and 16 `heddle.json` shapes (fake values only). Every listing agrees exactly: one endpoint with
+a default, a default naming no listed endpoint, two endpoints and no default, a literal key (shown only as
+`credential: "set"`), a key file (its path only), header names, `contextWindow`, unknown keys, a missing file and no
+file. The ten differences are the refusals — malformed JSON, `endpoints` not a list, an element not an object, an
+unknown kind, an endpoint without a name — where both exit 1 with the same summary but the Rust binary prints this
+crate's reason on the line before it; that line is the binary's boot reporting (`boot::failure_lines`), not this
+crate, and the TypeScript build shows load failures only through a loaded console exporter.
 
 ## Decisions the contract makes
 
