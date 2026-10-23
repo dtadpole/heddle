@@ -88,7 +88,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
     let context = heddle_server::command::Context {
         cwd: invocation.cwd.clone(),
         harness: &harness,
-        events: None,
+        // The hub the session store was given its listener over at boot.
+        events: boot.services.get::<heddle_server::EventHub>("event-hub"),
         routers: Vec::new(),
         views: Vec::new(),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),

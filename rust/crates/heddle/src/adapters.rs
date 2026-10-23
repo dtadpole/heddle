@@ -292,17 +292,25 @@ impl Component for SessionComponent {
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
         let config: heddle_session::SessionConfig =
             serde_json::from_value(config.clone()).map_err(|error| format!("session: {error}"))?;
-        // Every appended event is emitted as `session/event` on the bus, as the TypeScript store does.
-        let listener = services
-            .get::<heddle_events::EventBus>("events")
-            .map(|bus| {
-                Arc::new(
-                    move |handle: &heddle_session::SessionHandle,
-                          event: &heddle_session::SessionEvent| {
-                        heddle_events::bridge::session_event(&bus, &handle.id, &event.to_value());
-                    },
-                ) as heddle_session::EventListener
-            });
+        // Every appended event is emitted as `session/event` on the bus, as the TypeScript store does, and
+        // published on the server's hub, so a page that is open sees it as it lands.
+        let bus = services.get::<heddle_events::EventBus>("events");
+        let hub = services
+            .get::<heddle_server::EventHub>("event-hub")
+            .map(heddle_server::adapters::session_event_listener);
+        let listener = (bus.is_some() || hub.is_some()).then(|| {
+            Arc::new(
+                move |handle: &heddle_session::SessionHandle,
+                      event: &heddle_session::SessionEvent| {
+                    if let Some(bus) = &bus {
+                        heddle_events::bridge::session_event(bus, &handle.id, &event.to_value());
+                    }
+                    if let Some(hub) = &hub {
+                        hub(handle, event);
+                    }
+                },
+            ) as heddle_session::EventListener
+        });
         let service = Arc::new(heddle_session::SessionService::new(
             &config, &self.env, listener,
         ));

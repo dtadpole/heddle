@@ -75,7 +75,6 @@ pub const SERVED: &[Capability] = &[
     Capability::Sessions,
     Capability::Workspaces,
     Capability::Goal,
-    Capability::Web,
 ];
 
 /// The words the verifiers gate on, and the capability that must be served before one may appear.

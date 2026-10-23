@@ -23,23 +23,11 @@ use crate::{Exit, Invocation};
 /// A command whose capability is not served yet exits [`Exit::Unported`] naming itself, which is what
 /// keeps a verifier from judging a part that does not exist.
 pub fn dispatch(args: &Args, invocation: &Invocation, out: &mut Output<'_>) -> Exit {
-    dispatch_serving(args, invocation, out, crate::usage::SERVED)
-}
-
-/// [`dispatch`] for a build that serves `served`: the routing itself, separate from what this build
-/// serves, so a test can judge a command's whole path before its capability is advertised.
-pub fn dispatch_serving(
-    args: &Args,
-    invocation: &Invocation,
-    out: &mut Output<'_>,
-    served: &[Capability],
-) -> Exit {
     if let Some(command) = args.command {
         // A command that answers is routed whether or not the help advertises it yet: SERVED decides
-        // what a verifier may judge, not what the binary does. Only `web` waits for its crate.
+        // what a verifier may judge, not what the binary does.
         return match command {
-            CommandWord::Web if served.contains(&Capability::Web) => web(args, invocation, out),
-            CommandWord::Web => unported(command.as_str(), out),
+            CommandWord::Web => web(args, invocation, out),
             CommandWord::Profiles | CommandWord::Config => config_command(args, invocation, out),
             _ => boot_then(args, invocation, out),
         };
@@ -852,15 +840,13 @@ mod tests {
             env,
             cwd: home.clone(),
         };
-        let served = [Capability::Always, Capability::Config, Capability::Models];
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
-            dispatch_serving(
+            dispatch(
                 &parsed(&["--profile", "dev", "models", "--json"]),
                 &invocation,
                 &mut out,
-                &served,
             )
         };
         assert_eq!(exit, Exit::Success, "{}", captured.stderr_text());
@@ -903,11 +889,10 @@ mod tests {
         let mut captured = Captured::default();
         let exit = {
             let mut out = captured.output();
-            dispatch_serving(
+            dispatch(
                 &parsed(&["--profile", "dev", "sessions"]),
                 &invocation,
                 &mut out,
-                &[Capability::Always, Capability::Config, Capability::Sessions],
             )
         };
         assert_eq!(exit, Exit::Failure);
