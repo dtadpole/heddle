@@ -4,6 +4,7 @@
 #   ./redeploy.sh                 redeploy this checkout when origin/main has moved; judge it either way
 #   ./redeploy.sh --check         say whether the deployment is behind origin/main, and change nothing
 #   ./redeploy.sh --repo DIR ...  act on the deployment checkout DIR instead of the one this script lives in
+#   ./redeploy.sh --force         rebuild and restart even when no file the server loads at start changed
 #
 # Exit 0 when the deployment is at origin/main and 96-deployment holds, 1 when a step or the verifier failed, 2 when
 # it refused to start (an edited checkout), 10 from --check when the deployment is behind.
@@ -27,6 +28,7 @@ trap 'rm -f "$HEDDLE_REDEPLOY_COPY"' EXIT
 
 repo=$(CDPATH= cd -- "$HEDDLE_REDEPLOY_HOME/../.." && pwd)
 check=no
+force=no
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) check=yes ;;
@@ -35,7 +37,8 @@ while [ $# -gt 0 ]; do
       repo=$(CDPATH= cd -- "$2" && pwd)
       shift
       ;;
-    --help|-h) sed -n '2,8p' "$HEDDLE_REDEPLOY_COPY" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --force) force=yes ;;
+    --help|-h) sed -n '2,9p' "$HEDDLE_REDEPLOY_COPY" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "redeploy.sh: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -69,6 +72,30 @@ fi
 if [ "$head" = "$tip" ]; then
   say "already at origin/main $(short "$tip"); judging it"
 else
+  # Which changed files make the running server stale. The server loads its build (dist/, from src/ and the package
+  # files), the root configuration layers and, through the agent, this tool's definitions — all of them at start. The
+  # paths below are the ones it never loads at start: the Rust port, verifiers, records, other tools, docs. Only a move
+  # made entirely of those skips the rebuild and the restart; anything else, or a missing build, takes the full path.
+  # Every restart mints a new launch token and silences the port for a moment, and most moves of `main` are Rust or
+  # verifier changes, so this keeps the owner's page still when nothing it serves has changed.
+  stale=$(git_at diff --name-only "$head" "$tip" | awk '
+    /^(rust|_verifiers_|_context_|_skills_|_conventions_|_logs_|test)\// { next }
+    /^_tools_\/web-daemon\// { print; next }
+    /^_tools_\// { next }
+    /^src\// { print; next }
+    /\.md$/ { next }
+    NF { print }
+  ')
+  if [ "$force" = no ] && [ -z "$stale" ] && [ -f "$repo/dist/cli.js" ] && [ -z "${HEDDLE_BIN:-}" ]; then
+    say "moving $(short "$head") -> $(short "$tip"); nothing the server loads at start changed, so no rebuild or restart"
+    git_at checkout --quiet --detach "$tip"
+    restart=no
+  else
+    restart=yes
+  fi
+fi
+
+if [ "$head" != "$tip" ] && [ "$restart" = yes ]; then
   say "moving $(short "$head") -> $(short "$tip")"
   git_at checkout --quiet --detach "$tip"
   if [ -z "${HEDDLE_BIN:-}" ]; then

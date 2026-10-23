@@ -1,7 +1,7 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:42:38Z
+modified: 2026-10-23T04:48:13Z
 level: L3
 version: 2.0.0
 description: 'What serves the owner''s page at 127.0.0.1:8082, how it is redeployed, rehearsed and restored, who acts on it, and what is still open.'
@@ -28,7 +28,8 @@ The owner's page is `http://127.0.0.1:8082/`, the TypeScript build as the oracle
 
 - **Redeploy** when `main` moves: `sh ~/heddle-live/_tools_/web-daemon/redeploy.sh` (until `main` carries it, a seat
   copy with `--repo ~/heddle-live`). It fetches, moves, builds, runs the new checkout's installer and judges with
-  `96-deployment`; `--check` only says whether the deployment is behind.
+  `96-deployment`; `--check` only says whether the deployment is behind. A move that changes nothing the server
+  loads at start (Rust, verifiers, records, docs) is checked out and judged without a restart.
 - **Experiment** only with `_tools_/web-daemon/rehearse.sh`, on a scratch agent. The live agent is touched only by a
   redeploy, and 95 never runs against it: its stays-up check kills the server.
 - **Restore** a job that is gone: `launchctl kickstart gui/$(id -u)/com.dtadpole.heddle-web`. A silent port with the

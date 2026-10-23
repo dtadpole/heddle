@@ -1,6 +1,6 @@
 ---
 title: Web daemon redeploy rules
-version: 1.0.0
+version: 1.1.0
 description: Component tests for redeploy.sh — the one order of a redeploy (fetch, move, build, install with the new checkout's installer, probe, judge), and what it refuses.
 grounded_in:
   - source: _tools_/web-daemon/redeploy.sh
@@ -20,6 +20,8 @@ to a script the shell is still reading; the script runs from a private copy and 
 | behind origin/main | `npm ci`, `npm run build`, `install.sh --restart` from the **new** checkout, a port probe, `96-deployment`; exit 0; clean at the tip |
 | `--check` while behind | exit 10, nothing changed, nothing called |
 | already current | only the probe and `96-deployment`: no build, no restart |
+| a move of only inert paths (`rust/`, `_verifiers_/`, records, other tools, docs) with a build present | the checkout moves, then the probe and 96: no build, no restart |
+| the same with no build, `--force`, or `HEDDLE_BIN`; or any change under `src/` | the full path |
 | an edited deployment | exit 2 before anything runs, and the edit is kept |
 | the build fails | exit 1 before the installer, so the service keeps its previous build |
 | the installer refuses, or 96 fails | exit 1 |

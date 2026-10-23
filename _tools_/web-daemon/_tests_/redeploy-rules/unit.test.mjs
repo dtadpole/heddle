@@ -34,7 +34,7 @@ function git(cwd, ...args) {
   return result.stdout.trim()
 }
 
-function fixture() {
+function fixture({ change = 'tooling' } = {}) {
   counter += 1
   const base = join(scratch, `case-${counter}`)
   const origin = join(base, 'origin.git')
@@ -63,9 +63,22 @@ function fixture() {
   git(work, 'push', '-q', 'origin', 'main')
   const first = git(work, 'rev-parse', 'HEAD')
 
-  writeFileSync(join(work, 'README'), 'second\n')
-  writeFileSync(join(tools, 'redeploy.sh'), `${readFileSync(join(tools, 'redeploy.sh'), 'utf8')}\n# changed on main\n`)
-  git(work, 'commit', '-q', '-am', 'second')
+  // What the second commit on main changes decides whether the running server is stale.
+  if (change === 'tooling') {
+    writeFileSync(join(work, 'README'), 'second\n')
+    writeFileSync(join(tools, 'redeploy.sh'), `${readFileSync(join(tools, 'redeploy.sh'), 'utf8')}\n# changed on main\n`)
+  } else if (change === 'inert') {
+    // The Rust port, a verifier, another tool and a document: nothing the server loads at start.
+    for (const [path, body] of [['rust/notes.rs', '// rust\n'], ['_verifiers_/96-deployment/notes.md', 'notes\n'], ['_tools_/other/run.sh', 'echo\n'], ['GUIDE.md', 'guide\n']]) {
+      mkdirSync(join(work, path, '..'), { recursive: true })
+      writeFileSync(join(work, path), body)
+    }
+  } else if (change === 'src') {
+    mkdirSync(join(work, 'src'), { recursive: true })
+    writeFileSync(join(work, 'src', 'server.ts'), 'export {}\n')
+  }
+  git(work, 'add', '.')
+  git(work, 'commit', '-q', '-m', 'second')
   git(work, 'push', '-q', 'origin', 'main')
   const second = git(work, 'rev-parse', 'HEAD')
 
@@ -183,3 +196,43 @@ function readdirTmp(f) {
   const listing = spawnSync('ls', [f.base], { encoding: 'utf8' }).stdout.split('\n')
   return listing.filter((name) => name.startsWith('heddle-redeploy.'))
 }
+
+const probe = 'curl -fsS -m 1 http://127.0.0.1:3082/healthz'
+const full = ['npm ci --no-audit --no-fund --silent', 'npm run --silent build', 'install --restart', probe, 'verify --json']
+const built = (f) => {
+  mkdirSync(join(f.deploy, 'dist'), { recursive: true })
+  writeFileSync(join(f.deploy, 'dist', 'cli.js'), '// built\n')
+}
+
+test('a move that changes nothing the server loads at start moves the checkout and judges it, without a rebuild or a restart', () => {
+  const f = fixture({ change: 'inert' })
+  built(f)
+  const result = redeploy(f)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(head(f), f.second, 'the checkout is at the tip, so 96 can hold')
+  assert.deepEqual(calls(f), [probe, 'verify --json'], 'no npm and no install: the live server and its launch token are left alone')
+  assert.match(result.stdout, /nothing the server loads at start changed, so no rebuild or restart/)
+})
+
+test('the same inert move rebuilds and restarts when there is no build, with --force, or for a binary', () => {
+  const unbuilt = fixture({ change: 'inert' })
+  assert.equal(redeploy(unbuilt).status, 0)
+  assert.deepEqual(calls(unbuilt), full, 'no dist/cli.js: nothing to keep serving, so the full path')
+
+  const forced = fixture({ change: 'inert' })
+  built(forced)
+  assert.equal(redeploy(forced, ['--force']).status, 0)
+  assert.deepEqual(calls(forced), full)
+
+  const binary = fixture({ change: 'inert' })
+  built(binary)
+  assert.equal(redeploy(binary, [], { HEDDLE_BIN: '/opt/heddle/bin/heddle' }).status, 0)
+  assert.deepEqual(calls(binary), ['install --restart', probe, 'verify --json'], 'a rust/ change can matter to a binary deployment, so it always restarts')
+})
+
+test('a change under src/ always rebuilds and restarts, even with a build present', () => {
+  const f = fixture({ change: 'src' })
+  built(f)
+  assert.equal(redeploy(f).status, 0)
+  assert.deepEqual(calls(f), full)
+})
