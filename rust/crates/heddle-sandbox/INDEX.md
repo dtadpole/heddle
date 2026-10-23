@@ -1,8 +1,8 @@
 ---
 title: The heddle-sandbox crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:10:31Z
-version: 0.4.1
+modified: 2026-10-23T05:50:48Z
+version: 0.5.0
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
@@ -104,18 +104,25 @@ cases, so the tests can fail.
 ## Task 7, measured before it is judged
 
 Not yet a verdict: `main`'s binary advertises neither `--turn` nor `web` (`usage::SERVED`), so the lane's status run
-reports 75 as unjudged. Both runs below are rehearsals, on 2026-10-22, with
-`HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs <check> --json` and the verifiers at `d649349` (75) and
-`5ed8deb` (check-approval).
+reports 75 as unjudged. All three runs below are rehearsals, with
+`HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs <check> --json`. The first two ran on 2026-10-22 with
+the verifiers at `d649349` (75) and `5ed8deb` (check-approval). The third ran on 2026-10-23 UTC with them at
+`d649349` and `b71a1f0`.
 
 | Binary | 75-permission-sandbox | check-approval |
 |---|---|---|
 | The backend lane's release build of candidate `e5f2e80`. A shim adds only the `--turn` help line and passes every other call through | 10 pass (`check.mjs` 5, `check-shell-confinement` 4, unattended `check-escalation` 1), 7 unjudged | not run |
 | Debug build of `hd/developer-two` `f45993a` with `hd/developer-two-web` `b6995b6` and `hd/integrator-two` `7d26c6b` merged in. Scratch-only edits: `SERVED` gains `Turn`, and the web branch's sandbox port takes `Option<&Value>` as the server's trait does | 10 pass, 7 fail | 3 fail |
+| The backend lane's release build of 22:40 PDT, after `heddle web` was served on `main` in `e3f9d91` (sha256 prefix `934f4604699ca7b7`). A shim adds only the `--turn` and `web` help lines | 13 pass, 4 fail | 3 fail |
 
-**All ten failures have one cause outside this crate**, reproduced by hand. The `web` command gives the server only
-the models and sandbox services, so `POST /api/turn` answers `400 {"error":"this service is not loaded yet"}`. No
-turn runs, so no approval question is ever asked.
+**Every failure is outside this crate.**
+- In the second run, the `web` command gave the server only the models and sandbox services, so `POST /api/turn`
+  answered `400 {"error":"this service is not loaded yet"}` (reproduced by hand).
+- In the third run, sessions and turns are served, and the two `check-session-mode` checks pass. Two gaps remain:
+  - the server is given no approvals service, so `check-escalation`'s two web cases and all three `check-approval`
+    checks never see an approval question;
+  - the server has no `GET /api/sessions/<id>/log` route (TypeScript serves it at `src/server/web.ts:1203`), so
+    one `check-policy-context` and one `check-runtime-context` check read `not found`.
 
 **Run 75 from a checkout outside the host temp areas.** Its "outside" paths are folders under
 `<checkout>/.heddle-tmp/`. From a checkout under `/tmp` those folders are inside a root `workspace-write` admits.
