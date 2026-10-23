@@ -57,8 +57,10 @@ sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76
 - **Open, not in this crate:** `40-pluggable-tools` answers through `HEDDLE_BIN` once the binary dispatches
   `tools`/`--turn` to the entry points and composes the tools row with `gates_over`; its malformed-spec check also
   needs the boot to print an outside component's `OutsideError::Registration` with the failed row.
-- **Next in this crate:** a `ToolHooks` adapter over `heddle-events`' bridge (`bridge::pre_execute`/`post_execute`)
-  once `bridge.rs` is on main; the mapping is in the `ToolHooks` docs.
+- **Hooks are not this crate's to adapt:** `heddle-events` depends on this crate and implements `ToolHooks` over the
+  bus itself (`BusHooks`, with this crate's mapping: a refusal is `PreExecute::Refused`, a failure `ToolHookError`,
+  a failing post-execute `TOOL_FAILED`) and attaches an outside component's listeners over its connection
+  (`OutsideComponent::request`/`notify`). Adding `heddle-events` as a dependency here would be a cycle.
 - **Verify:** `_tools_/local-build/run test -p heddle-tools` from `rust/`; the verifier from the lane worktree,
   `HEDDLE_BIN="$PWD/rust/target/release/heddle" sh _verifiers_/40-pluggable-tools/verify.sh`.
 

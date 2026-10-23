@@ -55,9 +55,9 @@ records are still this crate's, converted at the seam. Unit tests: 74, green, wi
   `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
 - **Open, not in this crate:** `50-agentic-loop` answers through `HEDDLE_BIN` once the binary dispatches `--turn` to
   `command::run` with an `AgentRuntime` composed from those adapters (its owner has the exact lines).
-- **Next in this crate:** a `TurnHooks` adapter over `heddle-events`' bridge (`bridge::pre_step`) once `bridge.rs`
-  is on main; `impl command::StreamView for heddle_llm::command::StreamView` once that type's `&self` form (its
-  owner's `b48e784`) is on main.
+- **Next in this crate:** `impl command::StreamView for heddle_llm::command::StreamView` once that type's `&self` form
+  (its owner's `b48e784`) is on main. `TurnHooks` over the bus is `heddle-events`' (`BusHooks`), which depends on
+  this crate; adding `heddle-events` as a dependency here would be a cycle.
 - **Verify:** `_tools_/local-build/run test -p heddle-agent` from `rust/`; the verifier from the lane worktree,
   `HEDDLE_BIN="$PWD/rust/target/release/heddle" sh _verifiers_/50-agentic-loop/verify.sh`.
 
