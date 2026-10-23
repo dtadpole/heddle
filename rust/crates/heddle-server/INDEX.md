@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (121 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (122 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -70,11 +70,15 @@ The routes call the traits in `services`, never a backend crate directly, so thi
 with doubles while those crates are written. Data the server only forwards (events, tree nodes, records,
 goal views) is `serde_json::Value`; fields the routes read are typed. The binary implements the traits over
 the real services, or this crate gains adapter modules once `heddle-session`, `heddle-workspace` and
-`heddle-events` publish their APIs. The bus is bridged in, not depended on: the binary forwards
-`session/event` to `EventHub::publish_session_event` and `approval/request` to
-`EventHub::publish_approval_request`, and registers `selection::running_turn_selection` as the
-`model/request` waterfall listener while the server runs. A stop is a `tokio_util::sync::CancellationToken`
-in `TurnRequest`; the agent loop and the HTTP client watch it.
+`heddle-events` publish their APIs. The bus is bridged in, not depended on: the binary registers
+`stream::session_event_forwarder(hub)` as its `session/event` listener, and registers
+`selection::running_turn_selection` as the `model/request` waterfall listener while the server runs.
+Approval questions reach `/api/events` one of two ways: an `ApprovalService` whose `subscribe` returns a
+stream (`heddle-sandbox` publishes on a broadcast channel, so its adapter turns the receiver into a stream
+of JSON values) is relayed by `ServerBuilder::start` and stopped by `WebServer::close`; otherwise the
+binary forwards the bus's `approval/request` with `stream::approval_request_forwarder(hub)`. `start` also
+attaches the approval service as the answerer and `close` detaches it. A stop is a
+`tokio_util::sync::CancellationToken` in `TurnRequest`; the agent loop and the HTTP client watch it.
 
 ## Route table
 

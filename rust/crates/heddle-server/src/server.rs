@@ -438,6 +438,22 @@ impl ServerBuilder {
             .approvals
             .as_ref()
             .map(|approvals| approvals.attach_answerer());
+        // A service that publishes its questions itself is relayed here, so a card reaches every
+        // `/api/events` subscriber as an `approval` frame without the binary wiring a listener.
+        let approval_relay = state
+            .harness()
+            .approvals
+            .as_ref()
+            .and_then(|approvals| approvals.subscribe())
+            .map(|mut questions| {
+                let hub = state.events().clone();
+                tokio::spawn(async move {
+                    use futures::StreamExt;
+                    while let Some(question) = questions.next().await {
+                        hub.publish_approval_request(&question);
+                    }
+                })
+            });
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router)
@@ -456,6 +472,7 @@ impl ServerBuilder {
             shutdown: Some(shutdown_tx),
             task: Some(task),
             detach_approvals,
+            approval_relay,
         })
     }
 }
@@ -471,6 +488,8 @@ pub struct WebServer {
     task: Option<tokio::task::JoinHandle<()>>,
     /// The approval service's detach function, held for as long as the server answers questions.
     detach_approvals: Option<Box<dyn FnOnce() + Send>>,
+    /// The task relaying the approval service's published questions into the hub.
+    approval_relay: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WebServer {
@@ -526,6 +545,9 @@ impl WebServer {
     pub async fn close(mut self) {
         if let Some(detach) = self.detach_approvals.take() {
             detach();
+        }
+        if let Some(relay) = self.approval_relay.take() {
+            relay.abort();
         }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {
@@ -1875,6 +1897,30 @@ mod tests {
         }
     }
 
+    /// An approval service that publishes questions on a channel, the way heddle-sandbox's broadcast does.
+    struct PublishingApprovals {
+        questions: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Value>>>,
+    }
+
+    impl ApprovalService for PublishingApprovals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            false
+        }
+        fn subscribe(&self) -> Option<futures::stream::BoxStream<'static, Value>> {
+            let receiver = self.questions.lock().unwrap().take()?;
+            Some(Box::pin(futures::stream::unfold(
+                receiver,
+                |mut receiver| async move { receiver.recv().await.map(|value| (value, receiver)) },
+            )))
+        }
+    }
+
     struct Approvals;
 
     impl ApprovalService for Approvals {
@@ -2305,6 +2351,50 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
+    }
+
+    #[tokio::test]
+    async fn a_published_approval_question_reaches_the_event_stream() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut harness = harness();
+        harness.approvals = Some(Arc::new(PublishingApprovals {
+            questions: std::sync::Mutex::new(Some(receiver)),
+        }));
+        let server = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("approval-relay")),
+                ..ServerOptions::default()
+            },
+        )
+        .start()
+        .await
+        .expect("the server starts");
+        let mut frames = server.state().events().subscribe();
+
+        let question = serde_json::json!({
+            "id": "approval-00000000-0000-0000-0000-000000000000",
+            "tool": "write_file",
+            "reason": "write outside the workspace",
+            "displayReason": "write outside the workspace",
+            "at": "2026-10-23T01:16:42.123Z"
+        });
+        sender.send(question.clone()).unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next_frame())
+            .await
+            .expect("the question is relayed")
+            .expect("the hub is open");
+        assert_eq!(frame.event, "approval");
+        assert_eq!(
+            serde_json::from_str::<Value>(&frame.data).unwrap(),
+            question
+        );
+
+        server.close().await;
+        // After close the relay is gone: nothing is delivered to a closed hub.
+        let _ = sender.send(serde_json::json!({"id": "late"}));
     }
 
     #[tokio::test]
