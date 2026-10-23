@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:05:53Z
-version: 0.5.0
+modified: 2026-10-23T05:17:14Z
+version: 0.5.1
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -48,7 +48,7 @@ never fails: every refusal is a result the model reads.
 
 ## Where the port stands
 
-As of 2026-10-22, branch `hd/developer-five`. Every body is ported; no `todo!()` and no mirror type is left (the
+As of 2026-10-22, branch `hd/developer-five-clean`. Every body is ported; no `todo!()` and no mirror type is left (the
 sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76, green, with the workspace gate
 (`fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `test --workspace`).
 
@@ -56,13 +56,12 @@ sandbox, LLM and session types are the owners' own, re-exported). Unit tests: 76
   (including `notify`), the gate ports over the real `heddle-sandbox` and `heddle-session` services
   (`adapters::{Sandbox, SandboxApprovals, SessionModes, gates_over}`), and the D-043 `tools`/`commands` entry point
   (`command::run`).
-- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule, at the binary owner's tip
-  `4e4e30e` with this branch merged and only `usage::SERVED` edited):** `40-pluggable-tools`' `check-tools.mjs` **5/6**
-  — the outside tool plugged in and used, and the displacement, pass through this crate's protocol and the binary's
-  manifest start, end to end with the verifier's own process script.
-- **Open, not in this crate:** check 6 needs the binary to print a failed row's error (the registration's
-  "a tool must be registered with a name") before its `N row(s) failed to load` line, as the TypeScript loader's log
-  line does; then serving `Capability::Tools`.
+- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule, at main `cfa6a2b` with this
+  branch merged and only `usage::SERVED` edited to add Tools and Turn):** `40-pluggable-tools`' `check-tools.mjs`
+  **6/6** — the outside tool plugged in and used, the displacement, and the malformed spec refused at registration
+  (the binary prints the row's own error before its failed-row summary, as the TypeScript loader logs it).
+- **Open, not in this crate:** the binary serving `Capability::Tools` and `Capability::Turn`, so the verifier judges
+  through `HEDDLE_BIN` in the lane.
 - **Hooks are not this crate's to adapt:** `heddle-events` depends on this crate and implements `ToolHooks` over the
   bus itself (`BusHooks`, with this crate's mapping: a refusal is `PreExecute::Refused`, a failure `ToolHookError`,
   a failing post-execute `TOOL_FAILED`) and attaches an outside component's listeners over its connection

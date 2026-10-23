@@ -26,6 +26,9 @@ pub use heddle_llm::{
 /// written order).
 pub use heddle_session::SessionEvent;
 
+/// The context service's own records: a named runtime-context section and a request's estimate split three ways.
+pub use heddle_context::{Breakdown as ContextBreakdown, RuntimeContextSection};
+
 /// The parts of a session's metadata the loop and delegation read. Mirror of a subset of
 /// `heddle_session::SessionMeta`; fields this crate does not read are kept in `rest`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -106,15 +109,6 @@ pub struct SurfaceView {
     pub replace_generation: u64,
 }
 
-/// One dynamic contribution to the runtime context. Mirror of `heddle_context::RuntimeContextSection`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeContextSection {
-    /// Its stable name, e.g. `sandbox:policy`.
-    pub name: String,
-    /// Its text.
-    pub text: String,
-}
-
 /// What a round's context is prepared for. Mirror of the options of `heddle_context`'s `prepare`/`assemble`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PrepareOptions {
@@ -128,17 +122,6 @@ pub struct PrepareOptions {
     pub tools: Vec<ToolSpec>,
     /// A system prompt for a session that has none.
     pub system: Option<String>,
-}
-
-/// A request's estimated size, split the way the context panel shows it. Mirror of `heddle_context`'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ContextBreakdown {
-    /// System prompts.
-    pub system: u64,
-    /// Tool schemas.
-    pub tools: u64,
-    /// Every other message.
-    pub messages: u64,
 }
 
 /// What a context preparation answered. Mirror of `heddle_context::ContextReport` (TypeScript `ContextReport`).
