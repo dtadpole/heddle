@@ -1,8 +1,8 @@
 ---
 title: The heddle-agent crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:05:53Z
-version: 0.6.0
+modified: 2026-10-23T05:11:14Z
+version: 0.6.1
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -50,9 +50,12 @@ included), `assistant/chunk`, the `tool` message (`error (<code>): <message>`, t
 
 ## Where the port stands
 
-As of 2026-10-22, branch `hd/developer-five`. Every body is ported; no `todo!()` is left. The model types are
-`heddle-llm`'s own and `SessionEvent` is `heddle-session`'s; the session-meta, create-session and context-report
-records are still this crate's, converted at the seam. Unit tests: 74, green, with the workspace gate.
+As of 2026-10-22, branch `hd/developer-five-clean`. Every body is ported; no `todo!()` is left. The model types are
+`heddle-llm`'s own, `SessionEvent` is `heddle-session`'s, and the context records `ContextSummary`, `RuntimeContextSection`
+and `ContextBreakdown` are `heddle-context`'s. `ContextReport` stays a mirror until the context crate's report derives
+`Default`, which `heddle-goal`'s tests construct it with. Three more shapes stay this crate's on purpose:
+`PrepareOptions` (owned, where the context crate's borrows), `SurfaceView` (the two generations and the node list
+the loop reads), and the session-meta and create-session records, converted at the session seam. Unit tests: 74, green, with the workspace gate.
 
 - **Done:** `run_turn` and `begin_turn`, the live-turn registry, delegation and the `delegate` tool, the ports over
   the real crates (`adapters::{LlmModel, Sessions, SessionSubagents, Context}`; `Context::over_session_handles` binds
