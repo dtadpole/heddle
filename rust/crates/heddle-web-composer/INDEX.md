@@ -25,19 +25,27 @@ trait declared here, so it builds and is tested against doubles before the crate
 
 ## Routes
 
-| Route | Module | Host trait |
-|---|---|---|
-| `GET /api/status` | `status` | `StatusHost` |
-| `GET /api/context?session=&endpoint=&model=` | `context_view` | `ContextHost` |
-| `GET /api/endpoints` | `model_switcher` | `ModelHost` |
-| `POST /api/sessions/{id}/model` | `model_switcher` | `ModelHost` |
-| `POST /api/sessions/{id}/steer` | `turn_control` | `TurnControlHost` |
-| `POST /api/sessions/{id}/stop` | `turn_control` | `TurnControlHost` |
+| Route | Module | Host trait | Mounted by `router`? |
+|---|---|---|---|
+| `GET /api/context?session=&endpoint=&model=` | `context_view` | `ContextHost` | yes |
+| `GET /api/endpoints` | `model_switcher` | `ModelHost` | yes |
+| `POST /api/sessions/{id}/model` | `model_switcher` | `ModelHost` | yes |
+| `GET /api/status` | `status` | `StatusHost` | **no** — `heddle-server`'s `CORE_ROUTES` owns it |
+| `POST /api/sessions/{id}/steer` | `turn_control` | `TurnControlHost` | **no** — the server's turn registry owns it |
+| `POST /api/sessions/{id}/stop` | `turn_control` | `TurnControlHost` | **no** — the server's turn registry owns it |
 
-`router(Arc<H>) -> axum::Router` mounts all six for any `H: ComposerHost` (blanket over the four traits); each
-module also has its own `routes`, and [`ROUTES`](src/lib.rs) lists the six `(method, path)` pairs so a caller can
-assert at boot that they do not collide with its own (the server's are `/api/turn`, `/api/sessions`, the session
-detail routes, `/api/tree`, `/api/workspaces`, `/api/folders/session`, goals and approvals). Mounting is one line
+The last three are the crate's **logic and tests** but not its mount: the server registers those paths itself, and a
+duplicate would fail the binary's start-up with a route error, so `router` and `ROUTES` carry only the first three.
+
+`check-runtime-context` asserts no composer route: it judges the Trajectory view's runtime-context rows
+(`heddle-web-trajectory`) and the server's `/api/sessions/{id}/permission`; the composer's contribution to that
+page is the composer card's markup, which the server serves. It is listed here because the assignment names it.
+
+`router(Arc<H>) -> axum::Router` mounts the three composer-owned routes for any `H: ComposerHost` (blanket over the
+four traits); each module also has its own `routes`, and [`ROUTES`](src/lib.rs) lists the three `(method, path)`
+pairs so a caller can assert at boot that they do not collide with its own — the server's include the other three
+row and `/api/turn`, `/api/sessions`, the session detail routes, `/api/tree`, `/api/workspaces`,
+`/api/folders/session`, goals and approvals. Mounting is one line
 once the caller's state is applied:
 
 ```ignore
@@ -91,6 +99,30 @@ handles. Until then the server can implement the traits itself.
    check-runtime-context and check-model-switcher run through `HEDDLE_BIN`. The traits' shapes are fixed and each
    route is judged against a host double, so the adapter work is a mapping over the crates' own APIs – the four
    host crates (`heddle-context`, `heddle-config`, `heddle-llm`, `heddle-session`) are still `todo!()` on `main`.
+
+## The routes against the checks' API expectations
+
+Committed as [`tests/check_expectations.rs`](tests/check_expectations.rs): it mounts `router` on a real listener over
+a fixed in-memory host and speaks HTTP to it, so the contract the four checks read is a regression test in the crate
+rather than a manual run. **13 of 13 hold**, each the exact status, sentence or body a check asserts —
+
+| Expectation (and the check that needs it) | Answer |
+|---|---|
+| `GET /api/status` is compact, `{"sandbox":{"mode"},"cwd"}` (composer) | holds |
+| `GET /api/context` without a session is `400 a session is required` (context-view) | holds |
+| `GET /api/context?session=<unknown>` is `404 no session <id>` (context-view) | holds |
+| `GET /api/context?session=<known>` carries session, instructions, contextWindow, thresholdTokens, surface and a `null` endpoint (context-view) | holds |
+| `GET /api/endpoints` is pretty, with the nominated default and each endpoint's entry (model-switcher) | holds |
+| `POST /api/sessions/<malformed>/model` is `400 not a session id` (model-switcher) | holds |
+| a model switch refuses an unconfigured endpoint, then an undeclared model, then records a valid one (model-switcher) | holds |
+| `POST /api/sessions/<malformed>/steer` is `400`, and a steer with no running turn is `409 session/steer-unavailable`, with `a prompt is required` decided first (composer) | holds |
+| `POST /api/sessions/<id>/stop` answers `{"stopped":0,"session":…}` (composer) | holds |
+
+The same expectations were first checked by hand through a throwaway stand-in host, and are now the test above. What is
+left for the four checks to run through `HEDDLE_BIN` is not in these routes: a binary that answers
+`heddle web`, the server mounting `router` behind its token and fence layers, and a host implementation over the
+session/context/model/turn crates (their APIs are still `todo!()` on `main`, so the adapters are a mapping that
+cannot be written against them yet).
 
 ## Read next
 
