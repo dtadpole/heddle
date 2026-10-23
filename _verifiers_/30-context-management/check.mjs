@@ -516,7 +516,10 @@ test('a provider that refused the call gets one reduction and one retry, and onl
     assert.notEqual(third.code, 0, `a second refusal in one round fails the turn\n${third.stdout}${third.stderr}`)
   } finally {
     removeDir(h.home)
-    await new Promise((resolvePromise) => server.close(() => resolvePromise()))
+    await new Promise((resolvePromise) => {
+      server.close(() => resolvePromise())
+      server.closeAllConnections()
+    })
   }
 })
 
