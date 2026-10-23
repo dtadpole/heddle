@@ -52,8 +52,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bus::{EventBus, HookFuture, ListenOptions, Listener, Scope};
-use crate::event::{EmitEvent, ParallelEvent, WaterfallEvent};
+use crate::error::HookError;
+use crate::event::{EmitEvent, Event, ParallelEvent, WaterfallEvent};
 use crate::mode::Mode;
+use crate::waterfall::Next;
 
 /// One dispatch, as an outside listener is told it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -90,6 +92,25 @@ pub enum HookReply {
     },
 }
 
+/// Serialize one payload into the message an outside listener is handed.
+fn hook_call<E: Event>(payload: &E::Payload, mode: Mode) -> Result<HookCall, HookError>
+where
+    E::Payload: Serialize,
+{
+    serde_json::to_value(payload)
+        .map(|value| HookCall {
+            point: E::NAME.to_owned(),
+            mode,
+            payload: value,
+        })
+        .map_err(|error| {
+            HookError::fail(format!(
+                "the payload of {} does not serialize: {error}",
+                E::NAME
+            ))
+        })
+}
+
 /// Anything that answers a [`HookCall`]: a process, or a test double.
 pub trait JsonListener: Send + Sync + 'static {
     /// A dispatch that waits for the answer (waterfall, parallel, serial).
@@ -114,7 +135,11 @@ impl EventBus {
     where
         E::Payload: Serialize,
     {
-        todo!("heddle-events: expose_emit")
+        self.inner().expose(
+            E::NAME,
+            Mode::Emit,
+            Arc::new(|scope, listener, options| scope.on_json_emit::<E>(listener, options)),
+        );
     }
 
     /// Let outside listeners attach to the [`ParallelEvent`] `E` by its name.
@@ -122,7 +147,11 @@ impl EventBus {
     where
         E::Payload: Serialize,
     {
-        todo!("heddle-events: expose_parallel")
+        self.inner().expose(
+            E::NAME,
+            Mode::Parallel,
+            Arc::new(|scope, listener, options| scope.on_json_parallel::<E>(listener, options)),
+        );
     }
 
     /// Let outside listeners attach to the [`WaterfallEvent`] `E` by its name. The crate that owns a point's
@@ -133,12 +162,16 @@ impl EventBus {
         E::Payload: Serialize,
         E::Output: DeserializeOwned,
     {
-        todo!("heddle-events: expose_waterfall")
+        self.inner().expose(
+            E::NAME,
+            Mode::Waterfall,
+            Arc::new(|scope, listener, options| scope.on_json_waterfall::<E>(listener, options)),
+        );
     }
 
     /// The points outside listeners may attach to, with their modes, sorted by name.
     pub fn exposed(&self) -> Vec<(&'static str, Mode)> {
-        todo!("heddle-events: exposed")
+        self.inner().exposed_points()
     }
 }
 
@@ -150,8 +183,8 @@ impl Scope {
         listener: Arc<dyn JsonListener>,
         options: ListenOptions,
     ) -> Result<Listener, UnknownPoint> {
-        let _ = (point, listener, options);
-        todo!("heddle-events: on_json")
+        let attach = self.bus().inner().attacher(point)?;
+        Ok(attach(self, listener, options))
     }
 
     /// Attach an outside listener to the [`EmitEvent`] `E`: every dispatch is a [`JsonListener::notify`].
@@ -163,8 +196,15 @@ impl Scope {
     where
         E::Payload: Serialize,
     {
-        let _ = (listener, options);
-        todo!("heddle-events: on_json_emit")
+        self.on_emit::<E>(
+            move |payload| match hook_call::<E>(payload, Mode::Emit) {
+                Ok(call) => listener.notify(call),
+                Err(error) => {
+                    tracing::warn!(point = E::NAME, error = %error, "an outside listener was not told");
+                }
+            },
+            options,
+        )
     }
 
     /// Attach an outside listener to the [`ParallelEvent`] `E`: `next` and `replace` succeed, `refuse` and
@@ -177,8 +217,20 @@ impl Scope {
     where
         E::Payload: Serialize,
     {
-        let _ = (listener, options);
-        todo!("heddle-events: on_json_parallel")
+        self.on_parallel::<E>(
+            move |payload: Arc<E::Payload>| {
+                let listener = listener.clone();
+                Box::pin(async move {
+                    let call = hook_call::<E>(&payload, Mode::Parallel)?;
+                    match listener.call(call).await? {
+                        HookReply::Next | HookReply::Replace { .. } => Ok(()),
+                        HookReply::Refuse { reason } => Err(HookError::refuse(reason)),
+                        HookReply::Fail { message } => Err(HookError::fail(message)),
+                    }
+                })
+            },
+            options,
+        )
     }
 
     /// Attach an outside listener to the [`WaterfallEvent`] `E`: `next` runs the rest of the chain, `replace`
@@ -193,8 +245,28 @@ impl Scope {
         E::Payload: Serialize,
         E::Output: DeserializeOwned,
     {
-        let _ = (listener, options);
-        todo!("heddle-events: on_json_waterfall")
+        self.on_waterfall::<E>(
+            move |payload: Arc<E::Payload>, next: Next<E>| {
+                let listener = listener.clone();
+                Box::pin(async move {
+                    let call = hook_call::<E>(&payload, Mode::Waterfall)?;
+                    match listener.call(call).await? {
+                        HookReply::Next => next.run().await,
+                        HookReply::Replace { value } => {
+                            serde_json::from_value::<E::Output>(value).map_err(|error| {
+                                HookError::fail(format!(
+                                    "the value an outside listener replaced at {} does not decode: {error}",
+                                    E::NAME
+                                ))
+                            })
+                        }
+                        HookReply::Refuse { reason } => Err(HookError::refuse(reason)),
+                        HookReply::Fail { message } => Err(HookError::fail(message)),
+                    }
+                })
+            },
+            options,
+        )
     }
 }
 
@@ -281,6 +353,10 @@ pub async fn attach_outside_listener(
 mod tests {
     use super::*;
 
+    use std::sync::Mutex;
+
+    use crate::error::HookErrorKind;
+
     #[test]
     fn a_reply_is_tagged_by_kind() {
         let replace: HookReply =
@@ -318,5 +394,274 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn reply_next(_call: &HookCall) -> HookFuture<HookReply> {
+        Box::pin(async { Ok(HookReply::Next) })
+    }
+
+    fn reply_replaced(_call: &HookCall) -> HookFuture<HookReply> {
+        Box::pin(async {
+            Ok(HookReply::Replace {
+                value: serde_json::json!("replaced"),
+            })
+        })
+    }
+
+    fn reply_replacement_of_the_wrong_type(_call: &HookCall) -> HookFuture<HookReply> {
+        Box::pin(async {
+            Ok(HookReply::Replace {
+                value: serde_json::json!(42),
+            })
+        })
+    }
+
+    fn reply_refused(_call: &HookCall) -> HookFuture<HookReply> {
+        Box::pin(async {
+            Ok(HookReply::Refuse {
+                reason: "this hook refuses".into(),
+            })
+        })
+    }
+
+    fn reply_failed(_call: &HookCall) -> HookFuture<HookReply> {
+        Box::pin(async {
+            Ok(HookReply::Fail {
+                message: "this hook is broken".into(),
+            })
+        })
+    }
+
+    struct MemoryListener {
+        seen: Arc<Mutex<Vec<HookCall>>>,
+        reply: fn(&HookCall) -> HookFuture<HookReply>,
+    }
+
+    impl JsonListener for MemoryListener {
+        fn call(&self, call: HookCall) -> HookFuture<HookReply> {
+            self.seen.lock().unwrap().push(call.clone());
+            (self.reply)(&call)
+        }
+
+        fn notify(&self, call: HookCall) {
+            self.seen.lock().unwrap().push(call);
+        }
+    }
+
+    fn memory(
+        reply: fn(&HookCall) -> HookFuture<HookReply>,
+    ) -> (Arc<dyn JsonListener>, Arc<Mutex<Vec<HookCall>>>) {
+        let seen: Arc<Mutex<Vec<HookCall>>> = Arc::default();
+        let listener: Arc<dyn JsonListener> = Arc::new(MemoryListener {
+            seen: seen.clone(),
+            reply,
+        });
+        (listener, seen)
+    }
+
+    struct Echoed;
+    impl Event for Echoed {
+        const NAME: &'static str = "test/json-waterfall";
+        type Payload = String;
+    }
+    impl WaterfallEvent for Echoed {
+        type Output = String;
+    }
+
+    struct Reported;
+    impl Event for Reported {
+        const NAME: &'static str = "test/json-emit";
+        type Payload = Value;
+    }
+    impl EmitEvent for Reported {}
+
+    struct FannedJson;
+    impl Event for FannedJson {
+        const NAME: &'static str = "test/json-parallel";
+        type Payload = u32;
+    }
+    impl ParallelEvent for FannedJson {}
+
+    #[tokio::test]
+    async fn an_exposed_waterfall_point_is_listed_and_a_next_reply_runs_the_default() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        assert_eq!(bus.exposed(), vec![(Echoed::NAME, Mode::Waterfall)]);
+        let (listener, seen) = memory(reply_next);
+        let scope = bus.scope("outside");
+        let handle = scope
+            .on_json(Echoed::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        assert!(handle.is_active());
+        let value = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| format!("default:{payload}"))
+            .await
+            .unwrap();
+        assert_eq!(value, "default:base");
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].point, Echoed::NAME);
+        assert_eq!(calls[0].mode, Mode::Waterfall);
+        assert_eq!(calls[0].payload, serde_json::json!("base"));
+    }
+
+    #[tokio::test]
+    async fn a_replace_reply_is_the_value_and_the_rest_does_not_run() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let (listener, _seen) = memory(reply_replaced);
+        let scope = bus.scope("outside");
+        scope
+            .on_json(Echoed::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let ran_default = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ran_default_in_inner = ran_default.clone();
+        let value = bus
+            .waterfall::<Echoed>("base".to_string(), move |payload| {
+                ran_default_in_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                payload.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(value, "replaced");
+        assert_eq!(
+            ran_default.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the replacement stopped the chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refuse_reply_is_a_refusal_attributed_to_the_scopes_name() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let (listener, _seen) = memory(reply_refused);
+        let scope = bus.scope("outside-policy");
+        scope
+            .on_json(Echoed::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let error = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| payload.clone())
+            .await
+            .unwrap_err();
+        assert!(error.is_refusal());
+        assert_eq!(error.to_string(), "refused by hook: this hook refuses");
+        assert_eq!(error.listener(), Some("outside-policy"));
+    }
+
+    #[tokio::test]
+    async fn a_fail_reply_is_a_broken_hook_attributed_to_the_scopes_name() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let (listener, _seen) = memory(reply_failed);
+        let scope = bus.scope("outside-broken");
+        scope
+            .on_json(Echoed::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let error = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| payload.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), HookErrorKind::Failed);
+        assert_eq!(error.listener(), Some("outside-broken"));
+        assert!(error.message().contains("this hook is broken"));
+    }
+
+    #[tokio::test]
+    async fn a_replacement_that_does_not_decode_fails_rather_than_guessing() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let (listener, _seen) = memory(reply_replacement_of_the_wrong_type);
+        let scope = bus.scope("outside");
+        scope
+            .on_json(Echoed::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let error = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| payload.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), HookErrorKind::Failed);
+        assert!(error.message().contains("does not decode"));
+    }
+
+    #[test]
+    fn an_unknown_point_lists_what_is_exposed() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        bus.expose_emit::<Reported>();
+        assert_eq!(
+            bus.exposed(),
+            vec![
+                (Reported::NAME, Mode::Emit),
+                (Echoed::NAME, Mode::Waterfall)
+            ],
+            "exposed points are sorted by name"
+        );
+        let (listener, _seen) = memory(reply_next);
+        let scope = bus.scope("outside");
+        let error = scope
+            .on_json("test/absent", listener, ListenOptions::APPEND)
+            .unwrap_err();
+        assert_eq!(error.name, "test/absent");
+        assert_eq!(error.exposed, "test/json-emit, test/json-waterfall");
+    }
+
+    #[tokio::test]
+    async fn an_emit_point_notifies_an_outside_listener_without_waiting() {
+        let bus = EventBus::new();
+        bus.expose_emit::<Reported>();
+        let (listener, seen) = memory(reply_next);
+        let scope = bus.scope("observer");
+        scope
+            .on_json(Reported::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        bus.emit::<Reported>(&serde_json::json!({"seq": 1}));
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].mode, Mode::Emit);
+        assert_eq!(calls[0].payload, serde_json::json!({"seq": 1}));
+    }
+
+    #[tokio::test]
+    async fn a_parallel_json_listener_can_refuse_and_the_failure_is_collected() {
+        let bus = EventBus::new();
+        bus.expose_parallel::<FannedJson>();
+        let (listener, _seen) = memory(reply_refused);
+        let scope = bus.scope("outside-fanout");
+        scope
+            .on_json(FannedJson::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        let error = bus.parallel::<FannedJson>(1u32).await.unwrap_err();
+        assert_eq!(error.errors.len(), 1);
+        assert_eq!(error.errors[0].kind(), HookErrorKind::Refused);
+        assert_eq!(error.errors[0].listener(), Some("outside-fanout"));
+    }
+
+    #[tokio::test]
+    async fn the_typed_bridges_attach_without_the_registry() {
+        let bus = EventBus::new();
+        let (listener, seen) = memory(reply_replaced);
+        let scope = bus.scope("direct");
+        scope.on_json_waterfall::<Echoed>(listener, ListenOptions::APPEND);
+        let value = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| payload.clone())
+            .await
+            .unwrap();
+        assert_eq!(value, "replaced");
+        assert_eq!(seen.lock().unwrap()[0].point, Echoed::NAME);
+    }
+
+    #[test]
+    fn a_disposed_scope_releases_its_outside_listener() {
+        let bus = EventBus::new();
+        bus.expose_emit::<Reported>();
+        let (listener, _seen) = memory(reply_next);
+        let scope = bus.scope("temporary");
+        scope
+            .on_json(Reported::NAME, listener, ListenOptions::APPEND)
+            .unwrap();
+        assert_eq!(bus.listener_count(Reported::NAME), 1);
+        scope.dispose();
+        assert_eq!(bus.listener_count(Reported::NAME), 0);
     }
 }

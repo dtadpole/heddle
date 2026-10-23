@@ -669,7 +669,7 @@ impl Drop for Scope {
 ///
 /// Dropping the handle does **not** release the listener (it lives as long as its scope); call
 /// [`dispose`](Listener::dispose) to release it early.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Listener {
     bus: Weak<Inner>,
     id: u64,
