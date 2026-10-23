@@ -36,7 +36,10 @@ function harness(label, options = {}) {
 /** Does this build expose a streaming view on the command line? */
 async function supportsStream() {
   const help = await runCli(['--help'])
-  return /--stream/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /--stream/.test(help.stdout) && /--turn/.test(help.stdout)
 }
 
 test('reasoning and content arrive as separate deltas, before the turn ends', async (context) => {
