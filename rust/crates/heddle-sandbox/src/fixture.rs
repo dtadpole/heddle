@@ -193,4 +193,77 @@ mod tests {
         assert_eq!(recorded_answer("{}"), None);
         assert_eq!(recorded_answer("not json"), None);
     }
+
+    /// The fixture's real claim: the live ladder, asked the same question, produces the recorded bytes.
+    ///
+    /// The recorded file is not hand-written text that merely parses; this drives `approve_escalation` through a
+    /// real `ApprovalService` with the recorded justification and then compares the frame the server would write
+    /// with the recorded frame, normalising only the two fields that belong to a run (`id` and `at`).
+    #[tokio::test]
+    async fn the_live_escalation_produces_the_recorded_question_and_frame() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::approvals::{Answer, ApprovalService, ApprovalsConfig};
+        use crate::escalation::{EscalationRequest, EscalationSubject, approve_escalation};
+        use crate::mode::SandboxMode;
+
+        let recorded = question();
+        let asked_tool = recorded.tool.clone();
+        let asked_session = recorded.session.clone();
+        let service = Arc::new(ApprovalService::new(ApprovalsConfig::default()));
+        let _guard = service.attach_answerer();
+        let channel = Arc::clone(&service);
+        let worker = tokio::spawn(async move {
+            approve_escalation(
+                EscalationRequest {
+                    tool: asked_tool,
+                    requested_mode: serde_json::json!("danger-full-access"),
+                    effective_mode: SandboxMode::WorkspaceWrite,
+                    justification:
+                        "the write target is outside the workspace and the task requires it"
+                            .to_owned(),
+                    subject: EscalationSubject::Command,
+                    session: asked_session,
+                },
+                &*channel,
+                std::future::pending::<()>(),
+            )
+            .await
+        });
+
+        let live = loop {
+            if let Some(published) = service.pending_requests().into_iter().next() {
+                break published;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        assert_eq!(live.tool, recorded.tool);
+        assert_eq!(
+            live.reason, recorded.reason,
+            "the audit reason, byte for byte"
+        );
+        assert_eq!(
+            live.display_reason, recorded.display_reason,
+            "the card text, byte for byte"
+        );
+        assert_eq!(live.session, recorded.session);
+        assert!(crate::approvals::is_approval_id(&live.id));
+
+        let mut normalised = live.clone();
+        normalised.id.clone_from(&recorded.id);
+        normalised.at.clone_from(&recorded.at);
+        assert_eq!(
+            stream_frame(&normalised),
+            STREAM_FRAME,
+            "a live frame is the recorded frame with only its run's id and time substituted"
+        );
+
+        assert!(service.answer(&live.id, Answer::AllowedOnce));
+        assert_eq!(
+            worker.await.expect("the escalation task"),
+            Ok(SandboxMode::DangerFullAccess),
+            "and the recorded answer grants the one wider call"
+        );
+    }
 }
