@@ -52,6 +52,9 @@ function fixture({ second = 'heddle' } = {}) {
   git(work, 'push', '-q', 'origin', 'main')
   const first = git(work, 'rev-parse', 'HEAD')
   if (second === 'heddle') put('rust/crates/heddle/src/web.rs', 'pub fn web() {}\n')
+  else if (second === 'other-crate') put('rust/crates/heddle-config/src/compose.rs', 'pub fn compose() {}\n')
+  else if (second === 'page') put('src/server/page.html', '<html></html>\n')
+  else if (second === 'crate-docs') put('rust/crates/heddle/src/INDEX.md', 'docs\n')
   else put('docs/notes.md', 'notes\n')
   git(work, 'add', '.')
   git(work, 'commit', '-q', '-m', 'second')
@@ -135,4 +138,16 @@ test('a checkout with changes, the deployment\'s port or label, and an unknown o
   assert.equal(preview(f, [], { PREVIEW_LABEL: 'com.dtadpole.heddle-web' }).status, 2)
   assert.equal(preview(f, ['--frobnicate']).status, 2)
   assert.deepEqual(calls(f), [])
+})
+
+test('any crate the binary links, and the page it embeds, make the preview behind; Markdown inside a crate does not', () => {
+  // Measured 2026-10-23: watching only rust/crates/heddle and heddle-server, the preview read "current" while main had
+  // changed heddle-config's compose.rs, which the binary links.
+  for (const [second, expected] of [['other-crate', 10], ['page', 10], ['crate-docs', 0]]) {
+    const f = fixture({ second })
+    writeFileSync(join(f.home, 'built-from-main'), `${f.first}\n`)
+    const answer = preview(f, ['--check'])
+    assert.equal(answer.status, expected, `${second}: ${answer.stdout}`)
+    assert.deepEqual(calls(f), [])
+  }
 })
