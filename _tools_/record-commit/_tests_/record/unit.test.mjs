@@ -322,29 +322,48 @@ exit 0
   chmodSync(join(hookDir, 'pre-push'), 0o755)
 }
 
-test('a staged file another writer lands with the same bytes mid-run: refused with exit 2, the rest not committed', (t) => {
-  const w = world(t)
+// The coordinator's scenario: one staged file that another writer adds to origin between
+// this run's fetch and its push, alongside two other staged files. The record must carry
+// all three or refuse with exit 2, whatever bytes the other writer used.
+function threeFilesWithRace(w, racedContent) {
   write(w.live, '_projects_/x/handover.md', 'handover\n')
   write(w.live, '_projects_/x/note.md', 'one\nref to handover\n')
-  raceHook(w, '_projects_/x/handover.md', 'handover\n')
-  const r = cli(w, ['--message', 'docs(test): handover and its ref', '--file', '_projects_/x/handover.md', '--file', '_projects_/x/note.md', '--validator', w.validator], { RACE_MARKER: join(w.root, 'race'), WRITER: w.writer })
+  write(w.live, '_logs_/run.jsonl', 'a\nb\nstep line\n')
+  raceHook(w, '_projects_/x/handover.md', racedContent)
+  return cli(
+    w,
+    ['--message', 'docs(test): handover, its ref and a step line', '--file', '_projects_/x/handover.md', '--file', '_projects_/x/note.md', '--file', '_logs_/run.jsonl', '--validator', w.validator],
+    { RACE_MARKER: join(w.root, 'race'), WRITER: w.writer },
+  )
+}
+
+function assertNothingOfOursLanded(w) {
+  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\n', 'the second staged file was not committed on its own')
+  assert.equal(originShow(w, '_logs_/run.jsonl'), 'a\nb\n', 'the third staged file was not committed on its own')
+  assert.equal(git(w.origin, ['rev-list', '--count', 'main']), '2', 'base + the racing commit, nothing of ours')
+  assert.equal(worktreeCount(w), 1)
+}
+
+test('another writer adds one of three staged files with the same bytes between fetch and push: exit 2, none committed', (t) => {
+  const w = world(t)
+  const r = threeFilesWithRace(w, 'handover\n')
   assert.equal(r.status, INCOMPLETE, r.output)
   assert.match(r.output, /push rejected .*rebuilding from a fresh origin/)
   assert.match(r.output, /UNCHANGED _projects_\/x\/handover\.md/)
-  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\n', 'the other staged file was not committed on its own')
-  assert.equal(git(w.origin, ['rev-list', '--count', 'main']), '2', 'base + the racing commit, nothing of ours')
+  assert.match(r.output, /refusing: 1 of 3 given file\(s\) would not change/)
+  assertNothingOfOursLanded(w)
+  assert.equal(originShow(w, '_projects_/x/handover.md'), 'handover\n')
 })
 
-test('a staged file another writer lands with different bytes mid-run: refused as stale, exit 1', (t) => {
+test('another writer adds one of three staged files with different bytes between fetch and push: exit 2, none committed', (t) => {
   const w = world(t)
-  write(w.live, '_projects_/x/handover.md', 'mine\n')
-  write(w.live, '_projects_/x/note.md', 'one\nref\n')
-  raceHook(w, '_projects_/x/handover.md', 'theirs\n')
-  const r = cli(w, ['--message', 'docs(test): handover', '--file', '_projects_/x/handover.md', '--file', '_projects_/x/note.md', '--validator', w.validator], { RACE_MARKER: join(w.root, 'race'), WRITER: w.writer })
-  assert.equal(r.status, REFUSED, r.output)
+  const r = threeFilesWithRace(w, 'theirs\n')
+  assert.equal(r.status, INCOMPLETE, r.output)
+  assert.match(r.output, /push rejected .*rebuilding from a fresh origin/)
   assert.match(r.output, /REFUSED _projects_\/x\/handover\.md: base does not match origin\/main/)
-  assert.equal(originShow(w, '_projects_/x/handover.md'), 'theirs\n')
-  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\n')
+  assert.match(r.output, /refusing: another writer changed 1 given file\(s\) while this run was pushing; nothing was committed/)
+  assertNothingOfOursLanded(w)
+  assert.equal(originShow(w, '_projects_/x/handover.md'), 'theirs\n', 'the other writer keeps its version')
 })
 
 test('the read-back counts the files it was given, not the files the commit happened to carry', () => {
@@ -360,6 +379,12 @@ test('the read-back counts the files it was given, not the files the commit happ
 
 test('a message outside <type>(<scope>): <subject> is warned about on stderr, and the commit still lands', (t) => {
   assert.deepEqual(messageWarnings('docs(hd): record the handover', ['_projects_/x/a.md']), [])
+  // Every type of the shared commit-messages convention is accepted, and nothing else.
+  for (const type of ['feat', 'fix', 'docs', 'test', 'refactor', 'perf', 'ci', 'chore', 'revert']) {
+    assert.deepEqual(messageWarnings(`${type}(hd): a subject`, ['_projects_/x/a.md']), [], `${type} is a type`)
+  }
+  assert.match(messageWarnings('logs(hd): lines', ['_logs_/run.jsonl']).join(), /'logs' is not a commit type .*spelled log/)
+  assert.match(messageWarnings('hd(008): a seat as a type', ['_projects_/x/a.md']).join(), /'hd' is not a commit type/)
   assert.deepEqual(messageWarnings('log(hd): two step lines', ['_logs_/repo-actions/action-log.jsonl']), [])
   assert.match(messageWarnings('record: the handover', ['_projects_/x/a.md']).join(), /'record' is not a commit type .*a record edit is docs\(<scope>\)/)
   assert.match(messageWarnings('Updated the handover', ['_projects_/x/a.md']).join(), /not <type>\(<scope>\): <subject>/)

@@ -32,8 +32,10 @@
 // rest is how two of three files once went missing with an exit 0.
 //
 //   0  committed, read back, live tree synced (or --no-sync)
-//   1  refused before the commit: stale base, validator, bad arguments
-//   2  the record would not carry every given file (refused, nothing committed), or the
+//   1  refused before the commit: a stale base on the first attempt, validator, bad
+//      arguments
+//   2  the record would not carry every given file (refused, nothing committed: a file
+//      unchanged, or changed by another writer while this run was pushing), or the
 //      pushed commit does not carry it as expected
 //   3  committed and read back, but the live tree could not be synced
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -225,7 +227,7 @@ function cleanupWorktree(repo, root) {
   rmSync(root, { recursive: true, force: true })
 }
 
-function attempt({ config, report }) {
+function attempt({ config, report, rebuild = false }) {
   const { repo, remote, branch, message, validator, python, noValidate, dryRun } = config
   git(repo, ['fetch', '-q', remote])
   const mainRef = `${remote}/${branch}`
@@ -248,6 +250,14 @@ function attempt({ config, report }) {
   const refused = prepared.filter((file) => file.refused)
   if (refused.length > 0) {
     for (const file of refused) report.push(`  REFUSED ${file.path}: ${file.refused}`)
+    if (rebuild) {
+      // Found while rebuilding after a rejected push: another writer changed a given file
+      // during this run, so this record cannot carry every file as given. That is exit 2,
+      // the same class as UNCHANGED; a stale base on the first attempt is the caller's
+      // own old edit and stays exit 1.
+      report.push(`  refusing: another writer changed ${refused.length} given file(s) while this run was pushing; nothing was committed`)
+      return { code: INCOMPLETE, files: prepared, report }
+    }
     return { code: REFUSED, files: prepared, report }
   }
   const unchanged = prepared.filter((file) => file.unchanged)
@@ -397,7 +407,7 @@ export function recordCommit(config) {
   const report = []
   let last
   for (let tries = 0; tries <= (config.retries ?? 2); tries += 1) {
-    last = attempt({ config, report })
+    last = attempt({ config, report, rebuild: tries > 0 })
     if (last.code !== 'retry') break
     if (tries === (config.retries ?? 2)) {
       last = { ...last, code: REFUSED }
