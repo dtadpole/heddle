@@ -1,6 +1,8 @@
 ---
 title: The heddle-workspace crate
-version: 0.3.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T08:22:32Z
+version: 0.3.1
 description: The Rust port crate for workspaces, the folders they name, and the classified recursive tree — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md

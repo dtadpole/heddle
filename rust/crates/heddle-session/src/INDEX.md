@@ -1,6 +1,8 @@
 ---
 title: The heddle-session sources
-version: 0.2.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T08:22:32Z
+version: 0.2.1
 description: The sources of the heddle-session crate, one module per TypeScript source, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
