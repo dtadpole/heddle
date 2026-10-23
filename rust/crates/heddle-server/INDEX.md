@@ -27,10 +27,38 @@ well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its s
 its `done` frame in one streamed response.
 
 The routes answer through the `services` traits, so the crate builds and is tested before the service
-crates exist. **Step 7 is not this crate's to finish**: `heddle web` lives in `rust/crates/heddle/`, and
-that binary must build a `Harness` over the real session, model, turn and sandbox services and start
-`ServerBuilder`. Until it does, `80-web-ui` and `90-web-ui-token` cannot pass through `HEDDLE_BIN`, and
-their checks are judged against the TypeScript build.
+crates exist.
+
+## Where the port stands
+
+As of 2026-10-22 21:08 PDT, branch `hd/developer-ten` at `2bc3d26`.
+
+- **Answers and is tested (134 tests):** every module; the door over a real socket; `/api/turn`
+  streaming end to end; every `CORE_ROUTES` entry; route conflicts as `ServerError::Route`;
+  `mount_router` for state-applied feature routers; the approval answerer attached by `start` and
+  published questions relayed from `ApprovalService::subscribe`; a refused team fold and a panicking
+  handler answering `500 internal error: <message>`; and `adapters::StoreSessions` over
+  `heddle-session` (on `main`), tested against a real store and through the routes.
+- **Merged:** into the ui lane (`hd/integrator-two`, through `ca07d50`) and into integrator-one's
+  backend candidate (`ca07d50`), both gate-green. **Not on `main`**: held by the public-hygiene gate's
+  rule 22, which matches the placeholder session ids in this crate's tests (19 findings across the
+  range); the coordinator owns the private list and is deciding. Do not rewrite ids to dodge it.
+- **Not judged yet:** `90-web-ui-token` and `80-web-ui` need `heddle web`. The door-only example
+  (`examples/web_door.rs`) passes 7 of 9 checks of main's `90-web-ui-token` through `HEDDLE_BIN`; the
+  two failures need a turn. That is evidence, not a pass.
+- **Next steps, in order:**
+  1. D-043: write `web`'s entry point as `src/command.rs` (`pub mod command`), per the convention in
+     `rust/crates/heddle/INDEX.md`, section "Command entry points in the owning crate (D-043)"
+     (`hd/developer-two` `f6065e1`): `pub async fn run(Command, &Args, &Context, out, err) -> i32`, the
+     flags `--host --port --endpoint --max-rounds --dry-run --json`, `--dry-run` through
+     `DryRunPlan`, a start through `ServerBuilder` with the `Harness` the binary passes in `Context`,
+     `announce()` written to `out`. Exit 0 or 1, never 2. Tests from `80-web-ui` and `90-web-ui-token`.
+  2. developer-seven's two fidelity notes: type `SandboxService::transition`'s `requested`/`confirm`
+     as `Option<&Value>` so an absent mode prints `'undefined'`, and check the approval id's shape and
+     the outcome before the missing-service 409 in `answer_approval`.
+  3. The remaining adapters as their APIs reach `main` (workspace, model, turn, sandbox, approvals).
+  4. The day `heddle web` answers through `HEDDLE_BIN`, run `80-web-ui` and `90-web-ui-token` from the
+     ui lane and report the counts to integrator-two.
 
 ## Public API
 
