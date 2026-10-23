@@ -1600,15 +1600,9 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             selection: SessionSelection::default(),
         })
     } else if let Some(folder) = folder.as_ref() {
-        let Some(workspaces) = state.harness().workspaces.as_ref() else {
-            return respond::plugin_missing("workspace");
-        };
-        if !workspaces.owns(folder) {
-            return respond::text(
-                StatusCode::BAD_REQUEST,
-                "the folder must be under a workspace root\n",
-            );
-        }
+        // web.ts opens the folder's session whether or not a workspace owns the folder, then adopts it
+        // (`ctx.workspace?.ensureOwner(folder)`, below); the ownership refusal belongs to the new-session
+        // route, not to a turn.
         sessions.open_at(
             folder,
             OpenAt {
@@ -2583,6 +2577,25 @@ mod tests {
             .to_bytes()
             .to_vec();
         (status, bytes)
+    }
+
+    #[tokio::test]
+    async fn a_turn_in_a_folder_runs_without_a_workspace_service() {
+        // web.ts opens the folder's session and adopts the folder; no workspace has to own it first,
+        // and a profile without the workspace row can still run a turn in a folder.
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::clone(&hub),
+            text: "hello".into(),
+        });
+        let (router, _) = app_with_runner("turn-folder", runner);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let folder = std::env::temp_dir();
+        let body = serde_json::json!({"prompt": "work in the loose folder", "folder": folder});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("event: done"));
     }
 
     #[tokio::test]
