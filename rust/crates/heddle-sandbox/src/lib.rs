@@ -157,10 +157,23 @@ pub(crate) mod testfs {
     }
 
     impl TempDir {
-        /// Create a fresh directory named for `label` and this process.
+        /// Create a fresh directory named for `label` and this process, under the host temp area.
         pub(crate) fn new(label: &str) -> TempDir {
+            TempDir::new_at(&std::env::temp_dir(), label)
+        }
+
+        /// A fresh directory **outside** both writable temp roots (`/tmp` and `os.tmpdir()`).
+        ///
+        /// The fence's containment has to be judged somewhere the policy does not admit anyway: under
+        /// `workspace-write`, everything inside the host temp area is writable, so a scratch directory there
+        /// would make an "outside the workspace" write look admitted.
+        pub(crate) fn outside_host_temp(label: &str) -> TempDir {
+            TempDir::new_at(Path::new("/var/tmp"), label)
+        }
+
+        fn new_at(root: &Path, label: &str) -> TempDir {
             let serial = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let path = std::env::temp_dir().join(format!(
+            let path = root.join(format!(
                 "heddle-sandbox-{}-{label}-{serial}",
                 std::process::id()
             ));
