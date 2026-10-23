@@ -59,9 +59,12 @@ Each step lands with its unit tests (`cargo test --manifest-path rust/Cargo.toml
 
 ## Where it stands, 2026-10-22
 
-Steps 1–5 are ported, each with the unit tests the table names: **36 tests pass** with
-`cargo test --manifest-path rust/Cargo.toml -p heddle-workspace`, alongside `heddle-session`'s 118, and
-`rustfmt` and `clippy -D warnings` are clean. The tree's fixture is the verifier's own shape: type and
+Steps 1–5 are ported, each with the unit tests the table names: **36 unit tests pass**, plus **4
+cross-crate tests** in [`tests/verifier_shape.rs`](tests/verifier_shape.rs) that hold
+`70-workspaces-sessions`'s claims at the seam the command line will call — one folder one session and
+`--new`, containment and the nearest root, the sibling-prefix trap, hoisted sessions and the
+instance-only rule, and the file reader's refusals. That is **40 tests** for this crate alongside
+`heddle-session`'s 120, and `rustfmt` and `clippy -D warnings` are clean. The tree's fixture is the verifier's own shape: type and
 instance classification, badges, folders before files, plumbing and generated folders, the boundary that
 only an instance carries a session, hoisted `_sessions_` rows (pinned first, then updated), the
 captured-session suppression, the archived filter and the virtual root's `adHoc` group. What is not

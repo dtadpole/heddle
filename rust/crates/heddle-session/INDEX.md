@@ -40,8 +40,8 @@ Everything is re-exported at the crate root.
 
 | Item | What it is |
 |---|---|
-| `SessionStore` | the store: `create`, `open`, `open_newest`, `list`, `append`, `read`, `count`, `surface`, `derive_messages`, `message`, `assistant_chunk`, `model_request`, `fork`, `rename`, `flags`, `set_model`, `touch`, `last_answer`, `bytes`, `framed`. `Send + Sync`, `&self` everywhere; share as `Arc` |
-| `SessionService` | the face the loop, CLI and server call: `start`, `open_at` (one folder, one session; `fresh` for `--new`), `current`, `create_at` (session + definition), `fork` → `ForkOutcome`, `user`/`user_content` (titles from the first message), `folder`, `recorded_mode`/`effective_mode`/`set_mode`, and pass-throughs |
+| `SessionStore` | the store: `create`, `open`, `open_newest`, `meta`, `list`, `append`, `read`, `count`, `surface`, `derive_messages`, `message`, `assistant_chunk`, `model_request`, `fork`, `rename`, `flags`, `set_model`, `touch`, `last_answer`, `bytes`, `framed`. `Send + Sync`, `&self` everywhere; share as `Arc` |
+| `SessionService` | the face the loop, CLI and server call: `start`, `open`/`meta`/`exists`, `open_at` (one folder, one session; `fresh` for `--new`), `current`, `create_at` (session + definition), `fork` → `ForkOutcome`, `user`/`user_content` (titles from the first message), `folder`, `recorded_mode`/`effective_mode`/`set_mode`, and pass-throughs |
 | `SessionConfig`, `EventListener` | the config row `{ root }`; the listener the boot wires to the `session/event` hook. `SessionStore::new(root, &Env)` and `SessionService::new(&config, &Env, listener)` take the environment, as every reader of `HEDDLE_HOME` does |
 | `SessionEvent`, `NewEvent`, `Events`, `SessionHandle`, `SurfaceOp`, `AppendOptions` | an event (`seq`, `at`, `kind`, ordered `fields`); what a caller appends (`NewEvent::new("x").field(k, v)` or `json!` via `TryFrom`); a snapshot `Arc<Vec<Arc<SessionEvent>>>`; the four paths of a session; `append` / `replace {start_seq, end_seq}` |
 | `SessionMeta` + `CreateOptions`, `ForkAttribution`, `ModelSelection`, `FlagPatch`, `SessionOrigin` | the meta record as its ordered JSON with getters, and what creates or edits it |
@@ -87,7 +87,7 @@ is pushed to its owner's branch on its own.
 
 ## Where it stands, 2026-10-22
 
-Steps 1–8 are ported, each with the unit tests the table names: **118 tests pass** with
+Steps 1–8 are ported, each with the unit tests the table names: **120 tests pass** with
 `cargo test --manifest-path rust/Cargo.toml -p heddle-session`, and `rustfmt` and
 `clippy -D warnings` are clean on both crates. Step 9 has its first half in the same suite: `store.rs`
 opens a session whose transcript bytes were produced by **Node 24's `zlib.zstdCompressSync`** with a

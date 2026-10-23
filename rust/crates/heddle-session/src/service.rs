@@ -404,6 +404,21 @@ impl SessionService {
             .find(|meta| canonical_path(Path::new(meta.cwd())) == canonical)
     }
 
+    /// One session's metadata record, or `None` when this store has no such session.
+    pub fn meta(&self, id: &str) -> Option<SessionMeta> {
+        self.store.meta(id)
+    }
+
+    /// Whether this store holds a session with that id.
+    pub fn exists(&self, id: &str) -> bool {
+        self.store.meta(id).is_some()
+    }
+
+    /// Open an existing session by id, in whichever layout it was written in.
+    pub fn open(&self, id: &str) -> Option<SessionHandle> {
+        self.store.open(id)
+    }
+
     /// Open the session bound to a folder, creating one when it has none or when `fresh`.
     pub fn open_at(
         &self,
@@ -860,6 +875,24 @@ mod tests {
             service.recorded_mode::<Mode>(&resumed).unwrap(),
             Some(Mode::WorkspaceWrite)
         );
+    }
+
+    #[test]
+    fn a_session_is_looked_up_by_id_and_answers_for_an_unknown_one() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let handle = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        assert!(service.exists(&handle.id));
+        assert_eq!(service.meta(&handle.id).unwrap().id(), handle.id);
+        assert_eq!(
+            service.open(&handle.id).unwrap().transcript,
+            handle.transcript
+        );
+        assert!(!service.exists("session-nope"));
+        assert_eq!(service.meta("session-nope"), None);
+        assert_eq!(service.open("session-nope"), None);
     }
 
     #[test]

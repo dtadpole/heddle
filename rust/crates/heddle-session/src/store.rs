@@ -498,6 +498,15 @@ impl SessionStore {
         })
     }
 
+    /// One session's metadata record, read straight from its file: no directory walk beyond locating it
+    /// and no log load. `None` when there is no such session or the file is not metadata.
+    pub fn meta(&self, id: &str) -> Option<SessionMeta> {
+        let path = self.meta_file(id)?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        SessionMeta::from_value(value)
+    }
+
     /// Open the newest session (by `created`), if there is one.
     pub fn open_newest(&self) -> Option<SessionHandle> {
         let newest = self.list().into_iter().next()?;
@@ -1773,6 +1782,22 @@ mod tests {
             SurfaceState::default(),
             "the boundary takes no position"
         );
+    }
+
+    #[test]
+    fn the_record_is_read_straight_from_its_file() {
+        let (_dir, store) = store();
+        let handle = store.create(CreateOptions::default()).unwrap();
+        let meta = store.meta(&handle.id).expect("the record exists");
+        assert_eq!(meta.id(), handle.id);
+        assert_eq!(meta.turns(), 0);
+        store.rename(&handle.id, "Named").unwrap();
+        assert_eq!(
+            store.meta(&handle.id).unwrap().title(),
+            Some("Named"),
+            "the accessor reads what is on disk now"
+        );
+        assert!(store.meta("session-nope").is_none());
     }
 
     #[test]
