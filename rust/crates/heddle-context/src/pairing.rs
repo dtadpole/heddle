@@ -44,20 +44,20 @@ pub fn repair_tool_pairing(messages: &[crate::types::Message]) -> Cow<'_, [crate
             continue;
         }
         for part in &message.content {
-            let ContentPart::ToolCall { id, .. } = part else {
+            let ContentPart::ToolCall(call) = part else {
                 continue;
             };
-            if !placed.insert(id.as_str()) {
+            if !placed.insert(call.id.as_str()) {
                 continue;
             }
-            match answers.get(id.as_str()) {
+            match answers.get(call.id.as_str()) {
                 Some(answer) => repaired.push((*answer).clone()),
                 None => repaired.push(Message {
                     role: Role::Tool,
                     content: vec![ContentPart::Text {
                         text: INTERRUPTED_ANSWER.to_string(),
                     }],
-                    tool_call_id: Some(id.clone()),
+                    tool_call_id: Some(call.id.clone()),
                     source: None,
                 }),
             }
@@ -74,18 +74,18 @@ pub fn repair_tool_pairing(messages: &[crate::types::Message]) -> Cow<'_, [crate
 #[cfg(test)]
 mod tests {
     use super::{INTERRUPTED_ANSWER, repair_tool_pairing};
-    use crate::types::{ContentPart, Message, Role};
+    use crate::types::{ContentPart, Message, Role, text_message};
 
     fn assistant(ids: &[&str]) -> Message {
         let mut content = vec![ContentPart::Text {
             text: "working".to_string(),
         }];
         for id in ids {
-            content.push(ContentPart::ToolCall {
+            content.push(ContentPart::ToolCall(crate::types::ToolCall {
                 id: (*id).to_string(),
                 name: "bash".to_string(),
                 arguments: "{}".to_string(),
-            });
+            }));
         }
         Message {
             role: Role::Assistant,
@@ -143,7 +143,7 @@ mod tests {
             assistant(&["c1", "c2"]),
             answer("c1", "ok"),
             answer("c2", "ok"),
-            Message::text(Role::Assistant, "done"),
+            text_message(Role::Assistant, "done"),
         ];
         assert!(matches!(
             repair_tool_pairing(&paired),
@@ -167,7 +167,7 @@ mod tests {
     fn an_answer_separated_from_its_call_by_a_steering_message_is_moved_not_replaced() {
         let separated = vec![
             assistant(&["c1"]),
-            Message::text(Role::User, "steer: also check the tests"),
+            text_message(Role::User, "steer: also check the tests"),
             answer("c1", "the real tool output"),
         ];
         let repaired = repair_tool_pairing(&separated);
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn an_answer_whose_question_is_absent_is_dropped_rather_than_sent_as_an_orphan() {
-        let messages = [answer("gone", "x"), Message::text(Role::User, "next")];
+        let messages = [answer("gone", "x"), text_message(Role::User, "next")];
         let repaired = repair_tool_pairing(&messages);
         assert_eq!(shape(&repaired), vec![(Role::User, None)]);
     }
@@ -192,9 +192,9 @@ mod tests {
     #[test]
     fn text_that_is_not_a_tool_exchange_is_left_alone() {
         let plain = vec![
-            Message::text(Role::System, "be brief"),
-            Message::text(Role::User, "hi"),
-            Message::text(Role::Assistant, "hello"),
+            text_message(Role::System, "be brief"),
+            text_message(Role::User, "hi"),
+            text_message(Role::Assistant, "hello"),
         ];
         assert!(matches!(
             repair_tool_pairing(&plain),

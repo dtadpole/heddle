@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::store::{
     AppendOptions, ContextStore, LogEvent, SeqRange, StoreError, SurfaceOp, SurfaceState,
 };
-use crate::types::{ContentPart, Message, Role};
+use crate::types::{ContentPart, Message, Role, ToolCall};
 
 /// Names one session of a [`MemoryStore`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -303,11 +303,11 @@ impl ContextStore for MemoryStore {
                 Some("reasoning-delta") => content.push(ContentPart::Reasoning {
                     text: string_field(chunk, "text"),
                 }),
-                Some("tool-call") => content.push(ContentPart::ToolCall {
+                Some("tool-call") => content.push(ContentPart::ToolCall(ToolCall {
                     id: string_field(chunk, "id"),
                     name: string_field(chunk, "name"),
                     arguments: string_field(chunk, "arguments"),
-                }),
+                })),
                 Some("done") => break,
                 _ => {}
             }
@@ -350,11 +350,11 @@ fn refusal(message: impl Into<String>) -> StoreError {
 mod tests {
     use super::MemoryStore;
     use crate::store::{AppendOptions, ContextStore, SeqRange, SurfaceOp};
-    use crate::types::{ContentPart, Message, Role};
+    use crate::types::{ContentPart, Message, Role, ToolCall, text_message};
     use serde_json::{Value, json};
 
     fn user(text: &str) -> Message {
-        Message::text(Role::User, text)
+        text_message(Role::User, text)
     }
 
     fn texts(store: &MemoryStore, session: &super::MemorySession) -> Vec<String> {
@@ -373,7 +373,7 @@ mod tests {
     fn an_append_takes_the_next_position_and_the_messages_derive_in_order() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
+        store.message(&session, text_message(Role::System, "be brief"));
         store.message(&session, user("first"));
         store.message(&session, user("second"));
 
@@ -422,11 +422,11 @@ mod tests {
                 ContentPart::Text {
                     text: "answer".to_string()
                 },
-                ContentPart::ToolCall {
+                ContentPart::ToolCall(ToolCall {
                     id: "call-1".to_string(),
                     name: "list_dir".to_string(),
                     arguments: "{}".to_string(),
-                },
+                }),
             ],
             "arrival order is kept, and reasoning stays its own block"
         );
@@ -437,7 +437,7 @@ mod tests {
         let store = MemoryStore::new();
         let session = store.open("s");
         let first = store.message(&session, user("one"));
-        let second = store.message(&session, Message::text(Role::Assistant, "two"));
+        let second = store.message(&session, text_message(Role::Assistant, "two"));
         store.message(&session, user("three"));
 
         let replacement = store
@@ -499,7 +499,7 @@ mod tests {
     fn the_surface_refuses_a_rewrite_it_could_not_fold_or_must_not_allow() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        let system = store.message(&session, Message::text(Role::System, "be brief"));
+        let system = store.message(&session, text_message(Role::System, "be brief"));
         let user_seq = store.message(&session, user("hello"));
         let tool = store.message(
             &session,
@@ -596,7 +596,7 @@ mod tests {
         let store = MemoryStore::new();
         let session = store.open("s");
         let one = store.message(&session, user("one"));
-        let two = store.message(&session, Message::text(Role::Assistant, "two"));
+        let two = store.message(&session, text_message(Role::Assistant, "two"));
         let three = store.message(&session, user("three"));
         let first = store
             .append(

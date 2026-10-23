@@ -174,13 +174,13 @@ impl ContextEvent {
 #[cfg(test)]
 mod tests {
     use super::{ContextEvent, ShadowedRange, origin};
-    use crate::types::{Message, Role};
+    use crate::types::{Role, text_message};
     use serde_json::json;
 
     #[test]
     fn a_note_serialises_with_its_type_first_and_no_absent_optional_fields() {
         let note = ContextEvent::Note {
-            message: Message::text(Role::User, "the rules"),
+            message: text_message(Role::User, "the rules"),
             origin: origin::INSTRUCTIONS.to_string(),
             identity: None,
             files: None,

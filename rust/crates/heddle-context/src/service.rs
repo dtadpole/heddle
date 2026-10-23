@@ -30,7 +30,7 @@ use crate::meter::{Measurement, MeterInput, MeteredMessage, TokenMeter, UsageAnc
 use crate::pairing::repair_tool_pairing;
 use crate::runtime::{RUNTIME_CONTEXT_ORIGIN, RuntimeContextSection, render_runtime_context};
 use crate::store::{AppendOptions, ContextStore, LogEvent, SeqRange, SurfaceState};
-use crate::types::{ContentPart, Message, Role, ToolSpec, describe_content};
+use crate::types::{ContentPart, Message, Role, ToolSpec, describe_content, text_message};
 
 /// The configured window when neither the endpoint nor the profile gives one.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 1_048_576;
@@ -564,7 +564,7 @@ impl<S: ContextStore> ContextService<S> {
                 self.store.append(
                     session,
                     ContextEvent::Note {
-                        message: Message::text(Role::System, system),
+                        message: text_message(Role::System, system),
                         origin: origin::SYSTEM_PROMPT.to_string(),
                         identity: None,
                         files: None,
@@ -817,7 +817,7 @@ impl<S: ContextStore> ContextService<S> {
 /// The instruction baseline as the note this crate writes.
 fn instruction_note(baseline: &InstructionBaseline) -> Value {
     ContextEvent::Note {
-        message: Message::text(Role::User, baseline.text.clone()),
+        message: text_message(Role::User, baseline.text.clone()),
         origin: origin::INSTRUCTIONS.to_string(),
         identity: Some(baseline.identity.clone()),
         files: Some(baseline.included.clone()),
@@ -875,7 +875,7 @@ mod tests {
     use crate::runtime::{CLEARED_RUNTIME_CONTEXT, RUNTIME_CONTEXT_HEADER, RuntimeContextSection};
     use crate::store::ContextStore;
     use crate::testing::MemoryStore;
-    use crate::types::{ContentPart, Message, Role};
+    use crate::types::{ContentPart, Message, Role, text_message};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1171,7 +1171,7 @@ mod tests {
         assert_eq!(report.instructions.len(), 1);
 
         // The prompt and the baseline are the first two nodes; a person's message follows them.
-        store.message(&session, Message::text(Role::User, "hello"));
+        store.message(&session, text_message(Role::User, "hello"));
         let report = service
             .assemble(
                 &session,
@@ -1346,7 +1346,7 @@ mod tests {
         let (store, service) =
             build_service(ContextConfig::default(), dependencies(scratch.path(), None));
         let session = store.open("s");
-        store.message(&session, Message::text(Role::User, "hello"));
+        store.message(&session, text_message(Role::User, "hello"));
         // A stream is open, so the `done` chunk closes it without adding a node: the generation
         // the request recorded is still the surface's generation when it is measured.
         store.assistant_chunk(&session, json!({"type": "text-delta", "text": "hi"}));
@@ -1374,7 +1374,7 @@ mod tests {
 
         // One more appended message moves the surface past the anchor, so the number stops
         // applying.
-        store.message(&session, Message::text(Role::User, "and again"));
+        store.message(&session, text_message(Role::User, "and again"));
         let measurement = service
             .measure(&session, &[])
             .expect("the surface measures");
@@ -1400,11 +1400,11 @@ mod tests {
             dependencies(scratch.path(), Some(model.clone())),
         );
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
+        store.message(&session, text_message(Role::System, "be brief"));
         // Two substantial turns: small enough to leave a span the checkpoint can shrink.
-        store.message(&session, Message::text(Role::User, "u".repeat(1500)));
-        store.message(&session, Message::text(Role::Assistant, "a".repeat(1500)));
-        store.message(&session, Message::text(Role::User, "q".repeat(1500)));
+        store.message(&session, text_message(Role::User, "u".repeat(1500)));
+        store.message(&session, text_message(Role::Assistant, "a".repeat(1500)));
+        store.message(&session, text_message(Role::User, "q".repeat(1500)));
 
         let report = block_on(service.prepare(
             &session,
@@ -1460,9 +1460,9 @@ mod tests {
             dependencies(scratch.path(), Some(model)),
         );
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        store.message(&session, Message::text(Role::User, "u".repeat(1500)));
-        store.message(&session, Message::text(Role::Assistant, "a".repeat(1500)));
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "u".repeat(1500)));
+        store.message(&session, text_message(Role::Assistant, "a".repeat(1500)));
 
         let decision = block_on(service.recover_overflow(
             &session,
@@ -1522,8 +1522,8 @@ mod tests {
             dependencies(scratch.path(), Some(model)),
         );
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        store.message(&session, Message::text(Role::User, "only this"));
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "only this"));
 
         let decision = block_on(service.recover_overflow(
             &session,
@@ -1608,8 +1608,8 @@ mod tests {
             dependencies(scratch.path(), Some(model.clone())),
         );
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        store.message(&session, Message::text(Role::User, "do the thing"));
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "do the thing"));
         store.message(
             &session,
             Message {
@@ -1665,9 +1665,9 @@ mod tests {
             dependencies(scratch.path(), None),
         );
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        store.message(&session, Message::text(Role::User, "u".repeat(1500)));
-        store.message(&session, Message::text(Role::Assistant, "a".repeat(1500)));
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "u".repeat(1500)));
+        store.message(&session, text_message(Role::Assistant, "a".repeat(1500)));
 
         let decision = block_on(service.recover_overflow(
             &session,

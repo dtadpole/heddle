@@ -52,11 +52,9 @@ pub fn estimate_part(part: &ContentPart) -> u64 {
         ContentPart::Text { text } | ContentPart::Reasoning { text } => {
             ceil_div(utf16_len(text) as u64, CHARS_PER_TOKEN) + BLOCK_OVERHEAD
         }
-        ContentPart::ToolCall {
-            name, arguments, ..
-        } => {
-            ceil_div(utf16_len(name) as u64, CHARS_PER_TOKEN)
-                + ceil_div(utf16_len(arguments) as u64, CHARS_PER_TOKEN)
+        ContentPart::ToolCall(call) => {
+            ceil_div(utf16_len(&call.name) as u64, CHARS_PER_TOKEN)
+                + ceil_div(utf16_len(&call.arguments) as u64, CHARS_PER_TOKEN)
                 + BLOCK_OVERHEAD
         }
         // A block this crate does not price specially is still priced rather than ignored:
@@ -274,12 +272,15 @@ mod tests {
         BLOCK_OVERHEAD, BaselineKind, CHARS_PER_TOKEN, MeterInput, MeteredMessage, ROLE_OVERHEAD,
         TokenMeter, UsageAnchor, estimate_message, estimate_part, estimate_tools,
     };
-    use crate::types::{ContentPart, FilePart, ImagePart, Message, Role, ToolSpec};
+    use crate::types::{
+        ContentPart, FilePart, ImageMediaType, ImagePart, Message, Role, ToolCall, ToolSpec,
+        text_message,
+    };
     use serde_json::json;
 
     /// One user message carrying a single text block, which is what most cases need.
     fn user_message(text: &str) -> Message {
-        Message::text(Role::User, text)
+        text_message(Role::User, text)
     }
 
     /// The one tool schema the pricing cases share, whose serialisation is 76 characters.
@@ -294,7 +295,7 @@ mod tests {
     fn image() -> ContentPart {
         ContentPart::Image(ImagePart {
             name: "a.png".to_string(),
-            mime_type: "image/png".to_string(),
+            mime_type: ImageMediaType::Png,
             path: "/tmp/a.png".to_string(),
             bytes: 1,
             sha256: "00".to_string(),
@@ -304,11 +305,11 @@ mod tests {
 
     #[test]
     fn a_tool_call_is_priced_with_two_ceilings_not_one_over_the_concatenation() {
-        let part = ContentPart::ToolCall {
+        let part = ContentPart::ToolCall(ToolCall {
             id: "call-1".to_string(),
             name: "ab".to_string(),
             arguments: "cd".to_string(),
-        };
+        });
         assert_eq!(estimate_part(&part), 1 + 1 + BLOCK_OVERHEAD);
         // The four concatenated characters round to one token, so the naive price is a token
         // cheaper — this is the difference the two ceilings exist to keep.
@@ -366,7 +367,7 @@ mod tests {
     #[test]
     fn a_system_message_pays_no_per_block_overhead_and_a_user_message_does() {
         let text = "a".repeat(40);
-        let system = Message::text(Role::System, text.clone());
+        let system = text_message(Role::System, text.clone());
         assert_eq!(estimate_message(&system), 10 + ROLE_OVERHEAD);
         assert_eq!(
             estimate_message(&user_message(&text)),
@@ -507,7 +508,7 @@ mod tests {
 
     #[test]
     fn measure_splits_the_surface_into_system_message_and_tool_prices() {
-        let system = Message::text(Role::System, "you are a harness");
+        let system = text_message(Role::System, "you are a harness");
         let message = user_message("hello world");
         let measurement = TokenMeter.measure(&MeterInput {
             nodes: &[

@@ -420,7 +420,7 @@ mod tests {
 
     use crate::store::ContextStore;
     use crate::testing::MemoryStore;
-    use crate::types::{ContentPart, Message, Role};
+    use crate::types::{ContentPart, Message, Role, text_message};
     use serde_json::json;
 
     /// Three times the text length, so a shadow price cannot be mistaken for a character count.
@@ -436,7 +436,7 @@ mod tests {
         3 * characters
     }
 
-    fn text(length: usize, character: &str) -> ContentPart {
+    fn text_part(length: usize, character: &str) -> ContentPart {
         ContentPart::Text {
             text: character.repeat(length),
         }
@@ -449,7 +449,7 @@ mod tests {
         let original = Message {
             role: Role::Tool,
             tool_call_id: Some("call-1".to_string()),
-            content: vec![text(64, "s")],
+            content: vec![text_part(64, "s")],
             source: None,
         };
         let seq = store.message(&session, original.clone());
@@ -487,7 +487,7 @@ mod tests {
         let kept = ContentPart::Reasoning {
             text: "a block that must keep its place".to_string(),
         };
-        let small = text(2000, "T");
+        let small = text_part(2000, "T");
         let original = Message {
             role: Role::Tool,
             tool_call_id: Some("call-7".to_string()),
@@ -570,7 +570,7 @@ mod tests {
         let original = Message {
             role: Role::Tool,
             tool_call_id: Some("call-2".to_string()),
-            content: vec![text(9000, "p")],
+            content: vec![text_part(9000, "p")],
             source: None,
         };
         store.message(&session, original);
@@ -603,7 +603,7 @@ mod tests {
         let original = Message {
             role: Role::Tool,
             tool_call_id: Some("call-3".to_string()),
-            content: vec![text(9000, "x"), text(4000, "y")],
+            content: vec![text_part(9000, "x"), text_part(4000, "y")],
             source: None,
         };
         store.message(&session, original);
@@ -641,7 +641,7 @@ mod tests {
     fn a_non_tool_node_is_never_pruned() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        let original = Message::text(Role::User, "u".repeat(9000));
+        let original = text_message(Role::User, "u".repeat(9000));
         let seq = store.message(&session, original.clone());
 
         let outcome = ToolResultPruner::default()

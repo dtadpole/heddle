@@ -28,7 +28,7 @@ use crate::meter::{Measurement, estimate_message};
 use crate::prune::ToolResultPruner;
 use crate::store::{AppendOptions, ContextStore, SeqRange, SurfaceNode};
 use crate::text::js_trim;
-use crate::types::{ContentPart, Message, Role};
+use crate::types::{ContentPart, Message, Role, text_message};
 
 /// What the summariser is asked: the final user message of the auxiliary call.
 pub const COMPACTION_INSTRUCTION: &str = "Summarise the conversation above so it can continue without the original messages. \
@@ -133,7 +133,7 @@ pub struct CompactOptions<'a> {
 /// Wrap a summary the way the model should read it: one user message,
 /// `<compacted-summary>\n{trimmed}\n</compacted-summary>`.
 pub fn frame_summary(summary: &str) -> Message {
-    Message::text(
+    text_message(
         Role::User,
         format!(
             "{SUMMARY_OPEN_TAG}\n{}\n{SUMMARY_CLOSE_TAG}",
@@ -166,10 +166,10 @@ pub fn tool_pairing_balanced_before(nodes: &[SurfaceNode], index: usize) -> bool
         };
         if message.role == Role::Assistant {
             for part in &message.content {
-                if let ContentPart::ToolCall { id, .. } = part
-                    && answered.contains(id.as_str())
+                if let ContentPart::ToolCall(call) = part
+                    && answered.contains(call.id.as_str())
                 {
-                    open.insert(id.as_str());
+                    open.insert(call.id.as_str());
                 }
             }
         } else if message.role == Role::Tool
@@ -303,7 +303,7 @@ impl CompactionEngine {
                 messages.push(message.clone());
             }
         }
-        messages.push(Message::text(Role::User, COMPACTION_INSTRUCTION));
+        messages.push(text_message(Role::User, COMPACTION_INSTRUCTION));
 
         let start_seq = store.append(
             session,
@@ -549,7 +549,7 @@ mod tests {
     use crate::meter::{Measurement, MeterInput, MeteredMessage, TokenMeter};
     use crate::store::{ContextStore, SurfaceNode};
     use crate::testing::{MemorySession, MemoryStore};
-    use crate::types::{ContentPart, Message, Role};
+    use crate::types::{ContentPart, Message, Role, text_message};
 
     fn measure(store: &MemoryStore, session: &MemorySession) -> Measurement {
         let surface = store.derive_surface(session).expect("the surface derives");
@@ -596,11 +596,11 @@ mod tests {
     fn assistant_call(id: &str) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentPart::ToolCall {
+            content: vec![ContentPart::ToolCall(crate::types::ToolCall {
                 id: id.to_string(),
                 name: "read_file".to_string(),
                 arguments: "{\"path\":\"a\"}".to_string(),
-            }],
+            })],
             tool_call_id: None,
             source: None,
         }
@@ -623,7 +623,7 @@ mod tests {
     fn a_cut_before_an_answered_call_is_unbalanced_and_a_cut_after_its_answer_is_balanced() {
         let system = SurfaceNode {
             seq: 0,
-            message: Some(Message::text(Role::System, "be brief")),
+            message: Some(text_message(Role::System, "be brief")),
         };
         let ask = SurfaceNode {
             seq: 1,
@@ -653,7 +653,7 @@ mod tests {
         };
         let next = SurfaceNode {
             seq: 1,
-            message: Some(Message::text(Role::User, "next")),
+            message: Some(text_message(Role::User, "next")),
         };
         assert!(tool_pairing_balanced_before(&[unanswered, next], 1));
     }
@@ -663,8 +663,8 @@ mod tests {
     fn call_surface() -> (MemoryStore, MemorySession, Vec<u64>) {
         let store = MemoryStore::new();
         let session = store.open("s");
-        let system = store.message(&session, Message::text(Role::System, "be brief"));
-        let user = store.message(&session, Message::text(Role::User, "do the thing"));
+        let system = store.message(&session, text_message(Role::System, "be brief"));
+        let user = store.message(&session, text_message(Role::User, "do the thing"));
         store.assistant_chunk(
             &session,
             serde_json::json!({"type": "tool-call", "id": "call-1", "name": "read_file", "arguments": "{\"path\":\"a\"}"}),
@@ -675,8 +675,8 @@ mod tests {
             serde_json::json!({"type": "done", "finishReason": "tool_calls"}),
         );
         let tool = store.message(&session, tool_message("call-1", "the result"));
-        let user2 = store.message(&session, Message::text(Role::User, "and again"));
-        let assistant2 = store.message(&session, Message::text(Role::Assistant, "done"));
+        let user2 = store.message(&session, text_message(Role::User, "and again"));
+        let assistant2 = store.message(&session, text_message(Role::Assistant, "done"));
         (
             store,
             session,
@@ -795,9 +795,9 @@ mod tests {
     fn a_landed_compaction_shadows_the_span_reads_the_checkpoint_once_and_keeps_the_log() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        let first = store.message(&session, Message::text(Role::User, "u".repeat(600)));
-        let second = store.message(&session, Message::text(Role::Assistant, "a".repeat(600)));
+        store.message(&session, text_message(Role::System, "be brief"));
+        let first = store.message(&session, text_message(Role::User, "u".repeat(600)));
+        let second = store.message(&session, text_message(Role::Assistant, "a".repeat(600)));
         let measurement = measure(&store, &session);
         let plan = CompactionEngine::default()
             .plan(&store, &session, &budget(10_000), &measurement, Some(0))
@@ -882,9 +882,9 @@ mod tests {
     fn a_second_compaction_may_shadow_a_span_whose_seqs_are_out_of_order() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        let user = store.message(&session, Message::text(Role::User, "u".repeat(600)));
-        let user2 = store.message(&session, Message::text(Role::User, "v".repeat(600)));
+        store.message(&session, text_message(Role::System, "be brief"));
+        let user = store.message(&session, text_message(Role::User, "u".repeat(600)));
+        let user2 = store.message(&session, text_message(Role::User, "v".repeat(600)));
         let engine = CompactionEngine::default();
         let summarizer = |_messages: Vec<Message>| async move {
             Ok::<String, SummarizeError>("brief".to_string())
@@ -914,7 +914,7 @@ mod tests {
             "the replacement is newer than the node it sits beside"
         );
         // A newest node is kept verbatim, so the second span is the two before it.
-        store.message(&session, Message::text(Role::User, "after"));
+        store.message(&session, text_message(Role::User, "after"));
 
         // Second compaction: the span is [replacement, user2], so its fromSeq is newer than its
         // throughSeq and only a positional reading can fold it.
@@ -962,8 +962,8 @@ mod tests {
     fn pruning_that_clears_the_pressure_pays_for_no_summary() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        store.message(&session, Message::text(Role::User, "do the thing"));
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "do the thing"));
         store.message(&session, tool_message("call-1", &"x".repeat(30_000)));
         let measurement = measure(&store, &session);
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1010,8 +1010,8 @@ mod tests {
     fn a_conversation_with_nothing_safely_removable_reports_why() {
         let store = MemoryStore::new();
         let session = store.open("s");
-        store.message(&session, Message::text(Role::System, "be brief"));
-        store.message(&session, Message::text(Role::User, "hello"));
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "hello"));
         let measurement = measure(&store, &session);
         let summarizer = |_messages: Vec<Message>| async move {
             Ok::<String, SummarizeError>("brief".to_string())
