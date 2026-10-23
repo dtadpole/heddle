@@ -15,11 +15,12 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::compose::EntryRow;
+use crate::compose::{ComponentName, EntryRow};
 use crate::env::Env;
 use crate::error::ConfigError;
 use crate::layer::{NamedLayer, anchor_dir};
 use crate::schema::Schema;
+use crate::value::LayerValue;
 
 /// What a catalog knows about the component a row names.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +69,113 @@ impl ComponentCatalog for StaticCatalog {
             Some(Some(schema)) => SchemaLookup::Schema(Box::new(schema.clone())),
             Some(None) => SchemaLookup::NoSchema,
             None => SchemaLookup::Unresolvable("not a known component".to_string()),
+        }
+    }
+}
+
+/// An outside component's manifest, read without starting the component: the part-0 shape a row
+/// names as `./alpha.component.yml` beside the profile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComponentManifest {
+    /// The command that starts the component. `--validate` reads it and never runs it.
+    pub command: String,
+    /// The component's configuration schema, when it declares one.
+    pub config: Option<Schema>,
+}
+
+/// Read the manifest at `path`.
+///
+/// Fails naming the path when the file cannot be read, is empty or is not a mapping, when `command` is
+/// not a non-empty string, or when `config` is not a JSON Schema or holds an environment reference. An
+/// absent `config` is `Ok(None)`: a component may take no configuration.
+pub fn read_component_manifest(path: &Path) -> Result<ComponentManifest, ConfigError> {
+    let Some(value) = crate::layer::read_yaml_value(path)? else {
+        return Err(ConfigError::one(format!(
+            "{} is empty, not a component manifest",
+            path.display()
+        )));
+    };
+    let LayerValue::Mapping(fields) = value else {
+        return Err(ConfigError::one(format!(
+            "{}: a component manifest must be a mapping",
+            path.display()
+        )));
+    };
+    let command = match manifest_field(&fields, "command") {
+        Some(LayerValue::String(command)) if !command.is_empty() => command.clone(),
+        _ => {
+            return Err(ConfigError::one(format!(
+                "{}: a component manifest needs a 'command' string",
+                path.display()
+            )));
+        }
+    };
+    let config = match manifest_field(&fields, "config") {
+        None => None,
+        Some(value) => {
+            let json = crate::value::plain_json(value).ok_or_else(|| {
+                ConfigError::one(format!(
+                    "{}: 'config' cannot hold an environment reference",
+                    path.display()
+                ))
+            })?;
+            Some(
+                Schema::from_json(json)
+                    .map_err(|error| ConfigError::one(format!("{}: {error}", path.display())))?,
+            )
+        }
+    };
+    Ok(ComponentManifest { command, config })
+}
+
+/// The value of `key` in a manifest's mapping.
+fn manifest_field<'a>(fields: &'a [(String, LayerValue)], key: &str) -> Option<&'a LayerValue> {
+    fields
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value)
+}
+
+/// A [`ComponentCatalog`] over outside-component manifests: a row naming a path is read as a
+/// `.component.yml` manifest beside the profile, with no process started. Built-ins are not here — a
+/// binary composes this with its own catalog, or answers [`SchemaLookup::Unresolvable`] for a bare name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ManifestCatalog;
+
+impl ManifestCatalog {
+    /// A catalog over manifests.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ComponentCatalog for ManifestCatalog {
+    fn lookup(&self, row: &EntryRow, anchor: Option<&Path>) -> SchemaLookup {
+        let Some(anchor) = anchor else {
+            return SchemaLookup::Unresolvable(
+                "no layer was read from a file, so a relative component name has no directory"
+                    .to_string(),
+            );
+        };
+        match row.component(anchor) {
+            ComponentName::Bare(name) => {
+                SchemaLookup::Unresolvable(format!("'{name}' is not a built-in name"))
+            }
+            ComponentName::Path(path) => {
+                if !path.exists() {
+                    return SchemaLookup::Unresolvable(format!(
+                        "{} does not exist",
+                        path.display()
+                    ));
+                }
+                match read_component_manifest(&path) {
+                    Ok(manifest) => match manifest.config {
+                        Some(schema) => SchemaLookup::Schema(Box::new(schema)),
+                        None => SchemaLookup::NoSchema,
+                    },
+                    Err(error) => SchemaLookup::Unresolvable(error.problems().join("; ")),
+                }
+            }
         }
     }
 }
@@ -288,5 +396,152 @@ mod tests {
             &Recording,
         )
         .unwrap();
+    }
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "heddle-config-manifest-{}-{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_text(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    const MANIFEST: &str = "command: ./alpha.ts\nconfig:\n  type: object\n  properties:\n    count:\n      type: number\n";
+
+    #[test]
+    fn a_manifest_is_read_without_starting_anything() {
+        let root = scratch("read");
+        let path = root.join("alpha.component.yml");
+        write_text(&path, MANIFEST);
+        let manifest = read_component_manifest(&path).unwrap();
+        assert_eq!(manifest.command, "./alpha.ts");
+        let schema = manifest.config.unwrap();
+        assert_eq!(
+            schema.check(&json!({ "count": "not-a-number" }))[0].to_string(),
+            "count is not a number, which means the value in the layer could not be read as one"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_without_config_is_no_schema() {
+        let root = scratch("no-schema");
+        let path = root.join("plain.component.yml");
+        write_text(&path, "command: ./plain\n");
+        let manifest = read_component_manifest(&path).unwrap();
+        assert_eq!(manifest.config, None);
+        let row = EntryRow {
+            name: "./plain.component.yml".into(),
+            ..EntryRow::default()
+        };
+        assert_eq!(
+            ManifestCatalog::new().lookup(&row, Some(&root)),
+            SchemaLookup::NoSchema
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_that_is_not_a_manifest_names_the_problem() {
+        let root = scratch("broken");
+        let path = root.join("broken.component.yml");
+        write_text(&path, "config:\n  type: object\n");
+        let error = read_component_manifest(&path).unwrap_err();
+        assert_eq!(
+            error.problems(),
+            [format!(
+                "{}: a component manifest needs a 'command' string",
+                path.display()
+            )]
+        );
+
+        write_text(&path, "command: ./x\nconfig: [not, a, mapping]\n");
+        let error = read_component_manifest(&path).unwrap_err();
+        assert!(error.problems()[0].contains("not a configuration schema"));
+
+        let row = EntryRow {
+            name: "./broken.component.yml".into(),
+            ..EntryRow::default()
+        };
+        match ManifestCatalog::new().lookup(&row, Some(&root)) {
+            SchemaLookup::Unresolvable(why) => assert!(why.contains("not a configuration schema")),
+            other => panic!("expected an unresolvable component, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_manifest_catalog_resolves_a_relative_row_against_the_anchor() {
+        let root = scratch("catalog");
+        write_text(&root.join("alpha.component.yml"), MANIFEST);
+        let row = EntryRow {
+            name: "./alpha.component.yml".into(),
+            ..EntryRow::default()
+        };
+        assert!(matches!(
+            ManifestCatalog::new().lookup(&row, Some(&root)),
+            SchemaLookup::Schema(_)
+        ));
+
+        let bare = EntryRow {
+            name: "model".into(),
+            ..EntryRow::default()
+        };
+        assert!(matches!(
+            ManifestCatalog::new().lookup(&bare, Some(&root)),
+            SchemaLookup::Unresolvable(_)
+        ));
+        let missing = EntryRow {
+            name: "./missing.component.yml".into(),
+            ..EntryRow::default()
+        };
+        assert!(matches!(
+            ManifestCatalog::new().lookup(&missing, Some(&root)),
+            SchemaLookup::Unresolvable(_)
+        ));
+        assert!(matches!(
+            ManifestCatalog::new().lookup(&row, None),
+            SchemaLookup::Unresolvable(_)
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_end_to_end_manifest_validation_names_the_row_and_the_field() {
+        let root = scratch("end-to-end");
+        let layer_file = root.join("dev/heddle.patch.yml");
+        write_text(&layer_file, "[]\n");
+        write_text(&root.join("dev/alpha.component.yml"), MANIFEST);
+        let fixture = vec![NamedLayer {
+            layer: "dev/heddle.patch.yml".into(),
+            file: layer_file.to_string_lossy().into_owned(),
+            entries: vec![Layer {
+                insert: vec![LayerValue::from(json!({
+                    "id": "alpha",
+                    "name": "./alpha.component.yml",
+                    "config": { "count": "not-a-number" }
+                }))],
+                ..Layer::default()
+            }],
+        }];
+        let result = validate_rows(&fixture, &Env::default(), &ManifestCatalog::new()).unwrap();
+        assert_eq!(result.rows, 1);
+        assert_eq!(result.checked, 1);
+        assert_eq!(
+            result.problems,
+            [
+                "alpha: count is not a number, which means the value in the layer could not be read as one"
+            ]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -202,7 +202,7 @@ fn write_json<T: serde::Serialize>(out: &mut dyn Write, value: &T) {
 mod tests {
     use super::*;
     use crate::schema::Schema;
-    use crate::validate::StaticCatalog;
+    use crate::validate::{ManifestCatalog, StaticCatalog};
     use serde_json::json;
     use std::path::Path;
 
@@ -396,6 +396,41 @@ mod tests {
         assert_eq!(result["rows"], json!(1));
         assert_eq!(result["checked"], json!(1));
         assert_eq!(result["problems"].as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn validate_reads_component_manifests_beside_the_profile() {
+        let root = scratch("validate-manifest");
+        let home = root.join("home");
+        write_text(&home.join("profiles/dev/cordis.yml"), "[]\n");
+        write_text(
+            &home.join("profiles/dev/heddle.patch.yml"),
+            "- insert:\n    - id: alpha\n      name: ./alpha.component.yml\n      config:\n        count: not-a-number\n",
+        );
+        write_text(
+            &home.join("profiles/dev/alpha.component.yml"),
+            "command: ./alpha.ts\nconfig:\n  type: object\n  properties:\n    count:\n      type: number\n",
+        );
+        std::fs::create_dir_all(root.join("cwd")).unwrap();
+        let env = Env::default().with("HEDDLE_HOME", home.to_string_lossy());
+        let args = ConfigArgs {
+            profile: Some("dev".into()),
+            validate: true,
+            ..ConfigArgs::default()
+        };
+        let (code, out, err) = execute(
+            ConfigCommand::Config,
+            &args,
+            &env,
+            &root,
+            &ManifestCatalog::new(),
+        );
+        assert_eq!(code, 1, "the bad value fails: {out}{err}");
+        assert!(
+            out.contains("alpha: count is not a number, which means the value in the layer could not be read as one"),
+            "the manifest's schema names the row and the field: {out}"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

@@ -118,24 +118,9 @@ fn read_layer_inner(file: &Path, stack: &[PathBuf], env: &Env) -> Result<Vec<Lay
             absolute.display()
         ))
     })?;
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let documents = Yaml::load_from_str(&text).map_err(|error| {
-        ConfigError::one(format!("{} is not valid YAML: {error}", absolute.display()))
-    })?;
-    if documents.len() > 1 {
-        return Err(ConfigError::one(format!(
-            "{}: expected a single YAML document in the stream",
-            absolute.display()
-        )));
-    }
-    let Some(document) = documents.into_iter().next() else {
+    let Some(document) = load_document(&text, &absolute.display().to_string())? else {
         return Ok(Vec::new());
     };
-    if matches!(&document, Yaml::BadValue) {
-        return Ok(Vec::new());
-    }
     let Yaml::Sequence(entries) = document else {
         return Err(ConfigError::one(format!(
             "{}: expected a top-level array of layers",
@@ -226,6 +211,37 @@ fn read_layer_inner(file: &Path, stack: &[PathBuf], env: &Env) -> Result<Vec<Lay
         }
     }
     Ok(layers)
+}
+
+/// One YAML document, or `None` for an empty file or an empty document.
+fn load_document<'a>(text: &'a str, label: &str) -> Result<Option<Yaml<'a>>, ConfigError> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let documents = Yaml::load_from_str(text)
+        .map_err(|error| ConfigError::one(format!("{label} is not valid YAML: {error}")))?;
+    if documents.len() > 1 {
+        return Err(ConfigError::one(format!(
+            "{label}: expected a single YAML document in the stream"
+        )));
+    }
+    Ok(match documents.into_iter().next() {
+        None | Some(Yaml::BadValue) => None,
+        Some(document) => Some(document),
+    })
+}
+
+/// Read any YAML file as one [`LayerValue`], for a reader outside the layer-array shape (a component
+/// manifest). Crate-internal: the public surface is [`crate::read_component_manifest`].
+pub(crate) fn read_yaml_value(path: &Path) -> Result<Option<LayerValue>, ConfigError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| ConfigError::one(format!("could not read {}: {error}", path.display())))?;
+    let Some(document) = load_document(&text, &path.display().to_string())? else {
+        return Ok(None);
+    };
+    convert(&document)
+        .map(Some)
+        .map_err(|reason| ConfigError::one(format!("{}: {reason}", path.display())))
 }
 
 /// The file made absolute the way every other layer path is: `~` expanded and resolved against the

@@ -82,6 +82,7 @@ pub use profile::{
 pub use references::{parse_scalar, references_in, resolve_env};
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
 pub use validate::{
-    ComponentCatalog, SchemaLookup, StaticCatalog, ValidationResult, validate_rows,
+    ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
+    ValidationResult, read_component_manifest, validate_rows,
 };
 pub use value::{LayerValue, plain_json};
