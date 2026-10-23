@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // One page of raw evidence for a member review.
 //
-//   node _tools_/review-collect/review-collect.mjs --seat developer-ten
-//   node _tools_/review-collect/review-collect.mjs --seat integrator-one --team ~/reflection/_projects_/heddle/TEAM.yaml
+//   node _tools_/review-collect/review-collect.mjs --team <TEAM.yaml> --seat developer-ten
+//   HEDDLE_TEAM_FILE=<TEAM.yaml> node _tools_/review-collect/review-collect.mjs --seat integrator-one
+//
+// No team path is built in: the team record is named on the command line or in
+// HEDDLE_TEAM_FILE, and the review log, action log and reporter come from that record.
 //
 // The coordinator reviews one member every pass. This gathers, in one read-only command,
 // what that review needs: the seat's tip against origin/main, the commits ahead, the files
@@ -21,10 +24,31 @@ import { fileURLToPath } from 'node:url'
 export const OK = 0
 export const ERROR = 1
 
-const DEFAULT_TEAM = join(homedir(), 'reflection', '_projects_', 'heddle', 'TEAM.yaml')
-const DEFAULT_INBOX_HOME = join(homedir(), '.reflection-inbox')
-const DEFAULT_ACTION_LOG = join(homedir(), 'reflection', '_logs_', 'repo-actions', 'action-log.jsonl')
-const DEFAULT_REVIEW_LOG = join(homedir(), 'reflection', '_projects_', 'heddle', '_context_', 'team-operations', 'execution-review-log.jsonl')
+// The inbox tool's own default home; the action log's place in any reflection tree.
+const DEFAULT_INBOX_HOME = process.env.REFLECTION_INBOX_HOME || join(homedir(), '.reflection-inbox')
+const ACTION_LOG_IN_TREE = join('_logs_', 'repo-actions', 'action-log.jsonl')
+
+const expandHome = (path) => (typeof path === 'string' && path.startsWith('~') ? join(homedir(), path.slice(1)) : path)
+
+// Where the team's record lives, from the record itself: the reflection root is its
+// root_hint when that exists, else the team file's folder minus its project_path; the
+// review log is references.execution_review under that root; the action log is the
+// tree's own; the reporter is the record's owner gateway.
+export function teamDefaults({ roster, teamFile }) {
+  let root = expandHome(roster.reflection?.root_hint ?? null)
+  if (!root || !existsSync(root)) {
+    const project = String(roster.project_path ?? '').replace(/\/+$/, '')
+    const folder = resolve(teamFile, '..')
+    root = project && folder.endsWith(project) ? folder.slice(0, -project.length).replace(/\/+$/, '') : null
+  }
+  const review = roster.references?.execution_review
+  return {
+    root,
+    reviewLog: root && review ? join(root, review) : null,
+    actionLog: root ? join(root, ACTION_LOG_IN_TREE) : null,
+    reporter: roster.coordination?.reporting?.owner_gateway ?? roster.record_owner ?? null,
+  }
+}
 
 // ---- TEAM.yaml, the subset this page needs ------------------------------------------------
 
@@ -262,7 +286,7 @@ export function readInbox(home) {
 // The seat's report is its newest message to the reporter (the coordinator by default);
 // its newest message to anyone else is kept beside it as one line, because a seat that
 // talks to peers but has not reported is itself a review finding.
-export function lastSentReport({ inboxHome = DEFAULT_INBOX_HOME, seat, reporter = 'hd-coordinator' }) {
+export function lastSentReport({ inboxHome = DEFAULT_INBOX_HOME, seat, reporter = null }) {
   const seen = new Set()
   const sent = []
   for (const message of readInbox(inboxHome)) {
@@ -271,13 +295,13 @@ export function lastSentReport({ inboxHome = DEFAULT_INBOX_HOME, seat, reporter 
     sent.push(message)
   }
   sent.sort((a, b) => String(b.created).localeCompare(String(a.created)))
-  const report = sent.find((message) => message.to === reporter) ?? null
+  const report = reporter === null ? null : (sent.find((message) => message.to === reporter) ?? null)
   const latest = sent[0] ?? null
   return { report, latest: latest !== null && latest.id !== report?.id ? latest : null, sent: sent.length }
 }
 
-export function lastReview({ reviewLog = DEFAULT_REVIEW_LOG, seat }) {
-  if (!existsSync(reviewLog)) return null
+export function lastReview({ reviewLog = null, seat }) {
+  if (!reviewLog || !existsSync(reviewLog)) return null
   let latest = null
   for (const line of readFileSync(reviewLog, 'utf8').split('\n')) {
     if (!line.trim()) continue
@@ -412,12 +436,12 @@ export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
   return { recorded: recorded.slice(0, limit), declared: declared.slice(0, limit), recordedTotal: recorded.length, declaredTotal: declared.length }
 }
 
-export function actionLedger({ actionLog = DEFAULT_ACTION_LOG, reviewLog = DEFAULT_REVIEW_LOG, seat, since = null }) {
+export function actionLedger({ actionLog = null, reviewLog = null, seat, since = null }) {
   const review = since === null ? lastReview({ reviewLog, seat }) : null
   const cutoff = since ?? review?.date ?? null
   const lines = []
   const before = []
-  if (!existsSync(actionLog)) return { cutoff, lines, review, lastBefore: null }
+  if (!actionLog || !existsSync(actionLog)) return { cutoff, lines, review, lastBefore: null, missing: true }
   for (const line of readFileSync(actionLog, 'utf8').split('\n')) {
     if (!line.trim()) continue
     let entry
@@ -444,10 +468,19 @@ export function actionLedger({ actionLog = DEFAULT_ACTION_LOG, reviewLog = DEFAU
 
 const tilde = (path) => (path.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path)
 
-export function collectReview({ seat, team = DEFAULT_TEAM, repo = null, worktree = null, branch = null, inboxHome = DEFAULT_INBOX_HOME, actionLog = DEFAULT_ACTION_LOG, reviewLog = DEFAULT_REVIEW_LOG, since = null, reporter = 'hd-coordinator' }) {
+export function collectReview({ seat, team = process.env.HEDDLE_TEAM_FILE || null, repo = null, worktree = null, branch = null, inboxHome = DEFAULT_INBOX_HOME, actionLog = null, reviewLog = null, since = null, reporter = null }) {
   const notes = []
+  if (!team) throw new Error('no team file: pass --team <TEAM.yaml> or set HEDDLE_TEAM_FILE')
+  team = expandHome(team)
   if (!existsSync(team)) throw new Error(`no team file at ${team}`)
   const roster = parseTeamYaml(readFileSync(team, 'utf8'))
+  const defaults = teamDefaults({ roster, teamFile: team })
+  actionLog = actionLog ?? defaults.actionLog
+  reviewLog = reviewLog ?? defaults.reviewLog
+  reporter = reporter ?? defaults.reporter
+  if (!reviewLog || !existsSync(reviewLog)) notes.push('no review log found from the team record; the action log is shown without a cutoff')
+  if (!actionLog || !existsSync(actionLog)) notes.push('no action log found from the team record')
+  if (!reporter) notes.push('the team record names no owner gateway; pass --reporter')
   const member = (roster.members ?? []).find((entry) => entry.key === seat)
   if (member === undefined) throw new Error(`no member ${JSON.stringify(seat)} in ${team}; seats: ${(roster.members ?? []).map((m) => m.key).join(', ')}`)
   const scopes = parseScopes(member)
@@ -593,7 +626,7 @@ export function render(result) {
 
   const { report, latest, sent } = result.report
   if (report === null) {
-    push(`last report none to ${result.reporter} (${sent} message(s) sent in all)`)
+    push(`last report none to ${result.reporter ?? '(no reporter)'} (${sent} message(s) sent in all)`)
   } else {
     const bodyLines = String(report.body ?? '').split('\n')
     push(`last report ${report.created} to ${report.to} [${report.kind}] ${report.subject}`)
@@ -632,7 +665,7 @@ export function render(result) {
 }
 
 function parseArgs(argv) {
-  const args = { seat: null, team: DEFAULT_TEAM, repo: null, worktree: null, branch: null, inboxHome: DEFAULT_INBOX_HOME, actionLog: DEFAULT_ACTION_LOG, reviewLog: DEFAULT_REVIEW_LOG, since: null, reporter: 'hd-coordinator', help: false }
+  const args = { seat: null, team: process.env.HEDDLE_TEAM_FILE || null, repo: null, worktree: null, branch: null, inboxHome: DEFAULT_INBOX_HOME, actionLog: null, reviewLog: null, since: null, reporter: null, help: false }
   const value = (i, name) => {
     if (argv[i] === undefined) throw new Error(`${name} needs a value`)
     return argv[i]
@@ -655,8 +688,9 @@ function parseArgs(argv) {
   return args
 }
 
-const USAGE = `usage: review-collect.mjs --seat NAME [--team TEAM.yaml] [--repo DIR] [--worktree DIR] [--branch BRANCH]
+const USAGE = `usage: review-collect.mjs --seat NAME --team TEAM.yaml [--repo DIR] [--worktree DIR] [--branch BRANCH]
        [--inbox-home DIR] [--action-log FILE] [--review-log FILE] [--since ISO] [--reporter SEAT]
+  --team may come from HEDDLE_TEAM_FILE; the review log, action log and reporter default from that record
   the page is read-only; --repo is the clone whose freshly fetched origin/main is the base
   exit 0 with the page, 1 when the seat or a required input is missing`
 

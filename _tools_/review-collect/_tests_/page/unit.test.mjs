@@ -18,6 +18,7 @@ import {
   parseTeamYaml,
   recordedRuns,
   render,
+  teamDefaults,
 } from '../../review-collect.mjs'
 
 const TOOL = join(import.meta.dirname, '..', '..', 'review-collect.mjs')
@@ -40,6 +41,10 @@ function write(root, path, content) {
 
 const TEAM = `# fixture roster
 title: '[hd] fixture team'
+record_owner: hd-coordinator
+coordination:
+  reporting:
+    owner_gateway: hd-coordinator
 members:
   - key: fake-seat
     title: '[hd] Fake Seat'
@@ -196,13 +201,13 @@ test('porcelain status keeps the path and the state, including a rename', () => 
 
 test('the last sent report is the newest message from the seat, not a received one', (t) => {
   const w = world(t)
-  const { report, latest, sent } = lastSentReport({ inboxHome: w.inbox, seat: 'fake-seat' })
+  const { report, latest, sent } = lastSentReport({ inboxHome: w.inbox, seat: 'fake-seat', reporter: 'hd-coordinator' })
   assert.equal(report.id, 'm-last', 'the newest message to the coordinator, not the newer peer answer')
   assert.equal(report.subject, 'fake report')
   assert.equal(latest.id, 'm-peer', 'the newer peer message is kept beside it')
   assert.equal(sent, 3, 'three distinct sent messages; the duplicate received copy is not counted')
-  const none = lastSentReport({ inboxHome: w.inbox, seat: 'fake-seat', reporter: 'nobody' })
-  assert.equal(none.report, null)
+  assert.equal(lastSentReport({ inboxHome: w.inbox, seat: 'fake-seat', reporter: 'nobody' }).report, null)
+  assert.equal(lastSentReport({ inboxHome: w.inbox, seat: 'fake-seat' }).report, null, 'no reporter, no report claimed')
 })
 
 test('the ledger keeps only the seat lines after the last review, and can name the last one before it', (t) => {
@@ -360,6 +365,43 @@ test('collectReview returns the same page the render prints, without writing', (
   assert.equal(result.ledger.lines.length, 2)
   assert.match(render(result), /review-collect: fake-seat/)
   assert.equal(git(w.seat, ['status', '--porcelain']), before, 'the page writes nothing into the seat worktree')
+})
+
+test('the logs and the reporter come from the team record, with no team path built in', (t) => {
+  const w = world(t)
+  const tree = join(w.root, 'tree')
+  const project = '_projects_/fixture'
+  write(tree, `${project}/TEAM.yaml`, `${TEAM}reflection:\n  root_hint: ${tree}\nproject_path: ${project}\nreferences:\n  execution_review: ${project}/review-log.jsonl\n`)
+  write(tree, `${project}/review-log.jsonl`, readFileSync(w.reviewLog, 'utf8'))
+  write(tree, '_logs_/repo-actions/action-log.jsonl', readFileSync(w.actionLog, 'utf8'))
+  const teamFile = join(tree, project, 'TEAM.yaml')
+
+  const roster = parseTeamYaml(readFileSync(teamFile, 'utf8'))
+  const defaults = teamDefaults({ roster, teamFile })
+  assert.equal(defaults.root, tree)
+  assert.equal(defaults.reviewLog, join(tree, project, 'review-log.jsonl'))
+  assert.equal(defaults.actionLog, join(tree, '_logs_/repo-actions/action-log.jsonl'))
+  assert.equal(defaults.reporter, 'hd-coordinator')
+  // A root_hint that does not exist falls back to the team file's folder minus its project path.
+  const moved = teamDefaults({ roster: { ...roster, reflection: { root_hint: join(w.root, 'gone') } }, teamFile })
+  assert.equal(moved.root, tree)
+
+  const r = spawnSync(process.execPath, [TOOL, '--seat', 'fake-seat', '--team', teamFile, '--repo', w.reviewer, '--worktree', w.seat, '--inbox-home', w.inbox], { encoding: 'utf8' })
+  assert.equal(r.status, OK, r.stderr)
+  assert.match(r.stdout, /action log  2 line\(s\) since 2026-10-22T20:00:00-07:00/, 'both logs found from the record')
+  assert.match(r.stdout, /last report 2026-10-22T20:30:00-07:00 to hd-coordinator/, 'the reporter from the record')
+  assert.doesNotMatch(r.stdout, /^note /m)
+})
+
+test('without --team or HEDDLE_TEAM_FILE the tool refuses and says how to name the record', (t) => {
+  const w = world(t)
+  const env = { PATH: process.env.PATH, HOME: w.root }
+  const r = spawnSync(process.execPath, [TOOL, '--seat', 'fake-seat', '--repo', w.reviewer], { encoding: 'utf8', env })
+  assert.equal(r.status, ERROR)
+  assert.match(r.stderr, /pass --team <TEAM\.yaml> or set HEDDLE_TEAM_FILE/)
+  const viaEnv = spawnSync(process.execPath, [TOOL, '--seat', 'fake-seat', '--repo', w.reviewer, '--worktree', w.seat, '--inbox-home', w.inbox], { encoding: 'utf8', env: { ...env, HEDDLE_TEAM_FILE: w.team } })
+  assert.equal(viaEnv.status, OK, viaEnv.stderr)
+  assert.match(viaEnv.stdout, /review-collect: fake-seat/)
 })
 
 test('a bad --worktree relative path or missing team file is a clear error', (t) => {
