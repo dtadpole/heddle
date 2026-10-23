@@ -103,6 +103,17 @@ export function compareToBaseline(baseline, current) {
 }
 
 /**
+ * Regressions confirmed by a re-run (D-048, with flaky checks): a check that regressed blocks only if it does not
+ * pass again when its file is re-run at once. One that passes on the re-run is **flaky** — named in the output so its
+ * owner can fix it, but not a lost pass. A deterministic regression, the usual kind a merge introduces, reproduces.
+ */
+export function confirmRegressions(regressed, rerun) {
+  const confirmed = regressed.filter((key) => rerun[key] !== 'pass')
+  const flaky = regressed.filter((key) => rerun[key] === 'pass')
+  return { confirmed, flaky }
+}
+
+/**
  * The command line: `--json`, `--timeout <seconds>`, `--baseline <file>`, `--write-baseline <file>`, and the part folders
  * in the order given.
  *
@@ -140,6 +151,19 @@ function usage() {
   process.exitCode = 2
 }
 
+function runFile(part, check, timeoutSeconds) {
+  const at = Date.now()
+  const run = spawnSync(process.execPath, [join(repoRoot, '_tools_', 'verify-runner', 'run.mjs'), join('_verifiers_', part, check), '--list'], {
+    cwd: repoRoot,
+    env: { ...process.env, NO_COLOR: '1' },
+    encoding: 'utf8',
+    timeout: timeoutSeconds * 1000,
+    killSignal: 'SIGKILL',
+  })
+  const result = run.error ? null : parseListOutput(run.stdout, run.status)
+  return { run, result, seconds: Math.round((Date.now() - at) / 100) / 10 }
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args === null) return usage()
@@ -153,16 +177,7 @@ function main() {
       continue
     }
     for (const check of readdirSync(dir).filter((name) => /^check.*\.mjs$/.test(name)).sort()) {
-      const at = Date.now()
-      const run = spawnSync(process.execPath, [join(repoRoot, '_tools_', 'verify-runner', 'run.mjs'), join('_verifiers_', part, check), '--list'], {
-        cwd: repoRoot,
-        env: { ...process.env, NO_COLOR: '1' },
-        encoding: 'utf8',
-        timeout: timeoutSeconds * 1000,
-        killSignal: 'SIGKILL',
-      })
-      const result = run.error ? null : parseListOutput(run.stdout, run.status)
-      const seconds = Math.round((Date.now() - at) / 100) / 10
+      const { run, result, seconds } = runFile(part, check, timeoutSeconds)
       records.push({ part, check, result, seconds })
       if (!json) {
         const shown = result === null ? `BROKEN (${run.error ? run.error.code ?? 'error' : 'no verdict'})` : `verdict ${result.verdict}  pass ${result.pass}  fail ${result.fail}  skipped ${result.skipped}`
@@ -177,9 +192,22 @@ function main() {
   let comparison = null
   if (baseline) {
     comparison = compareToBaseline(JSON.parse(readFileSync(baseline, 'utf8')), current)
+    // A regression must reproduce: re-run each file that holds one, once, and keep only what fails again.
+    let flaky = []
+    if (comparison.regressed.length > 0) {
+      const files = [...new Set(comparison.regressed.map((key) => key.split(' :: ')[0]))]
+      const rerunRecords = files.map((file) => {
+        const [part, check] = file.split('/')
+        return { part, check, result: runFile(part, check, timeoutSeconds).result }
+      })
+      const confirmation = confirmRegressions(comparison.regressed, checkMap(rerunRecords))
+      flaky = confirmation.flaky
+      comparison = { ...comparison, regressed: confirmation.confirmed }
+    }
+    comparison = { ...comparison, flaky }
     // Against a baseline the gate is D-048's: red on a lost pass or a broken file, not on a failure that was never a pass.
     const green = comparison.regressed.length === 0 && decision.broken.length === 0
-    decision = { ...decision, verdict: green ? 'green' : 'red', regressed: comparison.regressed, newlyPassing: comparison.newlyPassing.length }
+    decision = { ...decision, verdict: green ? 'green' : 'red', regressed: comparison.regressed, flaky, newlyPassing: comparison.newlyPassing.length }
   }
   if (json) {
     process.stdout.write(`${JSON.stringify({ ...decision, binary: process.env.HEDDLE_BIN ?? null, records })}\n`)
@@ -189,7 +217,9 @@ function main() {
         `${decision.broken.length > 0 ? `, ${decision.broken.length} broken` : ''}\n` +
         (comparison
           ? `against the baseline: ${comparison.newlyPassing.length} newly passing, ${comparison.regressed.length} regressed` +
+            `${comparison.flaky.length > 0 ? `, ${comparison.flaky.length} flaky` : ''}` +
             `${comparison.regressed.map((key) => `\n  REGRESSED ${key}`).join('')}` +
+            `${comparison.flaky.map((key) => `\n  flaky     ${key} (failed, then passed on a re-run of its file)`).join('')}` +
             `${comparison.failing.map((key) => `\n  failing   ${key}`).join('')}\n`
           : '') +
         `lane ${decision.verdict}${!comparison && decision.failing.length > 0 ? ` — failing: ${decision.failing.join(', ')}` : ''}${decision.broken.length > 0 ? ` — broken: ${decision.broken.join(', ')}` : ''}\n`,
