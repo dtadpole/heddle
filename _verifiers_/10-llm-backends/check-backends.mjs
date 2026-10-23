@@ -22,7 +22,10 @@ const CAPABILITY = 'backend connections with a configured endpoint list'
 
 async function supportsBackends() {
   const help = await runCli(['--help'])
-  return /--endpoint/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /--endpoint/.test(help.stdout) && /--turn/.test(help.stdout) && /^\s{2}models\b/m.test(help.stdout)
 }
 
 test('the endpoint list is configuration and the command reports it', async (context) => {

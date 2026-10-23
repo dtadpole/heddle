@@ -13,7 +13,8 @@ use std::sync::Mutex;
 use serde_json::{Map, Value};
 
 use crate::store::{
-    AppendOptions, ContextStore, LogEvent, SeqRange, StoreError, SurfaceOp, SurfaceState,
+    AppendOptions, ContextStore, LogEvent, SeqRange, StoreError, SurfaceNode, SurfaceOp,
+    SurfaceState,
 };
 use crate::types::{ContentPart, Message, Role, ToolCall};
 
@@ -274,53 +275,20 @@ impl ContextStore for MemoryStore {
         session: &MemorySession,
         seq: u64,
     ) -> Result<Option<Message>, StoreError> {
-        let events = self.read(session)?;
-        let Some(position) = events.iter().position(|event| event.seq == seq) else {
-            return Ok(None);
-        };
-        let event = &events[position];
-        if event.kind == "message" || event.kind == "context/note" {
-            return Ok(event
-                .message()
-                .filter(|message| !message.content.is_empty()));
-        }
-        if event.kind != "assistant/chunk" {
-            return Ok(None);
-        }
+        Ok(derive_in(&self.read(session)?, seq))
+    }
 
-        let mut content: Vec<ContentPart> = Vec::new();
-        for next in &events[position..] {
-            if next.kind != "assistant/chunk" {
-                break;
-            }
-            let Some(chunk) = next.field("chunk") else {
-                continue;
-            };
-            match chunk.get("type").and_then(Value::as_str) {
-                Some("text-delta") => content.push(ContentPart::Text {
-                    text: string_field(chunk, "text"),
-                }),
-                Some("reasoning-delta") => content.push(ContentPart::Reasoning {
-                    text: string_field(chunk, "text"),
-                }),
-                Some("tool-call") => content.push(ContentPart::ToolCall(ToolCall {
-                    id: string_field(chunk, "id"),
-                    name: string_field(chunk, "name"),
-                    arguments: string_field(chunk, "arguments"),
-                })),
-                Some("done") => break,
-                _ => {}
-            }
-        }
-        if content.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(Message {
-            role: Role::Assistant,
-            content,
-            tool_call_id: None,
-            source: None,
-        }))
+    fn derive_surface(&self, session: &MemorySession) -> Result<Vec<SurfaceNode>, StoreError> {
+        let events = self.read(session)?;
+        Ok(self
+            .surface(session)?
+            .nodes
+            .into_iter()
+            .map(|seq| SurfaceNode {
+                seq,
+                message: derive_in(&events, seq),
+            })
+            .collect())
     }
 
     fn append(
@@ -331,6 +299,56 @@ impl ContextStore for MemoryStore {
     ) -> Result<u64, StoreError> {
         self.append_value(session, event, options)
     }
+}
+
+/// The message the node at `seq` derives to, by the store's rules: a `message` or `context/note`
+/// carries its own (none when empty); a chunk run folds the chunks from `seq` up to its `done` or the
+/// next non-chunk event. A seq is the event's index in this store's log.
+fn derive_in(events: &[LogEvent], seq: u64) -> Option<Message> {
+    let position = usize::try_from(seq).ok()?;
+    let event = events.get(position).filter(|event| event.seq == seq)?;
+    if event.kind == "message" || event.kind == "context/note" {
+        return event
+            .message()
+            .filter(|message| !message.content.is_empty());
+    }
+    if event.kind != "assistant/chunk" {
+        return None;
+    }
+
+    let mut content: Vec<ContentPart> = Vec::new();
+    for next in &events[position..] {
+        if next.kind != "assistant/chunk" {
+            break;
+        }
+        let Some(chunk) = next.field("chunk") else {
+            continue;
+        };
+        match chunk.get("type").and_then(Value::as_str) {
+            Some("text-delta") => content.push(ContentPart::Text {
+                text: string_field(chunk, "text"),
+            }),
+            Some("reasoning-delta") => content.push(ContentPart::Reasoning {
+                text: string_field(chunk, "text"),
+            }),
+            Some("tool-call") => content.push(ContentPart::ToolCall(ToolCall {
+                id: string_field(chunk, "id"),
+                name: string_field(chunk, "name"),
+                arguments: string_field(chunk, "arguments"),
+            })),
+            Some("done") => break,
+            _ => {}
+        }
+    }
+    if content.is_empty() {
+        return None;
+    }
+    Some(Message {
+        role: Role::Assistant,
+        content,
+        tool_call_id: None,
+        source: None,
+    })
 }
 
 /// One string field of a chunk, or the empty string when it is absent.

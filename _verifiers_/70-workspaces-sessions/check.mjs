@@ -116,6 +116,23 @@ async function supportsCommands() {
   return /workspaces/.test(help.stdout) && /sessions/.test(help.stdout)
 }
 
+/**
+ * Whether the harness serves the Web UI — asked by every check here that starts `web`.
+ *
+ * A check that starts the server and probes only the commands would fail, not skip, on a build that answers
+ * `workspaces` and `sessions` before it serves the page; that failure would be about `web`, not about this part.
+ */
+async function supportsWeb() {
+  const help = await runCli(['--help'])
+  return /^\s{2}web\b/m.test(help.stdout)
+}
+
+/** Whether the harness runs a turn from the command line — asked by every check here that drives `--turn`. */
+async function supportsTurn() {
+  const help = await runCli(['--help'])
+  return /--turn/.test(help.stdout)
+}
+
 /** The commands a check uses when it does not want the fixture's own profile to be found by cwd. */
 function adminArgs(h, extra) {
   return ['--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions'), ...extra]
@@ -211,7 +228,7 @@ async function sessionsOf(h) {
 }
 
 test('a run writes a session record that outlives it', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('writes')
   try {
     const result = await runCli([...h.args, '--turn', 'remember the word loom'], { env: h.env })
@@ -226,7 +243,7 @@ test('a run writes a session record that outlives it', async (context) => {
 })
 
 test('the transcript is readable on disk and holds the turn', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('readable')
   try {
     const result = await runCli([...h.args, '--turn', 'remember the word loom'], { env: h.env })
@@ -250,7 +267,7 @@ test('the transcript is readable on disk and holds the turn', async (context) =>
 })
 
 test('a resumed session carries the earlier turns', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('resume')
   try {
     const first = await runCli([...h.args, '--turn', 'remember the word loom'], { env: h.env })
@@ -274,7 +291,7 @@ test('a resumed session carries the earlier turns', async (context) => {
 })
 
 test('the record is appended to, never rewritten', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('append')
   try {
     await runCli([...h.args, '--turn', 'first'], { env: h.env })
@@ -300,7 +317,7 @@ test('the record is appended to, never rewritten', async (context) => {
 })
 
 test('a session is grouped under the workspace whose folder it ran in', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('grouped')
   try {
     const run = await runCli([...h.args, '--turn', 'say something'], { env: h.env, cwd: h.work })
@@ -326,7 +343,7 @@ test('a session is grouped under the workspace whose folder it ran in', async (c
 })
 
 test('a session in a subdirectory is a member of the workspace root above it', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('subdir')
   const sub = join(h.work, 'nested', 'deeper')
@@ -362,7 +379,7 @@ test('a session in a subdirectory is a member of the workspace root above it', a
 })
 
 test('asking one folder twice continues one session, and both turns are in it', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('find')
   try {
@@ -406,7 +423,7 @@ test('asking one folder twice continues one session, and both turns are in it', 
  */
 
 test('starting a new session in a folder moves the folder to it, and the old one stays readable', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('rotate')
   const folder = join(h.work, '_tools_', 'some-tool')
@@ -445,7 +462,7 @@ test('starting a new session in a folder moves the folder to it, and the old one
 })
 
 test('a sibling folder whose path shares a prefix is not a member', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('prefix')
   /**
@@ -473,7 +490,7 @@ test('a sibling folder whose path shares a prefix is not a member', async (conte
 })
 
 test('the nearest registered root owns a session when roots nest', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('nest')
   const inner = join(h.work, 'inner')
@@ -697,7 +714,7 @@ test('plumbing is hidden and a declared generated folder is named as one', async
 })
 
 test('only an instance carries a session, and nested plain folders do not', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('boundary')
   try {
@@ -743,7 +760,7 @@ test('only an instance carries a session, and nested plain folders do not', asyn
 })
 
 test('the folder name is the session name, not the first prompt', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('label')
   const folder = join(h.work, '_tools_', 'some-tool')
@@ -880,7 +897,7 @@ test('a branch shows its sessions first, and never the folder that holds them', 
 })
 
 test('a folder outside every root is refused rather than walked', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('outside')
   const outside = fixtureDir('outside-root')
@@ -898,7 +915,7 @@ test('a folder outside every root is refused rather than walked', async (context
   }
 })
 
-test('a session interrupted mid-frame still reads, and its next turn lands', async (context) => {  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+test('a session interrupted mid-frame still reads, and its next turn lands', async (context) => {  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   /**
    * The failure this judges was found by testing the storage format rather than the feature: a
    * transcript torn in the middle of a frame made **every event written afterwards unreadable**,
@@ -998,7 +1015,7 @@ function disclosure(label) {
 }
 
 test('a folder opens and closes with the same control, including a leaf with nothing inside', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('tree-ui')
@@ -1410,7 +1427,7 @@ test('a folder opens and closes with the same control, including a leaf with not
 })
 
 test('a folder nobody registered is adopted as ad hoc, and registering it promotes it into the tree', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   /**
    * The distinction this judges is a view rather than a mechanism: `bootstrap` adopts every folder a
    * session ran in so that "every session has a root" stays true, but a folder adopted that way is
@@ -1456,7 +1473,7 @@ test('a folder nobody registered is adopted as ad hoc, and registering it promot
 })
 
 test('a workspace is unregistered, and a root that still holds sessions is refused', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   /**
    * Removal is judged by its answer rather than by the file: a root that still holds sessions and has
    * no root above it would be re-registered by `bootstrap` on the next run, so the command refuses
@@ -1499,7 +1516,7 @@ test('a workspace is unregistered, and a root that still holds sessions is refus
 })
 
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('new-session-here')
@@ -1630,7 +1647,7 @@ test('a new session is filed under its workspace, and an old one keeps the shape
 })
 
 test('the panel follows the selection: a session offers two views, a file one, and a folder changes nothing', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('panel-follows-selection')
@@ -1731,7 +1748,7 @@ test('the panel follows the selection: a session offers two views, a file one, a
 })
 
 test('the page wears the project icon, and its name sits above the workspaces', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('brand')
   let live
@@ -1810,7 +1827,7 @@ test('the page wears the project icon, and its name sits above the workspaces', 
 })
 
 test('a session is renamed from its own menu, and the row and its definition follow', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-rename')
@@ -1883,7 +1900,7 @@ test('a session is renamed from its own menu, and the row and its definition fol
 })
 
 test('a session is pinned and archived in the store, and the tree follows both', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('session-flags')
   let live
@@ -1985,7 +2002,7 @@ test('a session is pinned and archived in the store, and the tree follows both',
 })
 
 test('a session forks into a new one named after it, with its conversation and its own definition', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   const h = harness('session-fork')
   let live
@@ -2057,7 +2074,7 @@ test('a session forks into a new one named after it, with its conversation and i
 })
 
 test("a session row's controls appear on hover, and a search replaces the tree with named hits", async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-hover-search')
   let live
@@ -2633,7 +2650,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
 })
 
 test('the four session shortcuts act on the selected session, and say so when there is none', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-shortcuts')
   let live
@@ -2776,7 +2793,7 @@ test('the four session shortcuts act on the selected session, and say so when th
 })
 
 test('a session log downloads as decoded JSONL, named after the session', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   const h = harness('session-log-download')
   let live
   try {
@@ -2836,7 +2853,7 @@ test('a session log downloads as decoded JSONL, named after the session', async 
 })
 
 test('View options groups the sessions the two ways DSH offers: the tree, or one list', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-grouping')
   let live
@@ -2926,7 +2943,7 @@ test('View options groups the sessions the two ways DSH offers: the tree, or one
 })
 
 test('a running session says so before its name, and a workspace row offers the one act its name is for', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-running-mark')
   let live
@@ -3076,7 +3093,7 @@ test('a running session says so before its name, and a workspace row offers the 
 })
 
 test('the interactive inventory is cursor-bearing, hit-testable, unclipped and glyph-complete', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-inventory')
   let live
@@ -3450,7 +3467,7 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
 })
 
 test('pin, archive and fork refuse what the reference refuses, and record their provenance', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('session-actions')
   let live
   try {
@@ -3524,7 +3541,7 @@ test('pin, archive and fork refuse what the reference refuses, and record their 
 })
 
 test('a clipped session title crawls on hover and returns on leave', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-title-marquee')
   let live
@@ -3636,7 +3653,7 @@ test('a clipped session title crawls on hover and returns on leave', async (cont
 })
 
 test('the menu forks a session from its row, and the child appears in the tree named after it', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-fork-menu')
   let live
@@ -3707,7 +3724,7 @@ test('the menu forks a session from its row, and the child appears in the tree n
 })
 
 test('a written session moves to the top of its folder, its age follows, and a real pin click holds it there', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-order-age-pin')
   let live
@@ -4041,7 +4058,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
 })
 
 test('a pinned row glides to its new place, and reduced motion skips the glide', async (context) => {
-  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-pin-glide')
   let live
