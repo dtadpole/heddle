@@ -736,6 +736,8 @@ dependencies = [
  "bytes",
  "futures",
  "getrandom 0.3.4",
+ "heddle-config",
+ "heddle-session",
  "http-body-util",
  "serde",
  "serde_json",
