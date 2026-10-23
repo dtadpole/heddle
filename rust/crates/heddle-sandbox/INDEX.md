@@ -74,9 +74,11 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 | 6 | the ladder | `escalation.rs` (`approve_escalation`) | the same mode needs no ask; not-wider and malformed refusals; the ask's reason and display reason carry the justification verbatim; each outcome maps to its refusal sentence; it runs with `ApprovalService` as the channel |
 | 7 | judged through the binary | none here | once tools, server, session and boot compose it: `75-permission-sandbox` and `80-web-ui` check-approval through `HEDDLE_BIN`, recorded with the command and date |
 
-**Landed so far:** tasks 1 and 2 are implemented, with their unit tests (38 tests at 2026-10-22, `cargo test -p
+**Landed so far:** tasks 1, 2 and 3 are implemented, with their unit tests (70 tests at 2026-10-22, `cargo test -p
 heddle-sandbox`); the task 6 ladder body is ported and judged against a test double, and its `ApprovalService`-channel
-claim waits on task 5. Tasks 3, 4 and 5 still have `todo!()` bodies.
+claim waits on task 5. Tasks 4 and 5 still have `todo!()` bodies. The real Seatbelt profile was checked on macOS:
+the read-only profile accepts `/usr/bin/true`, a write under it is denied with `Operation not permitted`, and the
+canonical `/private/tmp` subpath admits the same write.
 
 ## Risks, stated now
 

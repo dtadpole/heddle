@@ -196,4 +196,18 @@ pub(crate) mod testfs {
     pub(crate) fn symlink(target: &Path, link: &Path) {
         std::os::unix::fs::symlink(target, link).expect("create the test symlink");
     }
+
+    /// An executable `/bin/sh` script at `dir/name`, for the runner probes' stand-ins.
+    pub(crate) fn script(dir: &TempDir, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write the test script");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat the test script")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("make the test script executable");
+        path
+    }
 }
