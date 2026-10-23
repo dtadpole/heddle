@@ -158,7 +158,7 @@ The label is the row's `id`, else its `name`. A non-number where a number belong
 `05-config-system` matches for row `alpha` and field `count`. A value of the wrong type is reported once, and no other
 keyword is checked against it. The exit code is 1 when there is any problem.
 
-The binary's `BuiltinCatalog` answers a built-in with its adapter's schema, or `NoSchema` until the adapter exists;
+The binary's `BuiltinCatalog` answers a built-in with its adapter's schema, or `NoSchema` when the adapter declares none;
 answers a path with `ManifestCatalog::new().lookup(row, anchor)`, which reads `<name>.component.yml` (`program`,
 optional `args`, an inline `config` JSON Schema) without starting anything; and answers anything else as
 `Unresolvable`. **Keep the path arm delegating to `ManifestCatalog`**: answering `Unresolvable` there makes check 7 of
@@ -167,8 +167,8 @@ optional `args`, an inline `config` JSON Schema) without starting anything; and 
 To answer a built-in, the catalog constructs that built-in's component and asks `schema()`; it never calls `start`.
 `--validate` therefore starts nothing only while **a component's constructor merely stores its inputs and its
 `schema()` is a pure value** — no file, directory, process or network touched. A new adapter keeps both, or
-`config --validate` begins doing work on a tree it was only asked to describe. As of lane `1221b3e`, every built-in
-constructor stores `env` and `cwd` only, and none of the 13 `schema()` bodies does I/O.
+`config --validate` begins doing work on a tree it was only asked to describe. As of lane `40906af` every built-in has
+an adapter; each constructor stores `env`, `cwd` or nothing, and none of the 20 `schema()` bodies does I/O.
 
 ### 7. What the server reads after boot
 
@@ -257,6 +257,8 @@ One line per run, oldest first: the candidate, the command as run (with the bina
 | 2026-10-22 | lane `a36a4c0` (the binary starts an outside component a row declares by manifest, through `read_component_manifest`) | `HEDDLE_BIN=<debug build of exactly a36a4c0> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, built after the candidate on a clean lane | 10/10 passed, verdict 0, both binaries |
 | 2026-10-22 | main `67c2587` (`a36a4c0` plus the lane gate and status docs; no Rust changed, so the lane release build is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and `HEDDLE_BIN=<lane release build> node _tools_/verify-runner/lane.mjs 05-config-system` | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | lane `4e504df` (agent increment: each goal round answered with a real agent turn; `heddle-agent` and `heddle-goal` changed) | `HEDDLE_BIN=<debug build of exactly 4e504df> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | main `8072846` (`4e504df` plus four lockfile lines filling in `heddle-goal`'s declared path dependencies; the lane release build was made after `4e504df`, so it is main's binary) | `HEDDLE_BIN=<lane release build> sh _verifiers_/05-config-system/verify.sh --json` from a worktree at main, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
+| 2026-10-22 | lane `40906af` (every built-in has an adapter: the subagent-tool, goal-driver and team rows; `--validate` now asks 20 schemas) | `HEDDLE_BIN=<debug build of exactly 40906af> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
 
 ## Decisions the contract makes
 
