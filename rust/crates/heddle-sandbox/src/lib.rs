@@ -15,6 +15,8 @@
 //! | [`service`] | [`SandboxService`], [`SandboxConfig`], [`SandboxDenial`] | `sandbox/service.ts` |
 //! | [`approvals`] | [`ApprovalService`], [`ApprovalsConfig`], [`ApprovalRequest`] | `approvals/service.ts` |
 //!
+//! [`testfs`] is the test-only scratch directory and symlink helper.
+//!
 //! The crate depends on no other heddle crate. What it needs from them arrives as values: the profile rows'
 //! `config` deserialises into [`SandboxConfig`] and [`ApprovalsConfig`], the harness home arrives in
 //! [`SandboxHost`], and a published approval question is a [`tokio::sync::broadcast`] receiver the server (or
@@ -56,3 +58,58 @@ pub use service::{BackendChoice, SandboxConfig, SandboxDenial, SandboxHost, Sand
 pub use transition::{
     FULL_ACCESS_CONFIRMATION, ModeChange, TransitionRefusal, permission_transition,
 };
+
+/// Test-only scratch directories and symlinks, so a path rule is judged on the filesystem it describes.
+#[cfg(test)]
+pub(crate) mod testfs {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A directory under the host temp area, removed when dropped.
+    pub(crate) struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        /// Create a fresh directory named for `label` and this process.
+        pub(crate) fn new(label: &str) -> TempDir {
+            let serial = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "heddle-sandbox-{}-{label}-{serial}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create the test directory");
+            TempDir { path }
+        }
+
+        /// The directory's path, not canonicalised: a test that wants the resolved form resolves it.
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+
+        /// A path inside the directory.
+        pub(crate) fn join(&self, name: &str) -> PathBuf {
+            self.path.join(name)
+        }
+
+        /// A subdirectory created under it.
+        pub(crate) fn child(&self, name: &str) -> PathBuf {
+            let path = self.join(name);
+            std::fs::create_dir_all(&path).expect("create the test subdirectory");
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A symlink at `link` pointing at `target`. The crate is POSIX-only (Seatbelt, Landlock).
+    pub(crate) fn symlink(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("create the test symlink");
+    }
+}
