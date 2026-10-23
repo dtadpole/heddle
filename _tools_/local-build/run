@@ -1,0 +1,119 @@
+#!/bin/sh
+# Run a cargo command inside one of this Mac's build slots.
+#
+#   _tools_/local-build/run test -p heddle-config
+#   _tools_/local-build/run build --release
+#   _tools_/local-build/run status
+#
+# Each slot is a directory under $LOCAL_BUILD_SLOT_ROOT. A slot directory is created
+# atomically with mkdir and removed when the command ends, so two seats never build at
+# once in the same slot. A slot whose owner process is gone, or whose stamp is older
+# than an hour, is reclaimed. The command runs from the caller's working directory, so
+# run it from inside your own worktree.
+set -eu
+
+SLOTS=${LOCAL_BUILD_SLOTS:-3}
+JOBS=${LOCAL_BUILD_JOBS:-3}
+ROOT=${LOCAL_BUILD_SLOT_ROOT:-$HOME/.hd-build-slots}
+WAIT=${LOCAL_BUILD_WAIT_SECONDS:-1800}
+CARGO=${CARGO:-$HOME/.cargo/bin/cargo}
+
+# The profile settings keep target directories small: this Mac has one disk shared by
+# every seat, and an unreleased binary never needs debug symbols.
+CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-0}
+CARGO_PROFILE_RELEASE_DEBUG=${CARGO_PROFILE_RELEASE_DEBUG:-0}
+CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}
+export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_RELEASE_DEBUG CARGO_INCREMENTAL
+
+usage() {
+    echo "usage: $0 <cargo args...> | $0 status" >&2
+    echo "  LOCAL_BUILD_SLOTS=$SLOTS LOCAL_BUILD_JOBS=$JOBS LOCAL_BUILD_SLOT_ROOT=$ROOT" >&2
+    exit 64
+}
+
+mkdir -p "$ROOT"
+
+show_status() {
+    printf 'root: %s\nslots: %s  jobs: %s\n' "$ROOT" "$SLOTS" "$JOBS"
+    i=0
+    while [ "$i" -lt "$SLOTS" ]; do
+        d="$ROOT/slot-$i"
+        if [ -d "$d" ] && [ -f "$d/owner" ]; then
+            read -r pid ts cwd < "$d/owner" || true
+            printf 'slot %s: busy pid=%s since=%s cwd=%s\n' "$i" "${pid:-?}" "${ts:-?}" "${cwd:-?}"
+        else
+            printf 'slot %s: free\n' "$i"
+        fi
+        i=$((i + 1))
+    done
+    exit 0
+}
+
+[ $# -eq 0 ] && usage
+[ "$1" = "status" ] && show_status
+
+# A caller that chose its own job count keeps it; otherwise the slot's cap applies.
+has_jobs=0
+for arg in "$@"; do
+    case "$arg" in -j|--jobs|-j*) has_jobs=1 ;; esac
+done
+
+stamp() { date +%s; }
+
+try_acquire() {
+    i=0
+    while [ "$i" -lt "$SLOTS" ]; do
+        d="$ROOT/slot-$i"
+        if mkdir "$d" 2>/dev/null; then
+            printf '%s %s %s\n' "$$" "$(stamp)" "$PWD" > "$d/owner"
+            SLOT=$i
+            return 0
+        fi
+        reclaim "$d"
+        i=$((i + 1))
+    done
+    return 1
+}
+
+reclaim() {
+    d=$1
+    [ -f "$d/owner" ] || return 0
+    read -r pid ts cwd < "$d/owner" || return 0
+    now=$(stamp)
+    age=$((now - ${ts:-0}))
+    if [ "$age" -gt 3600 ] || ! kill -0 "${pid:-0}" 2>/dev/null; then
+        rm -rf "$d" 2>/dev/null || true
+    fi
+}
+
+deadline=$(( $(stamp) + WAIT ))
+while ! try_acquire; do
+    if [ "$(stamp)" -ge "$deadline" ]; then
+        echo "local-build: no free slot within ${WAIT}s; try again later or raise LOCAL_BUILD_WAIT_SECONDS" >&2
+        exit 75
+    fi
+    sleep 3
+done
+
+cleanup() { rm -rf "$ROOT/slot-$SLOT" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM HUP
+
+echo "local-build: slot $SLOT/$SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
+
+if [ "$has_jobs" = 1 ]; then
+    exec "$CARGO" "$@"
+fi
+
+# -j belongs after the subcommand: `cargo -j 3 build` works, but `cargo -j 3 --version`
+# is rejected, and `cargo fmt` takes no jobs at all. Inject only for the subcommands
+# that compile something.
+case "${1-}" in
+    build|check|test|run|bench|doc|clippy|rustc|install|fix)
+        sub=$1
+        shift
+        exec "$CARGO" "$sub" -j "$JOBS" "$@"
+        ;;
+    *)
+        exec "$CARGO" "$@"
+        ;;
+esac
