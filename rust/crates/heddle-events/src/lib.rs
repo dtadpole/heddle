@@ -81,6 +81,7 @@ mod event;
 mod mode;
 pub mod outside;
 pub mod points;
+pub mod ports;
 mod waterfall;
 
 pub use bus::{EventBus, HookFuture, ListenOptions, Listener, Scope};

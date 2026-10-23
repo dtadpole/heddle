@@ -43,6 +43,26 @@ included), `assistant/chunk`, the `tool` message (`error (<code>): <message>`, t
 `(the tool produced no output)`), `turn/retry`, `assistant/completed` (`text`, `reasoning`, `finishReason`,
 `rounds`, `denials`, `ended`), `turn/completed`.
 
+## Where the port stands
+
+As of 2026-10-22, branch `hd/developer-five`. Every body is ported; no `todo!()` is left. The model types are
+`heddle-llm`'s own and `SessionEvent` is `heddle-session`'s; the session-meta, create-session and context-report
+records are still this crate's, converted at the seam. Unit tests: 74, green, with the workspace gate.
+
+- **Done:** `run_turn` and `begin_turn`, the live-turn registry, delegation and the `delegate` tool, the ports over
+  the real crates (`adapters::{LlmModel, Sessions, SessionSubagents, Context}`; `Context::over_session_handles` binds
+  `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
+  `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
+- **Open, not in this crate:** `50-agentic-loop` answers through `HEDDLE_BIN` once the binary dispatches `--turn` to
+  `command::run` with an `AgentRuntime` composed from those adapters (its owner has the exact lines).
+- **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
+  runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
+  starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.
+- **Hooks:** `TurnHooks` over the bus is `heddle-events`' (`BusHooks`), which depends on this crate; adding
+  `heddle-events` as a dependency here would be a cycle.
+- **Verify:** `_tools_/local-build/run test -p heddle-agent` from `rust/`; the verifier from the lane worktree,
+  `HEDDLE_BIN="$PWD/rust/target/release/heddle" sh _verifiers_/50-agentic-loop/verify.sh`.
+
 ## Port plan
 
 Each step lands with its unit tests in the worktree and is pushed to `hd/developer-five` for integrator-one.

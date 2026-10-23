@@ -825,4 +825,61 @@ pub(crate) mod tests {
             self.report(session)
         }
     }
+
+    #[tokio::test]
+    async fn the_context_port_over_the_real_session_store_prepares_what_the_session_recorded() {
+        // The production binding: heddle-context's `impl ContextStore for SessionStore`, whose handle is the
+        // session's own, so `over_session_handles` needs no map.
+        let sessions = sessions_at("context-real");
+        let handle = sessions.store().create(CreateOptions::default()).unwrap();
+        sessions
+            .user_content(&handle, vec![ContentPart::text("remember a word")], None)
+            .unwrap();
+        let service = Arc::new(ContextService::new(
+            Arc::clone(sessions.store()),
+            heddle_context::ContextConfig::default(),
+            heddle_context::ContextDependencies {
+                model: None,
+                heddle_home: std::env::temp_dir().join("heddle-agent-no-home"),
+            },
+        ));
+        let port = Context::over_session_handles(service);
+        port.record_runtime_context(
+            &handle,
+            &[RuntimeContextSection {
+                name: "sandbox:policy".into(),
+                text: "sandbox: workspace-write".into(),
+            }],
+        )
+        .unwrap();
+        let report = port.prepare(&handle, options()).await.unwrap();
+        assert!(
+            report.messages.iter().any(|message| {
+                message.role == Role::User
+                && message.content.iter().any(
+                    |part| matches!(part, ContentPart::Text { text } if text == "remember a word")
+                )
+            }),
+            "{:?}",
+            report.messages
+        );
+        assert!(report.estimated_tokens > 0);
+        // The runtime-context note is the context crate's own `context/note` in the same log the loop reads,
+        // written only when the snapshot changed: the loop records it every round, the log gains it once.
+        port.record_runtime_context(
+            &handle,
+            &[RuntimeContextSection {
+                name: "sandbox:policy".into(),
+                text: "sandbox: workspace-write".into(),
+            }],
+        )
+        .unwrap();
+        let notes = sessions
+            .events(&handle)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "context/note")
+            .count();
+        assert_eq!(notes, 1, "an unchanged snapshot appends nothing");
+    }
 }
