@@ -91,7 +91,10 @@ function harness(label, options = {}) {
 
 async function supportsTools() {
   const help = await runCli(['--help'])
-  return /tools/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /^\s{2}tools\b/m.test(help.stdout) && /--turn/.test(help.stdout)
 }
 
 test('the tools the configuration allows are the tools that exist', async (context) => {
