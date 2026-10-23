@@ -1,9 +1,9 @@
 ---
 title: 95-web-daemon — readings
 created: 2026-10-23T04:42:38Z
-modified: 2026-10-23T10:45:25Z
+modified: 2026-10-23T11:22:01Z
 level: L3
-version: 1.4.0
+version: 1.5.0
 description: The measured verdicts of 95-web-daemon on the Linux host and on the owner's Mac, against the deployment, an absent service, a scratch service and the Rust binary.
 status: unverified
 grounded_in:
@@ -24,6 +24,7 @@ grounded_in:
 | 23:54 | developer-two's `09a3f14` (debug, every capability advertised; sha256 `c4f5f67c6ab6…`), at its request | **4 of 4 on the scratch service**; the rehearsal's eight claims all held |
 | 00:05 (23 Oct) | main's binary once it advertises `web` (`d171876`, release; sha256 `fca84c3afd14…`) | **4 of 4 on the scratch service**; all eight claims held |
 | 03:43 (23 Oct) | the 3097 Rust preview itself (main `33407a4`'s release binary, its own agent), at the coordinator's request | **4 of 4**; the kill replaced the preview's binary, the deployment untouched |
+| 04:20 (23 Oct) | the same preview, run independently by integrator-two from its lane at main `e073f20` | **4 of 4**; target resolved as the preview before the kill, the deployment untouched |
 
 **Part 11 through `HEDDLE_BIN` holds since 22:42**, judged on a scratch service with
 `HEDDLE_BIN=<binary> sh _tools_/web-daemon/rehearse.sh`. Serving the binary on the owner's page, which is what
