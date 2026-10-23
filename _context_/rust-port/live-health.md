@@ -162,6 +162,20 @@ URL after a restore** and judges the door with the current token; the next pass 
 entry was removed from the record rather than pinned as a deployment failure, because it described
 nothing the deployment did.
 
+## A restore that should not have run (03:54)
+
+At 03:54:07Z a **manual smoke test** of this seat ran with `--restore` while live-deploy was moving the
+deployment to `59fd96f`: `dist/server/page.html` had been rebuilt at 03:54:01Z. The pass read the port
+silent in the gap between their stop and start, and `kickstart -k` then **SIGKILLed the server their
+install had just started** — `web.log`: *"node exited (SIGKILL) after 5380 ms"*. The supervisor put it
+back and the deployment recovered, but the race was real: by the time the kickstart ran, the reading
+that justified it was no longer true. The 03:42 restore was the same shape.
+
+The fix is a rule, not a promise: `restoreDecision` withholds the kickstart inside a 180 s window after
+any change to the deployment's build or agent definition, and requires the port to stay silent through
+a 10 s grace before acting. Fed the 03:54 inputs (6 s since the rebuild) it withholds; four tests hold
+it there. And `--restore` is now for the scheduled pass only — never a manual run.
+
 ## How often
 
 A `schedule_create` in this seat fires **every 20 minutes**: it runs the pass, pins the entry, and reports

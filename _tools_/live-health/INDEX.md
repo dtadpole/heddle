@@ -71,20 +71,30 @@ reading and calls these rules; a rule that is wrong fails a test before it can f
 
 ## The one action it may take
 
-The deployment's owner delegates exactly one action (live-deploy, 2026-10-22): if a pass finds the
-deployment **down** — the gate answering `502` because its upstream is gone, or the server's port
-silent — it may run
+The deployment's owner delegates exactly one action (live-deploy, 2026-10-22): when the deployment is
+down, `launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web`, once. Nothing else is ever run
+against the deployment: no installer, no `bootout`, no edit to the checkout.
 
-```bash
-launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
-```
+**A reading of "down" is not enough**, and the reason was paid for. At 03:54:07Z on 2026-10-22 a pass
+read the port silent six seconds after the deployment's page had been rebuilt — live-deploy's install
+window — and the `-k` kickstart SIGKILLed the server their install had just started (it had run for
+5,380 ms). So `restoreDecision` in [`rules.mjs`](rules.mjs) requires all three, in this order:
 
-once, wait up to 20 s for the port to answer, re-read the gate, the process and the door, and record
-`restored by live-monitor, kickstart` with the elapsed time. Nothing else is ever run against the
-deployment: no installer, no `bootout`, no edit to the checkout. A reading that says the deployment is
-down triggers nothing without `--restore`, and a kickstart that does not bring it back within 20 s is a
-real alert to live-deploy and the coordinator with the pass's evidence. The gate exists because
-launchd on this macOS never restarts the loaded agent by itself.
+1. the reads say **down** (`deploymentDown`: the gate's own 5xx with no upstream, or a silent port);
+2. **no recent deployment change** — the newest of `dist/server/page.html`, `dist/cli.js` and the
+   agent definition is older than 180 s; inside that window a redeploy is in progress and the restart
+   belongs to the person doing it;
+3. the port is **still silent after a 10 s grace** — the supervisor puts a killed server back in about
+   a second, so a port that stays silent through the grace means the agent itself is gone, which is
+   the one case the delegation covers.
+
+A withheld restore is recorded with its reason (`restore: held`), and if the port came back by itself
+the gate, process and door are re-read. A kickstart that runs is recorded with its elapsed time; one
+that does not bring the port back within 20 s is a real alert. The pass re-reads the launch token after
+a restart, because a relaunched server mints a new one.
+
+**`--restore` belongs to the scheduled pass only.** A smoke test or a debugging run never carries it:
+both incidents above came from manual runs during a redeploy.
 
 ## What the pass leaves alone
 

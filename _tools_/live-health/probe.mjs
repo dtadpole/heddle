@@ -60,6 +60,7 @@ import {
   consoleVerdict,
   deploymentDown,
   doorVerdict,
+  expectedPage,
   gateVerdict,
   launchUrlFromLog,
   looksLikeProxyError,
@@ -68,6 +69,7 @@ import {
   passVerdict,
   processVerdict,
   redactRecord,
+  restoreDecision,
   shellVerdict,
   tildePath,
   tildeText,
@@ -81,7 +83,10 @@ const JSONL = join(REPO, '_context_', 'rust-port', 'live-health.jsonl')
 const options = parseArguments(process.argv.slice(2))
 /** Expand a leading `~`, because the paths this team agrees on are written that way. */
 const expand = (path) => (path.startsWith('~') ? join(homedir(), path.slice(1)) : path)
-const say = (line) => process.stdout.write(`${line}\n`)
+const say = (line) => process.stdout.write(`${redactRecord(String(line), homedir())}\n`)
+
+// The document the gate served this pass, kept for the marker check; never pinned verbatim.
+let servedGateBody = null
 
 const URL_GATE = options.url ?? 'http://127.0.0.1:8082/'
 const URL_DSH = options.dsh ?? 'http://127.0.0.1:8080/'
@@ -179,7 +184,8 @@ const deployment = (() => {
   const behind = head !== null && mainTip !== null ? Number(gitAt(DEPLOY_ROOT, 'rev-list', '--count', `${head}..${mainTip}`) ?? 0) : null
   const ahead = head !== null && mainTip !== null ? Number(gitAt(DEPLOY_ROOT, 'rev-list', '--count', `${mainTip}..${head}`) ?? 0) : null
   const pagePath = join(DEPLOY_ROOT, 'dist', 'server', 'page.html')
-  const built = existsSync(pagePath) ? readFileSync(pagePath) : null
+  const builtBuffer = existsSync(pagePath) ? readFileSync(pagePath) : null
+  const built = builtBuffer
   return {
     root: DEPLOY_ROOT,
     head,
@@ -194,12 +200,15 @@ const deployment = (() => {
     pagePath,
     /** The marker the served document must carry, computed from this checkout's built page. */
     expectedMarker: built === null ? null : createHash('sha256').update(built).digest('hex').slice(0, 12),
+    /** The built document itself, kept in memory for the byte comparison and never pinned. */
+    builtText: builtBuffer === null ? null : builtBuffer.toString('utf8'),
   }
 })()
 
 /** The deployment facts as the pinned record states them: paths under ~, never the absolute home. */
+const { builtText: _builtText, ...deploymentSummary } = deployment
 const deploymentRecord = {
-  ...deployment,
+  ...deploymentSummary,
   root: tildePath(deployment.root, homedir()),
   pagePath: tildePath(deployment.pagePath, homedir()),
 }
@@ -440,6 +449,7 @@ async function judgeGate() {
   try {
     const response = await fetch(URL_GATE, { redirect: 'manual', signal: AbortSignal.timeout(8_000) })
     const body = await response.text()
+    servedGateBody = body
     const app = /id="log"/.test(body)
     /**
      * The app shell contains the word `heddle-proxy` once (a note about the gate), so matching the
@@ -536,15 +546,28 @@ function judgeMarker(load) {
   const served = load.page?.marker ?? null
   const expected = deployment.expectedMarker
   const judged = markerVerdict({ served, expected, loaded: load.page !== undefined })
+  /**
+   * The strongest form of the claim: the served document is the built page with its marker
+   * substituted, byte for byte. A marker alone proves only that some page carries the hash.
+   */
+  const expectedBody = deployment.builtText === null || expected === null ? null : expectedPage(deployment.builtText, expected)
+  const pageMatch = expectedBody === null || servedGateBody === null ? null : servedGateBody === expectedBody
+  const markerPassed = judged.verdict === 'pass'
   return {
     served,
     expected,
     match: served !== null && served === expected,
+    pageMatch,
+    servedBytes: servedGateBody === null ? null : servedGateBody.length,
+    expectedBytes: expectedBody === null ? null : expectedBody.length,
     deploymentHead: deployment.head,
     mainTip: deployment.mainTip,
     behind: deployment.behind,
-    verdict: judged.verdict,
-    detail: judged.detail,
+    verdict: markerPassed && pageMatch === false ? 'fail' : judged.verdict,
+    detail:
+      markerPassed && pageMatch === false
+        ? `the marker matches but the served page is not the build byte for byte (${servedGateBody.length} vs ${expectedBody.length} bytes)`
+        : judged.detail,
   }
 }
 
@@ -738,6 +761,59 @@ async function judgeDsh() {
  */
 const DEPLOY_LABEL = 'com.dtadpole.heddle-web'
 
+/** How long a silent port must stay silent before it counts as the agent being gone. */
+const GRACE_MS = 10_000
+
+/**
+ * Seconds since the deployment last changed: the newest of its built page, its built cli and its
+ * agent definition. An install rebuilds `dist/` and rewrites the agent definition, so a recent change
+ * means a redeploy is in progress. `null` when none of them can be read.
+ */
+function secondsSinceDeployChange() {
+  const candidates = [
+    join(DEPLOY_ROOT, 'dist', 'server', 'page.html'),
+    join(DEPLOY_ROOT, 'dist', 'cli.js'),
+    join(homedir(), 'Library', 'LaunchAgents', `${DEPLOY_LABEL}.plist`),
+  ]
+  let newest = null
+  for (const path of candidates) {
+    try {
+      const modified = statSync(path).mtimeMs
+      if (newest === null || modified > newest) newest = modified
+    } catch {
+      // A file that is missing mid-install is itself a reason the change time is unknown.
+    }
+  }
+  return newest === null ? null : (Date.now() - newest) / 1000
+}
+
+/** Does the deployed server answer its health route right now? */
+async function portAnswers() {
+  const target = serverOrigin === null ? 'http://127.0.0.1:3082/healthz' : `${serverOrigin}/healthz`
+  try {
+    const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(3_000) })
+    return response.status === 200
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Decide, then act. The decision is `restoreDecision`; this only gathers its inputs. The grace is
+ * taken last and only when the other conditions already allow a restore, so a healthy pass and a
+ * pass inside an install window never wait.
+ */
+async function guardedRestore() {
+  const sinceChange = secondsSinceDeployChange()
+  const early = restoreDecision({ down: true, secondsSinceDeployChange: sinceChange, stillDownAfterGrace: true })
+  if (!early.allowed) return { attempted: false, withheld: true, secondsSinceDeployChange: sinceChange, reason: early.reason }
+  await new Promise((done) => setTimeout(done, GRACE_MS))
+  const stillDown = !(await portAnswers())
+  const decision = restoreDecision({ down: true, secondsSinceDeployChange: secondsSinceDeployChange(), stillDownAfterGrace: stillDown })
+  if (!decision.allowed) return { attempted: false, withheld: true, secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
+  return { ...(await restoreDeployment()), secondsSinceDeployChange: sinceChange, graceMs: GRACE_MS, reason: decision.reason }
+}
+
 /** One delegated kickstart, then wait for the port to answer again. */
 async function restoreDeployment() {
   const started = Date.now()
@@ -769,7 +845,14 @@ pass.checks.gate = await judgeGate()
 pass.checks.process = judgeProcess()
 pass.checks.door = await judgeDoor()
 if (options.restore === true && deploymentDown(pass.checks)) {
-  pass.restore = await restoreDeployment()
+  pass.restore = await guardedRestore()
+  if (pass.restore.withheld === true && (await portAnswers())) {
+    // The port came back by itself (the supervisor, or the install finishing): judge what is there now.
+    refreshDeploymentTarget()
+    pass.checks.gate = { ...(await judgeGate()), afterGrace: true }
+    pass.checks.process = { ...judgeProcess(), afterGrace: true }
+    pass.checks.door = { ...(await judgeDoor()), afterGrace: true }
+  }
   if (pass.restore.broughtBack === true) {
     // The restart minted a new token: the door must be judged with the current one, not the one read before it.
     refreshDeploymentTarget()
@@ -825,7 +908,10 @@ if (options.json === true) {
   say(`live-health ${pass.at}`)
   say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}${deployment.mainTipFresh ? '' : ' (ref not refreshed)'}, behind ${deployment.behind ?? '?'}, ahead ${deployment.ahead ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
-  if (pass.restore !== undefined) say(`restore     ${pass.restore.broughtBack ? 'used' : 'FAILED'}  ${pass.restore.note ?? pass.restore.error ?? ''} (${pass.restore.waitedMs}ms)`)
+  if (pass.restore !== undefined) {
+    if (pass.restore.withheld === true) say(`restore     held  ${pass.restore.reason}`)
+    else say(`restore     ${pass.restore.broughtBack ? 'used' : 'FAILED'}  ${pass.restore.note ?? pass.restore.error ?? ''} (${pass.restore.waitedMs}ms)`)
+  }
   say(`process     ${mark(pass.checks.process.verdict)}  ${pass.checks.process.detail}`)
   say(`door        ${mark(pass.checks.door.verdict)}  ${pass.checks.door.detail}`)
   say(`load        ${mark(pass.checks.load.verdict)}  ${pass.checks.load.detail}`)

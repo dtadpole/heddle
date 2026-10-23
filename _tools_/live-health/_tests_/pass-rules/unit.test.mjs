@@ -15,6 +15,7 @@ import {
   consoleVerdict,
   deploymentDown,
   doorVerdict,
+  expectedPage,
   gateVerdict,
   launchUrlFromLog,
   looksLikeProxyError,
@@ -23,6 +24,7 @@ import {
   passVerdict,
   processVerdict,
   redactRecord,
+  restoreDecision,
   shellVerdict,
   tildePath,
   tildeText,
@@ -89,6 +91,13 @@ test('the shell passes after a 303 exchange or when the gate served it, with the
   assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: false, send: true }).verdict, 'fail')
   assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: true, composer: true, send: false }).verdict, 'fail')
   assert.equal(shellVerdict({ exchangeStatus: 303, loaded: true, log: false, composer: false, send: false }).verdict, 'fail')
+})
+
+test('the expected page is the built page with its marker substituted', () => {
+  const built = '<head>\n<meta name="heddle-page" content="unbuilt" />\n</head>'
+  const expected = expectedPage(built, 'abcdef123456')
+  assert.match(expected, /<meta name="heddle-page" content="abcdef123456">/)
+  assert.doesNotMatch(expected, /unbuilt/)
 })
 
 test('the marker passes on a match, fails on a mismatch, and is unjudged when no page loaded', () => {
@@ -164,6 +173,29 @@ test('only a gate with no upstream or a silent port counts as down enough to kic
   assert.equal(deploymentDown({ gate: { verdict: 'fail', status: 500, proxyError: false }, door: { verdict: 'pass' } }), false)
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'fail', detail: 'the deployed server answered 200 without a credential' } }), false)
   assert.equal(deploymentDown({ gate: { verdict: 'pass' }, door: { verdict: 'pass' } }), false)
+})
+
+test('a kickstart never runs on a deployment that is up', () => {
+  assert.equal(restoreDecision({ down: false, secondsSinceDeployChange: 9999, stillDownAfterGrace: true }).allowed, false)
+})
+
+test('a kickstart never runs inside an install window, even when the port is silent', () => {
+  // The 03:54 case: the page was rebuilt six seconds before the pass read the port.
+  const install = restoreDecision({ down: true, secondsSinceDeployChange: 6, stillDownAfterGrace: true })
+  assert.equal(install.allowed, false)
+  assert.match(install.reason, /redeploy is in progress/)
+})
+
+test('a kickstart never runs when the port came back during the grace period', () => {
+  const back = restoreDecision({ down: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: false })
+  assert.equal(back.allowed, false)
+  assert.match(back.reason, /answered again/)
+})
+
+test('a kickstart runs only when down, outside an install window, and still silent after the grace', () => {
+  assert.equal(restoreDecision({ down: true, secondsSinceDeployChange: 9999, stillDownAfterGrace: true }).allowed, true)
+  // An unreadable change time does not block the restore on its own: the grace still has to hold.
+  assert.equal(restoreDecision({ down: true, secondsSinceDeployChange: null, stillDownAfterGrace: true }).allowed, true)
 })
 
 test('the pass fails on any failure or unknown verdict, is unjudged on any unjudged check, and passes only when all pass', () => {

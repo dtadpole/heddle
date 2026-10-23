@@ -122,6 +122,19 @@ export function markerVerdict({ served, expected, loaded }) {
     : { verdict: 'fail', detail: `the served page is not this build: served ${served}, this checkout builds ${expected}` }
 }
 
+/**
+ * The document the server must serve: the built page with its marker substituted.
+ *
+ * `markedPage` in `src/server/web.ts` replaces the `<meta name="heddle-page" content="unbuilt">`
+ * placeholder with the first twelve hex of the file's own sha256. Comparing the whole served body to
+ * this string is the strongest form of the marker claim — a matching marker alone proves only that
+ * some page carries the hash, not that the served document is the build (`96-deployment` makes the
+ * same comparison byte for byte).
+ */
+export function expectedPage(built, marker) {
+  return String(built).replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+}
+
 /** The console: error-level messages fail, warnings and verbose messages are evidence. */
 export function consoleVerdict(messages) {
   const list = Array.isArray(messages) ? messages : []
@@ -217,6 +230,31 @@ export function redactRecord(value, home) {
     return out
   }
   return value
+}
+
+/**
+ * Whether the delegated kickstart may run, given what the pass measured.
+ *
+ * A reading of "down" is not enough, and the reason was paid for: on 2026-10-22 at 03:54:07Z a pass
+ * read the port silent six seconds after the deployment's page was rebuilt - live-deploy's install
+ * window - and `kickstart -k` then SIGKILLed the server that install had just started (it had run for
+ * 5,380 ms). So the kickstart needs three things, in this order:
+ *
+ * 1. the reads say **down** (see `deploymentDown`);
+ * 2. the deployment was **not changed recently** - a rebuilt `dist/` or a rewritten agent definition
+ *    within `installWindowSeconds` means a redeploy is in progress, and a restart belongs to the
+ *    person doing it;
+ * 3. the port is **still silent after a grace period** - the supervisor puts a killed server back in
+ *    about a second, so a port that stays silent through the grace means the agent itself is gone,
+ *    which is the one case the delegation covers.
+ */
+export function restoreDecision({ down, secondsSinceDeployChange, stillDownAfterGrace, installWindowSeconds = 180 }) {
+  if (down !== true) return { allowed: false, reason: 'the deployment is not down' }
+  if (typeof secondsSinceDeployChange === 'number' && secondsSinceDeployChange < installWindowSeconds) {
+    return { allowed: false, reason: `the deployment changed ${Math.round(secondsSinceDeployChange)} s ago; a redeploy is in progress, so the restart is left to it` }
+  }
+  if (stillDownAfterGrace !== true) return { allowed: false, reason: 'the port answered again within the grace period, so nothing needed restarting' }
+  return { allowed: true, reason: 'down, no recent deployment change, and still silent after the grace period' }
 }
 
 /** The pass: any failure fails it, any unjudged check leaves it unjudged, only all-pass passes. */
