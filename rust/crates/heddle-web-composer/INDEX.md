@@ -94,9 +94,9 @@ handles. Until then the server can implement the traits itself.
 
 ## The routes against the checks' API expectations
 
-Run against the real router through a stand-in host (a throwaway binary that implements the four traits over fixed
-data and mounts `router`; not part of the repository): **13 of 13 hold**, each the exact status, sentence or body a
-check asserts —
+Committed as [`tests/check_expectations.rs`](tests/check_expectations.rs): it mounts `router` on a real listener over
+a fixed in-memory host and speaks HTTP to it, so the contract the four checks read is a regression test in the crate
+rather than a manual run. **13 of 13 hold**, each the exact status, sentence or body a check asserts —
 
 | Expectation (and the check that needs it) | Answer |
 |---|---|
@@ -110,7 +110,8 @@ check asserts —
 | `POST /api/sessions/<malformed>/steer` is `400`, and a steer with no running turn is `409 session/steer-unavailable`, with `a prompt is required` decided first (composer) | holds |
 | `POST /api/sessions/<id>/stop` answers `{"stopped":0,"session":…}` (composer) | holds |
 
-What is left for the four checks to run through `HEDDLE_BIN` is not in these routes: a binary that answers
+The same expectations were first checked by hand through a throwaway stand-in host, and are now the test above. What is
+left for the four checks to run through `HEDDLE_BIN` is not in these routes: a binary that answers
 `heddle web`, the server mounting `router` behind its token and fence layers, and a host implementation over the
 session/context/model/turn crates (their APIs are still `todo!()` on `main`, so the adapters are a mapping that
 cannot be written against them yet).
