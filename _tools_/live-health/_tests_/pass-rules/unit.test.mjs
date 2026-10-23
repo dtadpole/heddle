@@ -27,6 +27,7 @@ import {
   previewTurnVerdict,
   previewVerdict,
   sharedSessions,
+  turnLanding,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -262,4 +263,15 @@ test("the preview fails when it shares the deployment's session store, and is un
   assert.equal(previewVerdict({ ...ok, shared: 0 }).verdict, 'pass')
   assert.match(previewVerdict({ ...ok, shared: 18 }).detail, /failing: store/)
   assert.equal(previewVerdict({ ...ok, shared: null }).verdict, 'unjudged')
+})
+
+test("a turn counts as the monitor's only when its own session changed; landing elsewhere is named", () => {
+  const before = [{ id: 'health', updated: 't1' }, { id: 'theirs', updated: 't1' }]
+  assert.deepEqual(turnLanding({ target: 'health', before, after: [{ id: 'health', updated: 't2' }, { id: 'theirs', updated: 't1' }] }), { landed: 'own', othersChanged: 0 })
+  // The 2026-10-23 mistake: the target untouched, someone else's session written.
+  assert.equal(turnLanding({ target: 'health', before, after: [{ id: 'health', updated: 't1' }, { id: 'theirs', updated: 't2' }] }).landed, 'other')
+  // A person working beside the monitor is counted, not blamed.
+  assert.deepEqual(turnLanding({ target: 'health', before, after: [{ id: 'health', updated: 't2' }, { id: 'theirs', updated: 't2' }] }), { landed: 'own', othersChanged: 1 })
+  assert.equal(turnLanding({ target: 'health', before, after: before }).landed, 'unknown')
+  assert.equal(turnLanding({ target: null, before, after: before }).landed, 'unknown', 'no target, no claim')
 })
