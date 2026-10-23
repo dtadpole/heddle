@@ -83,6 +83,12 @@ third check reads as `detached exactly at origin/main`.
 `~/heddle-live` detached at `origin/main`, the server owning 127.0.0.1:8082 behind the owner's SSH forward): 3
 checks, 3 passed.
 
+**Measured on the owner's Mac again after the tooling merge reached main** (deployment at `1bcff7e`, the agent
+running `supervisor.mjs`): **3 checks, 3 passed** from `~/heddle-live`, and with the agent booted out the same run
+answers **verdict 3** (`2 of 3 could not be judged`: the checkout check still passes, the live-service and page
+checks skip). That is the third check passing on `main` for the first time — before this merge the check demanded a
+local branch `main` that a deployment worktree cannot hold.
+
 ## Why this exists
 
 The composer's bottom statistics were implemented, every suite was green, and the owner reported twice that

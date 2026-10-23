@@ -75,6 +75,11 @@ service installed is the `3` case, and it says how to install it.
 **Measured** on the Linux deployment host on 2026-10-22, against the hand-written unit `install.sh` now renders
 (TypeScript build, `~/heddle-live`, 127.0.0.1:8082): 4 checks, 4 passed.
 
+**Measured on the owner's Mac, 2026-10-22** — the deployment at `1bcff7e` with the agent running
+[`supervisor.mjs`](../../_tools_/web-daemon/INDEX.md) in front of it: **4 checks, 4 passed**. Then with the agent
+booted out, the same run answers **verdict 3** (`2 of 4 check(s) could not be judged`: the two definition checks
+still judge the repository, and the live and stays-up checks skip) — an absent service is unjudged, never a pass.
+
 ## What it deliberately does not judge
 
 - **That a browser renders the page.** The daemon is judged over HTTP; a browser is still the missing
