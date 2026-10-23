@@ -10,3 +10,28 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The session store the SessionService adapter (`adapters::StoreSessions`) is written against.
+heddle-session.workspace = true
+axum.workspace = true
+bytes.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Not in the workspace table yet; the integrator who owns rust/Cargo.toml may hoist them there.
+base64 = "0.22"
+getrandom = "0.3"
+sha2 = "0.10"
+tokio-util = "0.7"
+
+[dev-dependencies]
+# The adapter tests build a real session store, which takes the boot's environment.
+heddle-config.workspace = true
+http-body-util = "0.1"
+# The lane builds the whole workspace, where heddle-llm enables serde_json's preserve_order, so
+# JSON objects keep insertion order. Running this crate's own tests with the same feature is what
+# keeps an order-sensitive assertion from passing here and failing in the lane.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tower = { version = "0.5", features = ["util"] }
