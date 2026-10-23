@@ -1,13 +1,13 @@
 ---
 title: The heddle-sandbox crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T06:17:35Z
-version: 0.6.0
+modified: 2026-10-23T06:45:24Z
+version: 0.7.0
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
   - source: src/sandbox/*.ts at 8047667 and src/approvals/service.ts at 4d4075f (each one's last change), read 2026-10-22
-  - source: _verifiers_/75-permission-sandbox at d649349 and _verifiers_/80-web-ui/check-approval.mjs at 5ed8deb, run 2026-10-22
+  - source: _verifiers_/75-permission-sandbox at f473854 and _verifiers_/80-web-ui/check-approval.mjs at b71a1f0, run 2026-10-23
 ---
 
 # `rust/crates/heddle-sandbox`
@@ -88,7 +88,7 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 **Landed so far:** tasks 1 to 6 are implemented, with their unit tests (121 tests at 2026-10-22, `cargo test -p
 heddle-sandbox`), including the task 6 ladder through `ApprovalService` as its channel and the recorded approval
 fixture, which a live `approve_escalation` call is proven to reproduce byte for byte up to the run's `id` and `at`.
-Task 7 is the judged-through-the-binary row; it waits on the binary's `--turn` and `web`.
+Task 7 is judged: both verifiers pass through the binary, as the section below records.
 
 **The shell seam is judged on the real macOS runner, not only with doubles.** `service::seatbelt_end_to_end`
 (macOS only) spawns exactly what the `bash` tool spawns, `confine(["/bin/sh", "-c", cmd], mode)` in the workspace.
@@ -101,7 +101,23 @@ It classifies the real exit code and stderr, one test per claim `check-shell-con
 A mutation that turns the profile's `(deny file-write*)` into `allow` fails the `workspace-write` and `read-only`
 cases, so the tests can fail.
 
-## Task 7, measured before it is judged
+## Task 7, judged through the binary
+
+**Both verifiers pass through `HEDDLE_BIN`.** The binary is the backend lane's release build of candidate `e9a0836`
+(23:42 PDT on 2026-10-22, sha256 prefix `eb58b7447519ee38`). That candidate is `main` `b7bfb32` plus `7d52ad0`, which
+advertises `web` and `--turn` under D-048. No shim was involved, and the verifiers were at `f473854` (75) and
+`b71a1f0` (check-approval).
+
+| Runner | 75-permission-sandbox | check-approval |
+|---|---|---|
+| `node _tools_/verify-runner/run.mjs <check> --json`, each file | 17 pass, 0 fail, 0 skipped | 3 pass |
+| `sh _verifiers_/75-permission-sandbox/verify.sh` | verdict 0 on all 6 files | — |
+| `node _tools_/verify-runner/lane.mjs 75-permission-sandbox` | "17 checks: 17 pass, 0 fail, 0 unjudged", lane green | — |
+| `run.mjs` again | — | 3 pass |
+
+The rehearsals that led here follow.
+
+### Rehearsals before the capability was advertised
 
 Not yet a verdict: `main`'s binary advertises neither `--turn` nor `web` (`usage::SERVED`), so the lane's status run
 reports 75 as unjudged. All three runs below are rehearsals, with
