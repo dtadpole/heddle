@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-23T05:36:13Z
+modified: 2026-10-23T07:15:23Z
 level: L3
-version: 1.1.0
+version: 1.2.0
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -23,9 +23,10 @@ grounded_in:
 | about 22:00 | main's binary at `a871aae`, by the lane gate | 14 files, every check unjudged, none failed |
 | 22:10 to 22:24 | developer-two's `web` (22bd865) in the ui lane at `6910c6e`, release binary, by the lane gate — not on main | 14 files: 14 checks pass, 61 fail (chat-view 4 of 18, composer 6 of 25, check.mjs 4 of 5; the other eleven files pass none). Every argument shape the checks use printed its URL; the failures are in the served app |
 | about 22:40 | the TypeScript build, with the start timer unref'd (`cb6b392`) | same verdicts; check-context-view finishes in 0.5 s instead of 15 s |
+| 23:53 to 23:58 | main `b72cc1a`, which advertises `web` (D-048), release binary, by the lane gate | 70 of 75: chat-view #15 (the weaving clock), composer #13 (the context gauge), context-view #1 and #2 (the context row) and file-view #1 (the highlighter) fail; nine of fourteen files pass in full |
 
-**Part 9 through `HEDDLE_BIN` is not met.** Unjudged is not passing; the part cannot be judged until the binary
-serves `web`.
+**Part 9 through `HEDDLE_BIN` is not met on main `b72cc1a`**: 80 passes 70 of its 75 checks, and the five failures
+are listed with their owners in `rust/INDEX.md`; 85, 87 and 88, the rest of part 9, pass in full.
 
 The commands: `sh verify.sh --json` for the TypeScript build; the same with `HEDDLE_BIN` set to the binary for the
 port; and the lane gate, `HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs --json 80-web-ui 85-trajectory-view 87-resizable-panels 88-file-preview 90-web-ui-token`, which was green at `a871aae`: 18 files, 90 checks, all unjudged.
