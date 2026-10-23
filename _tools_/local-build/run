@@ -16,6 +16,7 @@ SLOTS=${LOCAL_BUILD_SLOTS:-3}
 JOBS=${LOCAL_BUILD_JOBS:-3}
 ROOT=${LOCAL_BUILD_SLOT_ROOT:-$HOME/.hd-build-slots}
 WAIT=${LOCAL_BUILD_WAIT_SECONDS:-1800}
+STALE=${LOCAL_BUILD_STALE_SECONDS:-3600}
 CARGO=${CARGO:-$HOME/.cargo/bin/cargo}
 
 # The profile settings keep target directories small: this Mac has one disk shared by
@@ -25,6 +26,8 @@ CARGO_PROFILE_RELEASE_DEBUG=${CARGO_PROFILE_RELEASE_DEBUG:-0}
 CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}
 export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_RELEASE_DEBUG CARGO_INCREMENTAL
 
+stamp() { date +%s; }
+
 usage() {
     echo "usage: $0 <cargo args...> | $0 status" >&2
     echo "  LOCAL_BUILD_SLOTS=$SLOTS LOCAL_BUILD_JOBS=$JOBS LOCAL_BUILD_SLOT_ROOT=$ROOT" >&2
@@ -33,58 +36,199 @@ usage() {
 
 mkdir -p "$ROOT"
 
-show_status() {
-    printf 'root: %s\nslots: %s  jobs: %s\n' "$ROOT" "$SLOTS" "$JOBS"
-    i=0
-    while [ "$i" -lt "$SLOTS" ]; do
-        d="$ROOT/slot-$i"
-        if [ -d "$d" ] && [ -f "$d/owner" ]; then
-            read -r pid ts cwd < "$d/owner" || true
-            printf 'slot %s: busy pid=%s since=%s cwd=%s\n' "$i" "${pid:-?}" "${ts:-?}" "${cwd:-?}"
-        else
-            printf 'slot %s: free\n' "$i"
-        fi
-        i=$((i + 1))
-    done
-    exit 0
+# An owner file is "<pid> <epoch> <cargo> <cwd>": the run shell, when it took the slot,
+# the cargo process (0 until it starts) and the caller's directory. It is rewritten once
+# cargo starts, so a killed shell whose cargo still builds is a busy slot, not a free
+# one. The cargo pid is last but one, so a directory with a space stays in one field.
+# The o_ names are kept apart from $cargo_pid on purpose: a function that read an owner
+# file must never overwrite the pid this shell is waiting for.
+owner_line() {
+    if [ -f "$1/owner" ]; then
+        cat "$1/owner" 2>/dev/null || true
+    fi
+}
+owner_fields() {
+    o_pid=0; o_ts=0; o_cargo=0; o_cwd=
+    read -r o_pid o_ts o_cargo o_cwd < "$1/owner" 2>/dev/null || true
+    # An owner file written before the cargo pid was recorded has three fields:
+    # "<pid> <epoch> <cwd>". Read the third as the directory rather than as a pid.
+    case "${o_cargo:-}" in
+        '' | *[!0-9]*) o_cwd=${o_cargo:-}; o_cargo=0 ;;
+    esac
+}
+owner_alive() {
+    if [ -n "${o_cargo:-}" ] && [ "$o_cargo" != "0" ] && kill -0 "$o_cargo" 2>/dev/null; then
+        return 0
+    fi
+    if [ -n "${o_pid:-}" ] && [ "$o_pid" != "0" ] && kill -0 "$o_pid" 2>/dev/null; then
+        return 0
+    fi
+    return 1
 }
 
-[ $# -eq 0 ] && usage
-[ "$1" = "status" ] && show_status
+# A dead slot is one no process holds: its owner pid and its cargo are both gone. An
+# ownerless directory is the microsecond between mkdir and the owner write; it gets a
+# short grace, then counts as dead.
+is_dead() {
+    d=$1
+    [ -d "$d" ] || return 1
+    if [ ! -f "$d/owner" ]; then
+        sleep 0.2
+        [ -f "$d/owner" ] || return 0
+    fi
+    owner_fields "$d"
+    if owner_alive; then
+        return 1
+    fi
+    return 0
+}
 
-# A caller that chose its own job count keeps it; otherwise the slot's cap applies.
-has_jobs=0
-for arg in "$@"; do
-    case "$arg" in -j|--jobs|-j*) has_jobs=1 ;; esac
-done
+# An old slot is one whose stamp is past $STALE, whether or not its process lives: a
+# build that ran for an hour is not a build this Mac should keep waiting for.
+is_old() {
+    d=$1
+    [ -f "$d/owner" ] || return 1
+    owner_fields "$d"
+    now=$(stamp)
+    if [ $((now - o_ts)) -gt "$STALE" ]; then
+        return 0
+    fi
+    return 1
+}
 
-stamp() { date +%s; }
+# Move a slot directory out of the way in one atomic rename, then delete it only if its
+# owner line is exactly the one judged. The rename means two reclaimers cannot both
+# remove the same directory; the re-read means a slot re-acquired in between is put back
+# instead of deleted.
+reclaim() {
+    d=$1
+    before=$(owner_line "$d")
+    t=$(mktemp -d "$ROOT/.trash.XXXXXX") || return 1
+    if ! mv "$d" "$t/slot" 2>/dev/null; then
+        rm -rf "$t" 2>/dev/null || true
+        return 1
+    fi
+    after=$(owner_line "$t/slot")
+    if [ "$after" != "$before" ]; then
+        # Someone re-acquired the slot between the check and the rename. Put the live
+        # slot back; if its name is taken, leave it in the trash undeleted and say so.
+        if ! mv "$t/slot" "$d" 2>/dev/null; then
+            echo "local-build: kept a live slot in $t/slot; remove it by hand" >&2
+            return 1
+        fi
+        rm -rf "$t" 2>/dev/null || true
+        return 1
+    fi
+    rm -rf "$t" 2>/dev/null || true
+    return 0
+}
 
+take() {
+    i=$1
+    d="$ROOT/slot-$i"
+    mkdir "$d" 2>/dev/null || return 1
+    if ! printf '%s %s 0 %s\n' "$$" "$(stamp)" "$PWD" > "$d/owner" 2>/dev/null; then
+        rm -rf "$d" 2>/dev/null || true
+        return 1
+    fi
+    SLOT=$i
+    return 0
+}
+
+# Clean up after killed owners first, so a dead slot never lingers; then take a free
+# one; only when every slot is busy, break an hour-old stamp.
 try_acquire() {
     i=0
     while [ "$i" -lt "$SLOTS" ]; do
         d="$ROOT/slot-$i"
-        if mkdir "$d" 2>/dev/null; then
-            printf '%s %s %s\n' "$$" "$(stamp)" "$PWD" > "$d/owner"
-            SLOT=$i
+        if is_dead "$d"; then
+            reclaim "$d" || true
+        fi
+        i=$((i + 1))
+    done
+    i=0
+    while [ "$i" -lt "$SLOTS" ]; do
+        if take "$i"; then
             return 0
         fi
-        reclaim "$d"
+        i=$((i + 1))
+    done
+    i=0
+    while [ "$i" -lt "$SLOTS" ]; do
+        d="$ROOT/slot-$i"
+        if is_old "$d"; then
+            if reclaim "$d"; then
+                if take "$i"; then
+                    return 0
+                fi
+            fi
+        fi
         i=$((i + 1))
     done
     return 1
 }
 
-reclaim() {
-    d=$1
-    [ -f "$d/owner" ] || return 0
-    read -r pid ts cwd < "$d/owner" || return 0
-    now=$(stamp)
-    age=$((now - ${ts:-0}))
-    if [ "$age" -gt 3600 ] || ! kill -0 "${pid:-0}" 2>/dev/null; then
-        rm -rf "$d" 2>/dev/null || true
+show_status() {
+    printf 'root: %s\nslots: %s  jobs: %s\n' "$ROOT" "$SLOTS" "$JOBS"
+    busy=0; stale=0; free=0; i=0
+    while [ "$i" -lt "$SLOTS" ]; do
+        d="$ROOT/slot-$i"
+        if [ ! -d "$d" ]; then
+            printf 'slot %s: free\n' "$i"
+            free=$((free + 1))
+        elif [ ! -f "$d/owner" ]; then
+            printf 'slot %s: unclaimed (no owner file)\n' "$i"
+            stale=$((stale + 1))
+        else
+            owner_fields "$d"
+            now=$(stamp)
+            age=$((now - o_ts))
+            if owner_alive && [ "$age" -le "$STALE" ]; then
+                printf 'slot %s: busy pid=%s cargo=%s age=%ss cwd=%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}"
+                busy=$((busy + 1))
+            else
+                printf 'slot %s: stale pid=%s cargo=%s age=%ss cwd=%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}"
+                stale=$((stale + 1))
+            fi
+        fi
+        i=$((i + 1))
+    done
+    for t in "$ROOT"/.trash.*; do
+        if [ -d "$t" ]; then
+            printf 'trash: %s\n' "$t"
+        fi
+    done
+    printf 'summary: busy=%s stale=%s free=%s\n' "$busy" "$stale" "$free"
+    if [ "$stale" -eq 0 ]; then
+        return 0
     fi
+    return 1
 }
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+if [ "$1" = "status" ]; then
+    if [ $# -ne 1 ]; then
+        usage
+    fi
+    show_status
+    exit $?
+fi
+
+if [ ! -x "$CARGO" ]; then
+    echo "local-build: cargo not found at $CARGO (set CARGO or install the toolchain)" >&2
+    exit 127
+fi
+
+# A caller that chose its own job count keeps it; otherwise the slot's cap applies.
+has_jobs=0
+for arg in "$@"; do
+    case "$arg" in
+        --) break ;;
+        -j | --jobs | -j[0-9]* | --jobs=*) has_jobs=1 ;;
+    esac
+done
 
 deadline=$(( $(stamp) + WAIT ))
 while ! try_acquire; do
@@ -95,37 +239,57 @@ while ! try_acquire; do
     sleep 3
 done
 
-cleanup() { rm -rf "$ROOT/slot-$SLOT" 2>/dev/null || true; }
-trap cleanup EXIT INT TERM HUP
+# Only remove the slot while it still names this process as its owner. A slot can be
+# reclaimed and re-acquired while a command runs (an hour-old stamp, a reused pid), and
+# this process must never delete the new occupant's directory.
+cleanup() {
+    d="$ROOT/slot-${SLOT:-none}"
+    [ -f "$d/owner" ] || return 0
+    owner_fields "$d"
+    if [ "${o_pid:-}" = "$$" ]; then
+        rm -rf "$d" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 echo "local-build: slot $SLOT/$SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
 
-# Run cargo as a child, never with exec: the EXIT trap that frees the slot must still
-# run when cargo ends, and an exec would replace this shell and lose the trap.
-run_cargo() {
-    if [ "$has_jobs" = 1 ]; then
-        "$CARGO" "$@"
-        return $?
-    fi
+if [ "$has_jobs" = 1 ]; then
+    set -- "$@"
+else
     # -j belongs after the subcommand: `cargo -j 3 build` works, but `cargo -j 3 --version`
     # is rejected, and `cargo fmt` takes no jobs at all. Inject only for the subcommands
     # that compile something.
     case "${1-}" in
-        build|check|test|run|bench|doc|clippy|rustc|install|fix)
+        build | check | test | run | bench | doc | clippy | rustc | install | fix)
             sub=$1
             shift
-            "$CARGO" "$sub" -j "$JOBS" "$@"
-            ;;
-        *)
-            "$CARGO" "$@"
+            set -- "$sub" -j "$JOBS" "$@"
             ;;
     esac
-}
+fi
 
-set +e
-run_cargo "$@"
-status=$?
-set -e
-cleanup
-trap - EXIT INT TERM HUP
-exit "$status"
+# Run cargo as a child rather than with exec, so the slot is released when the command
+# ends and on a signal. A signal is forwarded to cargo and the shell keeps waiting, so
+# the slot is never freed while cargo is still building.
+"$CARGO" "$@" &
+cargo_pid=$!
+if [ -f "$ROOT/slot-$SLOT/owner" ]; then
+    owner_fields "$ROOT/slot-$SLOT"
+    printf '%s %s %s %s\n' "$$" "$o_ts" "$cargo_pid" "$PWD" > "$ROOT/slot-$SLOT/owner" 2>/dev/null || true
+fi
+
+forward() {
+    kill "-$1" "$cargo_pid" 2>/dev/null || true
+}
+trap 'forward TERM' TERM
+trap 'forward INT' INT
+trap 'forward HUP' HUP
+
+rc=0
+while :; do
+    rc=0
+    wait "$cargo_pid" || rc=$?
+    kill -0 "$cargo_pid" 2>/dev/null || break
+done
+exit "$rc"
