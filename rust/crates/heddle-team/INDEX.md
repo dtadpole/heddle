@@ -18,8 +18,8 @@ The Rust port of durable teams, their policy, state and tool.
 | Judged by | `_verifiers_/50-agentic-loop` (check-teams), `_verifiers_/80-web-ui` (check-team-view), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-team --all-features` |
-| Integration tests | [`tests/session_store.rs`](tests/session_store.rs): the team layer over the real `heddle-session` store (dev-dependency only) — the recorded check-teams store recovered byte for byte, and the first check's journal driven through the nine tools and read back from disk, restart included |
-| State | **ported and on `main`** (merged as `d5956c5`, 2026-10-22): `state`, `service`, `tool`, `plugin` and `api` behind the declared API; 80 unit and 2 integration tests pass, and `fmt`, `clippy -D warnings` and `rustdoc -D warnings` are clean. M5 — the binary composing the `team` row and `heddle-server`'s route — is the binary's and the server's |
+| Integration tests | [`tests/session_store.rs`](tests/session_store.rs): the team layer over the real `heddle-session` store (dev-dependency only) — check-teams' recorded store recovered byte for byte; its first check's journal driven through the nine tools and read back from disk, restart included; and check-team-view's fixture served through `team_view` with the panel text derived as `page.html` derives it (roster, `1 teammate(s)`, `task-1 write the thing`, `0 queued`, `1 delivered`, no panel without a team) |
+| State | **ported and on `main`** (merged as `d5956c5`, 2026-10-22): `state`, `service`, `tool`, `plugin` and `api` behind the declared API; 84 unit and 3 integration tests pass, and `fmt`, `clippy -D warnings` and `rustdoc -D warnings` are clean. M5 — the binary composing the `team` row and `heddle-server`'s route — is the binary's and the server's |
 
 **A team is the Lead's session**; every teammate is a session of its own; everything the team shares is a
 `team/*` event in the Lead's log, folded on demand. The design decisions are the TypeScript build's, recorded
