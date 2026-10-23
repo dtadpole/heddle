@@ -17,3 +17,6 @@
 {"at": "2026-10-22T21:43-07:00", "deployed": "a2d4ae4", "how": "redeploy.sh", "verdict_96": "3/3", "note": "146 commits: heddle-server and the web crates merged; page unchanged; the binary's web still exits 2"}
 {"at": "2026-10-22T21:45-07:00", "deployed": "1db2b4e", "how": "redeploy.sh", "verdict_96": "3/3", "note": "18 commits; page unchanged"}
 {"at": "2026-10-22T21:50-07:00", "deployed": "67c2587", "how": "redeploy.sh", "verdict_96": "3/3", "note": "only rust/ and other tools changed: checkout moved, no rebuild or restart; server pid and launch token unchanged"}
+{"at": "2026-10-22T21:57-07:00", "deployed": "8072846", "how": "redeploy.sh (seat copy, --repo)", "verdict_96": "3/3", "note": "13 commits, rust/ and tools only: checkout moved, no restart"}
+{"at": "2026-10-22T22:33-07:00", "deployed": "bb6bc00", "how": "redeploy.sh (seat copy, --repo)", "verdict_96": "3/3", "note": "181 commits incl. the tooling merge a871aae: _tools_/web-daemon changed, so a full rebuild and restart by main's installer; the deployment had trailed main since 21:56 (this seat's lapse)"}
+{"at": "2026-10-22T22:35-07:00", "deployed": "db3d76d", "how": "the deployment's own redeploy.sh, now on main", "verdict_96": "3/3", "note": "no restart; main's rehearse.sh from the deployment just before: 6 of 6, 95 4/4 on the scratch service, live pid unchanged"}
