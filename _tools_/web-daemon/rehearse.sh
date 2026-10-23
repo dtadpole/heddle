@@ -106,10 +106,15 @@ if [ "$mode" != "--keep" ]; then trap cleanup EXIT INT TERM; fi
 
 held=0
 failed=0
+unjudged=0
 result() {
-  # result <claim> <held|failed> <detail>
-  printf '%-14s %-6s %s\n' "$1" "$2" "$3"
-  if [ "$2" = held ]; then held=$((held + 1)); else failed=$((failed + 1)); fi
+  # result <claim> <held|failed|unjudged> <detail>
+  printf '%-14s %-8s %s\n' "$1" "$2" "$3"
+  case "$2" in
+    held) held=$((held + 1)) ;;
+    unjudged) unjudged=$((unjudged + 1)) ;;
+    *) failed=$((failed + 1)) ;;
+  esac
 }
 
 # Wait until the port answers or `limit` ms pass; print the elapsed ms, or nothing on timeout.
@@ -124,10 +129,24 @@ wait_answer() {
 }
 
 echo "rehearsal: label $label, port $port, state $home"
+echo "program:   ${HEDDLE_BIN:-node $(CDPATH= cd -- "$here/../.." && pwd)/dist/cli.js}"
 
 # started
 scratch sh "$here/install.sh" >/dev/null 2>"$home/install.err" || { cat "$home/install.err" >&2; exit 1; }
-if ms=$(wait_answer 20000); then result started held "${ms} ms after install"; else result started failed "no answer within 20 s"; fi
+if ms=$(wait_answer "${HEDDLE_REHEARSE_START_MS:-20000}"); then
+  result started held "${ms} ms after install"
+else
+  result started failed "no answer within $(( ${HEDDLE_REHEARSE_START_MS:-20000} / 1000 )) s"
+  # Nothing else can be judged without a server, so say why it did not start and stop here rather than spending
+  # another minute failing claims that were never in question. The server's own words are in the scratch log.
+  if [ -f "$home/web.log" ]; then
+    echo "why: the scratch log ends with:"
+    grep -v '^heddle-supervisor: restarting in' "$home/web.log" | tail -3 | sed 's/^/  /'
+  fi
+  for claim in kill guard reinstall "agent gone" 95-web-daemon; do result "$claim" unjudged "no server to judge"; done
+  echo "verdict: $held held, $failed failed, $unjudged unjudged"
+  exit 1
+fi
 
 # kill: the port's owner is the server, and its death is the outage the supervisor exists for.
 sleep 6
@@ -200,6 +219,6 @@ if [ -f "$verifier" ]; then
   if [ "$verdict" = 0 ]; then result 95-web-daemon held "$summary"; else result 95-web-daemon failed "verdict ${verdict:-none}: ${summary:-$json}"; fi
 fi
 
-echo "verdict: $held held, $failed failed"
+echo "verdict: $held held, $failed failed, $unjudged unjudged"
 if [ "$mode" = "--keep" ]; then echo "kept: $label on $port; remove it with $0 --cleanup"; fi
 [ "$failed" -eq 0 ]

@@ -1,6 +1,6 @@
 ---
 title: Verifier 11 — Web Daemon
-version: 1.4.0
+version: 1.5.0
 description: a supervised user service — a launchd agent on macOS, a systemd user unit on Linux — keeps the Web UI running at the documented port, survives a kill, and does not weaken the token.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082
@@ -70,6 +70,14 @@ resolves. So the binary deployment needs no second definition and no second veri
 `HEDDLE_BIN=/abs/path/heddle`, and checks 1 and 2 judge the rendered definition, checks 3 and 4 the service that is
 installed. The served build is [`96-deployment`](../96-deployment/INDEX.md)'s claim, and it knows the binary serves
 the repository's `src/server/page.html` rather than a `dist/` copy.
+
+**The Rust branch today, rehearsed.** `HEDDLE_BIN=<binary> sh _tools_/web-daemon/rehearse.sh` installs exactly that
+service on a scratch agent. Run 2026-10-22 at 21:23 PDT with the ui and backend lanes' release binary (sha256
+`a355a0aa1fc4…`, built 21:14 PDT): **started failed** in 20 s, and the scratch log says why — `heddle: not ported to
+Rust yet: web`, exit 2 after 4 ms, retried by the supervisor with backoff; the other five claims, this verifier's
+four checks among them, are **unjudged**, because there is no server to judge. So part 11 through `HEDDLE_BIN` is
+not met and cannot be judged until the binary serves `web`; when it does, the same command is the first reading, and
+the deployment switches with `HEDDLE_BIN=… sh _tools_/web-daemon/install.sh --restart` from `~/heddle-live`.
 
 ## Running it
 

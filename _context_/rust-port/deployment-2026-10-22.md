@@ -1,9 +1,9 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-23T03:15:19Z
-modified: 2026-10-23T04:18:27Z
+modified: 2026-10-23T04:22:39Z
 level: L3
-version: 1.5.0
+version: 1.6.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
 status: unverified
 grounded_in:
@@ -209,6 +209,14 @@ deployment (D-042), because its stays-up check kills the owner's server. `95-web
 1170 ms, **95-web-daemon 4 pass, 0 fail, 0 skipped** — 6 of 6 held, while the live server kept pid 70020 and its token.
 `96-deployment` blanks those overrides, so it always reads the deployment: 3/3 at `b0ef8ab` both from a plain shell and
 from one with the scratch label set.
+
+**The Rust branch, rehearsed (part 11 through `HEDDLE_BIN`).** The same tool installs the binary exactly as the
+deployment would serve it: `HEDDLE_BIN=<binary> sh _tools_/web-daemon/rehearse.sh`. With the lanes' release binary
+(sha256 `a355a0aa1fc4…`, built 21:14 PDT, copied to a temporary file first so the run depended on nothing in another
+seat's worktree): `started` **failed** after 20 s, and the scratch log gave the reason — `heddle: not ported to Rust
+yet: web`, exit 2 after 4 ms, retried by the supervisor with backoff — and the other five claims were reported
+**unjudged** rather than failed one by one. The rehearsal now stops at that point instead of spending another minute,
+which a component test pins. The TypeScript rehearsal run right after held 6 of 6 again (95: 4 pass, 0 fail).
 
 ## Who acts on the service, and the guard's state (D-045)
 
