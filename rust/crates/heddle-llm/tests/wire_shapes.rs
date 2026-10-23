@@ -1,0 +1,389 @@
+//! The three wire shapes end to end: request builder, HTTP transport and fold, against local doubles.
+//!
+//! The unit tests judge each half separately (the builder's body, the fold's vocabulary). These drive the
+//! whole path a verifier sees — a real socket speaking the provider's route — because the failure this
+//! catches is the join: a request the route would refuse, a header the proxy would mangle, or a body the
+//! fold cannot parse. Everything here is offline and spends nothing.
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+
+use futures::StreamExt;
+use heddle_llm::{
+    Chunk, ContentPart, EndpointConfig, EndpointKind, GenerateRequest, Message, ModelService, Role,
+    StreamPrinter, StreamPrinterOptions, ToolCall, adapter_for, types::user_message,
+};
+
+/// A one-shot HTTP double in a background thread: reads each request's head, answers with `reply`'s bytes.
+struct Double {
+    base_url: String,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl Double {
+    fn start(reply: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds a loopback port");
+        let address = listener.local_addr().expect("has an address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let reply = Arc::new(reply);
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let recorded = recorded.clone();
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let mut head = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(count) => head.extend_from_slice(&buffer[..count]),
+                        }
+                    }
+                    recorded
+                        .lock()
+                        .expect("records")
+                        .push(String::from_utf8_lossy(&head).into_owned());
+                    let _ = socket.write_all(&reply(&String::from_utf8_lossy(&head)));
+                    let _ = socket.flush();
+                });
+            }
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            seen,
+        }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.seen.lock().expect("reads").clone()
+    }
+}
+
+fn reply(content_type: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+fn endpoint(name: &str, kind: EndpointKind, base_url: &str, model: &str) -> EndpointConfig {
+    EndpointConfig {
+        name: name.to_string(),
+        kind,
+        base_url: base_url.to_string(),
+        model: Some(model.to_string()),
+        models: None,
+        reasoning: None,
+        project: None,
+        region: None,
+        api_key: None,
+        api_key_file: None,
+        headers: None,
+        stream: None,
+        max_output_tokens: None,
+        context_window: None,
+        capabilities: None,
+        input_modalities: None,
+        proxy: None,
+        timeout_ms: None,
+    }
+}
+
+fn ask(name: &str, text: &str) -> GenerateRequest {
+    GenerateRequest {
+        endpoint: name.to_string(),
+        messages: vec![user_message(text)],
+        ..GenerateRequest::default()
+    }
+}
+
+async fn collect(stream: heddle_llm::ChunkStream) -> Vec<Result<Chunk, heddle_llm::ModelError>> {
+    stream.collect().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chat_shape_streams_reasoning_content_and_an_assembled_tool_call() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"an\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let adapter = adapter_for(endpoint(
+        "chat",
+        EndpointKind::OpenaiChat,
+        &double.base_url,
+        "m",
+    ))
+    .expect("a chat adapter");
+    let chunks = collect(adapter.stream(ask("chat", "go"))).await;
+    assert_eq!(
+        chunks
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            Chunk::ReasoningDelta { text: "hm".into() },
+            Chunk::TextDelta { text: "an".into() },
+            Chunk::ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("bash".into()),
+                arguments_delta: "{\"command\":".into(),
+            },
+            Chunk::ToolCallDelta {
+                index: 0,
+                id: None,
+                name: None,
+                arguments_delta: "\"ls\"}".into(),
+            },
+            Chunk::ToolCall(ToolCall {
+                id: "call_1".into(),
+                name: "bash".into(),
+                arguments: "{\"command\":\"ls\"}".into(),
+            }),
+            Chunk::Done {
+                finish_reason: "tool_calls".into(),
+                usage: Some(heddle_llm::TokenUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(4),
+                    ..heddle_llm::TokenUsage::default()
+                }),
+            },
+        ]
+    );
+    let seen = double.requests().join("\n");
+    assert!(
+        seen.starts_with("POST /chat/completions HTTP/1.1"),
+        "{seen}"
+    );
+    assert!(
+        seen.to_lowercase()
+            .contains("content-type: application/json"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("\"stream\":true"),
+        "the body asks for a stream: {seen}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chat_shape_reduces_a_json_only_answer_to_the_same_chunks() {
+    let body = r#"{"choices":[{"message":{"reasoning_content":"hm","content":"plain answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+    let double = Double::start(move |_| reply("application/json", body));
+    let mut endpoint = endpoint("chat", EndpointKind::OpenaiChat, &double.base_url, "m");
+    endpoint.stream = Some(false);
+    let adapter = adapter_for(endpoint).expect("a chat adapter");
+    let chunks = collect(adapter.stream(ask("chat", "go"))).await;
+    assert_eq!(
+        chunks
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            Chunk::ReasoningDelta { text: "hm".into() },
+            Chunk::TextDelta {
+                text: "plain answer".into()
+            },
+            Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: Some(heddle_llm::TokenUsage {
+                    input_tokens: Some(3),
+                    output_tokens: Some(2),
+                    ..heddle_llm::TokenUsage::default()
+                }),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_responses_shape_streams_text_reasoning_and_a_restated_call() {
+    let sse = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"an\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"hm\"}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"bash\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2},\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}]}}\n\n"
+    );
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let adapter = adapter_for(endpoint(
+        "codex",
+        EndpointKind::OpenaiResponses,
+        &double.base_url,
+        "m",
+    ))
+    .expect("a responses adapter");
+    let chunks = collect(adapter.stream(ask("codex", "go"))).await;
+    let chunks: Vec<Chunk> = chunks
+        .into_iter()
+        .map(|item| item.expect("streams"))
+        .collect();
+    assert_eq!(chunks.len(), 4, "{chunks:?}");
+    assert_eq!(chunks[0], Chunk::TextDelta { text: "an".into() });
+    assert_eq!(chunks[1], Chunk::ReasoningDelta { text: "hm".into() });
+    assert_eq!(
+        chunks[2],
+        Chunk::ToolCall(ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments: "{\"command\":\"ls\"}".into(),
+        })
+    );
+    assert_eq!(
+        chunks[3],
+        Chunk::Done {
+            finish_reason: "tool_calls".into(),
+            usage: Some(heddle_llm::TokenUsage {
+                input_tokens: Some(5),
+                output_tokens: Some(2),
+                ..heddle_llm::TokenUsage::default()
+            }),
+        }
+    );
+    let seen = double.requests().join("\n");
+    assert!(seen.starts_with("POST /responses HTTP/1.1"), "{seen}");
+    assert!(seen.contains("\"store\":false"), "{seen}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_that_ends_without_a_terminal_event_is_not_a_finished_answer() {
+    let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"cut\"}\n\n";
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let adapter = adapter_for(endpoint(
+        "codex",
+        EndpointKind::OpenaiResponses,
+        &double.base_url,
+        "m",
+    ))
+    .expect("a responses adapter");
+    let chunks = collect(adapter.stream(ask("codex", "go"))).await;
+    assert_eq!(
+        chunks.last().and_then(|item| item.as_ref().ok()),
+        Some(&Chunk::Done {
+            finish_reason: "stream_ended".into(),
+            usage: None
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_anthropic_shape_streams_thinking_and_a_tool_use_block() {
+    let sse = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12}}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"list_dir\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\".\\\"}\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"checking\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    );
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let mut endpoint = endpoint(
+        "claude",
+        EndpointKind::AnthropicVertex,
+        &double.base_url,
+        "claude-opus-5-5",
+    );
+    endpoint.project = Some("a-project".into());
+    endpoint.region = Some("global".into());
+    let adapter = adapter_for(endpoint).expect("an anthropic adapter");
+    let chunks = collect(adapter.stream(ask("claude", "go"))).await;
+    let chunks: Vec<Chunk> = chunks
+        .into_iter()
+        .map(|item| item.expect("streams"))
+        .collect();
+    assert_eq!(
+        chunks,
+        vec![
+            Chunk::TextDelta {
+                text: "checking".into()
+            },
+            Chunk::ReasoningDelta { text: "hm".into() },
+            Chunk::ToolCall(ToolCall {
+                id: "toolu_1".into(),
+                name: "list_dir".into(),
+                arguments: "{\"path\":\".\"}".into(),
+            }),
+            Chunk::Done {
+                finish_reason: "tool_calls".into(),
+                usage: Some(heddle_llm::TokenUsage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(7),
+                    ..heddle_llm::TokenUsage::default()
+                }),
+            },
+        ]
+    );
+    let seen = double.requests().join("\n");
+    assert!(
+        seen.starts_with(
+            "POST /projects/a-project/locations/global/publishers/anthropic/models/claude-opus-5-5:streamRawPredict HTTP/1.1"
+        ),
+        "{seen}"
+    );
+}
+
+/// The stream a person watches: the same chunks, printed as they arrive, and counted for `--json`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_service_stream_can_be_printed_as_it_arrives() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"live reasoning\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"live content\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let service = ModelService::new(vec![endpoint(
+        "chat",
+        EndpointKind::OpenaiChat,
+        &double.base_url,
+        "m",
+    )])
+    .expect("registers the endpoint");
+    let generated = service.generate(ask("chat", "go")).await.expect("answers");
+    assert_eq!(generated.text, "live content");
+    assert_eq!(generated.reasoning, "live reasoning");
+
+    let printed = Arc::new(Mutex::new(String::new()));
+    let sink = printed.clone();
+    let mut printer = StreamPrinter::with_writer(StreamPrinterOptions::new("s1"), move |text| {
+        sink.lock().expect("buffer").push_str(text);
+    });
+    let mut stream = service.stream(ask("chat", "go")).expect("streams");
+    while let Some(item) = stream.next().await {
+        let chunk = item.expect("streams");
+        if let Chunk::Done { .. } = chunk {
+            printer.observe("s1", &serde_json::json!({ "type": "assistant/completed" }));
+            continue;
+        }
+        printer.observe(
+            "s1",
+            &serde_json::json!({ "type": "assistant/chunk", "chunk": chunk }),
+        );
+    }
+    let summary = printer.summary();
+    assert!(summary.text_deltas > 0, "{summary:?}");
+    assert!(summary.reasoning_deltas > 0, "{summary:?}");
+    assert!(summary.completed);
+    let printed = printed.lock().expect("buffer").clone();
+    assert!(printed.contains("[reasoning] live reasoning"), "{printed}");
+    assert!(printed.contains("live content"), "{printed}");
+}
+
+#[test]
+fn a_message_type_is_available_as_the_crate_exports_it() {
+    // A compile-time check of the re-exports heddle-context and heddle-session build against.
+    let message: Message = Message::new(Role::User, vec![ContentPart::text("hi")]);
+    assert_eq!(message.role, Role::User);
+}
