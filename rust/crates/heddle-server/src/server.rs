@@ -1262,6 +1262,17 @@ async fn list_approvals(State(state): State<AppState>) -> Response {
     respond::json_compact(StatusCode::OK, &json!({"requests": requests}))
 }
 
+/// The 409 a question that is no longer waiting gets, in web.ts's shape (`answered: false`).
+fn approval_not_waiting() -> Response {
+    respond::json(
+        StatusCode::CONFLICT,
+        &json!({
+            "answered": false,
+            "error": "that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it",
+        }),
+    )
+}
+
 async fn answer_approval(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1270,10 +1281,7 @@ async fn answer_approval(
     // The TypeScript route answers a question nobody is holding as a conflict, not as a missing
     // plugin: a profile without the approval service simply has no question to answer.
     let Some(service) = state.harness().approvals.as_ref() else {
-        return respond::error(
-            StatusCode::CONFLICT,
-            "that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it",
-        );
+        return approval_not_waiting();
     };
     let looks_like_approval = id.strip_prefix("approval-").is_some_and(|rest| {
         rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
@@ -1295,10 +1303,7 @@ async fn answer_approval(
     if service.answer(&id, outcome) {
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
     } else {
-        respond::error(
-            StatusCode::CONFLICT,
-            "that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it",
-        )
+        approval_not_waiting()
     }
 }
 
@@ -2646,7 +2651,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert!(body_text(&bytes).contains("no longer waiting"));
+        let body = body_text(&bytes);
+        assert!(body.contains("no longer waiting"), "{body}");
+        assert!(body.contains("\"answered\": false"), "{body}");
 
         // No workspace service: /api/html reports the path as outside every root, as web.ts does.
         let response = router
