@@ -602,6 +602,23 @@ mod tests {
     }
 
     #[test]
+    fn a_self_closed_tag_does_not_eat_the_text_after_it() {
+        // Measured against `sanitize.ts`, which advances one byte past a `/>`-closed tag and so drops the first
+        // character of what follows: `<p/>text` came back as `<p />ext`. The port ends the tag at its own `>`.
+        assert_eq!(
+            sanitize_html("<p/>text", SanitizeOptions::default()),
+            "<p />text"
+        );
+        assert_eq!(
+            sanitize_html(
+                "<span onclick=\"alert(1)\"/>x</span>",
+                SanitizeOptions::default()
+            ),
+            "<span />x</span>"
+        );
+    }
+
+    #[test]
     fn an_unterminated_tag_leaves_the_rest_of_the_input_as_text() {
         assert_eq!(
             sanitize_html("a <span class=\"x", SanitizeOptions::default()),
