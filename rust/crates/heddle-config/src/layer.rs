@@ -121,6 +121,11 @@ fn read_layer_inner(file: &Path, stack: &[PathBuf], env: &Env) -> Result<Vec<Lay
     let Some(document) = load_document(&text, &absolute.display().to_string())? else {
         return Ok(Vec::new());
     };
+    // A document that is `null` or `~` is no layers, as `src/config/schema.ts` reads it
+    // (`if (parsed === null || parsed === undefined) return []`).
+    if matches!(document, Yaml::Value(Scalar::Null)) {
+        return Ok(Vec::new());
+    }
     let Yaml::Sequence(entries) = document else {
         return Err(ConfigError::one(format!(
             "{}: expected a top-level array of layers",
@@ -131,6 +136,14 @@ fn read_layer_inner(file: &Path, stack: &[PathBuf], env: &Env) -> Result<Vec<Lay
     let mut layers = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         let Yaml::Mapping(fields) = entry else {
+            // The TypeScript loader builds `{ __include: path }` for a `!include` tag, so a tagged
+            // entry is refused there as a mapping with an unknown key; say it the same way.
+            if include_tagged(entry) {
+                return Err(ConfigError::one(format!(
+                    "{}: layer {index} has unknown key '__include'; expected insert, patch, remove or include",
+                    absolute.display()
+                )));
+            }
             return Err(ConfigError::one(format!(
                 "{}: layer {index} must be a mapping of insert, patch, remove or include",
                 absolute.display()
@@ -222,7 +235,7 @@ fn load_document<'a>(text: &'a str, label: &str) -> Result<Option<Yaml<'a>>, Con
         .map_err(|error| ConfigError::one(format!("{label} is not valid YAML: {error}")))?;
     if documents.len() > 1 {
         return Err(ConfigError::one(format!(
-            "{label}: expected a single YAML document in the stream"
+            "{label} is not valid YAML: expected a single document in the stream, but found more"
         )));
     }
     Ok(match documents.into_iter().next() {
@@ -344,6 +357,15 @@ fn describe(node: &Yaml<'_>) -> String {
 }
 
 /// The suffix of a local tag (`!env` -> `env`); `None` for a tag from another handle.
+/// Whether `node` is a scalar tagged `!include`.
+fn include_tagged(node: &Yaml<'_>) -> bool {
+    match node {
+        Yaml::Tagged(tag, _) => local_tag(tag) == Some("include"),
+        Yaml::Representation(_, _, Some(tag)) => local_tag(tag) == Some("include"),
+        _ => false,
+    }
+}
+
 fn local_tag(tag: &Tag) -> Option<&str> {
     (tag.handle == "!").then_some(tag.suffix.as_str())
 }
@@ -521,6 +543,56 @@ mod tests {
             error.problems(),
             [format!(
                 "{}: expected a top-level array of layers",
+                root.join("p.yml").display()
+            )]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_layer_file_whose_document_is_null_reads_as_no_layers() {
+        let root = scratch("null-layer");
+        for (name, text) in [
+            ("null.yml", "null\n"),
+            ("tilde.yml", "~\n"),
+            ("comment.yml", "# nothing yet\n"),
+            ("empty.yml", ""),
+        ] {
+            write(&root.join(name), text);
+            assert!(
+                read_layer(&root.join(name), &Env::default())
+                    .unwrap_or_else(|error| panic!("{name}: {:?}", error.problems()))
+                    .is_empty(),
+                "{name} reads as no layers, as the TypeScript build reads it"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_tagged_include_as_a_layer_entry_is_refused_in_the_typescript_words() {
+        let root = scratch("tag-top");
+        write(&root.join("p.yml"), "- !include ./x.yml\n");
+        let error = read_layer(&root.join("p.yml"), &Env::default()).unwrap_err();
+        assert_eq!(
+            error.problems(),
+            [format!(
+                "{}: layer 0 has unknown key '__include'; expected insert, patch, remove or include",
+                root.join("p.yml").display()
+            )]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn two_documents_in_one_file_are_refused_in_the_typescript_words() {
+        let root = scratch("two-docs");
+        write(&root.join("p.yml"), "- insert: []\n---\n- insert: []\n");
+        let error = read_layer(&root.join("p.yml"), &Env::default()).unwrap_err();
+        assert_eq!(
+            error.problems(),
+            [format!(
+                "{} is not valid YAML: expected a single document in the stream, but found more",
                 root.join("p.yml").display()
             )]
         );

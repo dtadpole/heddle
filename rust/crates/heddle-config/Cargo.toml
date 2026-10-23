@@ -11,5 +11,7 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
+# `preserve_order`: a row's unknown keys and `config --json` keep the order the layer wrote them in, as the
+# TypeScript objects did; without it this crate alone would print sorted keys.
+serde_json = { workspace = true, features = ["preserve_order"] }
 saphyr.workspace = true

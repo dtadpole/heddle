@@ -120,6 +120,20 @@ impl ComposedRow {
             Ok(Value::Object(map)) => map,
             _ => Map::new(),
         };
+        // A row that wrote `config: null` composes to no config, so the loader hands `{}`; but the
+        // TypeScript row kept the null and printed it. The written null leaves a `config` origin,
+        // which an absent config does not, so print it back in the row's own place, after `name`.
+        if self.row.config.is_none() && self.fields.iter().any(|field| field.field == "config") {
+            let mut with_null = Map::new();
+            for (key, value) in report {
+                let after_name = key == "name";
+                with_null.insert(key, value);
+                if after_name {
+                    with_null.insert("config".into(), Value::Null);
+                }
+            }
+            report = with_null;
+        }
         report.insert("position".into(), Value::from(self.position));
         report.insert(
             "origins".into(),
@@ -582,6 +596,22 @@ mod tests {
     }
 
     #[test]
+    fn a_row_that_writes_no_config_prints_no_config_key() {
+        let layers = vec![named(
+            "base.yml",
+            "/p/base.yml",
+            vec![LayerValue::from(
+                json!({ "insert": [{ "id": "a", "name": "./a" }] }),
+            )],
+        )];
+        let rows = compose(&layers, &env()).unwrap();
+        assert!(
+            rows[0].to_report().get("config").is_none(),
+            "only a written `config: null` is printed back; an absent config stays absent"
+        );
+    }
+
+    #[test]
     fn a_config_written_as_null_reads_as_no_config() {
         // The loader hands a component `{}` for a row with no config; it can only do that if absent
         // and `null` compose to the same thing, so both are `None` here.
@@ -621,10 +651,25 @@ mod tests {
             rows[1].row.config, None,
             "a patched `config: null` clears the config"
         );
-        assert!(
-            rows[1].to_report().get("config").is_none(),
-            "`config --json` prints no config key for it"
-        );
+        for (at, how) in [(0, "an inserted"), (1, "a patched")] {
+            let report = rows[at].to_report();
+            assert_eq!(
+                report.get("config"),
+                Some(&Value::Null),
+                "{how} `config: null` is printed back by `config --json`, as the TypeScript row kept it"
+            );
+            let keys: Vec<&str> = report
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                &keys[..3],
+                ["id", "name", "config"],
+                "in the row's own place"
+            );
+        }
         assert_eq!(
             origin_of(&rows, "beta", "config").map(|p| p.layer.as_str()),
             Some("clear.yml"),
