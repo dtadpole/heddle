@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 
 import {
@@ -154,15 +153,22 @@ async function derived(h, session) {
 }
 
 /**
- * The page's display fold, which is what a reader is shown.
+ * What a reader is shown, judged on the log rather than through a build's own fold.
  *
- * Imported from the build rather than re-implemented here: the claim is about *the panel*, and a
- * check that folded the log itself would only be judging its own idea of the panel.
+ * The panel draws a `message` event as a turn — a user message as a user turn, an assistant message as
+ * an assistant turn — and skips every `context/note`, which is how a checkpoint and an instruction
+ * baseline stay out of the conversation. So the claim "a note is never shown as something a person said"
+ * is a claim about which events are `message`s, and the log answers it for either build. Importing the
+ * TypeScript build's fold from `dist/` instead made the check fail under `HEDDLE_BIN` in a lane with no
+ * TypeScript build (D-023).
  */
-let panelFold
-async function transcriptTurns(events) {
-  panelFold ??= (await import(pathToFileURL(join(repoRoot, 'dist', 'server', 'web.js')).href)).transcriptTurns
-  return panelFold(events)
+function readerTurns(events) {
+  return events
+    .filter((event) => event.type === 'message' && (event.message?.role === 'user' || event.message?.role === 'assistant'))
+    .map((event) => ({
+      kind: event.message.role,
+      text: (event.message.content ?? []).map((part) => part.text ?? '').join(''),
+    }))
 }
 
 test('a compaction shadows a span, the log keeps it, and the model reads the summary once', async (context) => {
@@ -636,7 +642,7 @@ test('a long conversation can be compacted more than once, and the reader still 
     assert.equal(checkpoints.length, 1, 'the model reads the newest checkpoint, not a pile of them')
 
     // And the reader's view is the conversation: the harness's own notes are not turns.
-    const panel = await transcriptTurns(events)
+    const panel = readerTurns(events)
     assert.equal(panel.filter((turn) => turn.kind === 'user').length, 4, 'the four prompts are the four user turns')
     assert.ok(
       !panel.some((turn) => (turn.text ?? '').includes('<compacted-summary>') || (turn.text ?? '').includes('<system-reminder>')),

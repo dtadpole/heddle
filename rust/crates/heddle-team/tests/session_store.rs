@@ -544,3 +544,188 @@ async fn a_lead_spawns_tasks_and_messages_through_the_tools_and_the_team_survive
         "the board survived the restart"
     );
 }
+
+/// The team panel's three lines as `src/server/page.html` (`refreshTeam`) derives them from `/api/team`, or
+/// `None` when the page hides the panel (no teammate, no live task and no message).
+fn panel_text(body: &Value) -> Option<(String, Vec<String>, String)> {
+    let members = body["members"].as_array().cloned().unwrap_or_default();
+    let teammates = members
+        .iter()
+        .filter(|member| member["role"] == "teammate")
+        .count();
+    let tasks: Vec<&Value> = body["tasks"]
+        .as_array()
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter(|task| task["status"] != "deleted")
+                .collect()
+        })
+        .unwrap_or_default();
+    let messages = body["messages"].as_array().cloned().unwrap_or_default();
+    if teammates == 0 && tasks.is_empty() && messages.is_empty() {
+        return None;
+    }
+    let summary = format!("{teammates} teammate(s) \u{b7} {} task(s)", tasks.len());
+    let board = tasks
+        .iter()
+        .map(|task| {
+            let owner = task["ownerName"]
+                .as_str()
+                .map(|name| format!(" \u{b7} {name}"))
+                .unwrap_or_default();
+            let ready = if task["status"] == "pending" && task["ready"] == true {
+                " \u{b7} ready"
+            } else {
+                ""
+            };
+            format!(
+                "{} {} \u{b7} {}{owner}{ready}",
+                task["id"].as_str().unwrap_or_default(),
+                task["subject"].as_str().unwrap_or_default(),
+                task["status"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    let delivered = body["delivered"].as_array().cloned().unwrap_or_default();
+    let queued = messages
+        .iter()
+        .filter(|message| !delivered.contains(&message["id"]))
+        .count();
+    let mail = format!("{queued} queued \u{b7} {} delivered", delivered.len());
+    Some((summary, board, mail))
+}
+
+#[test]
+fn the_team_view_fixture_renders_the_roster_board_and_mailbox_the_check_reads() {
+    // `_verifiers_/80-web-ui/check-team-view.mjs`'s fixture, event for event: the teammate first, the Lead
+    // last, a three-revision task ending completed, and one delivered message. The check shapes its ids as
+    // `session-<uuid>` because the HTTP session route refuses anything else; this test calls `team_view`
+    // directly, so plain ids serve.
+    let home = Scratch::new("view-home");
+    let work = Scratch::new("view-work");
+    let store = open_store(&home.0.join("sessions"));
+    let lead = "session-view-lead";
+    let member = "session-view-member";
+    let member_handle = store
+        .store
+        .create(CreateOptions {
+            id: Some(member.to_owned()),
+            cwd: Some(work.text()),
+            parent_session: Some(lead.to_owned()),
+            origin: Some(SessionOrigin::Subagent),
+            delegation_depth: Some(1),
+            team_id: Some(lead.to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the teammate session");
+    store
+        .store
+        .message(
+            &member_handle,
+            Message {
+                role: Role::User,
+                tool_call_id: None,
+                content: vec![ContentPart::Text {
+                    text: "the spawn prompt".to_owned(),
+                }],
+                source: None,
+            },
+        )
+        .expect("the spawn prompt");
+    store
+        .append(
+            member,
+            json!({ "type": "assistant/completed", "text": "member done" }),
+        )
+        .expect("the teammate's answer");
+    store
+        .store
+        .create(CreateOptions {
+            id: Some(lead.to_owned()),
+            cwd: Some(work.text()),
+            endpoint: Some("scripted".to_owned()),
+            model: Some("scripted".to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the Lead session");
+    let alpha = |phase: &str| json!({ "id": member, "name": "alpha", "description": "the teammate", "context": "fresh", "phase": phase });
+    let task = |revision: u64, status: &str, owner: Option<&str>| {
+        let mut task = json!({ "id": "task-1", "revision": revision, "subject": "write the thing", "description": "", "status": status });
+        if let Some(owner) = owner {
+            task["ownerId"] = Value::from(owner);
+        }
+        task["blockedBy"] = json!([]);
+        task["writeScopes"] = json!([]);
+        task
+    };
+    for event in [
+        json!({ "type": "team/member", "version": 2, "teamId": lead, "member": alpha("provisioning") }),
+        json!({ "type": "team/member", "version": 2, "teamId": lead, "member": alpha("active") }),
+        json!({ "type": "team/task", "version": 2, "teamId": lead, "task": task(1, "pending", None) }),
+        json!({ "type": "team/task", "version": 2, "teamId": lead, "task": task(2, "in_progress", Some(member)) }),
+        json!({ "type": "team/task", "version": 2, "teamId": lead, "task": task(3, "completed", Some(member)) }),
+        json!({ "type": "team/message/queued", "version": 2, "teamId": lead, "message": { "id": "team-message-view-1", "senderId": lead, "senderName": "lead", "targetId": member, "content": [{ "type": "text", "text": "mailed" }] } }),
+        json!({ "type": "team/message/delivered", "version": 2, "teamId": lead, "messageId": "team-message-view-1", "targetId": member }),
+    ] {
+        store
+            .append(lead, event)
+            .expect("the team event is journaled");
+    }
+    let service = service_over(&store);
+
+    let body = serde_json::to_value(team_view(&service, lead).expect("the fixture folds"))
+        .expect("the view serializes");
+    let roster: Vec<(String, String, String)> = body["members"]
+        .as_array()
+        .expect("the roster is a list")
+        .iter()
+        .map(|member| {
+            let field = |key: &str| member[key].as_str().unwrap_or_default().to_owned();
+            (field("name"), field("role"), field("status"))
+        })
+        .collect();
+    let expected: Vec<(String, String, String)> = [
+        ("lead", "lead", "inactive"),
+        ("alpha", "teammate", "inactive"),
+    ]
+    .into_iter()
+    .map(|(name, role, status)| (name.to_owned(), role.to_owned(), status.to_owned()))
+    .collect();
+    assert_eq!(roster, expected, "view.roster");
+
+    let (summary, board, mail) = panel_text(&body).expect("a team session shows its panel");
+    assert!(summary.contains("1 teammate(s)"), "{summary}");
+    assert_eq!(board.len(), 1);
+    assert!(
+        board[0].starts_with("task-1 write the thing"),
+        "{}",
+        board[0]
+    );
+    assert_eq!(body["tasks"][0]["status"], "completed");
+    assert!(mail.contains("0 queued"), "{mail}");
+    assert!(mail.contains("1 delivered"), "{mail}");
+
+    // Asked about the teammate's own session, the answer is its team's; a session with no team hides the panel.
+    let from_member =
+        serde_json::to_value(team_view(&service, member).expect("the teammate's team folds"))
+            .expect("the view serializes");
+    assert_eq!(from_member["lead"], lead);
+    let plain = store
+        .store
+        .create(CreateOptions {
+            cwd: Some(work.text()),
+            ..CreateOptions::default()
+        })
+        .expect("an ordinary session")
+        .id;
+    let ordinary =
+        serde_json::to_value(team_view(&service, &plain).expect("an ordinary session folds"))
+            .expect("the view serializes");
+    assert_eq!(ordinary["members"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        panel_text(&ordinary),
+        None,
+        "a session with no team shows no panel"
+    );
+}

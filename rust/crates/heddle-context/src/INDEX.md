@@ -21,6 +21,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`instructions.rs`](instructions.rs) | the project's rule files as one baseline in a byte budget (`instructions.ts`) |
 | [`pairing.rs`](pairing.rs) | the repair of a log whose tool calls were left unanswered (`pairing.ts`) |
 | [`runtime.rs`](runtime.rs) | the runtime-context snapshot's text (`service.ts`) |
+| [`command.rs`](command.rs) | `heddle context [<session>] [--json]`: the command's entry point the binary dispatches to (D-043) |
 | [`service.rs`](service.rs) | the seam the agent loop, the command line and the composer call (`service.ts`) |
 | [`events.rs`](events.rs) | the `context/note` and `compaction/*` events this crate writes, typed |
 | [`store.rs`](store.rs) | the `ContextStore` port this crate needs from the session store |
