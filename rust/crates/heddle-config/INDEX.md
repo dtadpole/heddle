@@ -203,6 +203,7 @@ coordinator before any other work. Each check leans on the steps above:
 | 2026-10-22 | lane `abdf20c` (the binary's commands and boot) | lane release build, and a debug build of exactly `abdf20c` | 10 pass, verdict 0, both |
 | 2026-10-22 | main `0a10ceb` (the binary on main) | a debug build of main, and the lane release build | 10 pass, verdict 0, both |
 | 2026-10-22 | main `480d9b8` (a served command routes through the boot) | a debug build of main, and the lane release build of `480d9b8` | 10 pass, verdict 0, both |
+| 2026-10-22 | main `cc09a59`, lane `a819f5f` (a context-verifier fix and status docs; no Rust source, 05 verifier or runner changed since `480d9b8`) | the `480d9b8` builds above, source-identical | 10 pass, verdict 0, both |
 
 ## Decisions the contract makes
 
