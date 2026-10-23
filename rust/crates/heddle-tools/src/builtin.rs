@@ -262,12 +262,26 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                 let mut lines = Vec::with_capacity(entries.len());
                 for entry in &entries {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    let kind = entry.file_type().await?;
-                    if kind.is_dir() {
+                    // Follow the entry like the TypeScript `statSync` does: a symlink to a directory is a
+                    // directory in the listing. A broken link falls back to the entry's own type.
+                    let metadata = match tokio::fs::metadata(entry.path()).await {
+                        Ok(metadata) => metadata,
+                        Err(_) => {
+                            let kind = entry.file_type().await?;
+                            if kind.is_dir() {
+                                lines.push(format!("{name}/"));
+                            } else if kind.is_symlink() {
+                                lines.push(name);
+                            } else {
+                                lines.push(format!("{name} (0B)"));
+                            }
+                            continue;
+                        }
+                    };
+                    if metadata.is_dir() {
                         lines.push(format!("{name}/"));
                     } else {
-                        let bytes = entry.metadata().await?.len();
-                        lines.push(format!("{name} ({bytes}B)"));
+                        lines.push(format!("{name} ({}B)", metadata.len()));
                     }
                 }
                 let data = serde_json::Map::from_iter([
@@ -350,9 +364,12 @@ fn bash_tool(
                     || vec!["/bin/sh".to_owned(), "-c".to_owned(), command],
                     |confined| confined.argv.clone(),
                 );
+                // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
                 let limit = args
                     .get("timeoutMs")
-                    .and_then(serde_json::Value::as_u64)
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|milliseconds| *milliseconds > 0.0)
+                    .map(|milliseconds| milliseconds.round() as u64)
                     .unwrap_or(default_timeout_ms);
                 run_command(
                     sandbox.as_ref(),
@@ -707,6 +724,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.output, "a.txt (5B)\nsub/");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_dir_follows_a_symlink_to_a_directory() {
+        let root = tempdir();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink("real", root.path().join("link")).unwrap();
+        let list = tool("list_dir", sandbox(root.path()));
+        let result = list
+            .run(args(json!({})), context(SandboxMode::WorkspaceWrite))
+            .await
+            .unwrap();
+        assert_eq!(result.output, "link/\nreal/");
     }
 
     #[tokio::test]

@@ -1133,6 +1133,35 @@ pub(crate) mod tests {
         assert!(registry.names().is_empty());
     }
 
+    #[test]
+    fn the_listing_serializes_as_the_tools_command_and_the_verifier_read_it() {
+        let registry =
+            ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &ToolsConfig::default());
+        let listing: Vec<serde_json::Value> =
+            serde_json::from_str(&serde_json::to_string(&registry.describe()).unwrap()).unwrap();
+        assert_eq!(listing.len(), 4);
+        for tool in &listing {
+            assert!(
+                tool["name"].as_str().is_some_and(|name| !name.is_empty()),
+                "{tool}"
+            );
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .is_some_and(|description| description.len() > 10),
+                "{tool}"
+            );
+            assert!(tool["parameters"].is_object(), "{tool}");
+        }
+        assert_eq!(
+            listing
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["write_file", "read_file", "list_dir", "bash"]
+        );
+    }
+
     #[tokio::test]
     async fn a_command_shares_the_approval_gate_under_the_command_name() {
         struct CommandDenier;

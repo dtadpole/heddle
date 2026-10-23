@@ -1795,4 +1795,165 @@ mod tests {
             "the round never reached the model"
         );
     }
+
+    // ---- The loop and the delegate tool together: the parent side of the subagent claim. ----
+
+    use crate::subagent::{
+        SubagentDeps, SubagentError, SubagentLimits, SubagentRun, SubagentStore, subagent_tools,
+    };
+    use crate::upstream::{CreateSession, SessionEvent, SessionMeta};
+
+    /// A store holding one parent and the child `create` makes, with the child's own log.
+    struct DelegationStore {
+        parent: SessionMeta,
+        child: SessionHandle,
+        child_events: Mutex<Vec<SessionEvent>>,
+    }
+
+    impl DelegationStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                parent: SessionMeta {
+                    id: "s".into(),
+                    cwd: Some("/w".into()),
+                    endpoint: Some("scripted".into()),
+                    ..SessionMeta::default()
+                },
+                child: SessionHandle {
+                    id: "child".into(),
+                    dir: "/child".into(),
+                    transcript: "/child/t".into(),
+                    meta: "/child/m".into(),
+                },
+                child_events: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl SubagentStore for DelegationStore {
+        fn meta(&self, id: &str) -> Option<SessionMeta> {
+            (id == self.parent.id).then(|| self.parent.clone())
+        }
+        fn create(&self, _: CreateSession) -> Result<SessionHandle, PortError> {
+            Ok(self.child.clone())
+        }
+        fn read(&self, session: &SessionHandle) -> Vec<SessionEvent> {
+            if session.id == self.child.id {
+                self.child_events.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            }
+        }
+        fn inherit_recorded_mode(
+            &self,
+            _: &SessionHandle,
+            _: &SessionHandle,
+        ) -> Result<Option<crate::upstream::SandboxMode>, PortError> {
+            Ok(None)
+        }
+    }
+
+    /// Runs the child by writing its answer into the child's log.
+    struct AnsweringChild {
+        store: Arc<DelegationStore>,
+    }
+
+    impl SubagentRun for AnsweringChild {
+        fn run<'a>(
+            &'a self,
+            _child: &'a SessionHandle,
+            prompt: String,
+            _cancel: Option<CancellationToken>,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                let mut events = self.store.child_events.lock().unwrap();
+                events.push(session_event(1, "model/request", serde_json::json!({})));
+                events.push(session_event(
+                    2,
+                    "assistant/chunk",
+                    serde_json::json!({
+                        "chunk": { "type": "text-delta", "text": format!("child answer to {prompt}") }
+                    }),
+                ));
+                Ok(())
+            })
+        }
+    }
+
+    fn session_event(seq: u64, kind: &str, fields: serde_json::Value) -> SessionEvent {
+        SessionEvent {
+            seq,
+            at: "t".into(),
+            kind: kind.into(),
+            fields: fields.as_object().cloned().unwrap_or_default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delegate_call_in_a_turn_returns_the_child_answer_and_the_turn_continues() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk(
+                    "c1",
+                    "delegate",
+                    serde_json::json!({ "prompt": "child task" }),
+                ),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "parent done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let store = DelegationStore::new();
+        let deps = SubagentDeps {
+            store: Arc::clone(&store) as Arc<dyn SubagentStore>,
+            run: Arc::new(AnsweringChild {
+                store: Arc::clone(&store),
+            }),
+        };
+        let tools = registry_with(subagent_tools(deps, SubagentLimits::default()));
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            tools,
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "delegate it"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "parent done");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "delegate");
+        let output = &result.tool_calls[0].result.output;
+        assert!(
+            output.contains("child child (depth 1) answered:"),
+            "{output}"
+        );
+        assert!(output.contains("child answer to child task"), "{output}");
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "the parent continued with the child's answer"
+        );
+        let last = model.requests().pop().unwrap();
+        assert!(last.messages.iter().any(|message| {
+            message.content.iter().any(
+                |part| matches!(part, ContentPart::Text { text } if text.contains("child answer")),
+            )
+        }));
+        // The delegation is one tool message in the parent's own log, and the child's log stays its own.
+        let tool_messages = session
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == Role::Tool)
+            .count();
+        assert_eq!(tool_messages, 1);
+    }
 }
