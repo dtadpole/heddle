@@ -14,7 +14,8 @@ a check file with no verdict (a timeout, a crash) is broken and broken is red, t
 line of the runner's output, and that every part named on the command line is judged — the first version dropped the
 first part whenever `--timeout` was absent. And, for D-048's baseline mode: that a `--list` run is read as named checks with
 its exit code as the verdict, that only a lost pass regresses (a new failure of an unjudged check is listed, not blocking),
-and that a baseline pass which disappears from the run counts as a regression.
+that a baseline pass which disappears from the run counts as a regression, and that a regression blocks only if its
+file fails it again on a re-run (one that passes is named flaky).
 
 ## Run it
 
