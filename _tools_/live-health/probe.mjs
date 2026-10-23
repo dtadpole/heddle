@@ -68,6 +68,10 @@ import {
   markerVerdict,
   outageHop,
   parseArguments,
+  fixtureOnly,
+  previewTurnVerdict,
+  previewVerdict,
+  sharedSessions,
   passVerdict,
   processVerdict,
   redactRecord,
@@ -95,6 +99,11 @@ const DEPLOY_ROOT = expand(options.deploy ?? '~/heddle-live')
 const LOG_FILE = expand(options.log ?? '~/.heddle/web.log')
 const SESSION = options.session ?? 'hd-live-monitor'
 const SEND_TURN = options['no-turn'] !== true
+/**
+ * The preview's turn alone can be paused: live-deploy asked for it on 2026-10-22 (23:24) while the
+ * preview wrote into the deployment's session store. A paused turn is unjudged, never a pass.
+ */
+const PREVIEW_TURN = options['no-preview-turn'] !== true
 
 /** The browser is a child of this pass, but its session outlives it: that is the tool's design. */
 process.env.HEDDLE_BROWSER_SESSION = SESSION
@@ -573,7 +582,12 @@ function judgeMarker(load) {
 }
 
 /** 5. One short turn goes through the live page and its answer arrives in deltas. */
-async function judgeTurn(pageId, beforeSession) {
+/**
+ * `deploymentTrace` reads the deployment's own session store for the stream's chunk count and a
+ * failed turn's code. The Rust preview is judged on the page alone, so its turn passes `false` and
+ * never reads the deployment's store.
+ */
+async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {}) {
   if (!SEND_TURN) return { verdict: 'unjudged', detail: '--no-turn' }
   if (pageId === undefined) return { verdict: 'unjudged', detail: 'the page is not open, so a turn cannot be sent' }
   try {
@@ -668,13 +682,13 @@ async function judgeTurn(pageId, beforeSession) {
      * A turn that produced no answer is a failure of the deployment, not of the pass; the server's own
      * trace is what turns "nothing appeared" into a code someone can act on.
      */
-    const trace = assistantAppeared ? null : await serverTrace()
+    const trace = assistantAppeared || !deploymentTrace ? null : await serverTrace()
     const code = trace?.events?.find((event) => event.code !== null)?.code ?? null
     /**
      * A scripted answer can land between two 200ms DOM polls, so "it grew while we watched" is not
      * the only evidence of a stream: the deployment's own chunk count is the mechanism's record.
      */
-    const stream = assistantAppeared ? await streamTrace(prompt) : null
+    const stream = assistantAppeared && deploymentTrace ? await streamTrace(prompt) : null
     const judged = turnVerdict({ userAppeared, assistantAppeared, chunks: stream?.chunks ?? null, samples, settledMs, notices })
     return {
       prompt,
@@ -759,6 +773,117 @@ async function judgeDsh() {
  * live-deploy's job-aware guard - after three outages that night came from extra restorers, two of
  * them this seat's own kickstarts. There is no restart, kickstart or kill anywhere in this file.
  */
+/**
+ * The Rust preview on 3097: a second, read-only target (the coordinator's review of 2026-10-22, 23:14).
+ * Its launch link is read from its own log, for the preview only - never as the deployment's token.
+ */
+const PREVIEW_LOG = expand(options['preview-log'] ?? '~/.heddle-rust-preview/web.log')
+const PREVIEW_LABEL = 'com.dtadpole.heddle-web-rust-preview'
+
+/** One read-only request to the preview: status, type and size are kept; the body is used, never pinned. */
+async function previewFetch(url, cookie) {
+  try {
+    const response = await fetch(url, { redirect: 'manual', headers: cookie ? { cookie } : {}, signal: AbortSignal.timeout(8_000) })
+    const body = await response.text()
+    return { status: response.status, type: response.headers.get('content-type'), bytes: Buffer.byteLength(body), setCookie: response.headers.get('set-cookie'), body }
+  } catch (error) {
+    return { status: null, error: error.message }
+  }
+}
+
+/** A fixture turn on the preview, judged in the browser alone. */
+async function previewTurn(launch) {
+  let pageId
+  try {
+    pageId = (await callTool('new_page', { url: launch }, 45_000))?.pageId
+    if (!(await waitFor(pageId, '#log', 25_000))) return { verdict: 'fail', detail: "the preview's page never drew its log" }
+    const turn = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
+    const judged = previewTurnVerdict(turn)
+    return {
+      session: turn.session ?? null,
+      userAppeared: turn.userAppeared ?? null,
+      assistantAppeared: turn.assistantAppeared ?? null,
+      settledMs: turn.settledMs ?? null,
+      answerHead: turn.answerHead ?? null,
+      verdict: judged.verdict,
+      detail: turn.verdict === 'fail' && turn.userAppeared === undefined ? turn.detail : judged.detail,
+    }
+  } catch (error) {
+    return { verdict: 'fail', detail: `the preview turn failed: ${error.message}` }
+  } finally {
+    if (pageId !== undefined) await callTool('close_page', { pageId }, 15_000).catch(() => {})
+  }
+}
+
+/** 8. The Rust preview: token link 303, /api/endpoints and /api/tree 200, a fixture turn completes. */
+async function judgePreview() {
+  if (options['no-preview'] === true) return { verdict: 'unjudged', detail: '--no-preview' }
+  const agent = agentRunning(PREVIEW_LABEL)
+  const launch = existsSync(PREVIEW_LOG) ? launchUrlFromLog(readFileSync(PREVIEW_LOG, 'utf8')) : null
+  if (launch === null) return { agentRunning: agent, verdict: 'fail', detail: 'the preview log carries no launch link' }
+  const origin = originOf(launch)
+  const token = await previewFetch(launch, null)
+  const cookie = (token.setCookie ?? '').split(';')[0] || null
+  const endpoints = await previewFetch(`${origin}/api/endpoints`, cookie)
+  const tree = await previewFetch(`${origin}/api/tree`, cookie)
+  const page = await previewFetch(`${origin}/`, cookie)
+  let kinds = null
+  try {
+    kinds = (JSON.parse(endpoints.body ?? '').endpoints ?? []).map((item) => ({ name: item.name ?? null, kind: item.kind ?? null }))
+  } catch {}
+  let roots = null
+  try {
+    roots = (JSON.parse(tree.body ?? '').children ?? []).length
+  } catch {}
+  /**
+   * The preview must keep its own session store. Both lists are read with each server's own cookie and
+   * compared by id; only the counts are pinned. While they overlap, no preview turn is sent, so a Rust
+   * write can never land in the deployment's sessions again.
+   */
+  const previewSessions = await previewFetch(`${origin}/api/sessions`, cookie)
+  let deploymentList = null
+  if (launchUrl !== null && serverOrigin !== null) {
+    const exchange = await previewFetch(launchUrl, null)
+    const deploymentCookie = (exchange.setCookie ?? '').split(';')[0] || null
+    const listed = await previewFetch(`${serverOrigin}/api/sessions`, deploymentCookie)
+    try {
+      deploymentList = JSON.parse(listed.body ?? '')
+    } catch {}
+  }
+  let previewList = null
+  try {
+    previewList = JSON.parse(previewSessions.body ?? '')
+  } catch {}
+  const shared = sharedSessions(deploymentList, previewList)
+  let command = null
+  try {
+    const pid = execFileSync('lsof', ['-nP', `-iTCP:${portOf(origin)}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).trim().split('\n')[0]
+    if (pid) command = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8' }).trim()
+  } catch {}
+  const turn = !SEND_TURN
+    ? { verdict: 'unjudged', detail: '--no-turn' }
+    : !PREVIEW_TURN
+      ? { verdict: 'unjudged', detail: 'the preview turn is paused (--no-preview-turn) until its session store is separated from the deployment' }
+      : shared !== 0
+        ? { verdict: 'unjudged', detail: `the preview's sessions are not separate from the deployment's (${shared ?? 'unreadable'} shared), so no turn was sent` }
+        : !fixtureOnly(kinds)
+      ? { verdict: 'unjudged', detail: 'an endpoint other than the offline fixture is configured, so no turn was spent' }
+      : await previewTurn(launch)
+  const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn, shared })
+  return {
+    origin,
+    agentRunning: agent,
+    command: command === null ? null : tildeText(command, homedir()),
+    token: { status: token.status, httpOnly: /HttpOnly/i.test(token.setCookie ?? ''), sameSiteStrict: /SameSite=Strict/i.test(token.setCookie ?? ''), error: token.error ?? null },
+    endpoints: { status: endpoints.status, type: endpoints.type ?? null, bytes: endpoints.bytes ?? null, kinds },
+    tree: { status: tree.status, type: tree.type ?? null, bytes: tree.bytes ?? null, roots },
+    store: { previewSessions: Array.isArray(previewList) ? previewList.length : null, deploymentSessions: Array.isArray(deploymentList) ? deploymentList.length : null, shared },
+    marker: /<meta name="heddle-page" content="([0-9a-f]+)"/.exec(page.body ?? '')?.[1] ?? null,
+    turn,
+    ...judged,
+  }
+}
+
 const DEPLOY_LABEL = 'com.dtadpole.heddle-web'
 /** The gate on 8082 is its own launchd agent (dsh-web-ops'), restored by nobody on this Mac if it dies. */
 const GATE_LABEL = 'ai.reflection.heddle-web-gate'
@@ -874,6 +999,7 @@ if (pass.checks.load.verdict === 'pass') {
 }
 
 pass.dsh = await judgeDsh()
+pass.preview = await judgePreview()
 pass.compare = {
   /** The same DOM inventory on both pages; the full parity ledger is the ui lane's, this is the live cross-check. */
   heddle: pass.checks.load.inventory ?? null,
@@ -911,6 +1037,7 @@ if (options.json === true) {
   say(`turn        ${mark(pass.checks.turn.verdict)}  ${pass.checks.turn.detail}`)
   say(`console     ${mark(pass.checks.console.verdict)}  ${pass.checks.console.detail}`)
   say(`dsh         ${mark(pass.dsh.verdict)}  ${pass.dsh.detail}`)
+  say(`preview     ${mark(pass.preview.verdict)}  ${pass.preview.detail}${pass.preview.marker ? ` (marker ${pass.preview.marker})` : ''}`)
   const digest = (row) => (row === null ? 'not measured' : `${row.interactive} interactive, ${row.enabled} enabled, ${row.nonPointerCursors} non-pointer cursor(s), ${row.hitTestMisses} hit-test miss(es), ${row.clipped} clipped${row.nonPointer?.length > 0 ? ` [${row.nonPointer.join(', ')}]` : ''}`)
   say(`compare     heddle ${digest(pass.compare.heddle)}`)
   say(`            dsh    ${digest(pass.compare.dsh)}`)

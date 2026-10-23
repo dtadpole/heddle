@@ -291,6 +291,7 @@ export function summaryRow(entry) {
     mark(checks.console),
     outage,
     String(entry?.verdict ?? '?').toUpperCase(),
+    mark(entry?.preview),
   ]
 }
 
@@ -302,4 +303,59 @@ export function passVerdict(checks) {
   if (verdicts.some((verdict) => verdict !== 'pass' && verdict !== 'unjudged')) return 'fail'
   if (verdicts.includes('unjudged')) return 'unjudged'
   return 'pass'
+}
+
+/** The first words of the offline fixture's answer, which no real model writes. */
+export const FIXTURE_PREFIX = 'scripted endpoint: offline fixture reply'
+
+/**
+ * Whether every configured endpoint is the offline fixture, read from `/api/endpoints`.
+ *
+ * Decided before a turn is sent, so the pass never spends a real model call: an empty list or any
+ * other kind is "no", and the turn is not sent.
+ */
+export function fixtureOnly(endpoints) {
+  return Array.isArray(endpoints) && endpoints.length > 0 && endpoints.every((endpoint) => endpoint?.kind === 'scripted')
+}
+
+/**
+ * How many session ids two servers both list. The preview must keep its own store: any overlap means
+ * its writes can land in the deployment's sessions (live-deploy, 2026-10-22). Null when either list
+ * could not be read.
+ */
+export function sharedSessions(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return null
+  const ids = new Set(left.map((item) => item?.id).filter((id) => id !== undefined && id !== null))
+  return right.filter((item) => ids.has(item?.id)).length
+}
+
+/** A fixture turn on the Rust preview completed: the prompt and an answer appeared, it settled, and it is the fixture's. */
+export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead }) {
+  if (userAppeared !== true) return { verdict: 'fail', detail: 'the prompt never appeared in the log' }
+  if (assistantAppeared !== true) return { verdict: 'fail', detail: 'no answer appeared' }
+  if (settled !== true) return { verdict: 'fail', detail: 'the answer never settled' }
+  if (!String(answerHead ?? '').startsWith(FIXTURE_PREFIX)) return { verdict: 'fail', detail: "the answer is not the fixture's" }
+  return { verdict: 'pass', detail: 'a fixture turn completed' }
+}
+
+/**
+ * The Rust preview on 3097, a second read-only target: the token link answers 303, `/api/endpoints`
+ * and `/api/tree` answer 200, and a fixture turn completes. It never changes the deployment's verdict.
+ */
+export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn, shared }) {
+  const checks = {
+    store: shared === 0 ? 'pass' : typeof shared === 'number' ? 'fail' : 'unjudged',
+    token: tokenStatus === 303 ? 'pass' : 'fail',
+    endpoints: endpointsStatus === 200 ? 'pass' : 'fail',
+    tree: treeStatus === 200 ? 'pass' : 'fail',
+    turn: turn?.verdict === 'pass' || turn?.verdict === 'fail' ? turn.verdict : 'unjudged',
+  }
+  const failing = Object.entries(checks).filter(([, verdict]) => verdict === 'fail').map(([name]) => name)
+  const unjudged = Object.entries(checks).filter(([, verdict]) => verdict === 'unjudged').map(([name]) => name)
+  const verdict = failing.length > 0 ? 'fail' : unjudged.length > 0 ? 'unjudged' : 'pass'
+  const detail =
+    verdict === 'pass'
+      ? 'own session store, token link 303, /api/endpoints 200, /api/tree 200, a fixture turn completed'
+      : [failing.length > 0 ? `failing: ${failing.join(', ')}` : null, unjudged.length > 0 ? `unjudged: ${unjudged.join(', ')}` : null].filter(Boolean).join('; ')
+  return { verdict, checks, detail }
 }
