@@ -21,7 +21,7 @@ The Rust port of the permission modes, their enforcement backends, escalation an
 
 ## The public API
 
-Landed first, so dependent crates build against it; bodies marked `todo!()` are being ported. `cargo doc -p
+Landed first, so dependent crates build against it, and implemented behind it; `cargo doc -p
 heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 
 | Item | Who calls it | TypeScript |
