@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { checkMap, compareToBaseline, laneVerdict, parseArgs, parseListOutput, parseVerdictLine } from '../../lane.mjs'
+import { checkMap, compareToBaseline, confirmRegressions, laneVerdict, parseArgs, parseListOutput, parseVerdictLine } from '../../lane.mjs'
 
 /**
  * The lane gate's decision, judged without running a verifier.
@@ -119,4 +119,11 @@ test('--baseline and --write-baseline take a file, and a missing value is refuse
   assert.equal(parseArgs(['--write-baseline', 'out.json', '05-config-system']).writeBaseline, 'out.json')
   assert.equal(parseArgs(['05-config-system', '--baseline']), null)
   assert.equal(parseArgs(['--baseline', '--json', '05-config-system']), null)
+})
+
+test('a regression blocks only if its file fails it again on a re-run; one that passes is named flaky', () => {
+  const regressed = ['70/check.mjs :: shortcuts', '70/check.mjs :: pin', '50/check-teams.mjs :: lead']
+  const rerun = { '70/check.mjs :: shortcuts': 'pass', '70/check.mjs :: pin': 'fail' }
+  assert.deepEqual(confirmRegressions(regressed, rerun), { confirmed: ['70/check.mjs :: pin', '50/check-teams.mjs :: lead'], flaky: ['70/check.mjs :: shortcuts'] })
+  assert.deepEqual(confirmRegressions([], rerun), { confirmed: [], flaky: [] })
 })

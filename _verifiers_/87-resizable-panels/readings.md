@@ -1,9 +1,9 @@
 ---
 title: 87-resizable-panels — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-23T07:15:23Z
+modified: 2026-10-23T08:12:29Z
 level: L3
-version: 1.2.0
+version: 1.3.0
 description: The measured verdicts of 87-resizable-panels against the TypeScript build and the Rust binary.
 status: unverified
 grounded_in:
@@ -20,6 +20,7 @@ grounded_in:
 | about 22:00 | main's binary at `a871aae`, by the lane gate | 1 of 1 unjudged, none failed |
 | 22:10 to 22:24 | developer-two's `web` (22bd865) in the ui lane at `6910c6e`, release binary, by the lane gate — not on main | 0 of 1 |
 | 23:53 to 23:58 | main `b72cc1a`, which advertises `web` (D-048), release binary, by the lane gate | **1 of 1** |
+| 01:01 to 01:06 | main `4fc75f1`, release binary, by the lane gate (written as main's per-check baseline) | **1 of 1** |
 
-**Met through `HEDDLE_BIN` on main `b72cc1a`**: the check passes on the Rust binary.
+**Met through `HEDDLE_BIN` on main `b72cc1a` and `4fc75f1`**: the check passes on the Rust binary.
 The lane gate: `HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs --json 80-web-ui 85-trajectory-view 87-resizable-panels 88-file-preview 90-web-ui-token`.

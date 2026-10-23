@@ -71,6 +71,8 @@ is "no check that passes on `main` stops passing". `--write-baseline <file>` rec
 and name; `--baseline <file>` then judges a candidate against it: **red** when a check that passed in the baseline does
 not pass now (a check that disappeared counts — a rename must not hide a lost pass) or a file gives no verdict, **green**
 otherwise, with the newly passing count and every failing check listed so the status table can name each with its owner.
+A regression must reproduce: the gate re-runs each file that holds one, once, and a check that passes on the re-run is
+reported as **flaky** — named, so its owner can fix it — instead of blocking. A deterministic regression fails again.
 
 ```bash
 HEDDLE_BIN=<main's binary>      node _tools_/verify-runner/lane.mjs --write-baseline base.json <part> ...

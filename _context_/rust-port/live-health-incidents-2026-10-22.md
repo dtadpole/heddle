@@ -1,7 +1,7 @@
 ---
 title: Live health - incidents of 2026-10-22
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: What went wrong on the first evening of live monitoring - in the deployment, in the monitor's own actions and in the instrument - with the evidence and the fix for each.
 status: unverified
 grounded_in:
@@ -9,7 +9,7 @@ grounded_in:
   - source: the deployment's web.log, guard.log and session logs, read that evening
   - source: live-deploy's measurements, reported through the team inbox
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-23T05:10:55Z
+modified: 2026-10-23T07:14:09Z
 ---
 
 # Incidents of 2026-10-22
@@ -41,6 +41,11 @@ These ended the monitor's restore authority: D-045 gives the live page one resto
 was removed from the tool. The note pinned at 03:21:30 first called a pass healthy while its turn had
 failed; it was corrected after the coordinator's review.
 
+- **06:48 and 07:08 the next day** - the Rust preview's first turns, with no health session of their own,
+  typed into the session the page had selected and landed in live-deploy's test sessions `store check 2`
+  and `check at 00:04`. The turn was paused at 07:10, those sessions were left to their owner, and the
+  probe now starts its own session and proves the landing (07:13, first turn in an own session).
+
 ## In the instrument
 
 | Hole | Effect | Fixed in |
@@ -50,6 +55,7 @@ failed; it was corrected after the coordinator's review.
 | no baseline for the turn in the reused session | samples and answer head from the previous turn | `2c8168e` |
 | an unreadable console folded into a pass | unjudged read as clean | `2c8168e` |
 | the restart watch polled only 3082 | a dead gate would have been a 0 ms "restart", never alerted | `f7e3060` |
+| a new turn typed into the selected session | two preview turns landed in another seat's sessions | `7e543ca` |
 
 ## Read next
 

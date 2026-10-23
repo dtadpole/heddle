@@ -78,6 +78,7 @@ import {
   shellVerdict,
   tildePath,
   tildeText,
+  turnLanding,
   turnVerdict,
 } from './rules.mjs'
 
@@ -620,7 +621,42 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       },
       20_000,
     ))?.value ?? null
+    /** The session list as the page's server holds it: id and `updated` only, never titles of others. */
+    const sessionsNow = async () =>
+      (await callTool(
+        'evaluate_script',
+        { pageId, function: `(async () => { const list = await (await fetch('/api/sessions')).json(); return Array.isArray(list) ? list.map((item) => ({ id: item.id, updated: item.updated ?? null })) : null })` },
+        15_000,
+      ))?.value ?? null
+    const listed = await sessionsNow()
+    let target = healthSession?.id ?? null
     let reused = 'new'
+    if (healthSession === null || healthSession === undefined) {
+      /**
+       * No health session yet: start one explicitly with the page's own New session control, and wait
+       * for an id that did not exist before. Typing into whatever the page had selected is how the
+       * preview's turns of 2026-10-23 06:48 and 07:08 landed in someone else's sessions.
+       */
+      const button = (await callTool(
+        'evaluate_script',
+        { pageId, function: `() => { const b = document.getElementById('new-session'); if (b === null) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } }` },
+        15_000,
+      ))?.value ?? null
+      if (button === null || !Array.isArray(listed)) {
+        return { verdict: 'unjudged', detail: 'no session of the monitor\'s own could be started, so no turn was sent', session: { reused: false, via: 'none', title: null } }
+      }
+      await callTool('click_at', { pageId, x: Math.round(button.x), y: Math.round(button.y) }, 15_000)
+      const known = new Set(listed.map((item) => item.id))
+      const waitUntil = Date.now() + 6_000
+      while (target === null && Date.now() < waitUntil) {
+        await new Promise((done) => setTimeout(done, 300))
+        target = ((await sessionsNow()) ?? []).find((item) => !known.has(item.id))?.id ?? null
+      }
+      if (target === null) {
+        return { verdict: 'unjudged', detail: 'New session started nothing the server lists, so no turn was sent', session: { reused: false, via: 'none', title: null } }
+      }
+      reused = 'started'
+    }
     if (healthSession?.row !== null && healthSession?.row !== undefined) {
       await callTool('click_at', { pageId, x: Math.round(healthSession.row.x), y: Math.round(healthSession.row.y) }, 15_000)
       reused = 'tree'
@@ -641,6 +677,7 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
      * against this baseline: a new user row, a new assistant row, samples that grow past the old last
      * length, and only the notices that appeared since.
      */
+    const listedBeforeTurn = await sessionsNow()
     const baseUser = before.userTurns
     const baseTurns = before.assistantTurns
     const baseNotices = (before.notices ?? []).length
@@ -674,6 +711,18 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       }
       await new Promise((done) => setTimeout(done, 200))
     }
+    /**
+     * Where the turn landed, read from the server: it counts only if the monitor's own session changed.
+     * The server records the turn a moment after the page settles, so the list is re-read for up to 3 s.
+     */
+    const beforeTurn = listedBeforeTurn
+    let landing = { landed: 'unknown', othersChanged: null }
+    const landBy = Date.now() + 3_000
+    do {
+      landing = turnLanding({ target, before: beforeTurn, after: await sessionsNow() })
+      if (landing.landed !== 'unknown') break
+      await new Promise((done) => setTimeout(done, 300))
+    } while (Date.now() < landBy)
     const userAppeared = (facts.userTurns ?? 0) > baseUser
     const assistantAppeared = (facts.assistantTurns ?? 0) > baseTurns
     const notices = (facts.notices ?? []).slice(baseNotices)
@@ -689,10 +738,17 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
      * the only evidence of a stream: the deployment's own chunk count is the mechanism's record.
      */
     const stream = assistantAppeared && deploymentTrace ? await streamTrace(prompt) : null
-    const judged = turnVerdict({ userAppeared, assistantAppeared, chunks: stream?.chunks ?? null, samples, settledMs, notices })
+    const streamed = turnVerdict({ userAppeared, assistantAppeared, chunks: stream?.chunks ?? null, samples, settledMs, notices })
+    const judged =
+      landing.landed === 'other'
+        ? { ...streamed, verdict: 'fail', detail: `the turn landed in a session the monitor does not own (${landing.othersChanged} other session(s) changed, its own did not)` }
+        : landing.landed === 'unknown' && streamed.verdict === 'pass'
+          ? { ...streamed, verdict: 'unjudged', detail: `${streamed.detail}; but the server's session list did not show where it landed` }
+          : streamed
     return {
       prompt,
-      session: { reused: reused !== 'new', via: reused, title: healthSession?.title ?? null },
+      session: { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null },
+      landing,
       userAppeared,
       assistantAppeared,
       samples,
@@ -798,15 +854,25 @@ async function previewTurn(launch) {
     pageId = (await callTool('new_page', { url: launch }, 45_000))?.pageId
     if (!(await waitFor(pageId, '#log', 25_000))) return { verdict: 'fail', detail: "the preview's page never drew its log" }
     const turn = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
-    const judged = previewTurnVerdict(turn)
+    /** A preview turn passes only when it landed in the monitor's own session; elsewhere fails it. */
+    const landed = turn.landing?.landed
+    const judged =
+      turn.landing === undefined
+        ? { verdict: turn.verdict, detail: turn.detail }
+        : landed === 'own'
+          ? previewTurnVerdict(turn)
+          : landed === 'other'
+            ? { verdict: 'fail', detail: turn.detail }
+            : { verdict: 'unjudged', detail: turn.detail }
     return {
       session: turn.session ?? null,
+      landing: turn.landing ?? null,
       userAppeared: turn.userAppeared ?? null,
       assistantAppeared: turn.assistantAppeared ?? null,
       settledMs: turn.settledMs ?? null,
       answerHead: turn.answerHead ?? null,
       verdict: judged.verdict,
-      detail: turn.verdict === 'fail' && turn.userAppeared === undefined ? turn.detail : judged.detail,
+      detail: judged.detail,
     }
   } catch (error) {
     return { verdict: 'fail', detail: `the preview turn failed: ${error.message}` }

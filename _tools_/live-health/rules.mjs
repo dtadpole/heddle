@@ -329,6 +329,24 @@ export function sharedSessions(left, right) {
   return right.filter((item) => ids.has(item?.id)).length
 }
 
+/**
+ * Where a turn landed, from the session lists read before and after it (id and `updated` of each).
+ *
+ * The monitor may write only into a session it owns: the reused health session or one it has just
+ * started. `own` - the target changed; `other` - the target did not change but another session did,
+ * so the turn went into someone else's session (the preview's 06:48 and 07:08 turns of 2026-10-23
+ * did exactly that); `unknown` - nothing changed, or a list could not be read. Another session that
+ * changed beside the target is counted, not blamed: a person may be working at the same time.
+ */
+export function turnLanding({ target, before, after }) {
+  if (typeof target !== 'string' || !Array.isArray(before) || !Array.isArray(after)) return { landed: 'unknown', othersChanged: null }
+  const was = new Map(before.map((item) => [item?.id, item?.updated ?? null]))
+  const changed = after.filter((item) => !was.has(item?.id) || was.get(item?.id) !== (item?.updated ?? null)).map((item) => item?.id)
+  const othersChanged = changed.filter((id) => id !== target).length
+  if (changed.includes(target)) return { landed: 'own', othersChanged }
+  return { landed: othersChanged > 0 ? 'other' : 'unknown', othersChanged }
+}
+
 /** A fixture turn on the Rust preview completed: the prompt and an answer appeared, it settled, and it is the fixture's. */
 export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead }) {
   if (userAppeared !== true) return { verdict: 'fail', detail: 'the prompt never appeared in the log' }

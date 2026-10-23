@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.7.1
+version: 0.7.2
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -40,7 +40,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing: a part
 whose checks skip has not been judged, and a part that failed has not been met.
 
-**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `46b727a`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
+**Run 2026-10-22, in `~/heddle--int-backend`, on `main` at `cce4bec`, judged with `_tools_/verify-runner/lane.mjs --baseline` against the previous `main`:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -49,7 +49,7 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" \
     40-pluggable-tools 50-agentic-loop 60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**18 check files, 117 checks: 112 passed, 1 failed, 4 unjudged. Parts 0, 2, 3, 4, 6 and 8 pass; part 5 passes with one intermittent check.** Since `b72cc1a` the
+**18 check files, 117 checks: 112 passed, 1 failed, 4 unjudged. Parts 0, 2, 3, 4, 5, 6 and 8 pass.** Since `b72cc1a` the
 binary advertises `web`, `--turn`, `--stream`, `context`, `tools`, `hooks` and `models` beside configuration, sessions,
 workspaces and goal, so the checks that skipped at their capability probe are judged now: 91 checks turned from unjudged
 to passing, and none of the 21 that passed before stopped passing (compared check by check against a run on the previous
@@ -67,10 +67,15 @@ this table names each failing check and the code that owns it — below, for bot
   `hostile.js`'s `<script>` is split across highlight spans instead of shown as text (owned by `heddle-web-files`).
   `web.rs`'s context row turned `check-composer` #13 and `check-context-view` #2 into passes at `9319116`.
 
-**Intermittent:** `50-agentic-loop/check-teams.mjs` — *a Lead spawns, delegates, tasks, messages and answers — and the
-team survives a restart* passes when its file runs alone (8 of 8 runs on `main`'s binary) but fails in about half of full
-lane runs, on `main`'s binary as well as on candidates, so it is a defect of order or load rather than of one merge
-(owned by the team row: `heddle-team` and the binary's team composition).
+**No longer intermittent:** `50-agentic-loop/check-teams.mjs`'s Lead check failed in about half of full lane runs at
+`46b727a` and never alone. The cause was the check, not the binary: it read the Lead's log once, before a delivery the
+team service journals asynchronously by design (mail to a member still provisioning waits until it is active). Since
+`8248e5e` it waits, bounded, for the delivery and then asserts exactly as before.
+
+**Intermittent:** `70-workspaces-sessions` — *the four session shortcuts act on the selected session, and say so when
+there is none* failed once in six full lane runs tonight and passes when its file runs alone; it is a page check
+through the served web (owner to be attributed from its first error). The lane gate re-runs a file whose check
+regresses and names one that passes on the re-run as flaky, so it cannot hold a merge or hide a real regression.
 
 **Unjudged, and why:** `10-llm-backends`'s two real-endpoint checks and `98-model-endpoints`'s two checks need a
 configured endpoint on the machine, which this one does not have — the same on the TypeScript build. Every other backend
@@ -90,7 +95,7 @@ check's capability probe asks for every command it runs, matched as a command li
 | 2 streaming | `_verifiers_/20-streaming` | **passes** — 5 of 5 |
 | 3 context management | `_verifiers_/30-context-management` | **passes** — 9 of 9 |
 | 4 pluggable tools | `_verifiers_/40-pluggable-tools` | **passes** — 6 of 6; outside tools are processes under `HEDDLE_BIN` |
-| 5 agentic loop | `_verifiers_/50-agentic-loop` | 9 of 9 pass when run alone; one `check-teams` check is intermittent in full lane runs (above) |
+| 5 agentic loop | `_verifiers_/50-agentic-loop` | **passes** — 9 of 9 |
 | 6 hooks | `_verifiers_/60-hooks` | **passes** — 6 of 6; hooks are processes under `HEDDLE_BIN` |
 | 7 workspaces and sessions | `_verifiers_/70-workspaces-sessions` | 44 pass, **1 fail** (above, with its owner) |
 | 8 permission sandbox | `_verifiers_/75-permission-sandbox` | **passes** — 17 of 17 (two consecutive runs) |

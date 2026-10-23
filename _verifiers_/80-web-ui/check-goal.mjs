@@ -165,10 +165,14 @@ test('an active goal keeps being pushed after the harness restarts', async (cont
     assert.equal(after.phase, 'active', 'and the goal is still the active one')
 
     // Leave nothing pushing: complete it and check the rounds stop.
-    const completed = (await api(server.url, cookie, '/api/goal', {
+    // The answer is kept whole: a refused completion read as `.body.goal` was an undefined goal and a TypeError that
+    // named neither the status nor the server's reason (seen once in eight runs against the Rust binary).
+    const completion = await api(server.url, cookie, '/api/goal', {
       method: 'POST',
       body: JSON.stringify({ session, action: 'complete', goal_id: after.id, revision: after.revision }),
-    })).body.goal
+    })
+    assert.equal(completion.status, 200, `the goal completed\n${JSON.stringify(completion.body).slice(0, 240)}`)
+    const completed = completion.body.goal
     assert.equal(completed.phase, 'complete')
     const stoppedAt = (await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal.roundsStarted
     await new Promise((resolve) => setTimeout(resolve, 500))
@@ -429,7 +433,11 @@ test('an active goal is visible in the chat window, live, without a reload', asy
     try {
       // Opened before the goal exists: what appears later must come from the stream rather than a reload.
       await browser.goto(server.url)
-      await browser.waitFor('document.getElementById("goal-bar") !== null', 20_000)
+      // The page's own contract (page.html, where `data-ready` is set): waiting for an element waits for the markup,
+      // not the behaviour. The event stream opens during boot, so a goal created before boot finished could be missed
+      // by a page that was not yet listening — the goal bar then never showed (once in eight runs against the Rust
+      // binary). The claim is unchanged: the goal must appear live, created after the page is ready.
+      await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
       assert.equal(await browser.evaluate('document.getElementById("goal-bar").hidden'), true, 'no goal, no indicator')
 
       // A wide budget keeps the goal active while the page reads it, instead of racing a one-round cap.
