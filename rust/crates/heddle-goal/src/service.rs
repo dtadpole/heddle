@@ -73,6 +73,16 @@ pub enum GoalActivation {
     Disarmed,
 }
 
+impl GoalActivation {
+    /// The serialized name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            GoalActivation::Armed => "armed",
+            GoalActivation::Disarmed => "disarmed",
+        }
+    }
+}
+
 /// Why a goal is blocked: a lower-kebab-case code and a sentence. Serialized `{code, message}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalBlockReason {
