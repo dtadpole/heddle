@@ -60,6 +60,12 @@ no visible backtick), the source file (language, `hljs-` classes, `class="ln"` g
 text with no `html`, the SVG served inline as `image/svg+xml`, a markdown file offered as a download, `/etc/passwd`
 refused by both routes, and the served page carrying `data-view="file"` with no Docs surface.
 
+Against the repository's own files, the markup predicates the third check (the browser one) relies on also hold,
+measured through the same stand-in server: `AGENTS.md` renders with its table, its heading, its frontmatter section,
+inline code, panel links, no visible backtick and no surviving `<script>`; `README.md`'s raw `<img>` is resolved to
+`/api/raw`; `package.json` carries its language, its `hljs-` spans and a gutter starting at 1; `ULTIMATE_GOAL.md`
+carries panel links. Thirteen predicates, thirteen holds.
+
 What that leaves to the seats that own it: the real server's `web` command, the check's own `startCli` and fixture,
 and its second and third checks, which judge `/api/html` (the server's route) and the tree (the server's route) in a
 browser.
