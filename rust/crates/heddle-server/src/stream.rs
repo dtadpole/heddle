@@ -16,8 +16,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use axum::body::Body;
 use axum::response::Response;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -49,28 +50,60 @@ pub struct SseFrame {
 impl SseFrame {
     /// A frame whose data is `data` serialized compactly.
     pub fn new(event: impl Into<String>, data: &impl Serialize) -> Self {
-        todo!()
+        SseFrame {
+            event: event.into(),
+            data: serde_json::to_string(data).expect("a serializable frame payload"),
+        }
     }
 
     /// A `session` frame for the bus payload `{session, event}`, keys in that order.
     pub fn session(session: &str, event: &Value) -> Self {
-        todo!()
+        // Built as a string because `JSON.stringify({session, event})` writes `session` first, and a
+        // `serde_json::Map` is ordered by key by default.
+        SseFrame {
+            event: names::SESSION.to_owned(),
+            data: format!(
+                "{{\"session\":{},\"event\":{}}}",
+                serde_json::to_string(session).expect("a string serializes"),
+                serde_json::to_string(event).expect("an event serializes")
+            ),
+        }
     }
 
     /// An `approval` frame for one approval request, as the approval service emitted it.
     pub fn approval(request: &Value) -> Self {
-        todo!()
+        SseFrame {
+            event: names::APPROVAL.to_owned(),
+            data: serde_json::to_string(request).expect("an approval request serializes"),
+        }
     }
 
     /// `event: <name>\ndata: <data>\n\n`.
     pub fn encode(&self) -> String {
-        todo!()
+        format!("event: {}\ndata: {}\n\n", self.event, self.data)
     }
 
     /// The session a `session` frame belongs to, read from its data; `None` for any other frame.
     pub fn session_id(&self) -> Option<String> {
-        todo!()
+        if self.event != names::SESSION {
+            return None;
+        }
+        let value: Value = serde_json::from_str(&self.data).ok()?;
+        value.get("session")?.as_str().map(str::to_owned)
     }
+}
+
+/// The listener a binary registers on its event bus's `session/event` channel: it captures the hub the
+/// server streams from and publishes every payload into it. The bus's own signature is the binary's, so
+/// this is a plain function of `(session, event)` rather than a trait this crate would have to guess.
+pub fn session_event_forwarder(hub: EventHub) -> impl Fn(&str, &Value) + Send + Sync + 'static {
+    move |session, event| hub.publish_session_event(session, event)
+}
+
+/// The listener a binary registers on its `approval/request` channel, publishing each question to the
+/// `/api/events` subscribers.
+pub fn approval_request_forwarder(hub: EventHub) -> impl Fn(&Value) + Send + Sync + 'static {
+    move |request| hub.publish_approval_request(request)
 }
 
 /// The hub. Cloning shares it.
@@ -88,38 +121,60 @@ struct HubInner {
 
 impl EventHub {
     pub fn new() -> Self {
-        todo!()
+        Self::default()
     }
 
     /// Deliver one frame to every live subscriber, dropping those whose reader has gone.
     pub fn publish(&self, frame: SseFrame) {
-        todo!()
+        let mut inner = self.inner.lock().expect("the event hub lock");
+        if inner.closed {
+            return;
+        }
+        inner
+            .subscribers
+            .retain(|(_, sender)| sender.send(frame.clone()).is_ok());
     }
 
     /// Publish the bus's `session/event` payload.
     pub fn publish_session_event(&self, session: &str, event: &Value) {
-        todo!()
+        self.publish(SseFrame::session(session, event));
     }
 
     /// Publish the bus's `approval/request` payload.
     pub fn publish_approval_request(&self, request: &Value) {
-        todo!()
+        self.publish(SseFrame::approval(request));
     }
 
     /// A new subscription that receives every frame published after this call.
     pub fn subscribe(&self) -> Subscription {
-        todo!()
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut inner = self.inner.lock().expect("the event hub lock");
+        if inner.closed {
+            // A subscription to a closed hub ends at once, rather than waiting on a sender nobody holds.
+            drop(sender);
+        } else {
+            inner.next += 1;
+            let id = inner.next;
+            inner.subscribers.push((id, sender));
+        }
+        Subscription { receiver }
     }
 
     /// How many subscribers are live.
     pub fn subscriber_count(&self) -> usize {
-        todo!()
+        self.inner
+            .lock()
+            .expect("the event hub lock")
+            .subscribers
+            .len()
     }
 
     /// End every subscription, and refuse new ones (they end at once). This is what lets a server stop
     /// rather than wait forever on streams that are open by design.
     pub fn close(&self) {
-        todo!()
+        let mut inner = self.inner.lock().expect("the event hub lock");
+        inner.closed = true;
+        inner.subscribers.clear();
     }
 }
 
@@ -131,20 +186,23 @@ pub struct Subscription {
 impl Subscription {
     /// The next frame, or `None` once the hub has closed.
     pub async fn next_frame(&mut self) -> Option<SseFrame> {
-        todo!()
+        self.receiver.recv().await
     }
 
     /// Only the `session` frames of one session — what a running turn relays on its own response.
     pub fn for_session(self, session: impl Into<String>) -> SessionFrames {
-        todo!()
+        SessionFrames {
+            inner: self,
+            session: session.into(),
+        }
     }
 }
 
 impl Stream for Subscription {
     type Item = SseFrame;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        todo!()
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(cx)
     }
 }
 
@@ -157,8 +215,18 @@ pub struct SessionFrames {
 impl Stream for SessionFrames {
     type Item = SseFrame;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        todo!()
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.inner.receiver.poll_recv(cx) {
+                Poll::Ready(Some(frame)) => {
+                    if frame.session_id().as_deref() == Some(self.session.as_str()) {
+                        return Poll::Ready(Some(frame));
+                    }
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }
 
@@ -169,5 +237,153 @@ pub fn sse_response<S>(frames: S) -> Response
 where
     S: Stream<Item = SseFrame> + Send + 'static,
 {
-    todo!()
+    let body = futures::stream::once(async { Ok::<_, std::io::Error>(STREAM_OPEN.to_owned()) })
+        .chain(frames.map(|frame| Ok::<_, std::io::Error>(frame.encode())));
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-store")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(body))
+        .expect("a response builder with static headers")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_frame_serializes_keys_in_the_typescript_order() {
+        let frame = SseFrame::session("session-1", &serde_json::json!({"type": "user/message"}));
+        assert_eq!(frame.event, "session");
+        assert_eq!(
+            frame.data,
+            "{\"session\":\"session-1\",\"event\":{\"type\":\"user/message\"}}"
+        );
+        assert_eq!(frame.session_id().as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn encode_is_the_sse_wire_format() {
+        let frame = SseFrame::new("done", &serde_json::json!({"text": "x"}));
+        assert_eq!(frame.encode(), "event: done\ndata: {\"text\":\"x\"}\n\n");
+    }
+
+    #[test]
+    fn only_a_session_frame_names_a_session() {
+        assert_eq!(
+            SseFrame::approval(&serde_json::json!({"id": "approval-1"})).session_id(),
+            None
+        );
+        assert_eq!(
+            SseFrame::new("done", &serde_json::json!({})).session_id(),
+            None
+        );
+        assert_eq!(
+            SseFrame {
+                event: "session".into(),
+                data: "not json".into()
+            }
+            .session_id(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn every_subscriber_gets_every_frame_in_order() {
+        let hub = EventHub::new();
+        let mut one = hub.subscribe();
+        let mut two = hub.subscribe();
+        assert_eq!(hub.subscriber_count(), 2);
+
+        hub.publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        hub.publish_session_event("session-2", &serde_json::json!({"n": 2}));
+        hub.publish_approval_request(&serde_json::json!({"id": "approval-1"}));
+
+        for subscription in [&mut one, &mut two] {
+            let first = subscription.next_frame().await.unwrap();
+            assert_eq!(first.session_id().as_deref(), Some("session-1"));
+            let second = subscription.next_frame().await.unwrap();
+            assert_eq!(second.session_id().as_deref(), Some("session-2"));
+            let third = subscription.next_frame().await.unwrap();
+            assert_eq!(third.event, "approval");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gone_subscriber_is_dropped_on_the_next_publish() {
+        let hub = EventHub::new();
+        let subscriber = hub.subscribe();
+        assert_eq!(hub.subscriber_count(), 1);
+        drop(subscriber);
+        hub.publish_session_event("s", &serde_json::json!({}));
+        assert_eq!(hub.subscriber_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn closing_ends_every_subscription_and_refuses_new_ones() {
+        let hub = EventHub::new();
+        let mut subscriber = hub.subscribe();
+        hub.close();
+        assert_eq!(subscriber.next_frame().await, None);
+        assert_eq!(hub.subscriber_count(), 0);
+
+        let mut late = hub.subscribe();
+        assert_eq!(late.next_frame().await, None);
+        hub.publish_session_event("s", &serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn for_session_relays_only_its_own_session() {
+        let hub = EventHub::new();
+        let frames = hub.subscribe().for_session("session-1");
+        hub.publish_session_event("session-2", &serde_json::json!({"n": 1}));
+        hub.publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        hub.publish_approval_request(&serde_json::json!({"id": "a"}));
+
+        let mut frames = std::pin::pin!(frames);
+        let frame = frames.next().await.unwrap();
+        assert_eq!(frame.session_id().as_deref(), Some("session-1"));
+        assert_eq!(
+            frame.data,
+            "{\"session\":\"session-1\",\"event\":{\"n\":2}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bus_forwarders_publish_into_the_server_hub() {
+        let hub = EventHub::new();
+        let mut frames = hub.subscribe();
+        let forward_session = session_event_forwarder(hub.clone());
+        let forward_approval = approval_request_forwarder(hub.clone());
+        forward_session("session-1", &serde_json::json!({"type": "user/message"}));
+        forward_approval(&serde_json::json!({"id": "approval-1"}));
+
+        let first = frames.next_frame().await.unwrap();
+        assert_eq!(first.session_id().as_deref(), Some("session-1"));
+        let second = frames.next_frame().await.unwrap();
+        assert_eq!(second.event, "approval");
+        assert_eq!(hub.subscriber_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_sse_response_opens_with_the_comment_and_writes_frames() {
+        let hub = EventHub::new();
+        let response = sse_response(hub.subscribe());
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+
+        hub.publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        hub.close();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.starts_with(STREAM_OPEN));
+        assert!(text.contains("event: session\n"));
+        assert!(text.contains("{\"session\":\"session-1\",\"event\":{\"n\":1}}"));
+    }
 }

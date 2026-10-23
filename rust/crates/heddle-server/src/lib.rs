@@ -26,11 +26,8 @@
 //! - **Pure folds** — [`transcript`] (the chat view of a session's log) and [`selection`] (which endpoint,
 //!   model and reasoning level a turn runs with).
 //!
-//! The public API landed first (contract first); bodies that still say `todo!()` are ported in the
-//! order the crate's `INDEX.md` gives.
-
-// The contract stage: signatures exist before their bodies. Removed once every body is ported.
-#![allow(unused_variables, dead_code)]
+//! The public API landed first (contract first) and every body is now ported, in the order the crate's
+//! `INDEX.md` gives. The tests beside the code are the evidence the rules hold.
 
 pub mod fence;
 pub mod page;
@@ -44,6 +41,7 @@ pub mod stream;
 pub mod token;
 pub mod transcript;
 
+pub use selection::running_turn_selection;
 pub use server::{
     AppState, DEFAULT_HOST, DEFAULT_PORT, DryRunPlan, Feature, ServerBuilder, ServerError,
     ServerOptions, SessionView, WebServer,

@@ -1,6 +1,6 @@
 ---
 title: The heddle-server sources
-version: 0.2.0
+version: 0.3.0
 description: The sources of the heddle-server crate, one module per concern, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -9,7 +9,8 @@ grounded_in:
 
 # `rust/crates/heddle-server/src`
 
-The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code.
+The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the code. 121 tests pass with
+`cargo test --manifest-path rust/Cargo.toml -p heddle-server`.
 
 | File | What it is |
 |---|---|

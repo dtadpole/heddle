@@ -48,11 +48,17 @@ pub struct ServiceError {
 
 impl ServiceError {
     pub fn new(message: impl Into<String>) -> Self {
-        todo!()
+        ServiceError {
+            message: message.into(),
+            code: None,
+        }
     }
 
     pub fn with_code(message: impl Into<String>, code: impl Into<String>) -> Self {
-        todo!()
+        ServiceError {
+            message: message.into(),
+            code: Some(code.into()),
+        }
     }
 }
 
@@ -87,7 +93,7 @@ pub struct SessionMeta {
 impl SessionMeta {
     /// The selection this record carries.
     pub fn selection(&self) -> SessionSelection {
-        todo!()
+        crate::selection::session_request_selection(Some(self))
     }
 }
 
@@ -224,9 +230,13 @@ pub enum ArchivedFilter {
 }
 
 impl ArchivedFilter {
-    /// Read the query parameter.
+    /// Read the query parameter: `only`, `show` (or the legacy `1`), else hide.
     pub fn from_query(value: Option<&str>) -> Self {
-        todo!()
+        match value {
+            Some("only") => ArchivedFilter::Only,
+            Some("show") | Some("1") => ArchivedFilter::Show,
+            _ => ArchivedFilter::Hide,
+        }
     }
 }
 
@@ -486,6 +496,400 @@ impl Harness {
         sandbox: Arc<dyn SandboxService>,
         cwd: PathBuf,
     ) -> Self {
-        todo!()
+        Harness {
+            sessions,
+            models,
+            turns,
+            sandbox,
+            workspaces: None,
+            approvals: None,
+            goals: None,
+            todos: None,
+            team: None,
+            attachments: None,
+            markdown: None,
+            stats: None,
+            cwd,
+        }
+    }
+
+    /// Start a [`HarnessBuilder`] with the four required services. The optional services are attached
+    /// with its methods, so a binary's composition reads as the profile it booted.
+    pub fn builder(
+        sessions: Arc<dyn SessionService>,
+        models: Arc<dyn ModelService>,
+        turns: Arc<dyn TurnRunner>,
+        sandbox: Arc<dyn SandboxService>,
+        cwd: PathBuf,
+    ) -> HarnessBuilder {
+        HarnessBuilder {
+            harness: Harness::new(sessions, models, turns, sandbox, cwd),
+        }
+    }
+}
+
+impl Harness {
+    /// A harness whose plugins have **not loaded yet**: the door answers, and every route that needs a
+    /// service answers that service's own refusal.
+    ///
+    /// This is what lets `heddle web` bind and print its URL while the session, model, turn and sandbox
+    /// adapters are still landing, so `/healthz` and the token handshake have something honest to talk
+    /// to. It is not a fake: the lists are empty, a start or a turn is an error naming the missing
+    /// service, and no route invents a session or an answer. A boot with the real services uses
+    /// [`Harness::new`] or [`Harness::builder`] instead.
+    pub fn unavailable(cwd: PathBuf) -> Self {
+        Harness {
+            sessions: Arc::new(UnavailableSessions),
+            models: Arc::new(UnavailableModels),
+            turns: Arc::new(UnavailableTurns),
+            sandbox: Arc::new(UnavailableSandbox {
+                root: cwd.display().to_string(),
+            }),
+            workspaces: None,
+            approvals: None,
+            goals: None,
+            todos: None,
+            team: None,
+            attachments: None,
+            markdown: None,
+            stats: None,
+            cwd,
+        }
+    }
+}
+
+/// The sentence every unavailable service answers with.
+const NOT_LOADED: &str = "this service is not loaded yet";
+
+struct UnavailableSessions;
+
+impl SessionService for UnavailableSessions {
+    fn list(&self) -> Vec<SessionMeta> {
+        Vec::new()
+    }
+    fn exists(&self, _id: &str) -> bool {
+        false
+    }
+    fn events(&self, _id: &str) -> Option<Vec<Value>> {
+        None
+    }
+    fn start(&self, _options: StartSession) -> Result<String, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn open_at(&self, _folder: &Path, _options: OpenAt) -> Result<String, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn create_at(
+        &self,
+        _branch: &Path,
+        _title: Option<&str>,
+    ) -> Result<CreatedSession, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn fork(&self, _id: &str) -> ForkOutcome {
+        ForkOutcome::NotFound
+    }
+    fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
+        None
+    }
+    fn definition_id(&self, _folder: &Path) -> Option<String> {
+        None
+    }
+    fn update_definition_title(&self, _folder: &Path, _title: &str) -> Result<(), ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn set_model(&self, _id: &str, _selection: &SessionSelection) -> Option<SessionMeta> {
+        None
+    }
+    fn effective_mode(&self, _id: &str, fallback: &str) -> String {
+        fallback.to_owned()
+    }
+    fn set_mode(&self, _id: &str, _mode: &str, _fallback: &str) -> Result<ModeWrite, ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn user_content(&self, _id: &str, _content: Vec<Value>) -> Result<(), ServiceError> {
+        Err(ServiceError::new(NOT_LOADED))
+    }
+    fn folder(&self, _id: &str) -> Option<PathBuf> {
+        None
+    }
+}
+
+struct UnavailableModels;
+
+impl ModelService for UnavailableModels {
+    fn names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn default_endpoint(&self) -> Option<String> {
+        None
+    }
+    fn declares_level(&self, _endpoint: &str, _model: Option<&str>, _effort: &str) -> bool {
+        false
+    }
+}
+
+struct UnavailableTurns;
+
+impl TurnRunner for UnavailableTurns {
+    fn run_turn(
+        &self,
+        _request: TurnRequest,
+    ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+        Box::pin(async { Err(ServiceError::new(NOT_LOADED)) })
+    }
+}
+
+struct UnavailableSandbox {
+    root: String,
+}
+
+impl SandboxService for UnavailableSandbox {
+    fn default_mode(&self) -> String {
+        "read-only".to_owned()
+    }
+    fn workspace_root(&self) -> String {
+        self.root.clone()
+    }
+    fn transition(
+        &self,
+        _current: &str,
+        _requested: &Value,
+        _confirm: &Value,
+    ) -> Result<String, String> {
+        Err(NOT_LOADED.to_owned())
+    }
+}
+
+/// Assembles a [`Harness`] service by service.
+///
+/// The binary knows which plugins a profile loaded; this type is where it says so, once, in the order
+/// the routes read them. A service left unattached is `None`, and its routes answer
+/// [`crate::respond::plugin_missing`], which is the TypeScript boot's behaviour for a profile that did
+/// not load that plugin.
+pub struct HarnessBuilder {
+    harness: Harness,
+}
+
+impl HarnessBuilder {
+    /// A builder whose four required services are already attached.
+    pub fn new(
+        sessions: Arc<dyn SessionService>,
+        models: Arc<dyn ModelService>,
+        turns: Arc<dyn TurnRunner>,
+        sandbox: Arc<dyn SandboxService>,
+        cwd: PathBuf,
+    ) -> Self {
+        HarnessBuilder {
+            harness: Harness::new(sessions, models, turns, sandbox, cwd),
+        }
+    }
+
+    pub fn sessions(mut self, service: Arc<dyn SessionService>) -> Self {
+        self.harness.sessions = service;
+        self
+    }
+
+    pub fn models(mut self, service: Arc<dyn ModelService>) -> Self {
+        self.harness.models = service;
+        self
+    }
+
+    pub fn turns(mut self, service: Arc<dyn TurnRunner>) -> Self {
+        self.harness.turns = service;
+        self
+    }
+
+    pub fn sandbox(mut self, service: Arc<dyn SandboxService>) -> Self {
+        self.harness.sandbox = service;
+        self
+    }
+
+    pub fn workspaces(mut self, service: Arc<dyn WorkspaceService>) -> Self {
+        self.harness.workspaces = Some(service);
+        self
+    }
+
+    pub fn approvals(mut self, service: Arc<dyn ApprovalService>) -> Self {
+        self.harness.approvals = Some(service);
+        self
+    }
+
+    pub fn goals(mut self, service: Arc<dyn GoalService>) -> Self {
+        self.harness.goals = Some(service);
+        self
+    }
+
+    pub fn todos(mut self, service: Arc<dyn TodoService>) -> Self {
+        self.harness.todos = Some(service);
+        self
+    }
+
+    pub fn team(mut self, service: Arc<dyn TeamService>) -> Self {
+        self.harness.team = Some(service);
+        self
+    }
+
+    pub fn attachments(mut self, service: Arc<dyn AttachmentReader>) -> Self {
+        self.harness.attachments = Some(service);
+        self
+    }
+
+    pub fn markdown(mut self, service: Arc<dyn MarkdownRenderer>) -> Self {
+        self.harness.markdown = Some(service);
+        self
+    }
+
+    pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
+        self.harness.stats = Some(service);
+        self
+    }
+
+    /// The working directory a turn with no folder starts in.
+    pub fn cwd(mut self, cwd: PathBuf) -> Self {
+        self.harness.cwd = cwd;
+        self
+    }
+
+    pub fn build(self) -> Harness {
+        self.harness
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Closure adapters
+//
+// A binary that already has a function for one optional service should not have to declare a type for
+// it. These adapters are also what this crate's own tests and a deployment use to attach behaviour
+// without depending on another crate's internals.
+
+/// An [`AttachmentReader`] over a function.
+pub struct FnAttachmentReader<F>(pub F);
+
+impl<F> AttachmentReader for FnAttachmentReader<F>
+where
+    F: Fn(Option<&Value>) -> Result<Vec<Value>, String> + Send + Sync,
+{
+    fn read(&self, raw: Option<&Value>) -> Result<Vec<Value>, String> {
+        (self.0)(raw)
+    }
+}
+
+/// Wrap a function as an [`AttachmentReader`].
+pub fn attachment_reader<F>(read: F) -> Arc<dyn AttachmentReader>
+where
+    F: Fn(Option<&Value>) -> Result<Vec<Value>, String> + Send + Sync + 'static,
+{
+    Arc::new(FnAttachmentReader(read))
+}
+
+/// A [`MarkdownRenderer`] over a function.
+pub struct FnMarkdownRenderer<F>(pub F);
+
+impl<F> MarkdownRenderer for FnMarkdownRenderer<F>
+where
+    F: Fn(&str) -> String + Send + Sync,
+{
+    fn render(&self, text: &str) -> String {
+        (self.0)(text)
+    }
+}
+
+/// Wrap a function as a [`MarkdownRenderer`].
+pub fn markdown_renderer<F>(render: F) -> Arc<dyn MarkdownRenderer>
+where
+    F: Fn(&str) -> String + Send + Sync + 'static,
+{
+    Arc::new(FnMarkdownRenderer(render))
+}
+
+/// A [`SessionStatsProjector`] over a function.
+pub struct FnSessionStatsProjector<F>(pub F);
+
+impl<F> SessionStatsProjector for FnSessionStatsProjector<F>
+where
+    F: Fn(&str, &[Value]) -> Value + Send + Sync,
+{
+    fn stats(&self, session: &str, events: &[Value]) -> Value {
+        (self.0)(session, events)
+    }
+}
+
+/// Wrap a function as a [`SessionStatsProjector`].
+pub fn stats_projector<F>(project: F) -> Arc<dyn SessionStatsProjector>
+where
+    F: Fn(&str, &[Value]) -> Value + Send + Sync + 'static,
+{
+    Arc::new(FnSessionStatsProjector(project))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_function_becomes_an_attachment_reader() {
+        let reader = attachment_reader(|raw| match raw {
+            Some(value) => Ok(vec![json!({"type": "file", "path": value})]),
+            None => Ok(Vec::new()),
+        });
+        assert!(reader.read(None).unwrap().is_empty());
+        let parts = reader.read(Some(&json!("/u/a.txt"))).unwrap();
+        assert_eq!(parts, vec![json!({"type": "file", "path": "/u/a.txt"})]);
+    }
+
+    #[test]
+    fn a_function_becomes_a_markdown_renderer_and_a_stats_projector() {
+        let renderer = markdown_renderer(|text| format!("<p>{text}</p>"));
+        assert_eq!(renderer.render("hi"), "<p>hi</p>");
+
+        let projector =
+            stats_projector(|session, events| json!({"session": session, "events": events.len()}));
+        assert_eq!(
+            projector.stats("session-1", &[json!({"type": "message"})]),
+            json!({"session": "session-1", "events": 1})
+        );
+    }
+
+    #[test]
+    fn an_unavailable_harness_answers_the_door_and_refuses_the_services() {
+        let harness = Harness::unavailable(PathBuf::from("/work"));
+        assert!(harness.sessions.list().is_empty());
+        assert!(!harness.sessions.exists("session-1"));
+        assert!(harness.models.names().is_empty());
+        assert_eq!(harness.sandbox.default_mode(), "read-only");
+        assert_eq!(harness.sandbox.workspace_root(), "/work");
+        assert_eq!(
+            harness.sessions.start(StartSession::default()),
+            Err(ServiceError::new("this service is not loaded yet"))
+        );
+        assert_eq!(
+            harness
+                .sandbox
+                .transition("read-only", &json!("full"), &json!(null)),
+            Err("this service is not loaded yet".to_owned())
+        );
+    }
+
+    #[test]
+    fn service_error_keeps_its_code() {
+        assert_eq!(
+            ServiceError::new("nope"),
+            ServiceError {
+                message: "nope".into(),
+                code: None
+            }
+        );
+        assert_eq!(
+            ServiceError::with_code("nope", "GOAL_NOT_FOUND"),
+            ServiceError {
+                message: "nope".into(),
+                code: Some("GOAL_NOT_FOUND".into())
+            }
+        );
     }
 }
