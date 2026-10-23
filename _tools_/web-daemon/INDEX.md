@@ -77,7 +77,9 @@ So, and each is a rule in this folder:
 
 - `install.sh` **kickstarts** the agent after bootstrapping it, because bootstrap alone leaves a job on disk;
 - the macOS agent runs [`supervisor.mjs`](supervisor.mjs), which restarts the server itself — quickly for a kill,
-  with backoff for a crash loop, and `exit 1` with a sentence after ten failed starts rather than looping forever;
+  with backoff for a crash loop, then a slow retry (every 60 s) after ten failed starts rather than an exit — on a
+  host where nothing restarts the job, exiting would leave the page down after a transient cause cleared, and
+  `--give-up` asks for the bounded behaviour where the platform does restart it;
 - `install.sh` tightens `~/.heddle/web.log` to `600`, because it carries the launch token and the 8082 gate refuses
   to read a log other users can read — a 644 log there looks exactly like a stopped server;
 - [`guard.sh`](guard.sh) is the outer layer, because a job that launchd never starts at login cannot be restarted

@@ -23,17 +23,31 @@ import { pathToFileURL } from 'node:url'
  *   node supervisor.mjs --max-failures 10 -- <program> [server arguments…]
  *
  * A server run that lasts at least `STABLE_MS` resets the failure count and is restarted immediately. Runs that
- * die sooner are restarted at a doubling delay, and after `--max-failures` of them **the supervisor gives up and
- * exits 1** rather than spinning forever: a broken build, a taken port or a missing profile is a person's problem,
- * and a loop that hides it is worse than a service that stops where the log says why.
+ * die sooner are restarted at a doubling delay, and after `--max-failures` of them it **slows down instead of
+ * stopping**: one retry every `--retry-seconds` (60 s by default), with one loud line saying so. Exiting is the
+ * right shape where the platform restarts the job — and wrong here, where launchd was measured not to: a transient
+ * cause (another process holding the port for a minute, a profile being written) would otherwise leave the page
+ * down until a person noticed. `--give-up` restores the bounded behaviour for a host whose platform does restart
+ * the job.
  */
 
 /** A run at least this long counts as having started: a crash loop shorter than this is a failure to start. */
 const STABLE_MS = 5_000
 /** The longest a restart is delayed, however many have failed. */
 const MAX_DELAY_MS = 5_000
-/** Consecutive failed starts before the supervisor stops trying. */
+/** Consecutive failed starts before the supervisor stops retrying fast. */
 const DEFAULT_MAX_FAILURES = 10
+/**
+ * How long it waits between slow retries once that limit is reached.
+ *
+ * The first version **exited 1** after the fast retries, and on a host whose platform restarts the job that is the
+ * right shape: launchd or systemd picks it up and the log says why. On this Mac, launchd was measured not to
+ * restart a loaded agent at all, so exiting means the page stays down until a person or a monitor notices — even
+ * when the cause was transient (another process holding the port for a minute). A slow retry keeps the service
+ * alive through that, at one log line a minute; `--give-up` asks for the old bounded behaviour for a host whose
+ * platform does restart the job.
+ */
+const DEFAULT_SLOW_RETRY_MS = 60_000
 
 /**
  * The delay before restart number `failures` (1-based): 250 ms, doubling, capped.
@@ -52,15 +66,24 @@ export function restartDelay(failures) {
  * Returns the new count, the delay, and whether to give up. A run that lasted counts as a start, which is the
  * distinction between "the server keeps crashing" and "the server was killed once after hours of work".
  */
-export function nextAttempt({ ranForMs, failures, maxFailures = DEFAULT_MAX_FAILURES }) {
-  if (ranForMs >= STABLE_MS) return { failures: 0, delayMs: 0, giveUp: false }
+export function nextAttempt({
+  ranForMs,
+  failures,
+  maxFailures = DEFAULT_MAX_FAILURES,
+  slowRetryMs = DEFAULT_SLOW_RETRY_MS,
+  giveUp = false,
+}) {
+  if (ranForMs >= STABLE_MS) return { failures: 0, delayMs: 0, slow: false, giveUp: false }
   const grown = failures + 1
-  if (grown >= maxFailures) return { failures: grown, delayMs: 0, giveUp: true }
-  return { failures: grown, delayMs: restartDelay(grown), giveUp: false }
+  if (grown >= maxFailures) {
+    if (giveUp) return { failures: grown, delayMs: 0, slow: false, giveUp: true }
+    return { failures: grown, delayMs: slowRetryMs, slow: true, giveUp: false }
+  }
+  return { failures: grown, delayMs: restartDelay(grown), slow: false, giveUp: false }
 }
 
 /**
- * The command line as `{ command, maxFailures }`.
+ * The command line as `{ command, maxFailures, slowRetryMs, giveUp }`.
  *
  * Everything after `--` is the server and is passed through untouched: flags, paths with spaces, and a program
  * that is not node (the Rust binary the port will serve) all stay exactly as the installer rendered them.
@@ -69,24 +92,34 @@ export function parseSupervisorArgs(argv) {
   const separator = argv.indexOf('--')
   if (separator < 0) throw new Error('missing "--" before the server command')
   let maxFailures = DEFAULT_MAX_FAILURES
+  let slowRetryMs = DEFAULT_SLOW_RETRY_MS
+  let giveUp = false
+  const number = (flag, at) => {
+    const value = argv[at + 1]
+    if (value === undefined || !/^\d+$/.test(value) || Number(value) < 1) {
+      throw new Error(`${flag} needs a positive integer`)
+    }
+    return Number(value)
+  }
   for (let index = 0; index < separator; index += 1) {
     const arg = argv[index]
     if (arg === '--max-failures') {
-      const value = argv[index + 1]
-      if (value === undefined || !/^\d+$/.test(value) || Number(value) < 1) {
-        throw new Error('--max-failures needs a positive integer')
-      }
-      maxFailures = Number(value)
+      maxFailures = number(arg, index)
       index += 1
+    } else if (arg === '--retry-seconds') {
+      slowRetryMs = number(arg, index) * 1000
+      index += 1
+    } else if (arg === '--give-up') {
+      giveUp = true
     } else if (arg === '--help' || arg === '-h') {
-      throw new Error('usage: supervisor.mjs [--max-failures N] -- <program> [arguments…]')
+      throw new Error('usage: supervisor.mjs [--max-failures N] [--retry-seconds S] [--give-up] -- <program> [arguments…]')
     } else {
       throw new Error(`unknown supervisor option ${arg}`)
     }
   }
   const command = argv.slice(separator + 1)
   if (command.length === 0) throw new Error('no server command after --')
-  return { command, maxFailures }
+  return { command, maxFailures, slowRetryMs, giveUp }
 }
 
 /**
@@ -139,10 +172,11 @@ async function main() {
     process.stderr.write(`heddle-supervisor: ${error.message}\n`)
     process.exit(2)
   }
-  const { command, maxFailures } = parsed
+  const { command, maxFailures, slowRetryMs, giveUp } = parsed
 
   let stopping = false
   let failures = 0
+  let slowedBefore = false
   let current = null
   let wake = null
 
@@ -163,8 +197,10 @@ async function main() {
     process.stdout.write(
       `heddle-supervisor: ${command[0]} exited (${ended.signal ?? `code ${ended.code}`}) after ${ended.ranForMs} ms\n`,
     )
-    const attempt = nextAttempt({ ranForMs: ended.ranForMs, failures, maxFailures })
+    const attempt = nextAttempt({ ranForMs: ended.ranForMs, failures, maxFailures, slowRetryMs, giveUp })
+    const slowed = attempt.slow && !slowedBefore
     failures = attempt.failures
+    slowedBefore = attempt.slow
     if (attempt.giveUp) {
       process.stderr.write(
         `heddle-supervisor: giving up after ${failures} failed starts in a row; the log above says why\n`,
@@ -172,6 +208,11 @@ async function main() {
       process.exit(1)
     }
     if (attempt.delayMs > 0) {
+      if (slowed) {
+        process.stderr.write(
+          `heddle-supervisor: ${failures} starts in a row failed; still retrying, every ${Math.round(attempt.delayMs / 1000)} s, because nothing else restarts this service on this host\n`,
+        )
+      }
       process.stdout.write(`heddle-supervisor: restarting in ${attempt.delayMs} ms\n`)
       await new Promise((resolve) => {
         wake = resolve

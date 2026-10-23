@@ -135,6 +135,13 @@ recovery was `_verifiers_/95-web-daemon` (main's checks) **passing 3 of 3 in 731
 15-second probe happened to land in the same second as the kill: a real pass, but not a repeatable one, and not
 launchd's. Until the supervisor is on main, main's 95 result on this host depends on the guard.
 
+**After ten failed starts the supervisor keeps retrying, slowly** (by 21:00 PDT on the branch; the deployment takes it
+at its next move): one attempt every 60 s with a line saying why, instead of exiting 1. The reason is the same
+measurement as everything else here — a process that exits is not restarted on this host, so an exit turns a
+transient cause into an outage that lasts until a person or a monitor acts; `--give-up` keeps the old bounded
+behaviour for a platform that restarts the job. Both are covered by the suite: one test that a failing server is
+started again after the limit while the supervisor stays alive, and one that `--give-up` exits 1.
+
 **The supervisor was also judged under launchd itself** (20:38 PDT), on a scratch label and a scratch port so the
 live agent was untouched: an agent whose `ProgramArguments` are `node supervisor.mjs -- node <checkout>/dist/cli.js
 web … --port 3098`, started with `launchctl kickstart -k`, answered `/healthz` 200 on 3098; a SIGKILL of the server
