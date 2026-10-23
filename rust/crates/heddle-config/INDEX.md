@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:27:19Z
+modified: 2026-10-23T07:36:12Z
 version: 0.5.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -320,6 +320,11 @@ order):
 Closed by the same measurement: a `null` layer document (`a042777`), a written `config: null` printed back, the
 two-document and top-level `!include` sentences, and keys kept in written order without relying on another crate's
 `preserve_order`.
+
+A second measurement the same night, 13 cases, agrees on every one, output and exit code: `profiles` in text and
+`--json` with no profiles directory, an empty one, and one mixing two real profiles with a directory holding no layer
+and a stray file; `--profile` by name, by absolute directory, and unknown (with other profiles present, and with
+none); `config` text output and `--origins`; and `config --validate` on a checkout's own profile.
 
 ## Decisions the contract makes
 
