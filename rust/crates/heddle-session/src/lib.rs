@@ -32,6 +32,7 @@
 //! `_verifiers_/70-workspaces-sessions` judges once the command line composes this crate.
 
 pub mod clock;
+pub mod command;
 pub mod definition;
 pub mod error;
 pub mod event;

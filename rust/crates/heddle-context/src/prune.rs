@@ -193,10 +193,12 @@ impl ToolResultPruner {
     ) -> Result<PruneOutcome, StoreError> {
         let mut outcome = PruneOutcome::default();
         // Snapshot first: appending during the walk must not extend the walk, or a replacement
-        // could be reconsidered within the same pass.
-        let nodes = store.surface(session)?.nodes;
-        for seq in nodes {
-            let Some(original) = store.derive_node(session, seq)? else {
+        // could be reconsidered within the same pass. The snapshot is derived in one call; an
+        // append cannot change how an earlier node derives, so deriving up front is the same walk.
+        let snapshot = store.derive_surface(session)?;
+        for node in snapshot {
+            let seq = node.seq;
+            let Some(original) = node.message else {
                 continue;
             };
             if original.role != Role::Tool {

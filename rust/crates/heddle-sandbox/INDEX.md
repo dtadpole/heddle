@@ -1,6 +1,6 @@
 ---
 title: The heddle-sandbox crate
-version: 0.3.0
+version: 0.3.1
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -83,12 +83,21 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 | 6 | the ladder | `escalation.rs` (`approve_escalation`) | the same mode needs no ask; not-wider and malformed refusals; the ask's reason and display reason carry the justification verbatim; each outcome maps to its refusal sentence; it runs with `ApprovalService` as the channel |
 | 7 | judged through the binary | none here | once tools, server, session and boot compose it: `75-permission-sandbox` and `80-web-ui` check-approval through `HEDDLE_BIN`, recorded with the command and date |
 
-**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (117 tests at 2026-10-22, `cargo test -p
+**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (121 tests at 2026-10-22, `cargo test -p
 heddle-sandbox`), including the task 6 ladder through `ApprovalService` as its channel and the recorded approval
 fixture, which a live `approve_escalation` call is proven to reproduce byte for byte up to the run's `id` and `at`.
-Task 7 is the judged-through-the-binary row, which needs the tools, server, session and boot crates. The real
-Seatbelt profile was checked on macOS: the read-only profile accepts `/usr/bin/true`, a write under it is denied
-with `Operation not permitted`, and the canonical `/private/tmp` subpath admits the same write.
+Task 7 is the judged-through-the-binary row; it waits on the binary's `--turn` and `web`.
+
+**The shell seam is judged on the real macOS runner, not only with doubles.** `service::seatbelt_end_to_end`
+(macOS only) spawns exactly what the `bash` tool spawns, `confine(["/bin/sh", "-c", cmd], mode)` in the workspace.
+It classifies the real exit code and stderr, one test per claim `check-shell-confinement.mjs` makes:
+- `workspace-write` admits the inside write and denies the outside one, including from a descendant shell;
+- `/dev/null` stays writable, and a command that only prints `Operation not permitted` is not a denial;
+- `read-only` runs a shell but denies every write;
+- `danger-full-access` is the only bypass;
+- `backend: none` fails closed without running anything.
+A mutation that turns the profile's `(deny file-write*)` into `allow` fails the `workspace-write` and `read-only`
+cases, so the tests can fail.
 
 ## Risks, stated now
 
