@@ -142,6 +142,31 @@ transient cause into an outage that lasts until a person or a monitor acts; `--g
 behaviour for a platform that restarts the job. Both are covered by the suite: one test that a failing server is
 started again after the limit while the supervisor stays alive, and one that `--give-up` exits 1.
 
+## 20:57–20:58: an outage this seat caused, and the installer bug behind it
+
+While measuring the restart windows, `install.sh --restart` was run against the live agent at the moment another
+seat's push had moved `origin/main` (the refs are shared by every worktree, and a `git fetch` in the base clone had
+just brought it in). The installer **booted the live agent out first**, then rendered the definition, and the render
+refused: the deployment was one commit behind the freshly fetched tip. It exited with nothing loaded. `8082`
+answered 502 for about forty seconds, until the agent was bootstrapped from its unchanged plist and kickstarted by
+hand at 03:58:35Z; the deployment was then moved to the new `main` (`0a10ceb`) the normal way.
+
+The bug is the ordering, not the refusal — the refusal is correct. `install.sh` now renders (and refuses) **before**
+it stops anything, so a refused reinstall leaves the running agent and the installed file exactly as they were. The
+regression test drives the macOS replace path with a loaded agent and a dirty checkout and requires no `bootout`,
+`bootstrap` or `kickstart` before the refusal; against the previous installer it fails with
+`calls: launchctl print … | launchctl bootout …`, which is this outage written as a test.
+
+Two smaller readings from the same measurement, for whoever next restarts this by hand:
+
+| Action | Longest silence at `3082` |
+|---|---|
+| `install.sh --restart` on a job older than 10 s | 288–364 ms |
+| `launchctl kickstart -k` on a job younger than `ThrottleInterval` (10 s) | the respawn waits out the throttle: about 10 s |
+
+So a restorer that kicks a freshly started job does not shorten an outage, it lengthens one — another reason the
+guard acts on the job state rather than on a silent port.
+
 ## The flap at 20:49–20:50, and the guard race it exposed
 
 The coordinator measured a 502 at `8082` with `3082` momentarily not listening, and three kickstarts in
@@ -206,6 +231,8 @@ launchctl kickstart -k gui/$(id -u)/com.dtadpole.heddle-web
 | 20:44 | `51f198b` (the tooling merge landed as `085caaf`) | `51f198b`, clean | installed by the deployment's own `install.sh` with **no override** (it accepts detached-at-`origin/main` now); the agent runs `supervisor.mjs`; **95 4/4 and 96 3/3, both run from `~/heddle-live`**; a SIGKILL of the port's process left a new pid answering within **one second** with no guard running |
 | 20:47 | `c67f5ad` (Rust lockfile chore) | `c67f5ad`, clean | 95 **4/4** (949 ms) and 96 **3/3** (521 ms) from the deployment; page unchanged (533,283 / 533,280, marker `dd6d45d28567`); a turn answers with the fixture, 0 errors |
 | 20:50 | `1bcff7e` (backend merges under the status-docs commits) | `1bcff7e`, clean | 95 **4/4** and 96 **3/3** from the deployment; page unchanged (same marker and byte counts); gate 200, healthz 200 |
+| 20:54 | `59fd96f` (component manifest) | `59fd96f`, clean | 95 **4/4**, 96 **3/3** from the deployment |
+| 20:59 | `0a10ceb` (part 0 passes through the binary) | `0a10ceb`, clean | after the 20:57–20:58 outage below; redeploy silence 288 ms; 95 **4/4**, 96 **3/3**; marker `dd6d45d28567` |
 
 Both redeploys used main's installer at that commit, which refuses a detached checkout, with
 `HEDDLE_ALLOW_DIRTY_INSTALL=1`; the branch's installer accepts the detached shape and replaces that override when

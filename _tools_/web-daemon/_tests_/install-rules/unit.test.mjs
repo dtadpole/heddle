@@ -62,7 +62,8 @@ function fixture({ name = 'repo' } = {}) {
   }
   // Not running, so an install never takes the replace path by accident; `print` fails as for an absent job.
   record('systemctl', 'case "$*" in *is-active*) exit 3;; esac\n')
-  record('launchctl', 'case "$1" in print) exit 113;; esac\n')
+  // FAKE_LOADED=1 makes the job look loaded, so the replace path (bootout, then bootstrap) can be judged too.
+  record('launchctl', 'case "$1" in print) [ "${FAKE_LOADED:-0}" = 1 ] && exit 0; exit 113;; esac\n')
   record('loginctl', 'echo "${FAKE_LINGER:-yes}"\n')
   // The account's crontab, kept in a file so the --guard edits can be read back like a real one.
   record(
@@ -262,6 +263,36 @@ test('a refused reinstall leaves the installed unit as it was', () => {
   writeFileSync(join(f.repo, 'cordis.yml'), '[] # edited\n')
   assert.equal(install(f, ['--restart'], { HEDDLE_WEB_PLATFORM: 'linux' }).status, 2)
   assert.equal(readFileSync(target, 'utf8'), before, 'rendered first, written only when the render succeeded')
+})
+
+test('a refused macOS reinstall leaves the running agent loaded: the render happens before the bootout', () => {
+  // Measured 2026-10-23: --restart booted the live agent out, then refused a deployment one commit behind a freshly
+  // fetched origin/main, and exited with nothing loaded — 8082 answered 502 until the agent was bootstrapped by hand.
+  const f = fixture()
+  const loaded = { HEDDLE_WEB_PLATFORM: 'darwin', FAKE_LOADED: '1' }
+  assert.equal(install(f, [], loaded).status, 0)
+  const target = join(f.home, 'Library', 'LaunchAgents', 'com.dtadpole.heddle-web.plist')
+  const before = readFileSync(target, 'utf8')
+  rmSync(f.calls, { force: true })
+
+  writeFileSync(join(f.repo, 'cordis.yml'), '[] # edited\n')
+  const refused = install(f, ['--restart'], loaded)
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /uncommitted changes/)
+  assert.ok(calls(f).every((line) => !line.includes('bootout')), `no bootout before the refusal (calls: ${calls(f).join(' | ')})`)
+  assert.ok(calls(f).every((line) => !line.includes('bootstrap') && !line.includes('kickstart')), 'and nothing was started either')
+  assert.equal(readFileSync(target, 'utf8'), before, 'the installed agent is the one that was there')
+
+  git(f.repo, 'checkout', '--', 'cordis.yml')
+  rmSync(f.calls, { force: true })
+  assert.equal(install(f, ['--restart'], loaded).status, 0)
+  const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
+  assert.deepEqual(calls(f), [
+    `launchctl print gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl bootout gui/${uid}/com.dtadpole.heddle-web`,
+    `launchctl bootstrap gui/${uid} ${target}`,
+    `launchctl kickstart -k gui/${uid}/com.dtadpole.heddle-web`,
+  ], 'an accepted reinstall replaces the loaded agent: bootout only after the render succeeded')
 })
 
 test('Linux uninstall disables and stops the unit, removes it and reloads', () => {

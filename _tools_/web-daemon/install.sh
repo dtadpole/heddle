@@ -198,9 +198,16 @@ render() {
   if [ "$platform" = darwin ]; then render_plist; else render_unit; fi
 }
 
-write_definition() {
-  # Rendered to a string first, so a refusal leaves the installed file as it was rather than half written.
+prepare_definition() {
+  # Rendered to a string first, and **before anything is stopped**: a refusal (a checkout that is not committed main,
+  # a missing build, a bad HEDDLE_BIN) must leave both the installed file and the running service as they were.
+  # Measured 2026-10-23, and it was an outage: `--restart` booted the live agent out, then the render refused a
+  # deployment one commit behind a freshly fetched origin/main and exited, so nothing was loaded again — 8082
+  # answered 502 for about forty seconds until the agent was bootstrapped by hand.
   definition=$(render)
+}
+
+write_definition() {
   mkdir -p "$HOME/.heddle" "$(dirname -- "$target")"
   printf '%s\n' "$definition" > "$target"
   echo "wrote $target"
@@ -231,6 +238,7 @@ loaded() {
 load() {
   # Idempotent on both platforms: an existing service is replaced rather than duplicated.
   if [ "$platform" = darwin ]; then
+    prepare_definition
     if loaded; then launchctl bootout "$domain/$label" >/dev/null 2>&1 || true; fi
     write_definition
     launchctl bootstrap "$domain" "$target"
@@ -243,6 +251,7 @@ load() {
     if [ -f "$log" ]; then chmod 600 "$log" 2>/dev/null || true; fi
   else
     require_linger
+    prepare_definition
     write_definition
     systemctl --user daemon-reload
     systemctl --user enable --quiet "$unit"
