@@ -1,6 +1,6 @@
 ---
 title: Verifier 11 — Web Daemon
-version: 1.2.0
+version: 1.3.0
 description: a supervised user service — a launchd agent on macOS, a systemd user unit on Linux — keeps the Web UI running at the documented port, survives a kill, and does not weaken the token.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, asking for a daemon on 3082

@@ -1,9 +1,9 @@
 ---
 title: 'The live deployment on the owner''s Mac, 2026-10-22'
 created: 2026-10-22T20:20:00Z
-modified: 2026-10-22T20:20:00Z
+modified: 2026-10-23T03:52:00Z
 level: L3
-version: 1.0.0
+version: 1.4.0
 description: 'The TypeScript deployment brought up on this Mac: which commit ~/heddle-live serves, the agent and gate that run it, the commands run, and what _verifiers_/96-deployment answered.'
 status: unverified
 grounded_in:

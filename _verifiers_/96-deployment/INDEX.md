@@ -1,6 +1,6 @@
 ---
 title: Verifier 15 — Deployment
-version: 1.3.0
+version: 1.4.0
 description: the page the owner actually sees is the deployment checkout's build, served by a process running that checkout, and that checkout contains only committed main — on macOS behind the gate, on a Linux host behind the owner's SSH forward, with the TypeScript build or the binary HEDDLE_BIN names.
 grounded_in:
   - source: owner statement 2026-10-17 that a worktree may carry initial verification but the job is not done until merged to main and the deployment is verified
