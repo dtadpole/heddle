@@ -11,29 +11,27 @@
 //!    an [`OutsideListenerConfig`] row. *Proposed*: the framing below is to be made identical to
 //!    `heddle-tools`' outside-tool protocol once that is fixed, so one process client serves both.
 //!
-//! # Wire framing (proposed)
+//! # Wire framing (JSON-RPC 2.0, the part-4 protocol)
 //!
-//! One JSON object per line. Heddle writes to the child's stdin:
-//!
-//! ```text
-//! {"id":7,"method":"hook","params":{"point":"tools/pre-execute","mode":"waterfall","payload":{"name":"write_file","args":{}}}}
-//! {"method":"hook","params":{"point":"session/event","mode":"emit","payload":{}}}
-//! ```
-//!
-//! The second line has no `id`: an `emit` point is observation, so it is a notification and never answered.
-//! The child answers each request on its stdout, in any order, by `id`:
+//! One JSON-RPC 2.0 message per line on the child's stdio, as `heddle-tools`'
+//! `PROTOCOL.md` states. The first message is `initialize`, answered with a result; every event after it is
+//! `hooks/call`, whose `params` are [`HookCall`] (`point`, `mode`, `payload`):
 //!
 //! ```text
-//! {"id":7,"result":{"kind":"replace","value":{"allowed":false,"reason":"this hook refuses writes"}}}
-//! {"id":8,"result":{"kind":"next"}}
-//! {"id":9,"result":{"kind":"refuse","reason":"this hook refuses to send the request"}}
-//! {"id":10,"error":{"message":"this hook is broken"}}
+//! {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol":"heddle-component/1","row":"hook-1","config":{...},"workspaceRoot":"/work","mode":"workspace-write"}}
+//! {"jsonrpc":"2.0","id":1,"result":{"listeners":[...]}}
+//! {"jsonrpc":"2.0","id":7,"method":"hooks/call","params":{"point":"tools/pre-execute","mode":"waterfall","payload":{"name":"write_file","args":{}}}}
+//! {"jsonrpc":"2.0","id":7,"result":{"kind":"replace","value":{"allowed":false,"reason":"this hook refuses writes"}}}
+//! {"jsonrpc":"2.0","method":"hooks/call","params":{"point":"session/event","mode":"emit","payload":{}}}
+//! {"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"this hook is broken"}}
 //! ```
 //!
-//! An `error`, an unreadable line, a reply after the timeout, or the child exiting fails the pending calls with
-//! [`HookErrorKind::Failed`](crate::HookErrorKind::Failed); the child's stderr goes to the log.
+//! An `emit` point is a notification (no `id`) and is never answered. A JSON-RPC `error` answer, an
+//! unreadable line, a reply after the timeout or the child exiting fails the pending calls with
+//! [`HookErrorKind::Failed`](crate::HookErrorKind::Failed); the child's stderr goes to the log. `shutdown`
+//! and `exit` end the connection ([`StdioListener::shutdown`]).
 //!
-//! # Configuration row (proposed, for the boot and the `60-hooks` branch)
+//! # Configuration row (for the boot and the `60-hooks` branch)
 //!
 //! ```yaml
 //! - id: hook-1
@@ -42,6 +40,10 @@
 //!     command: [node, ./retarget.mjs]
 //!     points: [model/request]
 //! ```
+//!
+//! `row`, `workspaceRoot` and `mode` in the handshake come from the row the boot built and the deployment;
+//! a listener started outside that context defaults them (`outside-listener`, the current directory,
+//! `workspace-write`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -279,11 +281,66 @@ impl Scope {
 /// The default time an outside listener has to answer one call.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// One call's answer channel.
-type PendingSender = oneshot::Sender<Result<HookReply, HookError>>;
+/// The protocol version the handshake announces.
+pub const COMPONENT_PROTOCOL: &str = "heddle-component/1";
 
-/// The calls waiting for an answer, by the id the caller was given.
+/// The time the child has to answer `initialize`.
+const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+
+/// One call's answer channel: the raw JSON-RPC result, parsed by the caller.
+type PendingSender = oneshot::Sender<Result<Value, HookError>>;
+
+/// The calls waiting for an answer, by the id the host gave them.
 type PendingCalls = HashMap<u64, PendingSender>;
+
+/// One request to the child, as JSON-RPC 2.0 writes it; a notification has no `id`.
+#[derive(Serialize)]
+struct RpcRequest<'a> {
+    jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
+    method: &'a str,
+    params: Value,
+}
+
+/// One line the child writes.
+#[derive(Deserialize)]
+struct RpcReply {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<RpcError>,
+}
+
+/// The JSON-RPC error arm of a reply.
+#[derive(Deserialize)]
+struct RpcError {
+    #[serde(default)]
+    #[expect(
+        dead_code,
+        reason = "the message is what a person reads; the code is carried by the protocol"
+    )]
+    code: Option<i64>,
+    message: String,
+    #[serde(default)]
+    #[expect(
+        dead_code,
+        reason = "the protocol's data arm; only SANDBOX reads it, in heddle-tools"
+    )]
+    data: Option<Value>,
+}
+
+/// Fail every pending call — the child died, or it wrote something that is not a reply.
+fn fail_pending(pending: &Mutex<PendingCalls>, message: &str) {
+    let mut pending = pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (_, sender) in pending.drain() {
+        let _ = sender.send(Err(HookError::fail(message.to_owned())));
+    }
+}
 
 /// One configured outside listener: the process to start and the points it listens on. Deserialized from a
 /// configuration row's `config`, with the TypeScript build's camel-case keys.
@@ -303,6 +360,15 @@ pub struct OutsideListenerConfig {
     /// Per-call answer deadline; [`DEFAULT_TIMEOUT_MS`] when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// The configuration row's id, for the initialize handshake; the boot fills it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<String>,
+    /// The deployment's workspace root, for the handshake; the boot fills it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<PathBuf>,
+    /// The deployment's mode, for the handshake; `workspace-write` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Starting or speaking to an outside listener failed.
@@ -319,64 +385,40 @@ pub enum OutsideError {
         /// Why.
         source: std::io::Error,
     },
+    /// The process did not complete the handshake.
+    #[error("outside listener '{row}' did not complete the handshake: {message}")]
+    Handshake {
+        /// The row.
+        row: String,
+        /// Why.
+        message: String,
+    },
     /// A configured point is not exposed.
     #[error(transparent)]
     UnknownPoint(#[from] UnknownPoint),
 }
 
-/// An outside listener running as a child process, spoken to as line-delimited JSON on its stdio.
+/// An outside listener running as a child process, spoken to as line-delimited JSON-RPC 2.0 on its stdio.
 ///
-/// The child lives as long as the last `Arc` to this value; it is killed when dropped.
+/// The child lives as long as the last `Arc` to this value; it is killed when dropped. [`shutdown`] asks it
+/// to end first.
+///
+/// [`shutdown`]: StdioListener::shutdown
 pub struct StdioListener {
     /// The child, kept only so dropping the listener can kill it.
     child: Mutex<Child>,
     /// Lines waiting to be written to the child's stdin; `notify` never blocks on the pipe.
     outbox: mpsc::UnboundedSender<String>,
-    /// Calls waiting for an answer, by the id the caller was given.
+    /// Calls waiting for an answer, by the id the host gave them.
     pending: Arc<Mutex<PendingCalls>>,
     next_id: AtomicU64,
     timeout: Duration,
 }
 
-/// One request to an outside listener, as the wire framing writes it.
-#[derive(Serialize)]
-struct HookRequest {
-    /// Present for a call that is waited for; absent for an `emit` notification.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<u64>,
-    method: &'static str,
-    params: HookCall,
-}
-
-/// One line the child writes: a result, an error, or neither (which is malformed).
-#[derive(Deserialize)]
-struct ReplyEnvelope {
-    #[serde(default)]
-    id: Option<u64>,
-    #[serde(default)]
-    result: Option<HookReply>,
-    #[serde(default)]
-    error: Option<ReplyError>,
-}
-
-/// The error arm of a reply.
-#[derive(Deserialize)]
-struct ReplyError {
-    message: String,
-}
-
-/// Fail every pending call — the child died, or it wrote something that is not a reply.
-fn fail_pending(pending: &Mutex<PendingCalls>, message: &str) {
-    let mut pending = pending
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for (_, sender) in pending.drain() {
-        let _ = sender.send(Err(HookError::fail(message.to_owned())));
-    }
-}
-
 impl StdioListener {
-    /// Start the configured process. Must be called inside a Tokio runtime.
+    /// Start the configured process and complete the `initialize` handshake.
+    ///
+    /// Must be called inside a Tokio runtime. The child is killed when the last `Arc` to the listener drops.
     pub async fn spawn(config: &OutsideListenerConfig) -> Result<Arc<StdioListener>, OutsideError> {
         if config.command.is_empty() {
             return Err(OutsideError::Config("the command is empty".into()));
@@ -393,6 +435,7 @@ impl StdioListener {
             command.env(key, value);
         }
         command
+            .env("HEDDLE_COMPONENT_PROTOCOL", COMPONENT_PROTOCOL)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -446,22 +489,22 @@ impl StdioListener {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let envelope: ReplyEnvelope = match serde_json::from_str(trimmed) {
-                            Ok(envelope) => envelope,
+                        let reply: RpcReply = match serde_json::from_str(trimmed) {
+                            Ok(reply) => reply,
                             Err(error) => {
                                 tracing::error!(
                                     %error,
                                     line = trimmed,
-                                    "an outside listener wrote a line that is not a reply"
+                                    "an outside listener wrote a line that is not a JSON-RPC reply"
                                 );
                                 fail_pending(
                                     &pending_for_reader,
-                                    "the outside listener wrote a line that is not a reply",
+                                    "the outside listener wrote a line that is not a JSON-RPC reply",
                                 );
                                 break;
                             }
                         };
-                        let ReplyEnvelope { id, result, error } = envelope;
+                        let RpcReply { id, result, error } = reply;
                         let Some(id) = id else {
                             tracing::warn!(
                                 line = trimmed,
@@ -505,29 +548,70 @@ impl StdioListener {
             }
         });
 
+        // The handshake is the first message, as the part-4 protocol states.
+        let row = config
+            .row
+            .clone()
+            .unwrap_or_else(|| "outside-listener".to_owned());
+        let workspace_root = config
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .display()
+            .to_string();
+        let mode = config
+            .mode
+            .clone()
+            .unwrap_or_else(|| "workspace-write".to_owned());
+        let handshake = serde_json::json!({
+            "protocol": COMPONENT_PROTOCOL,
+            "row": row,
+            "config": {
+                "command": config.command,
+                "points": config.points,
+                "cwd": config.cwd,
+                "env": config.env,
+                "timeoutMs": config.timeout_ms,
+            },
+            "workspaceRoot": workspace_root,
+            "mode": mode,
+        });
+        let initialized = tokio::time::timeout(
+            Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
+            listener.request("initialize", handshake),
+        )
+        .await;
+        let failure = match initialized {
+            Ok(Ok(_result)) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some(format!("no answer within {HANDSHAKE_TIMEOUT_MS}ms")),
+        };
+        if let Some(message) = failure {
+            return Err(OutsideError::Handshake { row, message });
+        }
         Ok(listener)
     }
-}
 
-impl JsonListener for StdioListener {
-    fn call(&self, call: HookCall) -> HookFuture<HookReply> {
+    /// One JSON-RPC request: write it, then wait for the answer correlated by id.
+    fn request(&self, method: &'static str, params: Value) -> HookFuture<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id, sender);
-        let request = HookRequest {
+        let request = RpcRequest {
+            jsonrpc: "2.0",
             id: Some(id),
-            method: "hook",
-            params: call,
+            method,
+            params,
         };
         let outcome = match serde_json::to_string(&request) {
             Ok(line) => self
                 .outbox
                 .send(line)
                 .map_err(|_| "the outside listener is not running: its input is closed".to_owned()),
-            Err(error) => Err(format!("the hook call does not serialize: {error}")),
+            Err(error) => Err(format!("the request does not serialize: {error}")),
         };
         if let Err(message) = outcome {
             self.pending
@@ -537,6 +621,7 @@ impl JsonListener for StdioListener {
             return Box::pin(async move { Err(HookError::fail(message)) });
         }
         let pending = self.pending.clone();
+        let outbox = self.outbox.clone();
         let timeout = self.timeout;
         Box::pin(async move {
             match tokio::time::timeout(timeout, receiver).await {
@@ -549,6 +634,14 @@ impl JsonListener for StdioListener {
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .remove(&id);
+                    if let Ok(line) = serde_json::to_string(&RpcRequest {
+                        jsonrpc: "2.0",
+                        id: None,
+                        method: "$/cancelRequest",
+                        params: serde_json::json!({ "id": id }),
+                    }) {
+                        let _ = outbox.send(line);
+                    }
                     Err(HookError::fail(format!(
                         "the outside listener did not answer within {}ms",
                         timeout.as_millis()
@@ -558,14 +651,56 @@ impl JsonListener for StdioListener {
         })
     }
 
-    fn notify(&self, call: HookCall) {
-        let request = HookRequest {
+    /// One notification: no id, never answered.
+    fn notify_raw(&self, method: &'static str, params: Value) {
+        if let Ok(line) = serde_json::to_string(&RpcRequest {
+            jsonrpc: "2.0",
             id: None,
-            method: "hook",
-            params: call,
-        };
-        if let Ok(line) = serde_json::to_string(&request) {
+            method,
+            params,
+        }) {
             let _ = self.outbox.send(line);
+        }
+    }
+
+    /// End the connection: `shutdown` (request), then `exit` (notification). Dropping the listener kills a
+    /// child that has not exited.
+    pub async fn shutdown(&self) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.request("shutdown", Value::Null),
+        )
+        .await;
+        self.notify_raw("exit", Value::Null);
+    }
+}
+
+impl JsonListener for StdioListener {
+    fn call(&self, call: HookCall) -> HookFuture<HookReply> {
+        let params = match serde_json::to_value(&call) {
+            Ok(params) => params,
+            Err(error) => {
+                return Box::pin(async move {
+                    Err(HookError::fail(format!(
+                        "a hook call does not serialize: {error}"
+                    )))
+                });
+            }
+        };
+        let answer = self.request("hooks/call", params);
+        Box::pin(async move {
+            let value = answer.await?;
+            serde_json::from_value::<HookReply>(value).map_err(|error| {
+                HookError::fail(format!(
+                    "the outside listener answered something that is not a hook reply: {error}"
+                ))
+            })
+        })
+    }
+
+    fn notify(&self, call: HookCall) {
+        if let Ok(params) = serde_json::to_value(&call) {
+            self.notify_raw("hooks/call", params);
         }
     }
 }
@@ -925,6 +1060,9 @@ mod tests {
             cwd: None,
             env: BTreeMap::new(),
             timeout_ms: Some(5_000),
+            row: None,
+            workspace_root: None,
+            mode: None,
         }
     }
 
@@ -938,8 +1076,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_stdio_listener_answers_by_correlating_the_id() {
-        let script = r#"read line
-printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"replace","value":"replaced"}}\n'
 "#;
         let config = script_config(script, &[Echoed::NAME]);
         let listener = StdioListener::spawn(&config).await.unwrap();
@@ -954,7 +1094,10 @@ printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
 
     #[tokio::test]
     async fn a_child_that_exits_without_answering_fails_the_pending_call() {
-        let config = script_config("read line\nexit 0\n", &[Echoed::NAME]);
+        let config = script_config(
+            "read handshake\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\nread line\nexit 0\n",
+            &[Echoed::NAME],
+        );
         let listener = StdioListener::spawn(&config).await.unwrap();
         let error = listener.call(waterfall_call("base")).await.unwrap_err();
         assert_eq!(error.kind(), HookErrorKind::Failed);
@@ -967,7 +1110,10 @@ printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
 
     #[tokio::test]
     async fn a_child_that_never_answers_times_out_with_its_own_message() {
-        let mut config = script_config("read line\nsleep 2\n", &[Echoed::NAME]);
+        let mut config = script_config(
+            "read handshake\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\nread line\nsleep 2\n",
+            &[Echoed::NAME],
+        );
         config.timeout_ms = Some(150);
         let listener = StdioListener::spawn(&config).await.unwrap();
         let error = listener.call(waterfall_call("base")).await.unwrap_err();
@@ -990,7 +1136,7 @@ printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
                 .as_nanos()
         ));
         let mut config = script_config(
-            "read line\nprintf '%s' \"$line\" > \"$OUT\"\n",
+            "read handshake\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\nread line\nprintf '%s' \"$line\" > \"$OUT\"\n",
             &[Reported::NAME],
         );
         config.env.insert("OUT".into(), path.display().to_string());
@@ -1012,7 +1158,8 @@ printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
         }
         let _ = std::fs::remove_file(&path);
         let text = recorded.expect("the child recorded the notification");
-        assert!(text.contains("\"method\":\"hook\""), "saw: {text}");
+        assert!(text.contains("\"jsonrpc\":\"2.0\""), "saw: {text}");
+        assert!(text.contains("\"method\":\"hooks/call\""), "saw: {text}");
         assert!(text.contains("\"point\":\"test/json-emit\""), "saw: {text}");
         assert!(
             !text.contains("\"id\""),
@@ -1045,12 +1192,83 @@ printf '{"id":1,"result":{"kind":"replace","value":"replaced"}}\n'
         let bus = EventBus::new();
         bus.expose_waterfall::<Echoed>();
         let scope = bus.scope("outside");
-        let config = script_config("cat > /dev/null\n", &[Echoed::NAME]);
+        let config = script_config(
+            "read handshake\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n'\ncat > /dev/null\n",
+            &[Echoed::NAME],
+        );
         let handles = attach_outside_listener(&scope, &config).await.unwrap();
         assert_eq!(handles.len(), 1);
         assert!(handles[0].is_active());
         assert_eq!(bus.listener_count(Echoed::NAME), 1);
         scope.dispose();
         assert_eq!(bus.listener_count(Echoed::NAME), 0);
+    }
+
+    #[tokio::test]
+    async fn a_json_rpc_error_reply_fails_the_hook_with_its_message() {
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"this hook is broken"}}\n'
+"#;
+        let config = script_config(script, &[Echoed::NAME]);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        let error = listener.call(waterfall_call("base")).await.unwrap_err();
+        assert_eq!(error.kind(), HookErrorKind::Failed);
+        assert!(error.message().contains("this hook is broken"));
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_is_not_a_hook_reply_fails_rather_than_guessing() {
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"maybe"}}\n'
+"#;
+        let config = script_config(script, &[Echoed::NAME]);
+        let listener = StdioListener::spawn(&config).await.unwrap();
+        let error = listener.call(waterfall_call("base")).await.unwrap_err();
+        assert_eq!(error.kind(), HookErrorKind::Failed);
+        assert!(error.message().contains("not a hook reply"));
+    }
+
+    #[tokio::test]
+    async fn an_attached_process_answers_a_real_dispatch() {
+        let bus = EventBus::new();
+        bus.expose_waterfall::<Echoed>();
+        let scope = bus.scope("outside");
+        let script = r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"replace","value":"from the process"}}\n'
+"#;
+        let config = script_config(script, &[Echoed::NAME]);
+        let handles = attach_outside_listener(&scope, &config).await.unwrap();
+        assert_eq!(handles.len(), 1);
+        let value = bus
+            .waterfall::<Echoed>("base".to_string(), |payload| format!("default:{payload}"))
+            .await
+            .unwrap();
+        assert_eq!(value, "from the process");
+        assert_eq!(bus.listener_count(Echoed::NAME), 1);
+        let next_config = script_config(
+            r#"read handshake
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+read line
+printf '{"jsonrpc":"2.0","id":2,"result":{"kind":"next"}}\n'
+"#,
+            &[Echoed::NAME],
+        );
+        let second = EventBus::new();
+        second.expose_waterfall::<Echoed>();
+        let second_scope = second.scope("outside");
+        attach_outside_listener(&second_scope, &next_config)
+            .await
+            .unwrap();
+        let value = second
+            .waterfall::<Echoed>("base".to_string(), |payload| format!("default:{payload}"))
+            .await
+            .unwrap();
+        assert_eq!(value, "default:base", "next runs the default");
     }
 }
