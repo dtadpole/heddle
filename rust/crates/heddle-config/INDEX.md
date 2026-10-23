@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:08:53Z
+modified: 2026-10-23T05:10:35Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -272,6 +272,7 @@ it judges.
 | 2026-10-22 | lane `40906af` (every built-in has an adapter: the subagent-tool, goal-driver and team rows; `--validate` now asks 20 schemas) | `HEDDLE_BIN=<debug build of exactly 40906af> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated the candidate and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
 | 2026-10-22 | main `6a809e3` (the lane's `40906af` re-made as `b2ee1f6`, a verify-runner fix so a check returns once its harness exits, and the lockfile; `6a809e3` itself only adds a status doc to `8ec2a71`) | `HEDDLE_BIN=<debug build of exactly 8ec2a71> sh _verifiers_/05-config-system/verify.sh --json` from that tree, with main's new runner, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | lane `c94d6b1` (the binary advertises the session, workspace and goal commands: `usage.rs` and `main.rs` changed; `--help` still lists `--profile`, `profiles` and `config`) | `HEDDLE_BIN=<debug build of exactly c94d6b1> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane tree held a modified lockfile when its release build was made, so I built the commit myself | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
+| 2026-10-22 | lane `cdea647` (`c94d6b1` plus hook and tool process tests in the 40 and 60 verifiers, and six lockfile lines with no version moved; 05 and the runner untouched) | `HEDDLE_BIN=<debug build of exactly cdea647> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 
 ## Decisions the contract makes
 
