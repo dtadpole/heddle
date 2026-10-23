@@ -7,11 +7,15 @@
 
 use heddle_web_composer::catalog::catalog_of;
 use heddle_web_composer::{ToolSpec, js};
-use heddle_web_trajectory::{JsonHighlighter, LedgerKind, ToolState, ledger_view, project_ledger};
+use heddle_web_trajectory::usage::billed_input_tokens;
+use heddle_web_trajectory::{
+    JsonHighlighter, LedgerKind, ToolState, ledger_view, project_ledger, session_stats_view,
+};
 use serde_json::{Value, json};
 
 const RUN_PWD: &str = include_str!("fixtures/85-run-pwd-and-answer.jsonl");
 const LIST_DIR_TWO_TURNS: &str = include_str!("fixtures/80-list-dir-two-turns.jsonl");
+const COMPOSER_STATS: &str = include_str!("fixtures/80-composer-stats-two-turns.jsonl");
 
 fn events(log: &str) -> Vec<Value> {
     log.lines()
@@ -283,5 +287,109 @@ fn every_call_in_the_recorded_logs_is_settled() {
                 );
             }
         }
+    }
+}
+
+/// check-composer's stats test declares `contextWindow: 2000` on its endpoint; the dock divides by it.
+const COMPOSER_CONTEXT_WINDOW: f64 = 2000.0;
+
+/// The chat route's `stats` after the first `n` events, as the page reads it.
+fn stats_after(events: &[Value], n: usize) -> Value {
+    serde_json::to_value(session_stats_view(&events[..n], || None)).expect("the stats serialise")
+}
+
+#[test]
+fn the_composer_dock_figures_are_what_check_composer_asserts() {
+    // check-composer.mjs, 'the session-statistics dock prints DSH's figures': a provider reporting
+    // prompt_tokens 1000 (800 cached) and completion_tokens 50 per round, two turns, a 2000-token window.
+    let events = events(COMPOSER_STATS);
+    let first_turn_end = events
+        .iter()
+        .position(|event| event["type"] == "turn/completed")
+        .expect("the first turn completed")
+        + 1;
+
+    let first = stats_after(&events, first_turn_end);
+    assert_eq!(
+        first["turns"], 1,
+        "'1 turns' — the reference's label is always plural"
+    );
+    assert_eq!(
+        first["steps"], 1,
+        "'1 steps' — one model round is one agent step"
+    );
+    let usage: heddle_web_trajectory::TokenUsage =
+        serde_json::from_value(first["usage"].clone()).unwrap();
+    let billed = billed_input_tokens(Some(&usage)).expect("a prompt side was reported");
+    assert_eq!(
+        billed + usage.output_tokens.unwrap(),
+        1050,
+        "'1.1K tok' — uncached + cache read + output"
+    );
+    assert_eq!(
+        usage.cache_read_tokens.unwrap() as f64 / billed as f64,
+        0.8,
+        "'Cache hit 80%'"
+    );
+    assert_eq!(
+        first["lastPromptTokens"].as_f64().unwrap() / COMPOSER_CONTEXT_WINDOW,
+        0.5,
+        "'50%' context share"
+    );
+    assert!(
+        first["generationMs"].as_u64().is_some_and(|ms| ms > 0),
+        "the rate has a measured denominator"
+    );
+    assert_eq!(
+        first["decodeTokens"], 50,
+        "and the reported output as its numerator"
+    );
+
+    let second = stats_after(&events, events.len());
+    assert_eq!(second["turns"], 2, "the backend fold counts two turns");
+    assert_eq!(second["steps"], 2, "'2 steps'");
+    let usage: heddle_web_trajectory::TokenUsage =
+        serde_json::from_value(second["usage"].clone()).unwrap();
+    let billed = billed_input_tokens(Some(&usage)).unwrap();
+    assert_eq!(
+        billed + usage.output_tokens.unwrap(),
+        2100,
+        "'2.1K tok' — the total is cumulative over the session"
+    );
+    assert_eq!(
+        usage.cache_read_tokens.unwrap() as f64 / billed as f64,
+        0.8,
+        "'Cache hit 80%' still"
+    );
+    assert_eq!(
+        second["lastPromptTokens"].as_f64().unwrap() / COMPOSER_CONTEXT_WINDOW,
+        0.5,
+        "the context share survives"
+    );
+    // the reloaded dock prints decodeTokens / (generationMs / 1000) and requires both to be positive
+    assert!(second["generationMs"].as_u64().is_some_and(|ms| ms > 0));
+    assert_eq!(second["decodeTokens"], 100);
+    assert_eq!(
+        second["contextBreakdownSource"], "request",
+        "the panel's sections are the last request's"
+    );
+}
+
+#[test]
+fn a_provider_that_reports_no_usage_leaves_the_dock_figures_absent() {
+    // check-composer.mjs's 'stats-bare' half: no usage frame, so no token figure, rate or context share.
+    let events: Vec<Value> = events(COMPOSER_STATS)
+        .into_iter()
+        .map(|mut event| {
+            if let Some(chunk) = event.get_mut("chunk").and_then(Value::as_object_mut) {
+                chunk.remove("usage");
+            }
+            event
+        })
+        .collect();
+    let stats = stats_after(&events, events.len());
+    assert_eq!(stats["turns"], 2, "the turns are still counted");
+    for absent in ["usage", "lastPromptTokens", "generationMs", "decodeTokens"] {
+        assert!(stats.get(absent).is_none(), "{absent} is absent, not zero");
     }
 }
