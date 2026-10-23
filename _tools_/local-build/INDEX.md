@@ -40,11 +40,11 @@ started in the wrong tree tests the wrong tree.
 ## `status`
 
 ```text
-root: /Users/zhenchen/.hd-build-slots
+root: ~/.hd-build-slots
 slots: 3  jobs: 3
-slot 0: busy pid=3521 cargo=3499 age=151s cwd=/Users/zhenchen/heddle--developer-six
+slot 0: busy pid=3521 cargo=3499 age=151s cwd=~/heddle--developer-six
 slot 1: free
-slot 2: stale pid=7371 cargo=0 age=3601s cwd=/Users/zhenchen/heddle--developer-twelve
+slot 2: stale pid=7371 cargo=0 age=3601s cwd=~/heddle--developer-twelve
 summary: busy=1 stale=1 free=1
 ```
 

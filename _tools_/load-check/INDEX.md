@@ -25,8 +25,8 @@ disk     59.9 GB free of 228 GB on /System/Volumes/Data [ok] (warn < 26 GB, stop
 load     11.23 9.71 7.14 = 1.12/core [ok] (warn >= 1.5/core, stop >= 2/core)
 swap     4891M used of 6144M = 80% [warn] (warn >= 75%, stop >= 95%)
 slots    3 of 3: 1 busy, 1 stale, 1 free
-         slot 0 busy pid=3521 cargo=3499 age=260s cwd=/Users/zhenchen/heddle--developer-six/rust
-         slot 2 stale pid=14877 cargo=0 age=4s cwd=/Users/zhenchen/heddle--developer-ten
+         slot 0 busy pid=3521 cargo=3499 age=260s cwd=~/heddle--developer-six/rust
+         slot 2 stale pid=14877 cargo=0 age=4s cwd=~/heddle--developer-ten
 worktrees 1 with a process
          ~/heddle--developer-six 3 proc 210% cpu: cargo, rustc
 builds   1 cargo, 2 rustc, 0 other [ok] (cap 9 rustc = 3 slots x 3 jobs)
