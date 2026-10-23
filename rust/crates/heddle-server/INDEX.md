@@ -53,9 +53,9 @@ As of 2026-10-22 21:08 PDT, branch `hd/developer-ten` at `2bc3d26`.
      flags `--host --port --endpoint --max-rounds --dry-run --json`, `--dry-run` through
      `DryRunPlan`, a start through `ServerBuilder` with the `Harness` the binary passes in `Context`,
      `announce()` written to `out`. Exit 0 or 1, never 2. Tests from `80-web-ui` and `90-web-ui-token`.
-  2. developer-seven's two fidelity notes: type `SandboxService::transition`'s `requested`/`confirm`
-     as `Option<&Value>` so an absent mode prints `'undefined'`, and check the approval id's shape and
-     the outcome before the missing-service 409 in `answer_approval`.
+  2. (done in the commit after `b77d3d4`) developer-seven's two fidelity notes: an absent permission
+     mode is passed as `None` so it is refused as `'undefined'`, and the approval id and outcome are
+     checked before the missing-service 409.
   3. The remaining adapters as their APIs reach `main` (workspace, model, turn, sandbox, approvals).
   4. The day `heddle web` answers through `HEDDLE_BIN`, run `80-web-ui` and `90-web-ui-token` from the
      ui lane and report the counts to integrator-two.

@@ -1134,12 +1134,11 @@ async fn permission_session(
     }
     let fallback = state.harness().sandbox.default_mode();
     let current = sessions.effective_mode(id.as_str(), &fallback);
-    let requested = body.get("mode").cloned().unwrap_or(Value::Null);
-    let confirm = body.get("confirm").cloned().unwrap_or(Value::Null);
+    // Passed as they arrived, so an absent mode is refused as 'undefined', as web.ts words it.
     match state
         .harness()
         .sandbox
-        .transition(&current, &requested, &confirm)
+        .transition(&current, body.get("mode"), body.get("confirm"))
     {
         Err(reason) => respond::json(
             StatusCode::CONFLICT,
@@ -1338,11 +1337,8 @@ async fn answer_approval(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: JsonBody,
 ) -> Response {
-    // The TypeScript route answers a question nobody is holding as a conflict, not as a missing
-    // plugin: a profile without the approval service simply has no question to answer.
-    let Some(service) = state.harness().approvals.as_ref() else {
-        return approval_not_waiting();
-    };
+    // web.ts checks the id's shape, then the outcome, and only then asks the service; a malformed
+    // request is a 400 whether or not an approval service is loaded.
     let looks_like_approval = id.strip_prefix("approval-").is_some_and(|rest| {
         rest.len() == 36 && rest.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
     });
@@ -1359,6 +1355,11 @@ async fn answer_approval(
                 "outcome must be 'allowed-once', 'rejected' or 'cancelled'",
             );
         }
+    };
+    // A question nobody is holding is a conflict, not a missing plugin: a profile without the approval
+    // service simply has no question to answer.
+    let Some(service) = state.harness().approvals.as_ref() else {
+        return approval_not_waiting();
     };
     if service.answer(&id, outcome) {
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
@@ -1912,8 +1913,8 @@ mod tests {
         fn transition(
             &self,
             _current: &str,
-            _requested: &Value,
-            _confirm: &Value,
+            _requested: Option<&Value>,
+            _confirm: Option<&Value>,
         ) -> Result<String, String> {
             Ok("read-only".into())
         }
@@ -2785,6 +2786,17 @@ mod tests {
         let body = body_text(&bytes);
         assert!(body.contains("no longer waiting"), "{body}");
         assert!(body.contains("\"answered\": false"), "{body}");
+
+        // The id's shape and the outcome are checked before the service, as web.ts orders them.
+        let (status, bytes) = post_json(
+            &router,
+            "/api/approvals/not-an-approval",
+            &cookie,
+            r#"{"outcome":"allowed-once"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(&bytes), "{\"error\":\"not an approval id\"}\n");
 
         // No workspace service: /api/html reports the path as outside every root, as web.ts does.
         let response = router
