@@ -22,7 +22,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (134 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (140 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -47,12 +47,8 @@ As of 2026-10-22 21:08 PDT, branch `hd/developer-ten` at `2bc3d26`.
   (`examples/web_door.rs`) passes 7 of 9 checks of main's `90-web-ui-token` through `HEDDLE_BIN`; the
   two failures need a turn. That is evidence, not a pass.
 - **Next steps, in order:**
-  1. D-043: write `web`'s entry point as `src/command.rs` (`pub mod command`), per the convention in
-     `rust/crates/heddle/INDEX.md`, section "Command entry points in the owning crate (D-043)"
-     (`hd/developer-two` `f6065e1`): `pub async fn run(Command, &Args, &Context, out, err) -> i32`, the
-     flags `--host --port --endpoint --max-rounds --dry-run --json`, `--dry-run` through
-     `DryRunPlan`, a start through `ServerBuilder` with the `Harness` the binary passes in `Context`,
-     `announce()` written to `out`. Exit 0 or 1, never 2. Tests from `80-web-ui` and `90-web-ui-token`.
+  1. (done) D-043: `web`'s entry point is `src/command.rs`; developer-two adds the dispatch line and
+     composes the `Context`.
   2. (done in the commit after `b77d3d4`) developer-seven's two fidelity notes: an absent permission
      mode is passed as `None` so it is refused as `'undefined'`, and the approval id and outcome are
      checked before the missing-service 409.
@@ -73,6 +69,7 @@ As of 2026-10-22 21:08 PDT, branch `hd/developer-ten` at `2bc3d26`.
 | `runs` | `RunRegistry` and `TurnGuard`: running counts, the per-turn clock, completion times, stop by `CancellationToken` |
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
+| `command` | `heddle web`'s entry point under D-043: `Command::Web`, `Args` (`host`, `port`, `endpoint`, `max_rounds`, `dry_run`, `json`), `Context` (the `Harness`, the event hub, feature routers, session views, asset roots, the secret path, boot notes, a shutdown token) and `async fn run(..) -> i32`, printing `runWeb`'s lines byte for byte |
 | `adapters` | the trait implementations over the real crates, as each crate's API reaches `main`: `StoreSessions` (`SessionService` over `heddle_session::SessionService`) and `session_event_listener` (the store's event listener, publishing into the `EventHub`) |
 | `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
 | `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |

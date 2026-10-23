@@ -30,6 +30,7 @@
 //! `INDEX.md` gives. The tests beside the code are the evidence the rules hold.
 
 pub mod adapters;
+pub mod command;
 pub mod fence;
 pub mod page;
 pub mod preview;
