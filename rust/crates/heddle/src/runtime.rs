@@ -14,12 +14,24 @@
 //! | [`heddle_agent::ContextPort`] | `adapters::Context` | `heddle-context`'s service on the session store |
 //! | [`heddle_agent::TurnHooks`] | [`heddle_agent::NoTurnHooks`] | until `heddle-events`' bus is mounted |
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use heddle_agent::AgentRuntime;
 
 use crate::adapters::Context;
 use crate::services::Services;
+
+/// The process's one async runtime: an outside component's stdio tasks, a turn and the server all run on
+/// it, so a child process started during the boot keeps its reader after the boot returns.
+pub fn tokio() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("the process can start its async runtime")
+    })
+}
 
 /// The runtime a turn runs on, from what the boot provided; the sentence naming the first missing
 /// service otherwise, as the TypeScript build's `ctx.<service>` lookups would fail.
