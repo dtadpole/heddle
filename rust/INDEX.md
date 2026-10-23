@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.1.0
+version: 0.2.0
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -21,16 +21,18 @@ folder, not a type folder. `target/` is cargo's output and is ignored.
 
 ## Where it builds and runs
 
-**Not on the owner's Mac.** Measured 2026-10-22: its binary-authorization policy kills every binary built
-there on exec (exit 137), a one-line C program as much as Rust; a packaged `cargo` still checks and lints. Getting
-around the policy is not an option. The port is developed on **Linux build hosts over SSH**, whose aliases are
-machine configuration (`HEDDLE_BUILD_HOST`), never committed.
+**On the owner's Mac, locally** (D-020, 2026-10-22). The earlier measurement that this Mac kills every binary
+it builds on exec (exit 137) did not reproduce: a compiled C probe and this workspace both ran, and
+`cargo check --workspace` completed here. Rust 1.99.1 with rustfmt and clippy comes from rustup, pinned by
+[`rust-toolchain.toml`](rust-toolchain.toml); there are no devservers in this setup, no SSH and no
+`HEDDLE_BUILD_HOST`.
 
-**One worktree per team member**, made by [`_tools_/build-host`](../_tools_/build-host/INDEX.md): `~/heddle--<seat>`
-on branch `hd/<seat>`, where its owner writes its crates **and their unit tests** and runs them; `~/heddle--int`,
-where an integrator merges the branches and runs every verifier through `HEDDLE_BIN`; `~/heddle-live`, the
-deployment, whose page the Mac reaches at `localhost:8081` through an SSH forward. One crate is one owner's write
-scope, so parallel work never shares a file; [`rust-toolchain.toml`](rust-toolchain.toml) pins the compiler.
+**One worktree per team member**, `~/heddle--<seat>` on branch `hd/<seat>`, where its owner writes its crates
+**and their unit tests** and runs them; `~/heddle--int-backend` and `~/heddle--int-ui`, where each integrator merges
+its lane's branches and runs every verifier through `HEDDLE_BIN`; `~/heddle-live`, the deployment, whose page the
+owner reaches at `http://127.0.0.1:8082/`. One crate is one owner's write scope, so parallel work never shares a
+file. Cargo runs in one of three build slots ([`_tools_/local-build`](../_tools_/local-build/INDEX.md)) because the
+team shares ten cores and one disk.
 
 ## Status
 
