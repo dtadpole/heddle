@@ -31,7 +31,7 @@ The Rust port of session goals, their driver and their tools.
 | `decide_goal_round`, `render_goal_round_prompt`, `RoundDecision`, `ROUND_LIMIT_CODE` | the pure decision and DSH's round prompt |
 | `round::{AgentRoundRunner, round_target}` | the rounds over `heddle-agent`'s real turn: the session's endpoint and model, else the default endpoint, the round's `source` on the prompt |
 | `DriverTrigger`, `SessionEdge`, `classify_session_event` | the goal-driver plugin's edges: `turn/completed`, turn activity, `goal/change` at rest |
-| `tool::{goal_tool_specs, run_create_goal, run_get_goal, run_update_goal, tool_view, end_of_run}` | the three verbs; the mirrors `ToolSpec`/`ToolAnswer` go when `heddle-tools`' API lands |
+| `tool::{goal_tool_specs, run_create_goal, run_get_goal, run_update_goal, tool_view, end_of_run}` | the three verbs over std and serde types; the boot wraps them as `heddle-tools` registry tools, so this crate needs no tools dependency |
 | `http::{get_goal, post_goal}`, `cli::{goal_json, goal_text}` | the person's verbs and the `heddle goal` command, as exact bytes |
 | `SessionLog`, `LogError`, `Clock`, `iso_timestamp` | the same ports as `heddle-todo`'s, kept separate so either plugin loads alone |
 

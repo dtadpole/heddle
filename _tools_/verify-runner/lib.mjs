@@ -148,14 +148,38 @@ export async function run(command, args, options = {}) {
     child.kill('SIGKILL')
   }, timeoutMs)
 
+  /**
+   * Resolve when the output streams close — or, once the process itself has exited, after a short grace period.
+   *
+   * `close` waits for every holder of the child's stdout and stderr, so a process the harness started that inherited
+   * them (an outside component, a backgrounded shell) kept this promise pending after the harness had exited or been
+   * killed at the timeout, and the check hung instead of reporting. The grace period lets the last output drain.
+   */
   const code = await new Promise((resolvePromise, reject) => {
+    let settled = false
+    const settle = (value) => {
+      if (settled) return
+      settled = true
+      resolvePromise(value)
+    }
     child.on('error', reject)
-    child.on('close', resolvePromise)
+    child.on('close', settle)
+    child.on('exit', (exitCode) => {
+      setTimeout(() => {
+        if (settled) return
+        child.stdout.destroy()
+        child.stderr.destroy()
+        settle(exitCode)
+      }, EXIT_GRACE_MS).unref()
+    })
   })
   clearTimeout(timer)
 
   return { code, stdout, stderr, timedOut, failed: timedOut || code !== 0 }
 }
+
+/** How long a harness that has exited may keep its output streams open before `run` stops waiting for them. */
+export const EXIT_GRACE_MS = 1500
 
 /**
  * The command that runs the harness under test, as `[file, argv]`.
@@ -375,7 +399,16 @@ export async function chatDouble(options = {}) {
   return {
     baseUrl: `http://127.0.0.1:${port}/ds`,
     requests,
-    close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
+    /**
+     * Stop listening **and** end every connection still open. `server.close()` alone waits for active connections,
+     * so a harness that stalled mid-request, or a check whose assertion threw first, kept the double — and the test
+     * file's process — alive forever: measured on 2026-10-22, a failing backend check never let `verify.sh` return.
+     */
+    close: () =>
+      new Promise((resolvePromise) => {
+        server.close(() => resolvePromise())
+        server.closeAllConnections()
+      }),
   }
 }
 
@@ -411,7 +444,16 @@ export async function responsesDouble(options = {}) {
   return {
     baseUrl: `http://127.0.0.1:${port}/cx`,
     requests,
-    close: () => new Promise((resolvePromise) => server.close(() => resolvePromise())),
+    /**
+     * Stop listening **and** end every connection still open. `server.close()` alone waits for active connections,
+     * so a harness that stalled mid-request, or a check whose assertion threw first, kept the double — and the test
+     * file's process — alive forever: measured on 2026-10-22, a failing backend check never let `verify.sh` return.
+     */
+    close: () =>
+      new Promise((resolvePromise) => {
+        server.close(() => resolvePromise())
+        server.closeAllConnections()
+      }),
   }
 }
 

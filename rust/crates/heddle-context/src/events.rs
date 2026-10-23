@@ -237,4 +237,44 @@ mod tests {
         assert_eq!(failed.kind(), "compaction/failed");
         assert_eq!(failed.to_value()["refused"], json!(true));
     }
+
+    /// The service's own events, key for key in the order the TypeScript literals write them
+    /// (`service.ts`), so a line one build appends is the line the other appends.
+    #[test]
+    fn the_service_events_keep_the_typescript_key_order() {
+        let baseline = ContextEvent::Note {
+            message: text_message(Role::User, "<system-reminder>rules</system-reminder>"),
+            origin: origin::INSTRUCTIONS.to_string(),
+            identity: Some("abc".to_string()),
+            files: Some(vec!["/p/AGENTS.md".into()]),
+        };
+        assert_eq!(
+            baseline.to_value().to_string(),
+            r#"{"type":"context/note","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>rules</system-reminder>"}]},"origin":"instructions","identity":"abc","files":["/p/AGENTS.md"]}"#
+        );
+
+        let overflow = ContextEvent::Recovery {
+            code: "CONTEXT_WINDOW_EXCEEDED".to_string(),
+            generation_before: Some(1),
+            generation_after: Some(2),
+            retry: true,
+            reason: None,
+        };
+        assert_eq!(
+            overflow.to_value().to_string(),
+            r#"{"type":"compaction/recovery","code":"CONTEXT_WINDOW_EXCEEDED","generationBefore":1,"generationAfter":2,"retry":true}"#
+        );
+
+        let other = ContextEvent::Recovery {
+            code: "HTTP_STATUS".to_string(),
+            generation_before: None,
+            generation_after: None,
+            retry: false,
+            reason: Some("not a window overflow".to_string()),
+        };
+        assert_eq!(
+            other.to_value().to_string(),
+            r#"{"type":"compaction/recovery","code":"HTTP_STATUS","retry":false,"reason":"not a window overflow"}"#
+        );
+    }
 }
