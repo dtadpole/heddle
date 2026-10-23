@@ -58,10 +58,12 @@ against the doubles in `testing`.
 
 **Runner ordering.** The service reads the target's log immediately after a turn is begun, so `TeamRunner::begin`
 must put the prompt in that log and register the turn live *before* it returns; the same is required of
-`TeamAgent::begin_turn`. The TypeScript build got this from `runTurn` appending before its first await. `heddle-agent`'s
-current `run_turn` performs both inside its async body, so an adapter that only boxes that future cannot satisfy it:
-the agent needs a begin/remainder split that writes the prompt and registers the turn synchronously and returns the
-rest as a future. Raised to the agent owner and the lane integrator, 2026-10-22.
+`TeamAgent::begin_turn`. The TypeScript build got this from `runTurn` appending before its first await. `heddle-agent`
+now provides the split the adapter needs: `begin_turn(&AgentRuntime, RunTurnOptions) -> BegunTurn` writes the prompt
+and registers the live turn before returning, and `BegunTurn::run` is the rest (`hd/developer-five` at `a0032f9`;
+`run_turn` is the same turn unsplit). The binary composes `TeamRunner::begin` from it: build the options with the
+member's endpoint and model (else the profile's default endpoint), `purpose: "team"` and the [`TeamSource`] as
+`source`, call `begin_turn`, and return `Box::pin(begun.run())` mapped to `Result<(), String>`.
 
 ## Rust shapes beyond the TypeScript build
 
