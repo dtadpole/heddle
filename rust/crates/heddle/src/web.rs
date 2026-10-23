@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use heddle_server::Harness;
 use heddle_server::services::{
-    ModelService as ServerModels, SandboxService as ServerSandbox, ServiceError, TurnOutcome,
-    TurnRequest, TurnRunner,
+    ApprovalOutcome, ApprovalService as ServerApprovals, ModelService as ServerModels,
+    SandboxService as ServerSandbox, ServiceError, TurnOutcome, TurnRequest, TurnRunner,
 };
 use serde_json::Value;
 
@@ -56,6 +56,14 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
         .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
     {
         harness.sandbox = Arc::new(Sandbox { service });
+    }
+    // The approvals row: the page becomes the answerer while the server runs, and every question the
+    // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_sandbox::ApprovalService>>("approvals")
+    {
+        harness.approvals = Some(Arc::new(Approvals { service }));
     }
     harness
 }
@@ -244,11 +252,94 @@ impl ServerSandbox for Sandbox {
     }
 }
 
+/// The approval service the sandbox row provides, as the server's port.
+struct Approvals {
+    service: Arc<heddle_sandbox::ApprovalService>,
+}
+
+impl ServerApprovals for Approvals {
+    fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+        let guard = self.service.attach_answerer();
+        Box::new(move || guard.detach())
+    }
+
+    fn pending_requests(&self) -> Vec<Value> {
+        self.service
+            .pending_requests()
+            .iter()
+            .filter_map(|request| serde_json::to_value(request).ok())
+            .collect()
+    }
+
+    fn answer(&self, id: &str, outcome: ApprovalOutcome) -> bool {
+        let word = match outcome {
+            ApprovalOutcome::AllowedOnce => "allowed-once",
+            ApprovalOutcome::Rejected => "rejected",
+            ApprovalOutcome::Cancelled => "cancelled",
+        };
+        heddle_sandbox::Answer::parse(word).is_some_and(|answer| self.service.answer(id, answer))
+    }
+
+    /// Every question the service publishes from now on; a lagging receiver skips what it missed (the
+    /// page repaints from `pending_requests`), and the stream ends when the service is gone.
+    fn subscribe(&self) -> Option<futures::stream::BoxStream<'static, Value>> {
+        let receiver = self.service.subscribe();
+        Some(Box::pin(futures::stream::unfold(
+            receiver,
+            |mut receiver| async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(request) => {
+                            let value = serde_json::to_value(&request).unwrap_or(Value::Null);
+                            return Some((value, receiver));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            },
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::Services;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn the_approvals_row_becomes_the_server_approval_service() {
+        let service = Arc::new(heddle_sandbox::ApprovalService::new(
+            heddle_sandbox::ApprovalsConfig::default(),
+        ));
+        let mut boot = empty_boot();
+        boot.services.provide("approvals", Arc::clone(&service));
+        let harness = harness(&boot, PathBuf::from("/work"));
+        let approvals = harness.approvals.expect("the approvals row is composed");
+
+        assert!(!service.can_answer());
+        let detach = approvals.attach_answerer();
+        assert!(
+            service.can_answer(),
+            "the page is the answerer while the server runs"
+        );
+        detach();
+        assert!(!service.can_answer());
+
+        assert!(approvals.pending_requests().is_empty());
+        assert!(
+            !approvals.answer(
+                "approval-00000000-0000-0000-0000-000000000000",
+                ApprovalOutcome::AllowedOnce
+            ),
+            "nothing is waiting under that id"
+        );
+        assert!(
+            approvals.subscribe().is_some(),
+            "questions are relayed by the server"
+        );
+    }
 
     fn empty_boot() -> Boot {
         Boot {
