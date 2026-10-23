@@ -1,8 +1,8 @@
 ---
 title: The heddle-llm sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:09:31Z
-version: 0.4.0
+modified: 2026-10-23T05:21:53Z
+version: 0.5.0
 description: The sources of the heddle-llm crate, one module per TypeScript concern, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -30,7 +30,7 @@ Unit tests sit in `#[cfg(test)]` modules beside the code.
 | [`model_info.rs`](model_info.rs) | `llm/model-info.ts` | the provider's model list: context window and input modalities |
 | [`service.rs`](service.rs) | `llm/service.ts`, `plugins/model.ts` | `ModelService`, the `ModelHooks` seam, `generate`, `probe` |
 | [`printer.rs`](printer.rs) | `stream/printer.ts` | the live stream view on standard error and its summary |
-| [`command.rs`](command.rs) | `cli.ts` | `models`, the turn's endpoint, the `--stream` view and its hub |
+| [`command.rs`](command.rs) | `cli.ts` | `models`, `adapter-call`, the turn's endpoint, the `--stream` view and its hub |
 
 ## Read next
 

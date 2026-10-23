@@ -952,3 +952,185 @@ async fn the_verifiers_publisher_route_config_answers_over_the_publisher_route()
         "the provider's thinking is not replayed: {call}"
     );
 }
+
+/// What `adapter-call` printed: each stdout line parsed, and the writes timestamped.
+struct Printed(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
+
+impl Write for Printed {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("buffer").push((
+            std::time::Instant::now(),
+            String::from_utf8_lossy(bytes).into_owned(),
+        ));
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn printed_lines(
+    printed: &Arc<Mutex<Vec<(std::time::Instant, String)>>>,
+) -> Vec<serde_json::Value> {
+    let all: String = printed
+        .lock()
+        .expect("buffer")
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect();
+    all.lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("one JSON object per line ({error}): {line}"))
+        })
+        .collect()
+}
+
+async fn run_adapter_call(
+    input: &str,
+) -> (
+    i32,
+    Vec<serde_json::Value>,
+    String,
+    Arc<Mutex<Vec<(std::time::Instant, String)>>>,
+) {
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let mut out = Printed(stdout.clone());
+    let mut err = Vec::new();
+    let code = heddle_llm::command::adapter_call(input, &mut out, &mut err).await;
+    let lines = printed_lines(&stdout);
+    (
+        code,
+        lines,
+        String::from_utf8_lossy(&err).into_owned(),
+        stdout,
+    )
+}
+
+/// `98-model-endpoints`' validator, through `adapter-call`: its streaming and tool-call claims read chunk types,
+/// `tool-call`'s `name` and `arguments`, and `done`'s `finishReason` — here against a chat double that streams the
+/// probe tool call the validator asks for.
+#[tokio::test(flavor = "multi_thread")]
+async fn adapter_call_streams_each_chunk_as_one_json_line_in_the_shape_the_validator_reads() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"weighing it\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one \"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"probe_echo\",\"arguments\":\"{\\\"value\\\":\\\"hello\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let input = serde_json::json!({
+        "endpoint": { "name": "chat", "kind": "openai-chat", "baseUrl": format!("{}/v1", double.base_url), "model": "m", "stream": true, "apiKey": "materialised" },
+        "request": {
+            "model": "m",
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "Call probe_echo with the value hello, then reply done." }] }],
+            "tools": [{ "name": "probe_echo", "description": "Echo a value back.", "parameters": { "type": "object", "properties": { "value": { "type": "string" } }, "required": ["value"] } }]
+        }
+    })
+    .to_string();
+
+    let (code, lines, err, _) = run_adapter_call(&input).await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(err, "");
+    let kinds: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line["type"].as_str())
+        .collect();
+    assert!(
+        kinds.iter().filter(|kind| **kind == "text-delta").count() >= 2,
+        "several text deltas: {kinds:?}"
+    );
+    assert!(kinds.contains(&"reasoning-delta"), "{kinds:?}");
+    let call = lines
+        .iter()
+        .find(|line| line["type"] == "tool-call")
+        .expect("a streamed tool call");
+    assert_eq!(call["name"], "probe_echo");
+    assert_eq!(call["arguments"], "{\"value\":\"hello\"}");
+    let done = lines.last().expect("lines");
+    assert_eq!(done["type"], "done", "the stream ends with done: {kinds:?}");
+    assert_eq!(
+        done["finishReason"], "tool_calls",
+        "the canonical finish reason of src/llm/types.ts"
+    );
+
+    let request = double.requests().pop().expect("the call went out");
+    assert!(
+        request.starts_with("POST /v1/chat/completions"),
+        "{request}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer materialised"),
+        "the materialised key is used"
+    );
+}
+
+/// A provider failure is the validator's `failure`: an error line naming the code and status, `heddle: …` on stderr,
+/// exit 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn adapter_call_reports_a_provider_failure_as_an_error_line_and_exit_one() {
+    let double = Double::start(|_| {
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 22\r\nConnection: close\r\n\r\n{\"error\":\"overloaded\"}".to_vec()
+    });
+    let input = serde_json::json!({
+        "endpoint": { "name": "chat", "kind": "openai-chat", "baseUrl": double.base_url, "model": "m", "stream": true },
+        "request": { "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }] }
+    })
+    .to_string();
+    let (code, lines, err, _) = run_adapter_call(&input).await;
+    assert_eq!(code, 1);
+    let last = lines.last().expect("an error line");
+    assert_eq!(last["type"], "error");
+    assert_eq!(last["status"], 500);
+    assert!(last["code"].as_str().is_some_and(|code| !code.is_empty()));
+    assert!(err.starts_with("heddle: "), "{err}");
+}
+
+/// Unreadable input never reaches a provider: `heddle: …` on stderr, nothing on stdout, exit 1.
+#[tokio::test]
+async fn adapter_call_refuses_unreadable_input_without_calling_anything() {
+    let (code, lines, err, _) = run_adapter_call("{\"request\":{}}").await;
+    assert_eq!(code, 1);
+    assert!(lines.is_empty());
+    assert!(err.starts_with("heddle: adapter-call reads"), "{err}");
+}
+
+/// The validator times the deltas (first, last, span): a line must be written when its chunk arrives, not when the
+/// call ends. The double holds its terminator 400ms after the first delta.
+#[tokio::test(flavor = "multi_thread")]
+async fn adapter_call_writes_a_delta_while_the_provider_is_still_writing() {
+    let first = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"early\"}}]}\n\n"
+    )
+    .into_bytes();
+    let rest = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\" late\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let base_url = staged_double(first, rest, std::time::Duration::from_millis(400));
+    let input = serde_json::json!({
+        "endpoint": { "name": "chat", "kind": "openai-chat", "baseUrl": base_url, "model": "m", "stream": true },
+        "request": { "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }] }
+    })
+    .to_string();
+    let started = std::time::Instant::now();
+    let (code, _, err, printed) = run_adapter_call(&input).await;
+    let ended = started.elapsed();
+    assert_eq!(code, 0, "{err}");
+    let writes = printed.lock().expect("buffer").clone();
+    let early_at = writes
+        .iter()
+        .find(|(_, text)| text.contains("early"))
+        .map(|(at, _)| at.duration_since(started))
+        .expect("the early delta was printed");
+    assert!(
+        early_at + std::time::Duration::from_millis(200) < ended,
+        "the first delta was written at {early_at:?}, the call ended at {ended:?}"
+    );
+}

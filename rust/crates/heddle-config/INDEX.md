@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:21:28Z
+modified: 2026-10-23T05:22:43Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -276,6 +276,7 @@ it judges.
 | 2026-10-22 | main `0e7ffea` (`12b21d1`, one event bus per run and the hook points over it, plus a status doc) | `HEDDLE_BIN=<debug build of exactly 12b21d1> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | lane `95708c4` (the turn's hooks chain the overflow recovery after the bus; the binary changed) | `HEDDLE_BIN=<debug build of exactly 95708c4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green, 0 unjudged |
 | 2026-10-22 | main `43fd346` (`3f8f744`: agent, team and events increments, a real outside component driven through the listeners, and the lockfile; `43fd346` adds a status doc) | `HEDDLE_BIN=<debug build of exactly 3f8f744> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary; the lane release build predated `3f8f744` and was not counted | 10/10 passed, verdict 0; lane gate green; the repository's own profile validates, 16 rows checked, 0 problems |
+| 2026-10-22 | lane `325cb67` (`ContextReport` has a `Default`; `heddle-context` changed) | `HEDDLE_BIN=<debug build of exactly 325cb67> sh _verifiers_/05-config-system/verify.sh --json`, and the same with the lane release build, made after the candidate on a clean lane; the lane gate with each | 10/10 passed, verdict 0, both binaries; lane gate green |
 
 ## Decisions the contract makes
 
