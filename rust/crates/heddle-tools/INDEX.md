@@ -1,5 +1,7 @@
 ---
 title: The heddle-tools crate
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T05:05:53Z
 version: 0.5.0
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
