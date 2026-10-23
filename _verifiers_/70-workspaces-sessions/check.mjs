@@ -2687,6 +2687,18 @@ test('the four session shortcuts act on the selected session, and say so when th
          * dismisses a native dialog by default. The confirmation itself is judged elsewhere; here it is stubbed to accept.
          */
         window.confirm = () => true
+        /**
+         * A chord's effect is read when it has happened, not after a fixed sleep: each one is a server round-trip and a tree
+         * re-render, which under load outlast any fixed wait. Bounded, so a chord that does nothing still fails below.
+         */
+        const until = async (done, ms) => {
+          const end = Date.now() + ms
+          while (Date.now() < end) {
+            if (done()) return true
+            await wait(100)
+          }
+          return done()
+        }
         /** One press helper, so every chord is dispatched the same way a keyboard would send it. */
         const press = (key, mods) => {
           const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods })
@@ -2711,12 +2723,12 @@ test('the four session shortcuts act on the selected session, and say so when th
 
         /** Nothing is selected: the chords that need a session refuse, and say why. */
         const beforeSelect = { note: '', prevented: press('a', { altKey: true, metaKey: true }) }
-        await wait(200)
+        await until(() => /select a session first/.test(document.getElementById('tree-note').textContent), 3000)
         beforeSelect.note = document.getElementById('tree-note').textContent
 
         /** Search needs no session and focuses its field. */
         const preventedSearch = press('k', { altKey: true, metaKey: true })
-        await wait(150)
+        await until(() => document.activeElement?.id === 'session-search', 3000)
         const searchFocused = document.activeElement !== null && document.activeElement.id === 'session-search'
         document.getElementById('session-search').value = ''
         document.getElementById('session-search').dispatchEvent(new Event('input', { bubbles: true }))
@@ -2729,12 +2741,12 @@ test('the four session shortcuts act on the selected session, and say so when th
         await wait(1200)
         window.prompt = () => 'a name from a chord'
         press('g', { altKey: true, metaKey: true })
-        await wait(1600)
+        await until(() => sessions().includes('a name from a chord'), 8000)
         const renamed = sessions()
 
         /** Fork: a second row appears named after the first. */
         press('f', { shiftKey: true, metaKey: true })
-        await wait(1800)
+        await until(() => sessions().some((label) => label?.startsWith('a name from a chord (')), 8000)
         const forked = sessions()
 
         /**
@@ -2744,7 +2756,7 @@ test('the four session shortcuts act on the selected session, and say so when th
         rows().find((row) => row.querySelector('.label')?.textContent === 'a name from a chord')?.click()
         await wait(800)
         press('a', { altKey: true, metaKey: true })
-        await wait(2600)
+        await until(() => !sessions().includes('a name from a chord'), 8000)
         const archived = sessions()
         const archiveNote = document.getElementById('tree-note')?.textContent ?? ''
 
@@ -2757,7 +2769,9 @@ test('the four session shortcuts act on the selected session, and say so when th
           archived,
           archiveNote,
         }
-      })().then((value) => JSON.stringify(value))`),
+      })().then((value) => JSON.stringify(value))`, 60_000),
+      // One script drives every chord; its own bounded waits can reach ~40 s on a slow machine, past the protocol's 10 s
+      // default for a single call — measured as "'Runtime.evaluate' did not answer within 10000ms" in a lane run.
     )
 
     /** A shortcut that needs a session says so instead of doing nothing silently. */
