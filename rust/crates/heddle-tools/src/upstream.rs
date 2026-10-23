@@ -1,4 +1,4 @@
-//! The owner's types where they have landed, and the one provisional mirror left.
+//! The owners' types, re-exported under the names this crate published.
 //!
 //! `heddle-sandbox`'s vocabulary is **the owner's own**: [`SandboxMode`], the denial and unavailable errors,
 //! [`ConfinedArgv`], [`SandboxOutcome`], [`ApprovalDecision`] and the escalation types are re-exported under
@@ -6,14 +6,9 @@
 //! `SandboxService`/`ApprovalService` without converting at every call (see [`crate::adapters`]).
 //!
 //! [`ToolSpec`] is `heddle-llm`'s type, so the registry's schemas, the agent loop's `PrepareOptions.tools` and
-//! the model's `GenerateRequest.tools` are one type. [`SessionHandle`] (`heddle-session`) is the only mirror
-//! left: it copies the TypeScript shape field for field and becomes a `pub use` when that crate lands, so a
-//! caller importing it from `heddle_tools` does not change. Nothing here has behaviour beyond construction
-//! and display: the logic stays with its owner and reaches this crate through the ports in [`crate::gates`].
-
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
+//! the model's `GenerateRequest.tools` are one type. [`SessionHandle`] is `heddle-session`'s. No mirror is left:
+//! a caller importing any of these from `heddle_tools` names the owner's type, and the logic stays with its
+//! owner, reaching this crate through the ports in [`crate::gates`].
 
 // `heddle-llm` has landed, so the tool schema the model is told is the owner's own type: the registry's
 // `describe()`, the agent loop's `PrepareOptions.tools` and the model's `GenerateRequest.tools` are one type
@@ -27,21 +22,9 @@ pub use heddle_sandbox::{
     RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode, SandboxOutcome,
 };
 
-/// What a caller gets back when it opens a session.
-///
-/// Mirror of `heddle_session::SessionHandle` (TypeScript `SessionHandle`, `src/session/store.ts`). A tool is
-/// handed one by the loop, never by the model's arguments, so a call cannot name another session.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionHandle {
-    /// The session id.
-    pub id: String,
-    /// The folder this session's files are in.
-    pub dir: PathBuf,
-    /// Where the transcript is.
-    pub transcript: PathBuf,
-    /// Where the metadata is.
-    pub meta: PathBuf,
-}
+/// What a caller gets back when it opens a session: `heddle-session`'s own handle. A tool is handed one by the
+/// loop, never by the model's arguments, so a call cannot name another session.
+pub use heddle_session::SessionHandle;
 
 #[cfg(test)]
 mod tests {

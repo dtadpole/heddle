@@ -1,4 +1,4 @@
-//! The gate ports over the real `heddle-sandbox` services.
+//! The gate ports over the real `heddle-sandbox` and `heddle-session` services.
 //!
 //! The binary builds one [`SandboxService`] and one [`ApprovalService`] from the profile rows — the sandbox
 //! crate owns both, and every sentence, mode and ladder rule — wraps them here, and hands the pair to
@@ -21,9 +21,12 @@ use heddle_sandbox::{
     validate_escalation_args,
 };
 
-use crate::gates::{ApprovalGate, EscalationError, EscalationRequest, SandboxGate};
+use heddle_session::SessionService;
+
+use crate::gates::{ApprovalGate, EscalationError, EscalationRequest, ModeResolver, SandboxGate};
 use crate::upstream::{
     ApprovalDecision, ConfinedArgv, SandboxDenial, SandboxMode, SandboxOutcome, SandboxUnavailable,
+    SessionHandle,
 };
 
 /// The [`ApprovalGate`] over an [`ApprovalService`]: the standing policy and the escalation ladder.
@@ -167,6 +170,38 @@ impl SandboxGate for Sandbox {
     }
 }
 
+/// The [`ModeResolver`] over a [`SessionService`]: a session's own `permission/mode` record outranks the
+/// deployment default.
+///
+/// A log that cannot be read resolves to the **default**, never to a wider mode: the default is the deployment's
+/// own choice, and a broken record must not be a way past it. The failure is logged.
+pub struct SessionModes {
+    service: Arc<SessionService>,
+}
+
+impl SessionModes {
+    /// Wrap the deployment's session service.
+    pub fn new(service: Arc<SessionService>) -> Self {
+        Self { service }
+    }
+}
+
+impl ModeResolver for SessionModes {
+    fn effective_mode(&self, session: &SessionHandle, default: SandboxMode) -> SandboxMode {
+        match self.service.effective_mode(session, default) {
+            Ok(mode) => mode,
+            Err(error) => {
+                tracing::warn!(
+                    target: "heddle_tools",
+                    session = session.id.as_str(),
+                    "the session's mode record could not be read, so the deployment mode applies: {error}"
+                );
+                default
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -279,6 +314,51 @@ mod tests {
         let decision = denied.check("bash");
         assert!(!decision.allowed);
         assert!(decision.reason.is_some());
+    }
+
+    fn sessions_at(root: &Path) -> Arc<SessionService> {
+        let config = heddle_session::SessionConfig {
+            root: Some(root.to_str().unwrap().to_owned()),
+        };
+        Arc::new(SessionService::new(
+            &config,
+            &heddle_config::Env::default(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn a_session_with_no_mode_record_runs_under_the_deployment_mode() {
+        let root = scratch("modes-none");
+        let sessions = sessions_at(&root);
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let modes = SessionModes::new(Arc::clone(&sessions));
+        assert_eq!(
+            modes.effective_mode(&handle, SandboxMode::WorkspaceWrite),
+            SandboxMode::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn a_sessions_own_record_outranks_the_deployment_mode() {
+        let root = scratch("modes-record");
+        let sessions = sessions_at(&root);
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let change = sessions
+            .set_mode(&handle, SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite)
+            .unwrap();
+        assert!(change.changed);
+        let modes = SessionModes::new(Arc::clone(&sessions));
+        assert_eq!(
+            modes.effective_mode(&handle, SandboxMode::WorkspaceWrite),
+            SandboxMode::ReadOnly
+        );
     }
 
     #[tokio::test]
