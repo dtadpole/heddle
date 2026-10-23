@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:41:28Z
+modified: 2026-10-23T05:42:20Z
 version: 0.4.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -61,11 +61,12 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 ## The config-boot contract
 
 What a caller does to turn command-line flags into rows, and what it may rely on afterwards. The binary follows it
-today: every command that boots goes through `rust/crates/heddle/src/commands.rs` `boot_then`, which builds
-`cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `profiles` and `config` pass
-`cli::config_args` to `command::run`. **`web` boots exactly as a run does** — the TypeScript `runWeb` calls
-`bootFromArgs` — so wiring it needs nothing new from this crate: boot through the same path as `boot_then` (steps 1–5
-below), then hand the server what step 7 lists. As of main `480d9b8`, the binary's `web` is still `todo!()`.
+today: every command that boots, `web` included, goes through `rust/crates/heddle/src/commands.rs` `boot_tree`, which
+builds `cli::layer_options` and `cli::root_overrides` and calls `boot::boot`; `boot_then` answers a booted command from
+it, and `web` hands it to `crate::web::web`. `profiles` and `config` pass `cli::config_args` to `command::run`.
+**`web` boots exactly as a run does**, as the TypeScript `runWeb` calls `bootFromArgs`. As of main `e3f9d91` it is
+routed but not yet listed in `--help`; it takes the launch secret's directory from `heddle_home(&invocation.env)`
+(step 7), and an unknown `--profile` or a missing `--config` reaches the user as this crate's sentence with exit 1.
 
 ### 1. One environment, built once
 
