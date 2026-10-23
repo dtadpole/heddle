@@ -93,6 +93,12 @@ UUID it overlaps is a placeholder; a match on a real UUID, or on text that is no
 digits or a `g` in it), is judged as before. The exemption is not tied to a rule number, because numbers are lines
 of the private list and move when it is edited.
 
+The coordinator's ruling after D-046 allows one widening: a **near-UUID**, a token shaped 8-4-4-4 with a last group
+of 10 to 14 characters that is not a valid UUID, is a placeholder when, ignoring the version and variant positions,
+every character but at most one is the same hex digit. That covers the parser's negative vectors made of placeholder
+digits (eleven or thirteen digits in the last group, a deliberate `g`); two strays, a truncated real id or a
+sequential id stay caught.
+
 ## What a range brings in
 
 `--range A..B` judges the commits in `B` that `A` lacks, and the content change **since their merge base**
@@ -113,7 +119,7 @@ forked, and read main's own fixes back as lines a behind branch adds.
 node --test _tools_/public-hygiene/_tests_/gate/unit.test.mjs
 ```
 
-Last run 2026-10-22 21:22 PDT, on 203cfff with main 4aca3b1 merged: `node --test _tools_/public-hygiene/_tests_/gate/unit.test.mjs`, 15 passed, 0 failed.
+Last run 2026-10-22 21:30 PDT, on hd/tool-developer with main c4c9292 merged: `node --test _tools_/public-hygiene/_tests_/gate/unit.test.mjs`, 17 passed, 0 failed.
 
 They judge the list format, literal and regex matching, redaction, the diff and log parsers, the identity
 check, the built-in rule, the placeholder rule (integrator-two's six measured shapes exempt, a random v4 and two

@@ -13,6 +13,7 @@ import {
   OK,
   checkIdentity,
   describe,
+  isPlaceholderNearUuid,
   isPlaceholderUuid,
   liveMatches,
   parseDiff,
@@ -299,4 +300,31 @@ test('the gate judges and fails when it is invoked through a symlinked path', (t
   const r = spawnSync(process.execPath, [link, '--range', 'HEAD~1..HEAD', '--identifiers', sb.list, '--no-identity'], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: dir } })
   assert.equal(r.status, FOUND, `a symlinked invocation must not silently pass:\n${r.stdout}${r.stderr}`)
   assert.match(r.stdout, /FAIL 1 finding/)
+})
+
+// The ruling after D-046: malformed negative vectors made only of placeholder digits.
+const NEAR_PLACEHOLDERS = [
+  '00000000-0000-0000-0000-00000000000', // eleven digits in the last group (too short)
+  '00000000-0000-0000-0000-0000000000000', // thirteen digits (too long)
+  '00000000-0000-4000-8000-00000000000g', // a non-hex last character
+]
+
+test('a malformed vector made only of placeholder digits is a placeholder near-UUID; two strays or a real id are not', () => {
+  for (const vector of NEAR_PLACEHOLDERS) assert.equal(isPlaceholderNearUuid(vector), true, `${vector} is a placeholder near-UUID`)
+  assert.equal(isPlaceholderNearUuid('00000000-0000-4000-8000-0000000000gg'), false, 'two non-hex strays are not')
+  assert.equal(isPlaceholderNearUuid('00000000-0000-0000-0000-00000000012'), false, 'two stray digits are not')
+  assert.equal(isPlaceholderNearUuid('3f9c2a71-5b4e-4d2a-9c1f-7e8b6a5d4c3'), false, 'a truncated real id is not')
+  assert.equal(isPlaceholderNearUuid('gggggggg-gggg-gggg-gggg-gggggggggggg'), false, 'the repeated character must be a hex digit')
+  assert.equal(isPlaceholderNearUuid(SIX_SHAPES[0]), false, 'a valid UUID is judged by D-046, not here')
+})
+
+test('the gate exempts the three malformed placeholder vectors and still catches the sequential id', () => {
+  const [rule] = parseIdentifiers('re:example-token-[0-9a-f]{8}-\n')
+  for (const vector of NEAR_PLACEHOLDERS) {
+    assert.equal(liveMatches(`assert!(parse("example-token-${vector}").is_none())`, rule).length, 0, `example-token-${vector} is exempt`)
+  }
+  assert.equal(liveMatches('example-token-01234567-89ab-cdef-0123-456789abcdef', rule).length, 1, 'a sequential id is not a placeholder')
+  assert.equal(liveMatches('example-token-00000000-0000-4000-8000-0000000000gg', rule).length, 1, 'two strays are caught')
+  assert.equal(liveMatches('example-token-3f9c2a71-5b4e-4d2a-9c1f-7e8b6a5d4c3', rule).length, 1, 'a truncated real id is caught')
+  for (const shape of SIX_SHAPES) assert.equal(liveMatches(`"example-token-${shape}"`, rule).length, 0, 'the D-046 shapes stay exempt')
 })
