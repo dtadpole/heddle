@@ -11,7 +11,6 @@ use crate::boot::Boot;
 use crate::builtins::BuiltinCatalog;
 use crate::cli::{Args, CommandWord};
 use crate::output::Output;
-use crate::ports::Record;
 use crate::usage::Capability;
 use crate::{Exit, Invocation};
 
@@ -182,448 +181,63 @@ pub fn booted_command(
         Some(CommandWord::Commands) => {
             owned_tools(heddle_tools::command::Command::Commands, args, boot, out)
         }
-        Some(CommandWord::Sessions) => sessions_command(args, boot, out),
-        Some(CommandWord::Transcript) => transcript_command(args, boot, out),
+        Some(CommandWord::Sessions) => owned_sessions(
+            heddle_session::command::Command::Sessions,
+            args,
+            invocation,
+            boot,
+            out,
+        ),
+        Some(CommandWord::Transcript) => owned_sessions(
+            heddle_session::command::Command::Transcript,
+            args,
+            invocation,
+            boot,
+            out,
+        ),
         Some(CommandWord::Hooks) => owned_hooks(args, out),
-        Some(CommandWord::Workspaces) => workspaces_command(args, boot, out),
-        Some(CommandWord::Workspace) => workspace_command(args, boot, out),
-        Some(CommandWord::Tree) => tree_command(args, boot, out),
-        Some(CommandWord::Session) => session_command(args, invocation, boot, out),
-        Some(CommandWord::File) => file_command(args, invocation, boot, out),
+        Some(CommandWord::Workspaces) => owned_workspaces(
+            heddle_workspace::command::Command::Workspaces,
+            args,
+            invocation,
+            boot,
+            out,
+        ),
+        Some(CommandWord::Workspace) => {
+            use crate::cli::Subcommand;
+            let command = match args.subcommand {
+                Some(Subcommand::List) => heddle_workspace::command::Command::Workspaces,
+                Some(Subcommand::Remove) => heddle_workspace::command::Command::WorkspaceRemove,
+                Some(Subcommand::Rename) => heddle_workspace::command::Command::WorkspaceRename,
+                _ => heddle_workspace::command::Command::WorkspaceAdd,
+            };
+            owned_workspaces(command, args, invocation, boot, out)
+        }
+        Some(CommandWord::Tree) => owned_workspaces(
+            heddle_workspace::command::Command::Tree,
+            args,
+            invocation,
+            boot,
+            out,
+        ),
+        Some(CommandWord::Session) => owned_workspaces(
+            heddle_workspace::command::Command::SessionNew,
+            args,
+            invocation,
+            boot,
+            out,
+        ),
+        Some(CommandWord::File) => owned_workspaces(
+            heddle_workspace::command::Command::File,
+            args,
+            invocation,
+            boot,
+            out,
+        ),
         Some(CommandWord::Goal) => owned_goal(args, invocation, boot, out),
         Some(CommandWord::Context) => owned_context(args, invocation, boot, out),
         Some(other) => unported(other.as_str(), out),
         None => unported("the configured tree", out),
-    }
-}
-
-/// `sessions`: the store's sessions, newest first, the first twenty.
-fn sessions_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let sessions = session.list();
-    if args.json {
-        out.json(&serde_json::Value::Array(sessions));
-        return Exit::Success;
-    }
-    out.out(&format!(
-        "heddle: {} session(s) in {}\n",
-        sessions.len(),
-        session.root().display()
-    ));
-    for meta in sessions.iter().take(20) {
-        out.out(&format!(
-            "  {}  {}  turns={}  {}\n",
-            field(meta, "id"),
-            field(meta, "created"),
-            meta.get("turns")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-            meta.get("title")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-        ));
-    }
-    Exit::Success
-}
-
-/// `transcript <id>`: the session's events, one compact JSON line each.
-fn transcript_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(target) = args.target.as_deref() else {
-        return out.fail("transcript needs a session id");
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let handle = match session.resume(target) {
-        Ok(handle) => handle,
-        Err(error) => return out.fail(&error.message),
-    };
-    let events = match session.events(&handle) {
-        Ok(events) => events,
-        Err(error) => return out.fail(&error.message),
-    };
-    for event in &events {
-        out.out(&serde_json::to_string(event).unwrap_or_default());
-        out.out("\n");
-    }
-    Exit::Success
-}
-
-/// The workspace service, or the sentence a profile that leaves the plugin out gets.
-fn require_workspace(
-    boot: &Boot,
-) -> Result<std::sync::Arc<dyn crate::ports::WorkspacePort>, String> {
-    boot.services.workspace().ok_or_else(|| {
-        "this profile does not load the workspace plugin, so it keeps no workspace records"
-            .to_owned()
-    })
-}
-
-/// A canonical absolute path, the spelling the workspace records and the fences compare.
-fn canonical(path: &str) -> std::path::PathBuf {
-    heddle_config::canonical_path(std::path::Path::new(path))
-}
-
-/// `workspaces`, and `workspace list`: the roots with their sessions.
-fn workspaces_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let workspace = match require_workspace(boot) {
-        Ok(workspace) => workspace,
-        Err(message) => return out.fail(&message),
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let records = workspace.list();
-    let all = session.list();
-    if args.json {
-        let mut listed = Vec::with_capacity(records.len());
-        for record in &records {
-            let mut merged = record.clone();
-            if let serde_json::Value::Object(map) = &mut merged {
-                let ids: Vec<serde_json::Value> = workspace
-                    .sessions(record, &all)
-                    .iter()
-                    .map(|meta| meta.get("id").cloned().unwrap_or(serde_json::Value::Null))
-                    .collect();
-                map.insert("sessions".to_owned(), serde_json::Value::Array(ids));
-            }
-            listed.push(merged);
-        }
-        out.json(&serde_json::Value::Array(listed));
-        return Exit::Success;
-    }
-    out.out(&format!(
-        "heddle: {} workspace(s) in {}\n",
-        records.len(),
-        workspace.file().display()
-    ));
-    for record in &records {
-        let sessions = workspace.sessions(record, &all);
-        out.out(&format!(
-            "  {}  {}  {} session(s)\n",
-            field(record, "title"),
-            field(record, "path"),
-            sessions.len()
-        ));
-        for meta in sessions.iter().take(5) {
-            out.out(&format!(
-                "    {}  turns={}\n",
-                field(meta, "id"),
-                meta.get("turns")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
-            ));
-        }
-    }
-    Exit::Success
-}
-
-/// `workspace add|list|remove|rename`.
-fn workspace_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    use crate::cli::Subcommand;
-    let Some(target) = args.target.clone() else {
-        let missing = match args.subcommand {
-            Some(Subcommand::Remove) => "workspace remove needs a workspace id or path",
-            Some(Subcommand::Rename) => "workspace rename needs a workspace id or path",
-            _ => "workspace add needs a path",
-        };
-        return out.fail(missing);
-    };
-    let workspace = match require_workspace(boot) {
-        Ok(workspace) => workspace,
-        Err(message) => return out.fail(&message),
-    };
-    match args.subcommand {
-        Some(Subcommand::List) => workspaces_command(args, boot, out),
-        Some(Subcommand::Remove) => {
-            let Some(session) = boot.services.session() else {
-                return out.fail("this profile does not load the session plugin");
-            };
-            let outcome = match workspace.remove(&target, &session.list(), args.force) {
-                Ok(outcome) => outcome,
-                Err(error) => return out.fail(&error.message),
-            };
-            if args.json {
-                out.json(&outcome);
-                return Exit::Success;
-            }
-            let removed = outcome.get("removed").cloned().unwrap_or_default();
-            out.out(&format!(
-                "heddle: removed {}  {}\n",
-                field(&removed, "title"),
-                field(&removed, "path")
-            ));
-            if let Some(adopted) = outcome.get("adoptedBy").and_then(serde_json::Value::as_str) {
-                out.out(&format!(
-                    "  {} session(s) adopted by {adopted}\n",
-                    outcome
-                        .get("ownedSessions")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0)
-                ));
-            }
-            Exit::Success
-        }
-        Some(Subcommand::Rename) => {
-            let renamed = match workspace.rename(&target, args.name.as_deref().unwrap_or("")) {
-                Ok(renamed) => renamed,
-                Err(error) => return out.fail(&error.message),
-            };
-            let Some(renamed) = renamed else {
-                return out.fail(&format!("no workspace '{target}'"));
-            };
-            if args.json {
-                out.json(&renamed);
-                return Exit::Success;
-            }
-            out.out(&format!(
-                "heddle: renamed to {}  {}\n",
-                field(&renamed, "title"),
-                field(&renamed, "path")
-            ));
-            Exit::Success
-        }
-        _ => {
-            let (record, created) = match workspace.add(&target, args.name.as_deref()) {
-                Ok(added) => added,
-                Err(error) => return out.fail(&error.message),
-            };
-            if args.json {
-                let mut merged = record;
-                if let serde_json::Value::Object(map) = &mut merged {
-                    map.insert("created".to_owned(), serde_json::Value::Bool(created));
-                }
-                out.json(&merged);
-                return Exit::Success;
-            }
-            out.out(&format!(
-                "heddle: {} {}  {}\n",
-                if created {
-                    "registered"
-                } else {
-                    "already registered"
-                },
-                field(&record, "title"),
-                field(&record, "path")
-            ));
-            Exit::Success
-        }
-    }
-}
-
-/// `tree [<path>]`: one level of the folder tree, refused outside every root.
-fn tree_command(args: &Args, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let workspace = match require_workspace(boot) {
-        Ok(workspace) => workspace,
-        Err(message) => return out.fail(&message),
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let wanted = args
-        .target
-        .as_deref()
-        .filter(|target| !target.is_empty())
-        .map(canonical);
-    if let Some(wanted) = &wanted
-        && workspace.owner(wanted).is_none()
-    {
-        return out.fail(&format!(
-            "{} is not under any workspace root; register it with 'heddle workspace add {}'",
-            wanted.display(),
-            wanted.display()
-        ));
-    }
-    let roots: Vec<crate::ports::TreeRoot> = workspace
-        .list()
-        .iter()
-        .map(|record| crate::ports::TreeRoot {
-            path: std::path::PathBuf::from(field(record, "path")),
-            title: field(record, "title"),
-            origin: record
-                .get("origin")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        })
-        .collect();
-    let mut generated = workspace.generated();
-    generated.extend(args.generated.iter().cloned());
-    let node = match session.tree(wanted.as_deref(), &roots, &session.list(), &generated) {
-        Ok(node) => node,
-        Err(error) => return out.fail(&error.message),
-    };
-    if args.json {
-        out.json(&node);
-        return Exit::Success;
-    }
-    for line in describe_tree(&node) {
-        out.out(&line);
-        out.out("\n");
-    }
-    Exit::Success
-}
-
-/// `tree` as the left column draws it: kind, name, badge, session, one level indented per depth.
-fn describe_tree(node: &Record) -> Vec<String> {
-    let children = node.get("children").and_then(serde_json::Value::as_array);
-    let path = node
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let mut lines = vec![format!(
-        "heddle: {} node(s) under {}",
-        children.map_or(0, Vec::len),
-        if path.is_empty() {
-            "the workspace level"
-        } else {
-            path
-        }
-    )];
-    walk_tree(node, 0, &mut lines);
-    lines
-}
-
-/// One node and everything under it, each child one level deeper.
-fn walk_tree(current: &Record, depth: usize, lines: &mut Vec<String>) {
-    let badge = match current.get("badge") {
-        None | Some(serde_json::Value::Null) => String::new(),
-        Some(value) => format!(" [{}]", js(value)),
-    };
-    let session = match current.get("session") {
-        None | Some(serde_json::Value::Null) => String::new(),
-        Some(session) => format!(
-            "  session {} ({} turn(s))",
-            field(session, "id"),
-            session
-                .get("turns")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        ),
-    };
-    lines.push(format!(
-        "  {}{:<9} {}{badge}{session}",
-        "  ".repeat(depth),
-        field(current, "kind"),
-        field(current, "label")
-    ));
-    if let Some(children) = current
-        .get("children")
-        .and_then(serde_json::Value::as_array)
-    {
-        for child in children {
-            walk_tree(child, depth + 1, lines);
-        }
-    }
-}
-
-/// `session new [<branch>]`: a session at a branch, its definition written there.
-fn session_command(
-    args: &Args,
-    invocation: &Invocation,
-    boot: &Boot,
-    out: &mut Output<'_>,
-) -> Exit {
-    let workspace = match require_workspace(boot) {
-        Ok(workspace) => workspace,
-        Err(message) => return out.fail(&message),
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let branch = match args.target.as_deref().filter(|target| !target.is_empty()) {
-        Some(target) => canonical(target),
-        None => heddle_config::canonical_path(&invocation.cwd),
-    };
-    if let Err(error) = workspace.ensure_owner(&branch) {
-        return out.fail(&error.message);
-    }
-    let (handle, definition) = match session.create_at(
-        &branch,
-        crate::ports::CreateAt {
-            title: args.name.clone(),
-            endpoint: args.endpoint.clone(),
-            model: args.model.clone(),
-        },
-    ) {
-        Ok(created) => created,
-        Err(error) => return out.fail(&error.message),
-    };
-    if args.json {
-        out.json(&serde_json::json!({
-            "session": handle.id,
-            "name": definition.name,
-            "definition": definition.file,
-            "log": definition.log,
-        }));
-        return Exit::Success;
-    }
-    out.out(&format!(
-        "heddle: session {} at {}\n",
-        handle.id,
-        definition.dir.display()
-    ));
-    out.out(&format!(
-        "heddle: its log is {}\n",
-        definition.log.display()
-    ));
-    Exit::Success
-}
-
-/// `file <path>`: a text file under a workspace root, refused outside every root.
-fn file_command(args: &Args, _invocation: &Invocation, boot: &Boot, out: &mut Output<'_>) -> Exit {
-    let Some(target) = args.target.as_deref() else {
-        return out.fail("file needs a path");
-    };
-    let workspace = match require_workspace(boot) {
-        Ok(workspace) => workspace,
-        Err(message) => return out.fail(&message),
-    };
-    let Some(session) = boot.services.session() else {
-        return out.fail("this profile does not load the session plugin");
-    };
-    let wanted = canonical(target);
-    if workspace.owner(&wanted).is_none() {
-        return out.fail(&format!(
-            "{} is not under any workspace root; register its folder with 'heddle workspace add <path>'",
-            wanted.display()
-        ));
-    }
-    let reading = match session.read_file_text(&wanted) {
-        Ok(reading) => reading,
-        Err(error) => return out.fail(&error.message),
-    };
-    if args.json {
-        out.json(&reading);
-        return Exit::Success;
-    }
-    let text = field(&reading, "text");
-    out.out(&text);
-    if !text.is_empty() && !text.ends_with('\n') {
-        out.out("\n");
-    }
-    Exit::Success
-}
-
-/// A value printed the way JavaScript's `String(value)` prints it.
-fn js(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "null".to_owned(),
-        serde_json::Value::Bool(flag) => flag.to_string(),
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// A string field of a record, as `String(record.field)` would print it; `-` when absent.
-fn field(record: &serde_json::Value, name: &str) -> String {
-    match record.get(name) {
-        Some(serde_json::Value::String(text)) => text.clone(),
-        Some(serde_json::Value::Number(number)) => number.to_string(),
-        Some(serde_json::Value::Bool(flag)) => flag.to_string(),
-        _ => "-".to_owned(),
     }
 }
 
@@ -716,6 +330,76 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         stderr,
     ));
     exit_code(code)
+}
+
+/// The session service the boot registered, or the sentence naming the missing plugin.
+fn session_of(boot: &Boot) -> Option<std::sync::Arc<heddle_session::SessionService>> {
+    boot.services
+        .get::<std::sync::Arc<heddle_session::SessionService>>("session")
+}
+
+/// `sessions` and `transcript`: `heddle-session`'s entry point.
+fn owned_sessions(
+    command: heddle_session::command::Command,
+    args: &Args,
+    invocation: &Invocation,
+    boot: &Boot,
+    out: &mut Output<'_>,
+) -> Exit {
+    let Some(sessions) = session_of(boot) else {
+        return out.fail("this profile does not load the session plugin");
+    };
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_session::command::run(
+        command,
+        &heddle_session::command::Args {
+            target: args.target.clone(),
+            json: args.json,
+        },
+        &heddle_session::command::Context {
+            cwd: invocation.cwd.clone(),
+            sessions: &sessions,
+        },
+        stdout,
+        stderr,
+    ))
+}
+
+/// `workspaces`, `workspace add|list|remove|rename`, `tree`, `file`, `session new`: `heddle-workspace`'s
+/// entry point. A profile without the workspace row gets the crate's own `requireWorkspace` sentence.
+fn owned_workspaces(
+    command: heddle_workspace::command::Command,
+    args: &Args,
+    invocation: &Invocation,
+    boot: &Boot,
+    out: &mut Output<'_>,
+) -> Exit {
+    let Some(sessions) = session_of(boot) else {
+        return out.fail("this profile does not load the session plugin");
+    };
+    let workspaces = boot
+        .services
+        .get::<std::sync::Arc<heddle_workspace::WorkspaceService>>("workspace");
+    let (stdout, stderr) = out.writers();
+    exit_code(heddle_workspace::command::run(
+        command,
+        &heddle_workspace::command::Args {
+            target: args.target.clone(),
+            json: args.json,
+            name: args.name.clone(),
+            force: args.force,
+            generated: args.generated.clone(),
+            endpoint: args.endpoint.clone(),
+            model: args.model.clone(),
+        },
+        &heddle_workspace::command::Context {
+            cwd: invocation.cwd.clone(),
+            sessions: &sessions,
+            workspaces: workspaces.as_deref(),
+        },
+        stdout,
+        stderr,
+    ))
 }
 
 /// `models`: `heddle-llm`'s entry point over the model row's service.
@@ -969,8 +653,7 @@ mod tests {
     }
 
     use crate::boot::{Entry, FiberState};
-    use crate::ports::{SessionHandle, SessionPort, ToolsPort};
-    use serde_json::json;
+    use crate::ports::{Record, ToolsPort};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -1003,100 +686,6 @@ mod tests {
 
         fn missing(&self) -> Vec<String> {
             Vec::new()
-        }
-    }
-
-    struct StubSession {
-        root: PathBuf,
-        sessions: Vec<Record>,
-        events: Vec<Record>,
-        tree: Option<Record>,
-        file_text: Option<String>,
-    }
-
-    impl SessionPort for StubSession {
-        fn root(&self) -> PathBuf {
-            self.root.clone()
-        }
-
-        fn list(&self) -> Vec<Record> {
-            self.sessions.clone()
-        }
-
-        fn open(&self, _id: &str) -> Option<SessionHandle> {
-            unimplemented!("not read by these commands")
-        }
-
-        fn resume(&self, id: &str) -> crate::ports::PortResult<SessionHandle> {
-            Ok(SessionHandle {
-                id: id.to_owned(),
-                transcript: self.root.join(format!("{id}.jsonl")),
-                inner: Arc::new(()),
-            })
-        }
-
-        fn current(&self, _cwd: &std::path::Path) -> crate::ports::PortResult<SessionHandle> {
-            unimplemented!("not read by these commands")
-        }
-
-        fn open_at(
-            &self,
-            _folder: &std::path::Path,
-            _options: crate::ports::OpenAt,
-        ) -> crate::ports::PortResult<SessionHandle> {
-            unimplemented!("not read by these commands")
-        }
-
-        fn create_at(
-            &self,
-            branch: &std::path::Path,
-            _options: crate::ports::CreateAt,
-        ) -> crate::ports::PortResult<(SessionHandle, crate::ports::SessionDefinition)> {
-            Ok((
-                SessionHandle {
-                    id: "session-1".to_owned(),
-                    transcript: self.root.join("session-1.jsonl"),
-                    inner: Arc::new(()),
-                },
-                crate::ports::SessionDefinition {
-                    name: "session-1".to_owned(),
-                    dir: branch.to_path_buf(),
-                    file: branch.join("_sessions_/session-1/session.yml"),
-                    log: self.root.join("session-1.jsonl"),
-                },
-            ))
-        }
-
-        fn events(&self, _handle: &SessionHandle) -> crate::ports::PortResult<Vec<Record>> {
-            Ok(self.events.clone())
-        }
-
-        fn folder(&self, _handle: &SessionHandle) -> Option<PathBuf> {
-            None
-        }
-
-        fn tree(
-            &self,
-            _wanted: Option<&std::path::Path>,
-            _roots: &[crate::ports::TreeRoot],
-            _sessions: &[Record],
-            _generated: &[String],
-        ) -> crate::ports::PortResult<Record> {
-            Ok(self.tree.clone().unwrap_or(serde_json::Value::Null))
-        }
-
-        fn read_file_text(&self, path: &std::path::Path) -> crate::ports::PortResult<Record> {
-            let Some(text) = &self.file_text else {
-                return Err(crate::ports::PortError::new("not a text file"));
-            };
-            Ok(json!({
-                "path": path.to_string_lossy(),
-                "name": path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default(),
-                "bytes": text.len(),
-                "lines": text.lines().count(),
-                "text": text,
-                "truncated": false,
-            }))
         }
     }
 
@@ -1134,91 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_print_the_store_and_keep_the_order_the_crate_gave() {
-        let mut services = Services::new();
-        let sessions: Vec<Record> = (1..=21)
-            .map(|turn| {
-                json!({
-                    "id": format!("session-{turn}"),
-                    "created": "2026-10-22T20:00:00.000Z",
-                    "turns": turn,
-                    "title": format!("a session {turn}"),
-                })
-            })
-            .collect();
-        services.provide(
-            "session",
-            Arc::new(StubSession {
-                root: PathBuf::from("/var/sessions"),
-                sessions,
-                events: Vec::new(),
-                tree: None,
-                file_text: None,
-            }) as Arc<dyn SessionPort>,
-        );
-        let boot = boot_with(services);
-        let (exit, stdout, _) = run(&boot, &["sessions"]);
-        assert_eq!(exit, Exit::Success);
-        let lines: Vec<&str> = stdout.lines().collect();
-        assert_eq!(lines[0], "heddle: 21 session(s) in /var/sessions");
-        assert_eq!(
-            lines[1],
-            "  session-1  2026-10-22T20:00:00.000Z  turns=1  a session 1"
-        );
-        assert_eq!(lines.len(), 21, "one header and the first twenty sessions");
-        let (_, json_out, _) = run(&boot, &["sessions", "--json"]);
-        let list: serde_json::Value = serde_json::from_str(&json_out).expect("a JSON array");
-        assert_eq!(
-            list.as_array().map(Vec::len),
-            Some(21),
-            "the JSON form is not cut to twenty"
-        );
-        assert_eq!(list[0]["id"], "session-1");
-    }
-
-    #[test]
-    fn transcript_writes_one_compact_json_line_per_event() {
-        let mut services = Services::new();
-        services.provide(
-            "session",
-            Arc::new(StubSession {
-                root: PathBuf::from("/var/sessions"),
-                sessions: Vec::new(),
-                events: vec![
-                    json!({ "type": "user/message", "text": "hello" }),
-                    json!({ "type": "assistant/completed", "text": "hi" }),
-                ],
-                tree: None,
-                file_text: None,
-            }) as Arc<dyn SessionPort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["transcript", "session-7"]);
-        assert_eq!(exit, Exit::Success);
-        let lines: Vec<&str> = stdout.lines().collect();
-        assert_eq!(
-            lines.len(),
-            2,
-            "one line per event, as JSON.stringify writes them"
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(lines[0]).expect("a JSON object"),
-            json!({ "type": "user/message", "text": "hello" })
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(lines[1]).expect("a JSON object"),
-            json!({ "type": "assistant/completed", "text": "hi" })
-        );
-    }
-
-    #[test]
-    fn transcript_needs_a_session_id() {
-        let (exit, stdout, stderr) = run(&boot_with(Services::new()), &["transcript"]);
-        assert_eq!(exit, Exit::Failure);
-        assert_eq!(stdout, "");
-        assert_eq!(stderr, "heddle: transcript needs a session id\n");
-    }
-
-    #[test]
     fn a_failed_row_is_reported_before_any_command_answers() {
         let boot = Boot {
             rows: Vec::new(),
@@ -1237,347 +741,6 @@ mod tests {
         assert_eq!(exit, Exit::Failure);
         assert_eq!(stdout, "");
         assert_eq!(stderr, "heddle: 1 row(s) failed to load: session\n");
-    }
-
-    #[derive(Default)]
-    struct StubWorkspace {
-        file: PathBuf,
-        records: Vec<Record>,
-        roots: Vec<PathBuf>,
-        generated: Vec<String>,
-        added: Mutex<Vec<(String, Option<String>)>>,
-    }
-
-    impl crate::ports::WorkspacePort for StubWorkspace {
-        fn file(&self) -> PathBuf {
-            self.file.clone()
-        }
-
-        fn list(&self) -> Vec<Record> {
-            self.records.clone()
-        }
-
-        fn sessions(&self, _record: &Record, all: &[Record]) -> Vec<Record> {
-            all.to_vec()
-        }
-
-        fn add(&self, path: &str, name: Option<&str>) -> crate::ports::PortResult<(Record, bool)> {
-            self.added
-                .lock()
-                .expect("the stub's lock")
-                .push((path.to_owned(), name.map(str::to_owned)));
-            Ok((
-                json!({ "title": name.unwrap_or(path), "path": path, "origin": "added" }),
-                true,
-            ))
-        }
-
-        fn rename(&self, target: &str, name: &str) -> crate::ports::PortResult<Option<Record>> {
-            if target == "missing" {
-                return Ok(None);
-            }
-            Ok(Some(json!({ "title": name, "path": "/work" })))
-        }
-
-        fn remove(
-            &self,
-            _target: &str,
-            _all: &[Record],
-            _force: bool,
-        ) -> crate::ports::PortResult<Record> {
-            Ok(json!({
-                "removed": { "title": "Old root", "path": "/old" },
-                "adoptedBy": "/work",
-                "ownedSessions": 3,
-            }))
-        }
-
-        fn owner(&self, path: &std::path::Path) -> Option<Record> {
-            self.roots
-                .iter()
-                .find(|root| path.starts_with(root))
-                .map(|root| json!({ "path": root.to_string_lossy(), "title": "root" }))
-        }
-
-        fn ensure_owner(&self, _path: &std::path::Path) -> crate::ports::PortResult<()> {
-            Ok(())
-        }
-
-        fn generated(&self) -> Vec<String> {
-            self.generated.clone()
-        }
-    }
-
-    fn services_with_session(
-        sessions: Vec<Record>,
-        events: Vec<Record>,
-        tree: Option<Record>,
-    ) -> Services {
-        let mut services = Services::new();
-        services.provide(
-            "session",
-            Arc::new(StubSession {
-                root: PathBuf::from("/sessions"),
-                sessions,
-                events,
-                tree,
-                file_text: None,
-            }) as Arc<dyn SessionPort>,
-        );
-        services
-    }
-
-    #[test]
-    fn workspaces_print_each_root_and_its_first_five_sessions() {
-        let sessions: Vec<Record> = (1..=6)
-            .map(|turn| json!({ "id": format!("s-{turn}"), "turns": turn }))
-            .collect();
-        let mut services = services_with_session(sessions, Vec::new(), None);
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                records: vec![json!({ "title": "Project", "path": "/work" })],
-                roots: vec![PathBuf::from("/work")],
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let boot = boot_with(services);
-        let (exit, stdout, _) = run(&boot, &["workspaces"]);
-        assert_eq!(exit, Exit::Success);
-        let lines: Vec<&str> = stdout.lines().collect();
-        assert_eq!(lines[0], "heddle: 1 workspace(s) in /home/ws.json");
-        assert_eq!(lines[1], "  Project  /work  6 session(s)");
-        assert_eq!(lines[2], "    s-1  turns=1");
-        assert_eq!(
-            lines.len(),
-            7,
-            "the header, the root and the first five sessions"
-        );
-        let (_, json_out, _) = run(&boot, &["workspaces", "--json"]);
-        let value: serde_json::Value = serde_json::from_str(&json_out).expect("a JSON array");
-        assert_eq!(value[0]["title"], "Project");
-        assert_eq!(
-            value[0]["sessions"].as_array().map(Vec::len),
-            Some(6),
-            "the JSON form carries every session id"
-        );
-    }
-
-    #[test]
-    fn workspace_add_prints_whether_the_root_was_new() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, stdout, _) = run(
-            &boot_with(services),
-            &["workspace", "add", "/work", "Project"],
-        );
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(stdout, "heddle: registered Project  /work\n");
-    }
-
-    #[test]
-    fn workspace_rename_names_what_it_could_not_find() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, _, stderr) = run(
-            &boot_with(services),
-            &["workspace", "rename", "missing", "New"],
-        );
-        assert_eq!(exit, Exit::Failure);
-        assert_eq!(stderr, "heddle: no workspace 'missing'\n");
-    }
-
-    #[test]
-    fn workspace_remove_reports_the_adoption() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["workspace", "remove", "/old"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: removed Old root  /old\n  3 session(s) adopted by /work\n"
-        );
-    }
-
-    #[test]
-    fn workspaces_needs_the_workspace_plugin() {
-        let (exit, _, stderr) = run(
-            &boot_with(services_with_session(Vec::new(), Vec::new(), None)),
-            &["workspaces"],
-        );
-        assert_eq!(exit, Exit::Failure);
-        assert_eq!(
-            stderr,
-            "heddle: this profile does not load the workspace plugin, so it keeps no workspace records\n"
-        );
-    }
-
-    #[test]
-    fn tree_refuses_a_path_outside_every_root() {
-        let mut services = services_with_session(Vec::new(), Vec::new(), None);
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                records: vec![json!({ "title": "Project", "path": "/work" })],
-                roots: vec![PathBuf::from("/work")],
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, _, stderr) = run(&boot_with(services), &["tree", "/elsewhere"]);
-        assert_eq!(exit, Exit::Failure);
-        assert_eq!(
-            stderr,
-            "heddle: /elsewhere is not under any workspace root; register it with 'heddle workspace add /elsewhere'\n"
-        );
-    }
-
-    #[test]
-    fn tree_prints_the_left_column() {
-        let node = json!({
-            "path": "/work",
-            "kind": "root",
-            "label": "Project",
-            "badge": null,
-            "session": null,
-            "children": [
-                {
-                    "path": "/work/notes.md",
-                    "kind": "file",
-                    "label": "notes.md",
-                    "badge": null,
-                    "session": { "id": "s-1", "turns": 2 },
-                },
-                {
-                    "path": "/work/dist",
-                    "kind": "folder",
-                    "label": "dist",
-                    "badge": "generated",
-                    "session": null,
-                },
-            ],
-        });
-        let mut services = services_with_session(Vec::new(), Vec::new(), Some(node));
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                records: vec![json!({ "title": "Project", "path": "/work" })],
-                roots: vec![PathBuf::from("/work")],
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["tree"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: 2 node(s) under /work\n  root      Project\n    file      notes.md  session s-1 (2 turn(s))\n    folder    dist [generated]\n"
-        );
-    }
-
-    #[test]
-    fn file_prints_the_text_and_adds_a_newline_only_when_it_is_missing() {
-        let mut services = Services::new();
-        services.provide(
-            "session",
-            Arc::new(StubSession {
-                root: PathBuf::from("/sessions"),
-                sessions: Vec::new(),
-                events: Vec::new(),
-                tree: None,
-                file_text: Some("one line".to_owned()),
-            }) as Arc<dyn SessionPort>,
-        );
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                records: vec![json!({ "title": "Project", "path": "/work" })],
-                roots: vec![PathBuf::from("/work")],
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["file", "/work/notes.md"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(stdout, "one line\n");
-    }
-
-    #[test]
-    fn file_refuses_a_path_outside_every_root() {
-        let mut services = Services::new();
-        services.provide(
-            "session",
-            Arc::new(StubSession {
-                root: PathBuf::from("/sessions"),
-                sessions: Vec::new(),
-                events: Vec::new(),
-                tree: None,
-                file_text: None,
-            }) as Arc<dyn SessionPort>,
-        );
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                roots: vec![PathBuf::from("/work")],
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, _, stderr) = run(&boot_with(services), &["file", "/etc/hosts"]);
-        assert_eq!(exit, Exit::Failure);
-        // The path is canonicalised first (`/etc` is `/private/etc` on macOS), so the sentence names
-        // the resolved path; the fence and its sentence are what the check asserts.
-        assert!(
-            stderr.ends_with("is not under any workspace root; register its folder with 'heddle workspace add <path>'\n"),
-            "{stderr}"
-        );
-    }
-
-    #[test]
-    fn session_new_reports_where_the_definition_and_the_log_are() {
-        let mut services = Services::new();
-        services.provide(
-            "session",
-            Arc::new(StubSession {
-                root: PathBuf::from("/sessions"),
-                sessions: Vec::new(),
-                events: Vec::new(),
-                tree: None,
-                file_text: None,
-            }) as Arc<dyn SessionPort>,
-        );
-        services.provide(
-            "workspace",
-            Arc::new(StubWorkspace {
-                file: PathBuf::from("/home/ws.json"),
-                ..StubWorkspace::default()
-            }) as Arc<dyn crate::ports::WorkspacePort>,
-        );
-        let (exit, stdout, _) = run(&boot_with(services), &["session", "new", "/work"]);
-        assert_eq!(exit, Exit::Success);
-        assert_eq!(
-            stdout,
-            "heddle: session session-1 at /work\nheddle: its log is /sessions/session-1.jsonl\n"
-        );
     }
 
     /// A profile named `dev` holding the patch that inserts these rows, under a fresh HEDDLE_HOME.
