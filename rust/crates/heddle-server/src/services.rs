@@ -348,11 +348,15 @@ pub trait SandboxService: Send + Sync {
 
     /// `permissionTransition(current, requested, confirm)`: the mode to write, or the refusal reason
     /// (an unknown mode, or an escalation to full access without `confirm: "full-access"`).
+    ///
+    /// `requested` and `confirm` are the body's fields as they arrived: `None` when absent, so an
+    /// absent mode is refused as `'undefined' is not one of …`, the sentence JavaScript's `String()`
+    /// writes and `heddle_sandbox::permission_transition` reproduces.
     fn transition(
         &self,
         current: &str,
-        requested: &Value,
-        confirm: &Value,
+        requested: Option<&Value>,
+        confirm: Option<&Value>,
     ) -> Result<String, String>;
 }
 
@@ -453,7 +457,11 @@ pub struct TeamView {
 }
 
 pub trait TeamService: Send + Sync {
-    fn view(&self, session: &str) -> TeamView;
+    /// The session's team as one fold. `Err` when the team log refuses to fold (a member active without
+    /// provisioning, a skipped task revision, a foreign team id, …); the route answers it as the
+    /// TypeScript server's catch-all does, `500 internal error: <message>`, rather than hiding a broken
+    /// team behind an empty panel.
+    fn view(&self, session: &str) -> Result<TeamView, ServiceError>;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -670,8 +678,8 @@ impl SandboxService for UnavailableSandbox {
     fn transition(
         &self,
         _current: &str,
-        _requested: &Value,
-        _confirm: &Value,
+        _requested: Option<&Value>,
+        _confirm: Option<&Value>,
     ) -> Result<String, String> {
         Err(NOT_LOADED.to_owned())
     }
@@ -883,7 +891,7 @@ mod tests {
         assert_eq!(
             harness
                 .sandbox
-                .transition("read-only", &json!("full"), &json!(null)),
+                .transition("read-only", Some(&json!("full")), None),
             Err("this service is not loaded yet".to_owned())
         );
     }

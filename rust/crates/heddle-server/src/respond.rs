@@ -106,6 +106,15 @@ pub fn plugin_missing(plugin: &str) -> Response {
     )
 }
 
+/// `500 internal error: <message>` in plain text — what the TypeScript server's catch-all writes when a
+/// route throws, so a failure a route cannot answer more precisely still says what went wrong.
+pub fn internal_error(message: impl std::fmt::Display) -> Response {
+    text(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("internal error: {message}\n"),
+    )
+}
+
 /// `404 not found` in plain text, the answer for an authenticated request no route claims.
 pub fn not_found() -> Response {
     text(StatusCode::NOT_FOUND, "not found\n")
