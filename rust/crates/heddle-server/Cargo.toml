@@ -26,4 +26,8 @@ tokio-util = "0.7"
 
 [dev-dependencies]
 http-body-util = "0.1"
+# The lane builds the whole workspace, where heddle-llm enables serde_json's preserve_order, so
+# JSON objects keep insertion order. Running this crate's own tests with the same feature is what
+# keeps an order-sensitive assertion from passing here and failing in the lane.
+serde_json = { workspace = true, features = ["preserve_order"] }
 tower = { version = "0.5", features = ["util"] }
