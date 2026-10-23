@@ -20,7 +20,7 @@ key order kept), so it depends on no session type.
 | Ported from | `src/server/ledger.ts`, `src/server/log-download.ts`, `src/server/tool-inspector.ts` |
 | Judged by | `_verifiers_/85-trajectory-view`, `_verifiers_/80-web-ui` (check-trajectory-view; the ledger half of check-runtime-context; the dock of check-composer), through the `heddle` binary |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **implemented and unit-tested — 62 tests here; the routes are mounted by `heddle-server` and the binary, which is the remaining step** |
+| Status | **implemented and unit-tested — 69 tests here; served through the real `heddle-server` router in a probe (below); the binary's `web` composition is the remaining step** |
 
 ## Public API
 
@@ -71,7 +71,7 @@ key order kept), so it depends on no session type.
 
 ## Verification so far
 
-- **Unit tests**: 62 here. (`heddle-web-composer` moved to developer-twelve under D-037 and carries its own suite; this crate builds against that crate's `SessionLookup`, `http`, `js` and `catalog` surfaces, which the two seats agreed to keep stable.) `cargo test -p heddle-web-trajectory -p
+- **Unit tests**: 69 here. (`heddle-web-composer` moved to developer-twelve under D-037 and carries its own suite; this crate builds against that crate's `SessionLookup`, `http`, `js` and `catalog` surfaces, which the two seats agreed to keep stable.) `cargo test -p heddle-web-trajectory -p
   heddle-web-composer` is green; every case of `test/ledger.test.ts`, `test/usage.test.ts`,
   `test/tool-catalog.test.ts`, `test/log-download.test.ts` and `test/tool-inspector.test.ts` is ported.
   `cargo fmt --check` and `cargo clippy --all-targets` are clean; `cargo check --workspace` is green.
@@ -85,6 +85,24 @@ key order kept), so it depends on no session type.
   and this crate agree: **ledger, rows, timeline and stats are semantically identical in all 26**.
 - **The download body**: re-serialising the same 11 logs through `ndjson` is **byte-identical** to the decoded
   TypeScript logs.
+
+- **Through the real server** (2026-10-22, ui lane tree at 525f632, a scratch probe outside the repository):
+  heddle-server's `ServerBuilder` booted with `router(host)` mounted beside its `CORE_ROUTES` (no route
+  conflict), the ledger registered as `SessionView` `"ledger"`, `stats` set through `stats_projector` over
+  `session_stats_view`, and JSON highlighted by heddle-web-files' `render_code(.., "json", gutter: false)`.
+  Through the real door (token handshake, cookie; `401` without it), 27 sessions — the 26 logs above plus one
+  adversarial case (float and exponent arguments, non-JSON arguments, markup in results, a quoted CJK title) —
+  were compared with the same answers built from `src/server/web.ts`: `stats`, the `/log` body,
+  `content-disposition` and `content-length` **identical in 27/27**; `?view=ledger` **identical as text in
+  27/27**, and byte-identical in 22/27. The five that differ do so only in the highlight classes
+  `render_code` emits (highlight.js marks JSON punctuation and `true`/`null` differently), which is
+  heddle-web-files' renderer, not this crate. The refusals answer `400 {"error":"not a session id"}` and
+  `404 {"error":"no session <id>"}` on both routes.
+- **Two divergences this probe found and fixed**: `serde_json` reads a float one ulp off without its
+  `float_roundtrip` feature (a logged `0.9999551342447491` downloaded as `…492`), now enabled on this crate's
+  dependency and therefore across the binary; and `serde_json` prints an integral double as `1.0` where
+  `JSON.stringify` prints `1`, so the inspector payload, the schema parameters, an unknown event's body and the
+  `/log` lines now go through [`js_json`](src/js_json.rs), which formats numbers by `Number#toString`.
 
 ### How to repeat the differential
 

@@ -10,6 +10,8 @@ use heddle_web_composer::catalog::schema_for;
 use heddle_web_composer::js;
 use serde::{Deserialize, Serialize};
 
+use crate::js_json;
+
 /// The code renderer, as the inspector needs it: `renderCode(source, "json", { gutter: false })`, which escapes
 /// every byte and highlights it. Implemented over `heddle-web-files` by the host.
 pub trait JsonHighlighter {
@@ -66,7 +68,7 @@ pub fn render_payload(
         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed)
     {
         return RenderedPayload {
-            html: highlighter.render_json(&js::stringify_pretty(&parsed)),
+            html: highlighter.render_json(&js_json::stringify_pretty(&parsed)),
             is_json: true,
         };
     }
@@ -98,7 +100,7 @@ pub fn inspect_tool(
         .map(|tool| SchemaInspection {
             name: tool.name.clone(),
             description: tool.description.clone(),
-            parameters: highlighter.render_json(&js::stringify_pretty(&tool.parameters)),
+            parameters: highlighter.render_json(&js_json::stringify_pretty(&tool.parameters)),
         });
     ToolInspection {
         payload: payload.html,
@@ -152,6 +154,31 @@ mod tests {
             "and the keys are still escaped text"
         );
         assert!(rendered.html.contains("\n  "), "re-indented as JSON");
+    }
+
+    #[test]
+    fn numbers_in_the_arguments_read_as_javascript_prints_them() {
+        // `JSON.stringify(JSON.parse(text), null, 2)` in the TypeScript inspector: a model's `1.0` shows as `1`,
+        // `1e3` as `1000` — measured differing against the TypeScript build before this module existed.
+        let rendered = render_payload(
+            "{\"timeout\": 1.0, \"n\": 1e3, \"half\": 0.5}",
+            &reference_highlighter(),
+        );
+        assert!(rendered.is_json);
+        assert!(
+            rendered.html.contains("&quot;timeout&quot;: 1,"),
+            "1.0 reads as 1: {}",
+            rendered.html
+        );
+        assert!(
+            rendered.html.contains("&quot;n&quot;: 1000,"),
+            "1e3 reads as 1000"
+        );
+        assert!(rendered.html.contains("&quot;half&quot;: 0.5"));
+        assert!(
+            !rendered.html.contains("1.0"),
+            "no Rust-style trailing fraction survives"
+        );
     }
 
     #[test]
