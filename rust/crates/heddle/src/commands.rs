@@ -276,9 +276,16 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
     if let Some(tools) = boot.services.tools() {
         tools.filter_to(&tools.allow_list());
     }
-    let runtime = match crate::runtime::agent_runtime(&boot.services) {
-        Ok(runtime) => runtime,
-        Err(message) => return out.fail(&message),
+    // The runtime a delegated child or a goal round already shares, else one built for this turn.
+    let runtime = match boot
+        .services
+        .get::<std::sync::Arc<heddle_agent::AgentRuntime>>("agent-runtime")
+    {
+        Some(runtime) => runtime,
+        None => match crate::runtime::agent_runtime(&boot.services) {
+            Ok(runtime) => std::sync::Arc::new(runtime),
+            Err(message) => return out.fail(&message),
+        },
     };
     let (Some(models), Some(sessions)) = (
         boot.services

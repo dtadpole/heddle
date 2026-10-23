@@ -420,6 +420,12 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
             }
+            ComponentRef::Builtin(Builtin::SubagentTool) => {
+                Some(Box::new(crate::adapters::SubagentToolComponent))
+            }
+            ComponentRef::Builtin(Builtin::GoalDriver) => {
+                Some(Box::new(crate::adapters::GoalDriverComponent))
+            }
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),

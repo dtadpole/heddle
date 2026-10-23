@@ -1244,6 +1244,126 @@ impl Component for OutsideRow {
     }
 }
 
+/// The services every agent row waits for: what the shared runtime is built from.
+const AGENT_SERVICES: [&str; 4] = ["model", "session", "context", "tools"];
+
+/// `src/plugins/subagent-tool.ts`: `delegate`, a child agent on the same runtime.
+pub struct SubagentToolComponent;
+
+impl Component for SubagentToolComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let config: heddle_agent::SubagentConfig =
+            if config.as_object().is_some_and(|map| map.is_empty()) {
+                heddle_agent::SubagentConfig::default()
+            } else {
+                serde_json::from_value(config.clone())
+                    .map_err(|error| format!("subagent-tool: {error}"))?
+            };
+        let sessions = session_service(services, "subagent-tool")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        let deps = heddle_agent::SubagentDeps {
+            store: Arc::new(heddle_agent::adapters::SessionSubagents::new(sessions)),
+            run: heddle_agent::subagent_runner(Arc::downgrade(&runtime)),
+        };
+        for tool in heddle_agent::subagent_tools(deps, config.into()) {
+            runtime
+                .tools
+                .register(tool)
+                .map_err(|error| format!("subagent-tool: {error}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// `src/plugins/goal-driver.ts`: a goal continues itself, one round at a time, on the shared runtime.
+pub struct GoalDriverComponent;
+
+/// A goal round: a turn in the goal's session, on its recorded endpoint, its source naming the goal.
+struct GoalRounds {
+    runtime: std::sync::Weak<heddle_agent::AgentRuntime>,
+    sessions: Arc<heddle_session::SessionService>,
+}
+
+impl heddle_goal::RoundRunner for GoalRounds {
+    fn run(
+        &self,
+        session: &str,
+        prompt: String,
+        source: heddle_goal::GoalRoundSource,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let runtime = self.runtime.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let session = session.to_owned();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .ok_or("the run that owned this goal has ended")?;
+            let handle = sessions
+                .open(&session)
+                .ok_or_else(|| format!("no session '{session}'"))?;
+            let endpoint = sessions
+                .meta(&session)
+                .and_then(|meta| {
+                    meta.as_map()
+                        .get("endpoint")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| runtime.model.default_endpoint())
+                .ok_or("no endpoint is configured")?;
+            let mut options = heddle_agent::RunTurnOptions::new(handle, endpoint, prompt);
+            options.source = serde_json::to_value(&source).ok();
+            heddle_agent::run_turn(&runtime, options)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl Component for GoalDriverComponent {
+    fn requires(&self) -> Vec<String> {
+        let mut requires: Vec<String> = AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        requires.push("goal".to_owned());
+        requires
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let goals = services
+            .get::<Arc<heddle_goal::GoalService>>("goal")
+            .ok_or_else(|| "goal-driver: the goal service is not provided".to_owned())?;
+        let sessions = session_service(services, "goal-driver")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        let driver = heddle_goal::GoalDriver::new(
+            goals,
+            Arc::new(GoalRounds {
+                runtime: Arc::downgrade(&runtime),
+                sessions,
+            }),
+        );
+        services.provide("goalDriver", driver);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1604,6 +1724,10 @@ mod tests {
             ("goal", json!({})),
             ("goal-tool", json!({})),
             ("turns", json!({})),
+            ("model", json!({ "readLocalConfig": false })),
+            ("context", json!({})),
+            ("subagent-tool", json!({})),
+            ("goal-driver", json!({})),
             ("greeting", json!({ "punctuation": "?" })),
             ("announce", json!({})),
             ("console", json!({})),
@@ -1640,6 +1764,7 @@ mod tests {
             "create_goal",
             "get_goal",
             "update_goal",
+            "delegate",
         ] {
             assert!(
                 names.contains(&expected.to_owned()),
@@ -1648,6 +1773,14 @@ mod tests {
         }
         assert!(services.goal().is_some());
         assert!(services.provides("turns"));
+        assert!(
+            services.provides("goalDriver"),
+            "the goal driver is composed"
+        );
+        assert!(
+            services.provides("agent-runtime"),
+            "the subagent tool and the goal driver share one runtime"
+        );
         let greeting = services
             .get::<Arc<Greeting>>("greeting")
             .expect("the greeting service");
