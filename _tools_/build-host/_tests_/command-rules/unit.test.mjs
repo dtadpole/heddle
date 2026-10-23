@@ -16,6 +16,8 @@ test('a seat lands in ~/heddle--<seat> on branch hd/<seat>; integration and the 
   assert.equal(remoteDir('live'), 'heddle-live', 'the deployment is the one exception to the pattern')
   assert.equal(branchOf('llm'), 'hd/llm')
   assert.equal(branchOf('int'), null)
+  assert.equal(branchOf('int-ui'), null, 'an integration lane is detached at main too')
+  assert.equal(branchOf('integrator-ui'), 'hd/integrator-ui', 'but the integrator\'s own seat has a branch')
   assert.equal(branchOf('live'), null)
   for (const bad of ['../etc', 'LLM', 'a b', '', '-x', 'a/b', undefined]) {
     assert.throws(() => remoteDir(bad), /kebab-case/, `rejects ${JSON.stringify(bad)}`)

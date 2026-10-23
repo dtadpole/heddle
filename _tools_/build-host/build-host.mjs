@@ -45,10 +45,13 @@ export function remoteDir(name) {
   return name === 'live' ? 'heddle-live' : `heddle--${name}`
 }
 
-/** The branch a seat works on; integration and the deployment follow main instead of a branch of their own. */
+/**
+ * The branch a seat works on. Integration worktrees (`int`, or one per lane as `int-<lane>`) and the deployment
+ * follow main instead of a branch of their own: they merge onto it and run from it.
+ */
 export function branchOf(name) {
   remoteDir(name)
-  return name === 'live' || name === 'int' ? null : `hd/${name}`
+  return name === 'live' || name === 'int' || name.startsWith('int-') ? null : `hd/${name}`
 }
 
 /**
