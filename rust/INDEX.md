@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.8.2
+version: 0.8.3
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -112,8 +112,9 @@ check's capability probe asks for every command it runs, matched as a command li
 | model endpoints (outside the goal's table) | `_verifiers_/98-model-endpoints` | 2 checks — unjudged on this machine, on either build: both need a machine-local endpoint configuration |
 
 What is **in place** is the toolchain and the seam, not a part: rust 1.99.1 from rustup, the workspace, and the
-`HEDDLE_BIN` path the checks reach the binary through — 13 of 13 `_tools_/verify-runner/_tests_/helper-rules` pass,
-and the seam's own cases are among them.
+`HEDDLE_BIN` path the checks reach the binary through — 16 of 16 `_tools_/verify-runner/_tests_/helper-rules` pass,
+and the seam's own cases are among them — and the lane gate that judges every candidate against `main`'s per-check
+baseline, whose 14 rules pass in `_tools_/verify-runner/_tests_/lane-rules`.
 
 ## Read next
 
