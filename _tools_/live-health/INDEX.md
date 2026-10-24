@@ -1,18 +1,18 @@
 ---
 title: Live health
-version: 2.0.0
-description: One read-only pass over the address the owner uses for heddle - the gate, the server behind it, the served build, a streamed turn and the console - pinned for the record.
+version: 2.1.0
+description: One read-only pass over the address the owner uses for heddle - the gate, the server behind it, the served build, a streamed turn and the console - and over the owner's Rust preview, pinned for the record.
 grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the heddle web gate's entry point in the dsh-web-ops tree, read 2026-10-22
 created: 2026-10-23T03:19:02Z
-modified: 2026-10-23T06:25:36Z
+modified: 2026-10-24T06:03:32Z
 ---
 
 # `live-health`
 
-Instance of [`_tools_`](../INDEX.md). **One read-only pass per run** over `http://127.0.0.1:8082/`, judged
-in a real browser and appended to
+Instance of [`_tools_`](../INDEX.md). **One read-only pass per run** over `http://127.0.0.1:8082/` and the
+Rust preview on `3097`, judged in a real browser and appended to
 [`../../_context_/rust-port/live-health.jsonl`](../../_context_/rust-port/live-health.jsonl).
 
 **Surface: headless.** The pass drives [`../browser-use/`](../browser-use/INDEX.md) in its own session
@@ -32,7 +32,7 @@ in a real browser and appended to
 ## Run it
 
 ```bash
-node _tools_/live-health/probe.mjs --pin        # one pass, appended; exit 0 pass, 1 fail, 3 unjudged
+node _tools_/live-health/probe.mjs --pin        # one pass, appended to the record
 node _tools_/live-health/probe.mjs --json       # the whole record of one pass
 node _tools_/live-health/probe.mjs --pin --no-preview-turn   # the preview's turn paused, by its owner's request
 node _tools_/live-health/summary.mjs --last=12  # the newest passes as a table
