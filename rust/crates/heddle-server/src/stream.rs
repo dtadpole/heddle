@@ -13,6 +13,7 @@
 //! `event: <name>\ndata: <one-line JSON>\n\n`.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -115,8 +116,21 @@ pub struct EventHub {
 #[derive(Default)]
 struct HubInner {
     next: u64,
-    subscribers: Vec<(u64, mpsc::UnboundedSender<SseFrame>)>,
+    subscribers: Vec<(u64, mpsc::UnboundedSender<SseFrame>, Arc<Delivery>)>,
     closed: bool,
+}
+
+/// How far one subscriber's reader has come: frames handed to its channel, and frames its stream has
+/// taken out (and so given to the response body). TypeScript writes every frame to every open response
+/// in the tick that publishes it; here a response task takes its frames when the runtime polls it, which
+/// on a busy machine can be after a later frame on another response. [`EventHub::flushed`] waits on
+/// these counts to restore TypeScript's order where it matters.
+#[derive(Default)]
+struct Delivery {
+    sent: AtomicU64,
+    taken: AtomicU64,
+    /// Set when the subscription is dropped: a reader that is gone is not waited on.
+    closed: AtomicBool,
 }
 
 impl EventHub {
@@ -130,9 +144,44 @@ impl EventHub {
         if inner.closed {
             return;
         }
-        inner
-            .subscribers
-            .retain(|(_, sender)| sender.send(frame.clone()).is_ok());
+        inner.subscribers.retain(|(_, sender, delivery)| {
+            let sent = sender.send(frame.clone()).is_ok();
+            if sent {
+                delivery.sent.fetch_add(1, Ordering::SeqCst);
+            }
+            sent
+        });
+    }
+
+    /// Wait, at most `limit`, until every live subscriber has taken every frame published before this
+    /// call; `true` when they all have. A turn calls this before its terminal frame, so a page never
+    /// sees its turn finish on one response while the turn's last text is still queued for another
+    /// (`/api/events`, which draws the live text). A subscriber whose reader is gone is not waited on.
+    pub async fn flushed(&self, limit: std::time::Duration) -> bool {
+        let pending: Vec<(Arc<Delivery>, u64)> = {
+            let inner = self.inner.lock().expect("the event hub lock");
+            inner
+                .subscribers
+                .iter()
+                .map(|(_, _, delivery)| {
+                    (Arc::clone(delivery), delivery.sent.load(Ordering::SeqCst))
+                })
+                .collect()
+        };
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let behind = pending.iter().any(|(delivery, sent)| {
+                !delivery.closed.load(Ordering::SeqCst)
+                    && delivery.taken.load(Ordering::SeqCst) < *sent
+            });
+            if !behind {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
     }
 
     /// Publish the bus's `session/event` payload.
@@ -148,6 +197,7 @@ impl EventHub {
     /// A new subscription that receives every frame published after this call.
     pub fn subscribe(&self) -> Subscription {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let delivery = Arc::new(Delivery::default());
         let mut inner = self.inner.lock().expect("the event hub lock");
         if inner.closed {
             // A subscription to a closed hub ends at once, rather than waiting on a sender nobody holds.
@@ -155,9 +205,9 @@ impl EventHub {
         } else {
             inner.next += 1;
             let id = inner.next;
-            inner.subscribers.push((id, sender));
+            inner.subscribers.push((id, sender, Arc::clone(&delivery)));
         }
-        Subscription { receiver }
+        Subscription { receiver, delivery }
     }
 
     /// How many subscribers are live.
@@ -181,12 +231,25 @@ impl EventHub {
 /// One subscriber's frames, in publish order. Ends when the hub closes.
 pub struct Subscription {
     receiver: mpsc::UnboundedReceiver<SseFrame>,
+    delivery: Arc<Delivery>,
 }
 
 impl Subscription {
     /// The next frame, or `None` once the hub has closed.
     pub async fn next_frame(&mut self) -> Option<SseFrame> {
-        self.receiver.recv().await
+        let frame = self.receiver.recv().await;
+        if frame.is_some() {
+            self.delivery.taken.fetch_add(1, Ordering::SeqCst);
+        }
+        frame
+    }
+
+    fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Option<SseFrame>> {
+        let polled = self.receiver.poll_recv(cx);
+        if let Poll::Ready(Some(_)) = &polled {
+            self.delivery.taken.fetch_add(1, Ordering::SeqCst);
+        }
+        polled
     }
 
     /// Only the `session` frames of one session — what a running turn relays on its own response.
@@ -198,11 +261,17 @@ impl Subscription {
     }
 }
 
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.delivery.closed.store(true, Ordering::SeqCst);
+    }
+}
+
 impl Stream for Subscription {
     type Item = SseFrame;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(cx)
+        self.poll_frame(cx)
     }
 }
 
@@ -217,7 +286,7 @@ impl Stream for SessionFrames {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            match self.inner.receiver.poll_recv(cx) {
+            match self.inner.poll_frame(cx) {
                 Poll::Ready(Some(frame)) => {
                     if frame.session_id().as_deref() == Some(self.session.as_str()) {
                         return Poll::Ready(Some(frame));
@@ -252,6 +321,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn flushed_waits_for_a_reader_that_has_not_taken_its_frames() {
+        let hub = EventHub::new();
+        let mut slow = hub.subscribe();
+        hub.publish_session_event("s", &serde_json::json!({"type": "x"}));
+        // Nobody has taken the frame: the wait runs to its limit and says so.
+        assert!(!hub.flushed(std::time::Duration::from_millis(30)).await);
+        assert!(slow.next_frame().await.is_some());
+        assert!(hub.flushed(std::time::Duration::from_millis(30)).await);
+
+        // A reader that is gone is not waited on.
+        let gone = hub.subscribe();
+        hub.publish_session_event("s", &serde_json::json!({"type": "y"}));
+        drop(gone);
+        assert!(slow.next_frame().await.is_some());
+        assert!(hub.flushed(std::time::Duration::from_millis(30)).await);
+    }
+
+    #[tokio::test]
+    async fn a_frame_another_session_filters_out_still_counts_as_taken() {
+        let hub = EventHub::new();
+        let mut other = Box::pin(hub.subscribe().for_session("other"));
+        hub.publish_session_event("s", &serde_json::json!({"type": "x"}));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        // The frame is not this reader's: it is taken and dropped, and nothing is returned.
+        assert!(other.as_mut().poll_next(&mut context).is_pending());
+        assert!(hub.flushed(std::time::Duration::from_millis(30)).await);
+    }
 
     #[test]
     fn a_session_frame_serializes_keys_in_the_typescript_order() {

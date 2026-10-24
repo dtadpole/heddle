@@ -1553,6 +1553,10 @@ async fn purify(State(state): State<AppState>) -> Response {
 // ---------------------------------------------------------------------------------------------------------
 // The turn
 
+/// The longest a turn's terminal frame waits for the `/api/events` readers to take the turn's frames. A
+/// reader that stays behind longer (a stalled client) delays `done` by this much and no more.
+const TERMINAL_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
@@ -1679,11 +1683,13 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let runner = state.harness().turns.clone();
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
+    let hub = state.events().clone();
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
     tokio::spawn(async move {
         use futures::{Stream, StreamExt};
         let mut running = Box::pin(runner.run_turn(request));
+        let mut reader_gone = false;
         let outcome = loop {
             tokio::select! {
                 frame = frames.next() => {
@@ -1693,6 +1699,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                                 // The reader is gone (the page reloaded or navigated away); the turn is the
                                 // server's, not the request's, so it runs to its end and records its
                                 // completion. Only the forwarding stops.
+                                reader_gone = true;
                                 break Some(running.as_mut().await);
                             }
                         }
@@ -1702,14 +1709,30 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 result = &mut running => break Some(result),
             }
         };
+        // The turn is over, so it stops running now: web.ts clears it in the tick the turn ends, and a page
+        // that saw `turn/completed` reads the list as not running.
+        drop(guard);
         // A fast turn can publish its last events and return in the same poll. Drain what is already
         // queued before the terminal frame, so a client never sees `done` before the answer it closes.
-        let waker = futures::task::noop_waker();
-        let mut context = std::task::Context::from_waker(&waker);
-        while let std::task::Poll::Ready(Some(frame)) = frames.as_mut().poll_next(&mut context) {
-            if sender.send(frame).is_err() {
-                break;
+        {
+            let waker = futures::task::noop_waker();
+            let mut context = std::task::Context::from_waker(&waker);
+            while let std::task::Poll::Ready(Some(frame)) = frames.as_mut().poll_next(&mut context)
+            {
+                if sender.send(frame).is_err() {
+                    reader_gone = true;
+                    break;
+                }
             }
+        }
+        // This response's own subscription is done; it is never one the flush below waits on.
+        drop(frames);
+        // web.ts writes each event to every open `/api/events` response in the tick that publishes it, so a
+        // page has drawn the turn's last text before this response's terminal frame arrives. Here each
+        // response takes its frames when the runtime polls it; wait (bounded) until the others have, so a
+        // busy machine cannot show a finished turn with its text cut short (80 check-chat-view #16).
+        if !reader_gone {
+            hub.flushed(TERMINAL_FLUSH_LIMIT).await;
         }
         let stopped = || {
             SseFrame::new(
@@ -1752,7 +1775,6 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 }
             }
         }
-        drop(guard);
     });
     let stream = futures::stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|frame| (frame, receiver))
@@ -2579,6 +2601,86 @@ mod tests {
             .to_bytes()
             .to_vec();
         (status, bytes)
+    }
+
+    #[tokio::test]
+    async fn a_turn_finishes_only_after_the_live_stream_has_taken_its_text() {
+        // web.ts writes each event to `/api/events` before the turn's `done`; a reader of the live
+        // stream that the runtime polls late must still have the turn's frames before `done` goes out.
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::new(std::sync::OnceLock::new()),
+            text: "下一段。".into(),
+        });
+        let (router, state) = app_with_runner("turn-flush", Arc::clone(&runner));
+        let mut lagging = state.events().subscribe();
+        let reader = tokio::spawn(async move {
+            // Polled late, as a busy machine schedules a page's `/api/events` response.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let mut last_taken = None;
+            while let Ok(Some(_)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), lagging.next_frame())
+                    .await
+            {
+                last_taken = Some(std::time::Instant::now());
+            }
+            last_taken.expect("the live stream received the turn's frames")
+        });
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, body) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"go"}"#).await;
+        let done_at = std::time::Instant::now();
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&body).contains("event: done"));
+        let last_taken = reader.await.unwrap();
+        assert!(
+            done_at >= last_taken,
+            "done arrived {:?} before the live stream took the turn's last frame",
+            last_taken - done_at
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_live_reader_delays_done_by_the_limit_at_most_and_never_the_running_flag() {
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::new(std::sync::OnceLock::new()),
+            text: "x".into(),
+        });
+        let (router, state) = app_with_runner("turn-stalled", Arc::clone(&runner));
+        // A client that never reads its `/api/events` response.
+        let _stalled = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let started = std::time::Instant::now();
+        let posting = {
+            let router = router.clone();
+            tokio::spawn(async move {
+                post_json(&router, "/api/turn", &cookie, r#"{"prompt":"go"}"#).await
+            })
+        };
+        // The turn ends at once; the session stops running before its `done` is held back.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let session = loop {
+            if let Some(meta) = state.harness().sessions.list().first()
+                && state.runs().completed_at(&meta.id).is_some()
+            {
+                break meta.id.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn never stopped running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        assert!(!state.runs().is_running(&session));
+        assert!(!posting.is_finished(), "done waited for the live readers");
+        let (status, body) = posting.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&body).contains("event: done"));
+        assert!(
+            started.elapsed() < TERMINAL_FLUSH_LIMIT + std::time::Duration::from_millis(800),
+            "a stalled reader held done for {:?}",
+            started.elapsed()
+        );
     }
 
     /// A runner that waits for a signal, publishes one event, then finishes a moment later.
