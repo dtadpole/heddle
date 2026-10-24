@@ -1,14 +1,14 @@
 ---
 title: Live health - outages and restarts
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: How a live-health pass tells a restart from an outage, names the hop that failed, and why it reports instead of restoring.
 status: unverified
 grounded_in:
   - source: live-deploy's measurements of the supervisor and the gate on this Mac, 2026-10-22
   - source: decision D-045 in the team's decision log, 2026-10-22
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-23T05:10:55Z
+modified: 2026-10-24T06:17:06Z
 ---
 
 # Outages and restarts
@@ -30,8 +30,8 @@ the same fact); `both` when neither answers. The launchd state of both agents is
 with `launchctl print`.
 
 **It never restores.** Under D-045 the live page has one restore chain: the supervisor, then live-deploy's
-guard. An outage is alerted to live-deploy with its hop and both agents' states, and to the coordinator if
-it persists into the next pass. The kickstart this tool once had was removed, not disabled, after two of
+guard. An outage is alerted at once to live-deploy and the coordinator, with its hop and both agents'
+states. The kickstart this tool once had was removed, not disabled, after two of
 its restores ran inside live-deploy's installs; that history is in
 [`live-health-incidents-2026-10-22.md`](../../_context_/rust-port/live-health-incidents-2026-10-22.md).
 
