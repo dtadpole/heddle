@@ -1,8 +1,8 @@
 ---
 title: The heddle-server crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-24T06:10:50Z
-version: 0.4.2
+modified: 2026-10-24T06:52:44Z
+version: 0.4.3
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -24,7 +24,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (147 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (148 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -35,7 +35,7 @@ crates exist.
 
 As of 2026-10-24 on main `445ea43`.
 
-- **On main and tested:** this crate (147 unit tests) and the `web` command that serves it, composed in
+- **On main and tested:** this crate (148 unit tests) and the `web` command that serves it, composed in
   `rust/crates/heddle/src/web.rs` (D-047): sessions, workspaces, model, turns, sandbox, approvals, goals,
   todos, team, statistics, uploads, markdown, the composer, files and trajectory routers, and the
   context row.
@@ -62,7 +62,7 @@ As of 2026-10-24 on main `445ea43`.
 | `command` | `heddle web`'s entry point under D-043: `Command::Web`, `Args` (`host`, `port`, `endpoint`, `max_rounds`, `dry_run`, `json`), `Context` (the `Harness`, the event hub, feature routers, session views, asset roots, the secret path, boot notes, a shutdown token) and `async fn run(..) -> i32`, printing `runWeb`'s lines byte for byte |
 | `adapters` | the trait implementations over the real crates, as each crate's API reaches `main`: `StoreSessions` (`SessionService` over `heddle_session::SessionService`) and `session_event_listener` (the store's event listener, publishing into the `EventHub`) |
 | `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
-| `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
+| `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer and serves every connection with Nagle off, as Node does), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
 ### How a feature crate mounts its routes
 
