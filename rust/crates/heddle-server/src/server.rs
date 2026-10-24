@@ -467,7 +467,7 @@ impl ServerBuilder {
             });
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, router)
+            let _ = axum::serve(without_nagle(listener), router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
@@ -1552,6 +1552,20 @@ async fn purify(State(state): State<AppState>) -> Response {
 
 // ---------------------------------------------------------------------------------------------------------
 // The turn
+
+/// web.ts serves through Node's http server, which turns Nagle's algorithm off on every connection it
+/// accepts (`noDelay` defaults to true), so a small frame leaves when it is written. With Nagle on, a live
+/// `/api/events` frame could sit in the kernel waiting for an acknowledgement while another connection's
+/// `done` went out first — the page then finishes a turn whose last text has not arrived (80
+/// check-chat-view #16).
+fn without_nagle(
+    listener: tokio::net::TcpListener,
+) -> impl axum::serve::Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr> {
+    use axum::serve::ListenerExt;
+    listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    })
+}
 
 /// The longest a turn's terminal frame waits for the `/api/events` readers to take the turn's frames. A
 /// reader that stays behind longer (a stalled client) delays `done` by this much and no more.
@@ -2866,6 +2880,35 @@ mod tests {
         )
         .await;
         String::from_utf8_lossy(&buffer).into_owned()
+    }
+
+    #[tokio::test]
+    async fn every_accepted_connection_has_nagle_off_as_node_s_server_does() {
+        use axum::serve::Listener;
+        // A plain accept keeps Nagle on, so the check below can tell the two apart.
+        let plain = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = plain.local_addr().unwrap().port();
+        let _client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let (stream, _) = plain.accept().await.unwrap();
+        assert!(!stream.nodelay().unwrap());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut served = without_nagle(listener);
+        let _client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let (stream, _) = served.accept().await;
+        assert!(
+            stream.nodelay().unwrap(),
+            "the served connection keeps Nagle on"
+        );
     }
 
     #[tokio::test]
