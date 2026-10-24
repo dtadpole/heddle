@@ -1,8 +1,8 @@
 ---
 title: The heddle-web-trajectory crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:26:00Z
-version: 0.4.1
+modified: 2026-10-23T14:20:19Z
+version: 0.4.2
 description: The Rust port of the Trajectory view's server side — the ledger, the ?view=ledger body, the log download and the composer dock's statistics.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -20,7 +20,7 @@ give the same ledger, rows, timeline and statistics.
 |---|---|
 | Ported from | `src/server/ledger.ts`, `log-download.ts`, `tool-inspector.ts` |
 | Judged by | `85-trajectory-view`; `80-web-ui` check-trajectory-view, check-runtime-context, check-composer's dock — through the `heddle` binary |
-| Status | implemented; 65 unit and 6 verifier-expectation tests; matches the TypeScript build through the real `heddle-server`. Waits on the binary's `heddle web` |
+| Status | implemented; 65 unit and 6 verifier-expectation tests; matches the TypeScript build; its checks pass through the `heddle` binary on main ([`VERIFICATION.md`](VERIFICATION.md)) |
 
 ## What is here
 
