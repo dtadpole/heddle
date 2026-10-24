@@ -1,6 +1,6 @@
 ---
 title: Verifier 6 — Hooks
-version: 1.0.0
+version: 1.1.0
 description: hooks intercept a model or a tool call.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -40,6 +40,14 @@ The script speaks line-delimited JSON-RPC 2.0 on stdio. It answers `initialize` 
 `next` to pass, `merge` for the post-execute rewrite (the rest of the chain and the tool run first, as the plugin's
 `next()` does), `refuse` for the pre-step stop, and a JSON-RPC error for the broken hook. The claims, the
 fixtures and their verdicts on the TypeScript build are unchanged.
+
+The processes are judged on their own by [`_tests_/process-hooks/`](_tests_/process-hooks/INDEX.md), which
+drives each over the protocol and compares every answer with its plugin's decision, so a failed check under
+`HEDDLE_BIN` is the binary's and not the fixture's:
+
+```bash
+node --test _verifiers_/60-hooks/_tests_/process-hooks/unit.test.mjs
+```
 
 ## Running it
 

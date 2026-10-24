@@ -489,4 +489,225 @@ mod tests {
             .unwrap();
         assert_eq!(same, SandboxMode::WorkspaceWrite);
     }
+
+    /// A folder under the repository's ignored `.heddle-tmp/`, never under the host temp areas: workspace-write
+    /// allows those, so an "outside" path there would prove nothing.
+    #[cfg(target_os = "macos")]
+    fn repo_scratch(label: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.heddle-tmp/heddle-tools-tests")
+            .join(format!("{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// A registry over the real services, the sandbox on the platform's own backend (Seatbelt here).
+    #[cfg(target_os = "macos")]
+    fn seatbelt_registry(work: &Path, mode: SandboxMode) -> crate::ToolRegistry {
+        let config = SandboxConfig {
+            mode,
+            workspace_root: Some(work.to_path_buf()),
+            backend: heddle_sandbox::BackendChoice::Auto,
+            ..SandboxConfig::default()
+        };
+        let host = SandboxHost {
+            cwd: work.to_path_buf(),
+            harness_home: work.join(".heddle"),
+            platform: Platform::current(),
+        };
+        let gates = gates_over(
+            Arc::new(SandboxService::new(&config, &host)),
+            Arc::new(ApprovalService::new(ApprovalsConfig::default())),
+            sessions_at(&work.join(".sessions")),
+        );
+        crate::ToolRegistry::from_config(gates, &crate::config::ToolsConfig::default())
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn bash(registry: &crate::ToolRegistry, work: &Path, command: &str) -> crate::ToolResult {
+        registry
+            .call(
+                "bash",
+                json!({ "command": command }).as_object().cloned().unwrap(),
+                crate::ToolContext::new(work),
+            )
+            .await
+    }
+
+    /// The expectations 75-permission-sandbox's check-shell-confinement judges through a turn, judged here on the
+    /// registry's own bash over the real Seatbelt backend.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn workspace_write_confines_the_shell_and_its_children_and_reports_the_denial() {
+        let root = repo_scratch("shell-write");
+        let work = root.join("work");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let registry = seatbelt_registry(&work, SandboxMode::WorkspaceWrite);
+
+        let inside = bash(&registry, &work, "echo inside > inside.txt").await;
+        assert_eq!(inside.error, None, "{inside:?}");
+        assert!(work.join("inside.txt").exists());
+
+        let outside_path = outside.join("outside.txt");
+        let denied = bash(
+            &registry,
+            &work,
+            &format!("echo outside > {}", outside_path.display()),
+        )
+        .await;
+        let error = denied
+            .error
+            .clone()
+            .unwrap_or_else(|| panic!("not denied: {denied:?}"));
+        assert_eq!(error.code, crate::codes::SANDBOX);
+        assert!(
+            error
+                .message
+                .contains("file access denied under workspace-write mode"),
+            "{}",
+            error.message
+        );
+        assert!(!outside_path.exists(), "the outside write left no file");
+
+        let child_path = outside.join("child.txt");
+        let child = bash(
+            &registry,
+            &work,
+            &format!("sh -c 'echo child > {}'", child_path.display()),
+        )
+        .await;
+        assert!(
+            child.error.is_some(),
+            "a descendant shell is confined with its parent: {child:?}"
+        );
+        assert!(!child_path.exists());
+
+        let devnull = bash(&registry, &work, "echo ok > /dev/null && echo devnull-ok").await;
+        assert_eq!(devnull.error, None, "{devnull:?}");
+        assert!(devnull.output.contains("devnull-ok"), "{devnull:?}");
+
+        let printed = bash(&registry, &work, "echo \"Operation not permitted\"").await;
+        assert_eq!(
+            printed.error, None,
+            "printing the denial sentence is not a denial: {printed:?}"
+        );
+        assert!(printed.output.contains("Operation not permitted"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn read_only_keeps_a_shell_but_denies_every_write() {
+        let root = repo_scratch("shell-read");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let registry = seatbelt_registry(&work, SandboxMode::ReadOnly);
+
+        let ran = bash(&registry, &work, "echo the-shell-ran").await;
+        assert_eq!(ran.error, None, "{ran:?}");
+        assert!(ran.output.contains("the-shell-ran"));
+
+        let denied = bash(&registry, &work, "echo denied > inside.txt").await;
+        let error = denied
+            .error
+            .clone()
+            .unwrap_or_else(|| panic!("not denied: {denied:?}"));
+        assert!(
+            error
+                .message
+                .contains("file access denied under read-only mode"),
+            "{}",
+            error.message
+        );
+        assert!(!work.join("inside.txt").exists(), "nothing landed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What 75-permission-sandbox's check-escalation judges for a run with no one to answer, through the registry
+    /// over the real services as the turn calls it: a read-only session's write is refused by the fence, the one
+    /// wider retry with a justification is refused because nobody can approve it, and nothing is written.
+    #[tokio::test]
+    async fn an_escalated_retry_with_no_one_to_answer_is_refused_and_writes_nothing() {
+        let root = scratch("escalation-unattended");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let sessions = sessions_at(&root.join("sessions"));
+        let session = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let config = SandboxConfig {
+            mode: SandboxMode::ReadOnly,
+            workspace_root: Some(work.clone()),
+            backend: BackendChoice::Disabled,
+            ..SandboxConfig::default()
+        };
+        let host = SandboxHost {
+            cwd: work.clone(),
+            harness_home: root.join(".heddle"),
+            platform: Platform::current(),
+        };
+        // The verifier's approvals row is `mode: allow`, the default, with nothing attached to answer a question.
+        let registry = crate::ToolRegistry::from_config(
+            gates_over(
+                Arc::new(SandboxService::new(&config, &host)),
+                Arc::new(ApprovalService::new(ApprovalsConfig::default())),
+                Arc::clone(&sessions),
+            ),
+            &crate::config::ToolsConfig::default(),
+        );
+        let context = || {
+            let mut context = crate::ToolContext::new(&work);
+            context.session = Some(session.clone());
+            context
+        };
+        let args = |value: serde_json::Value| value.as_object().cloned().unwrap();
+
+        let denied = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "escalated.txt", "content": "x" })),
+                context(),
+            )
+            .await;
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some(crate::codes::SANDBOX),
+            "{denied:?}"
+        );
+
+        let retried = registry
+            .call(
+                "write_file",
+                args(json!({
+                    "path": "escalated.txt",
+                    "content": "x",
+                    "sandbox_permissions": "workspace-write",
+                    "justification": "the session started read-only and this file is inside its workspace"
+                })),
+                context(),
+            )
+            .await;
+        let error = retried
+            .error
+            .clone()
+            .unwrap_or_else(|| panic!("not refused: {retried:?}"));
+        assert_eq!(error.code, crate::codes::ESCALATION_REFUSED);
+        assert!(
+            error.message.to_lowercase().contains("no one can approve"),
+            "the call says no one could approve it: {}",
+            error.message
+        );
+        assert!(!work.join("escalated.txt").exists(), "nothing was written");
+        assert_eq!(
+            sessions
+                .effective_mode(&session, SandboxMode::ReadOnly)
+                .unwrap(),
+            SandboxMode::ReadOnly,
+            "the session's own mode never moved"
+        );
+    }
 }

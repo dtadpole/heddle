@@ -87,7 +87,12 @@ function redact(line, rule) {
 // all-ones forms, each with or without one trailing counter digit. A random UUID never
 // meets that. Tests must still carry well-formed ids, and building one at runtime to slip
 // past the gate is not allowed (D-044), so the gate tells the two apart instead.
-const UUID = /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/gi
+// A token shaped like a UUID, including the malformed vectors a parser test needs (a
+// group one character short or long, a non-hex character): one regex finds both, and
+// each token is then judged as a UUID or as a near-UUID.
+const UUID_LIKE = /(?<![0-9a-z])[0-9a-z]{7,9}-[0-9a-z]{3,5}-[0-9a-z]{3,5}-[0-9a-z]{3,5}-[0-9a-z]{11,13}(?![0-9a-z])/gi
+const NEAR_SHAPE = /^([0-9a-z]{7,9})-([0-9a-z]{3,5})-([0-9a-z]{3,5})-([0-9a-z]{3,5})-([0-9a-z]{11,13})$/
+const VALID_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function isPlaceholderUuid(text) {
   const hex = String(text).replace(/-/g, '').toLowerCase()
@@ -98,17 +103,44 @@ export function isPlaceholderUuid(text) {
   return Math.max(...counts.values()) >= 29
 }
 
+// The coordinator's rule-22 ruling (21:18, applied 21:27) allows one widening beyond
+// D-046: a near-UUID. It is a token shaped like a session id that is not a valid UUID,
+// whose groups may each be one character short or long and which may carry one non-hex
+// character; it is a placeholder when every hex digit, apart from the version nibble
+// (the first character of the third group) and the variant nibble (the first of the
+// fourth), is one and the same digit. That covers a parser's negative vectors: the nil
+// form with eleven or thirteen digits in its last group, and the v4-shaped zeros ending
+// in a deliberate non-hex letter. Unlike a valid UUID, no stray hex digit is allowed, and
+// a near-UUID of random digits is never a placeholder. (Shapes are described in words
+// here: a literal would itself be judged by the gate on main.)
+export function isPlaceholderNearUuid(text) {
+  const token = String(text).toLowerCase()
+  if (VALID_UUID.test(token)) return false
+  const match = NEAR_SHAPE.exec(token)
+  if (!match) return false
+  const [first, second, third, fourth, fifth] = match.slice(1)
+  const rest = [...(first + second + third.slice(1) + fourth.slice(1) + fifth)]
+  const nonHex = rest.filter((ch) => !/[0-9a-f]/.test(ch))
+  if (nonHex.length > 1) return false
+  const hex = rest.filter((ch) => /[0-9a-f]/.test(ch))
+  return hex.length > 0 && new Set(hex).size === 1
+}
+
+export function isPlaceholderToken(text) {
+  return VALID_UUID.test(String(text)) ? isPlaceholderUuid(text) : isPlaceholderNearUuid(text)
+}
+
 // The matches of a rule that count. A match is exempt only when it overlaps at least one
-// UUID and every UUID it overlaps is a placeholder; a match on a real UUID, or on text
-// with no full UUID in it, is judged exactly as before. The rule is not named by its
+// UUID-shaped token and every such token it overlaps is a placeholder; a match on a real
+// id, or on text with no UUID-shaped token in it, is judged exactly as before. The rule is not named by its
 // number, because numbers are lines of the private list and move when it is edited.
 export function liveMatches(text, rule) {
   const matches = [...text.matchAll(rule.re)]
   if (matches.length === 0) return matches
-  const spans = [...text.matchAll(UUID)].map((match) => ({
+  const spans = [...text.matchAll(UUID_LIKE)].map((match) => ({
     start: match.index,
     end: match.index + match[0].length,
-    placeholder: isPlaceholderUuid(match[0]),
+    placeholder: isPlaceholderToken(match[0]),
   }))
   if (spans.length === 0) return matches
   return matches.filter((match) => {

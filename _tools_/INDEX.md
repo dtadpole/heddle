@@ -4,6 +4,8 @@ version: 1.0.0
 description: The scripts this repository runs on itself, kept out of the code it ships.
 grounded_in:
   - source: human-authored
+created: 2026-10-11T09:56:12Z
+modified: 2026-10-24T04:53:42Z
 ---
 
 # `_tools_`
@@ -23,13 +25,14 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 | [`model-validation/`](model-validation/INDEX.md) | drives every configured model through the real adapter and records streaming, declared reasoning levels and tool calls, beside a fingerprint of the configuration it validated |
-| [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots on this Mac, so the team's sessions share its cores and disk |
-| [`load-check/`](load-check/INDEX.md) | one plain report of the Mac's disk, load, swap, build-slot owners and worktree processes, with ok/warn/stop exit codes |
-| [`public-hygiene/`](public-hygiene/INDEX.md) | the gate before `main`: a private identifier list, no internal names in files, paths, messages or identities |
-| [`reflection-sync/`](reflection-sync/INDEX.md) | fast-forwards the team's shared checkout and refuses rather than overwrite another session's work |
-| [`record-commit/`](record-commit/INDEX.md) | commits record edits from a temporary worktree at a fresh origin/main, refusing a stale base and unioning append-only logs |
-| [`review-collect/`](review-collect/INDEX.md) | one read-only page of raw evidence for a member review: tip, commits and files against the write scope, uncommitted paths, last report, recorded runs, action-log lines since the last review |
-| [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host, for the Rust port (not used while the port builds locally) |
+| [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots shared by the team's sessions |
+| [`load-check/`](load-check/INDEX.md) | the Mac's disk, load, swap and build-slot report, with ok/warn/stop exit codes |
+| [`public-hygiene/`](public-hygiene/INDEX.md) | the gate before `main`: no private identifier in files, paths, messages or identities |
+| [`reflection-sync/`](reflection-sync/INDEX.md) | fast-forwards the shared reflection checkout, refusing rather than overwrite others' work |
+| [`record-commit/`](record-commit/INDEX.md) | commits record edits from a temporary worktree at a fresh origin/main, every file or none |
+| [`review-collect/`](review-collect/INDEX.md) | one read-only page of raw evidence for a member review |
+| [`build-host/`](build-host/INDEX.md) | per-member worktrees on a Linux build host (unused while the port builds locally) |
+| [`live-health/`](live-health/INDEX.md) | one read-only pass over the owner's live heddle address - gate, server, served build, a streamed turn, the console - pinned for the record every 20 minutes |
 
 A tool belongs here rather than under `src/` when its subject is *this repository*
 rather than the harness. The test is the one the conventions give: if the package

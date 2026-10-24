@@ -20,6 +20,7 @@
 //! | [`command`] | the entry point the binary calls from `web`'s startup edge: recover every team and print the line |
 //! | [`ports`] | the seams to the session store, the agent loop and the live-turn registry |
 //! | `testing` | in-memory doubles of the ports (feature `test-doubles`) |
+//! | `compose` | the `team` row composed over the session store, the agent, the tool registry and the server (feature `compose`) |
 //!
 //! The contract landed first; the implementation follows it module by module, with unit tests beside the code.
 
@@ -35,6 +36,9 @@ pub mod tool;
 
 #[cfg(any(test, feature = "test-doubles"))]
 pub mod testing;
+
+#[cfg(feature = "compose")]
+pub mod compose;
 
 pub use error::{TeamError, TeamErrorCode, TeamResult};
 pub use plugin::{TeamConfig, TeamPlugin, TeamPluginDeps};

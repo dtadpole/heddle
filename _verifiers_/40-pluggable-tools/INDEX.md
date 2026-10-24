@@ -1,6 +1,6 @@
 ---
 title: Verifier 4 — Pluggable Tools
-version: 1.0.0
+version: 1.1.0
 description: tools are configurable and pluggable.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -20,6 +20,32 @@ a display or a window.
 ## What decides it
 
 `check-tools.mjs` lists and calls the built-in tools, and `check-plugins.mjs` adds a fixture tool through a layer file.
+
+## Under `HEDDLE_BIN`
+
+The TypeScript build loads each fixture tool as a `.ts` plugin; a Rust binary cannot load TypeScript, so under
+`HEDDLE_BIN` each fixture tool is a **process** instead — part 4's Rust shape in `rust/ULTIMATE_GOAL.md`. The row
+names a component manifest beside the profile, in the shape D-031 froze:
+
+```yaml
+# shout-tool.component.yml; the row is `name: ./shout-tool.component.yml`
+program: "/path/to/node"
+args:
+  - ./shout-tool.mjs
+```
+
+The script speaks line-delimited JSON-RPC 2.0 on stdio (`rust/crates/heddle-tools/PROTOCOL.md`). It answers
+`initialize` with the spec its plugin registers, and each `tools/call` the way the plugin's `run` does: `shout`
+asks the host `sandbox/assertWritable` for `shout.txt` under the workspace root before writing it, the shadowing
+script declares `read_file`, and the malformed one declares `{"name":"","description":""}`. The claims, the `.ts`
+fixtures and their verdicts on the TypeScript build are unchanged.
+
+The processes are judged on their own by [`_tests_/process-tools/`](_tests_/process-tools/INDEX.md), which drives each
+over the protocol with the suite playing the host, so a failed check under `HEDDLE_BIN` is the binary's:
+
+```bash
+node --test _verifiers_/40-pluggable-tools/_tests_/process-tools/unit.test.mjs
+```
 
 ## Running it
 

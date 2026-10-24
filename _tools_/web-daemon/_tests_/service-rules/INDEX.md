@@ -1,5 +1,7 @@
 ---
 title: Web daemon service rules
+created: 2026-10-23T01:37:16Z
+modified: 2026-10-23T05:14:51Z
 version: 1.0.0
 description: Unit tests for the readers and verdicts in service.mjs that 95-web-daemon and 96-deployment share.
 grounded_in:

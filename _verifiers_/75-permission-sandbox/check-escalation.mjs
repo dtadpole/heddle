@@ -114,7 +114,7 @@ function startWeb(h) {
         child.kill('SIGKILL')
         reject(new Error(`the server printed no URL within 15s\n${output}`))
       }
-    }, 15_000)
+    }, 15_000).unref()
   })
 }
 
@@ -171,7 +171,7 @@ async function withHarness(label, body) {
 }
 
 test('an approved retry runs the one denied call under the wider mode, and the session stays read-only', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, /^  web\b/m.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness('approved', async (h, server) => {
     const turn = startTurn(server, { prompt: 'write inside' })
     const pending = await waitForApproval(server)
@@ -195,7 +195,7 @@ test('an approved retry runs the one denied call under the wider mode, and the s
 })
 
 test('a rejected retry leaves the effect undone', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, /^  web\b/m.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   await withHarness('rejected', async (h, server) => {
     const turn = startTurn(server, { prompt: 'write inside' })
     const pending = await waitForApproval(server)

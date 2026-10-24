@@ -4,6 +4,8 @@ version: 1.0.0
 description: Unit tests for the load-check report — its parsers, its thresholds and the exit code it hands the coordinator.
 grounded_in:
   - source: _tools_/load-check/load-check.mjs
+created: 2026-10-23T03:21:31Z
+modified: 2026-10-23T03:21:31Z
 ---
 
 # `report`

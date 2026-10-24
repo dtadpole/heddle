@@ -4,6 +4,8 @@ version: 1.0.0
 description: Unit tests for review-collect — every section of the review page, built from a scratch repository and a fake seat.
 grounded_in:
   - source: _tools_/review-collect/review-collect.mjs
+created: 2026-10-23T04:01:55Z
+modified: 2026-10-23T04:01:55Z
 ---
 
 # `page`

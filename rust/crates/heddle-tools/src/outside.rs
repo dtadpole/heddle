@@ -38,13 +38,15 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// One outside component, as configuration declares it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutsideComponentSpec {
-    /// The configuration row's id; every error and log line names it.
+    /// The configuration row's id (not the manifest's file name); every error and log line names it, as
+    /// `config --validate` and the boot's failed-row report do.
     pub row: String,
     /// The program to run: an executable (a script with a shebang is enough).
     pub program: PathBuf,
     /// Its arguments.
     pub args: Vec<String>,
-    /// Its working directory: the folder of the layer file that declared it.
+    /// Its working directory: the folder of its component manifest, so the `args` the manifest writes relative to
+    /// itself resolve.
     pub cwd: PathBuf,
     /// Variables added to the inherited environment.
     pub env: Vec<(String, String)>,

@@ -1,11 +1,13 @@
 ---
 title: The heddle-sandbox crate
-version: 0.3.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T13:14:11Z
+version: 0.7.1
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
-  - source: rust/ULTIMATE_GOAL.md
-  - source: src/sandbox/*.ts and src/approvals/service.ts, read 2026-10-22
-  - source: _verifiers_/75-permission-sandbox and _verifiers_/80-web-ui/check-approval.mjs, read 2026-10-22
+  - source: rust/ULTIMATE_GOAL.md at 5c113e8
+  - source: src/sandbox/*.ts at 8047667 and src/approvals/service.ts at 4d4075f (each one's last change), read 2026-10-22
+  - source: _verifiers_/75-permission-sandbox at f473854 and _verifiers_/80-web-ui/check-approval.mjs at b71a1f0, run 2026-10-23
 ---
 
 # `rust/crates/heddle-sandbox`
@@ -58,7 +60,8 @@ is inside its root (the TypeScript prefix test refuses it).
 
 ## What the other crates must do with it
 
-The verifiers judge the binary, so the checks pass only when these land beside this crate:
+These obligations have landed, and both verifiers pass through the binary (task 7 below). The table stays as the
+contract a change to any of these crates has to keep:
 
 | Crate (seat) | Obligation |
 |---|---|
@@ -66,7 +69,7 @@ The verifiers judge the binary, so the checks pass only when these land beside t
 | `heddle-agent` (developer-five) | the runtime-context snapshot's `sandbox:policy` section is `policy_statement(&sandbox.policy(effective_mode))` |
 | `heddle-session` (developer-eight) | the `permission/mode` event and the effective-mode fold use `SandboxMode` |
 | `heddle-server` (developer-ten) | hold an `AnswererGuard` while serving; forward `subscribe()` as SSE `event: approval`; `GET /api/approvals` → `{requests: pending_requests()}`; `POST /api/approvals/<id>`: `is_approval_id` else 400, `Answer::parse` else 400, `answer` false → 409; the permission route runs `permission_transition(effective, body.mode, body.confirm)` and refuses with 409 |
-| `heddle` boot (developer-two) | build both services from the profile rows (`sandbox`, `approvals`) and share them as `Arc` |
+| `heddle` boot (developer-two), and its web file (developer-ten, D-047) | build both services from the profile rows (`sandbox`, `approvals`) and share them as `Arc`; `web` gives the server the approvals service with the server attached as its answerer |
 
 ## Port plan
 
@@ -83,23 +86,80 @@ heddle-sandbox`); each task is a commit on `hd/developer-seven`.
 | 6 | the ladder | `escalation.rs` (`approve_escalation`) | the same mode needs no ask; not-wider and malformed refusals; the ask's reason and display reason carry the justification verbatim; each outcome maps to its refusal sentence; it runs with `ApprovalService` as the channel |
 | 7 | judged through the binary | none here | once tools, server, session and boot compose it: `75-permission-sandbox` and `80-web-ui` check-approval through `HEDDLE_BIN`, recorded with the command and date |
 
-**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (117 tests at 2026-10-22, `cargo test -p
+**Landed so far:** tasks 1 to 6 are implemented, with their unit tests (121 tests at 2026-10-22, `cargo test -p
 heddle-sandbox`), including the task 6 ladder through `ApprovalService` as its channel and the recorded approval
 fixture, which a live `approve_escalation` call is proven to reproduce byte for byte up to the run's `id` and `at`.
-Task 7 is the judged-through-the-binary row, which needs the tools, server, session and boot crates. The real
-Seatbelt profile was checked on macOS: the read-only profile accepts `/usr/bin/true`, a write under it is denied
-with `Operation not permitted`, and the canonical `/private/tmp` subpath admits the same write.
+Task 7 is judged: both verifiers pass through the binary, as the section below records.
+
+**The shell seam is judged on the real macOS runner, not only with doubles.** `service::seatbelt_end_to_end`
+(macOS only) spawns exactly what the `bash` tool spawns, `confine(["/bin/sh", "-c", cmd], mode)` in the workspace.
+It classifies the real exit code and stderr, one test per claim `check-shell-confinement.mjs` makes:
+- `workspace-write` admits the inside write and denies the outside one, including from a descendant shell;
+- `/dev/null` stays writable, and a command that only prints `Operation not permitted` is not a denial;
+- `read-only` runs a shell but denies every write;
+- `danger-full-access` is the only bypass;
+- `backend: none` fails closed without running anything.
+A mutation that turns the profile's `(deny file-write*)` into `allow` fails the `workspace-write` and `read-only`
+cases, so the tests can fail.
+
+## Task 7, judged through the binary
+
+**Both verifiers pass through `HEDDLE_BIN`.** The binary is the backend lane's release build of candidate `e9a0836`
+(23:42 PDT on 2026-10-22, sha256 prefix `eb58b7447519ee38`). That candidate is `main` `b7bfb32` plus `7d52ad0`, which
+advertises `web` and `--turn` under D-048. No shim was involved, and the verifiers were at `f473854` (75) and
+`b71a1f0` (check-approval).
+
+| Runner | 75-permission-sandbox | check-approval |
+|---|---|---|
+| `node _tools_/verify-runner/run.mjs <check> --json`, each file | 17 pass, 0 fail, 0 skipped | 3 pass |
+| `sh _verifiers_/75-permission-sandbox/verify.sh` | verdict 0 on all 6 files | — |
+| `node _tools_/verify-runner/lane.mjs 75-permission-sandbox` | "17 checks: 17 pass, 0 fail, 0 unjudged", lane green | — |
+| `run.mjs` again | — | 3 pass |
+
+It is kept judged: every change on `main` to this crate, approvals, the turn or `web.rs` is re-run. The team's
+status table in `rust/INDEX.md` carries the current count. The rehearsals that led here follow.
+
+### Rehearsals before the capability was advertised
+
+Not yet a verdict: `main`'s binary advertises neither `--turn` nor `web` (`usage::SERVED`), so the lane's status run
+reports 75 as unjudged. All three runs below are rehearsals, with
+`HEDDLE_BIN=<binary> node _tools_/verify-runner/run.mjs <check> --json`. The first two ran on 2026-10-22 with
+the verifiers at `d649349` (75) and `5ed8deb` (check-approval). The third and fourth ran on 2026-10-23 UTC with them at
+`d649349` and `b71a1f0`.
+
+| Binary | 75-permission-sandbox | check-approval |
+|---|---|---|
+| The backend lane's release build of candidate `e5f2e80`. A shim adds only the `--turn` help line and passes every other call through | 10 pass (`check.mjs` 5, `check-shell-confinement` 4, unattended `check-escalation` 1), 7 unjudged | not run |
+| Debug build of `hd/developer-two` `f45993a` with `hd/developer-two-web` `b6995b6` and `hd/integrator-two` `7d26c6b` merged in. Scratch-only edits: `SERVED` gains `Turn`, and the web branch's sandbox port takes `Option<&Value>` as the server's trait does | 10 pass, 7 fail | 3 fail |
+| The backend lane's release build of 22:40 PDT, after `heddle web` was served on `main` in `e3f9d91` (sha256 prefix `934f4604699ca7b7`). A shim adds only the `--turn` and `web` help lines | 13 pass, 4 fail | 3 fail |
+| A debug build of unmodified `main` `97f7435`, which has the approvals service (`5e431f6`) and the session-log route (`c93d2f4`) (sha256 prefix `436ce3c2f569f4d1`). The same help-line shim. Run twice | **17 pass, 0 fail, twice** | **3 pass, twice** |
+
+**On `main` `97f7435` both verifiers pass in full**, apart from the advertisement. `usage::SERVED` still lacks `Turn`
+and `Web`, so the lane's probes skip. Adding them is the binary owner's switch. The failures of the earlier runs were
+all outside this crate:
+- In the second run, the `web` command gave the server only the models and sandbox services, so `POST /api/turn`
+  answered `400 {"error":"this service is not loaded yet"}` (reproduced by hand).
+- In the third run, sessions and turns are served, and the two `check-session-mode` checks pass. Two gaps remain:
+  - the server is given no approvals service, so `check-escalation`'s two web cases and all three `check-approval`
+    checks never see an approval question;
+  - the server has no `GET /api/sessions/<id>/log` route (TypeScript serves it at `src/server/web.ts:1203`), so
+    one `check-policy-context` and one `check-runtime-context` check read `not found`.
+
+**Run 75 from a checkout outside the host temp areas.** Its "outside" paths are folders under
+`<checkout>/.heddle-tmp/`. From a checkout under `/tmp` those folders are inside a root `workspace-write` admits.
+With the same binary, three checks failed from `/tmp` and none from `~/heddle--developer-seven`.
 
 ## Risks, stated now
 
-- **On Linux the verifier cannot pass as written.** `check-shell-confinement.mjs` skips its three kernel checks
-  off macOS, and the shared runner (`_tools_/verify-runner/run.mjs`) reports any skip as unjudged (exit 3). The
-  Linux rungs are ported here, but the build host has no `bwrap` (measured 2026-10-22: not on `PATH`, unprivileged
-  user namespaces work) and no Landlock (absent from `/sys/kernel/security/lsm`). Passing needs a Linux branch in
-  that check (the bwrap dialect is `read-only file system`) and `bwrap` on the host — the backend verifiers'
-  integrator and the host's owner decide, not this crate.
-- The verifiers' profiles name TypeScript module paths (`src/sandbox/service.ts`) for each row; mapping a row to
-  this crate is the configuration and boot crates' job.
+- **Off macOS the verifier cannot pass as written.** `check-shell-confinement.mjs` skips its three kernel checks
+  off macOS, and the shared runner (`_tools_/verify-runner/run.mjs`) reports any skip as unjudged (exit 3). The team
+  judges on macOS, where all four checks run and pass. The Linux rungs are ported here, but the Linux build host
+  used before had no `bwrap` (measured 2026-10-22: not on `PATH`, unprivileged user namespaces work) and no Landlock
+  (absent from `/sys/kernel/security/lsm`). Judging there would need a Linux branch in that check (the bwrap dialect
+  is `read-only file system`) and `bwrap` on the host. The backend verifiers' integrator decides that, not this crate.
+- Resolved: the verifiers' profiles name TypeScript module paths (`src/sandbox/service.ts`) for each row, and the
+  binary's boot recognises a name ending in `src/<module>.ts` as the built-in row (`rust/crates/heddle/src/builtins.rs`).
+  75's profiles were validated through the binary on 2026-10-22.
 - Adding the four dependencies changes `rust/Cargo.lock`, which this seat does not commit; it regenerates on merge.
 
 ## Read next

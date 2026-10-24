@@ -24,6 +24,12 @@ printf '+%s\\n' "$$" >> "$FAKE_LOG"
 if [ -n "\${FAKE_HIJACK:-}" ]; then
   printf '1 %s hijacked\\n' "$(date +%s)" > "$FAKE_HIJACK"
 fi
+# Held until released; a holder whose folder is gone (its test failed and cleaned up)
+# or that has waited a minute exits, so a failed test never leaves processes behind.
+if [ -n "\${FAKE_HOLD:-}" ]; then
+  n=0
+  while [ ! -f "\$FAKE_HOLD" ] && [ -d "\$(dirname "\$FAKE_HOLD")" ] && [ "\$n" -lt 600 ]; do sleep 0.1; n=\$((n + 1)); done
+fi
 sleep "\${FAKE_SLEEP:-0}"
 printf -- '-%s\\n' "$$" >> "$FAKE_LOG"
 exit "\${FAKE_RC:-0}"
@@ -134,12 +140,17 @@ test('a caller\'s own -j is kept, in every spelling, and no -j is added to fmt',
   assert.deepEqual(args(sb), ['check', '-j2'])
 })
 
-test('six at once never exceed the three slots, and all of them finish', async (t) => {
-  const sb = sandbox(t)
-  const runs = Array.from({ length: 6 }, () => start(sb, ['check'], { FAKE_SLEEP: '0.5' }))
+// Concurrency is proven by holding every fake cargo until released, not by timing: on a
+// loaded Mac short sleeps can run one after another and a peak of three never happen.
+async function holdAndRelease(sb, { runners, expectBusy, extra = {} }) {
+  const release = join(sb.dir, 'release')
+  const runs = Array.from({ length: runners }, () => start(sb, ['check'], { FAKE_HOLD: release, ...extra }))
+  await waitForStatus(sb, `summary: busy=${expectBusy} `)
+  // One full retry cycle of the waiting runners (they poll every 3 s): none may get in.
+  await new Promise((done) => setTimeout(done, 3500))
+  const startedWhileHeld = logLines(sb).filter((line) => line.startsWith('+')).length
+  writeFileSync(release, '')
   const results = await Promise.all(runs.map((r) => r.done))
-  for (const r of results) assert.equal(r.code, 0, r.stderr)
-
   const events = logLines(sb).filter((l) => l.startsWith('+') || l.startsWith('-'))
   let current = 0
   let peak = 0
@@ -147,8 +158,16 @@ test('six at once never exceed the three slots, and all of them finish', async (
     current += e.startsWith('+') ? 1 : -1
     peak = Math.max(peak, current)
   }
-  assert.equal(peak, 3, 'three slots, so three commands at most')
-  assert.equal(results.length, 6)
+  return { results, startedWhileHeld, peak, started: events.filter((e) => e.startsWith('+')).length }
+}
+
+test('six at once never exceed the three slots, and all of them finish', async (t) => {
+  const sb = sandbox(t)
+  const { results, startedWhileHeld, peak, started } = await holdAndRelease(sb, { runners: 6, expectBusy: 3 })
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  assert.equal(startedWhileHeld, 3, 'three slots filled, and a fourth never got in while they were held')
+  assert.ok(peak <= 3, `three slots, so three commands at most (peak ${peak})`)
+  assert.equal(started, 6, 'every caller ran once the slots freed')
   assert.deepEqual(slotDirs(sb), [])
 })
 
@@ -260,17 +279,11 @@ test('the coordinator caps the machine with one file, and status says which cap 
   assert.equal(status.status, 0, status.stderr)
   assert.match(status.stdout, /cap: 2 of 3 slots \(set by .*cap\)/)
 
-  const runs = Array.from({ length: 4 }, () => start(sb, ['check'], { FAKE_SLEEP: '0.4' }))
-  const results = await Promise.all(runs.map((r) => r.done))
+  const { results, startedWhileHeld, peak, started } = await holdAndRelease(sb, { runners: 4, expectBusy: 2 })
   for (const r of results) assert.equal(r.code, 0, r.stderr)
-  const events = logLines(sb).filter((l) => l.startsWith('+') || l.startsWith('-'))
-  let current = 0
-  let peak = 0
-  for (const e of events) {
-    current += e.startsWith('+') ? 1 : -1
-    peak = Math.max(peak, current)
-  }
-  assert.equal(peak, 2, 'a cap of two means two commands at most')
+  assert.equal(startedWhileHeld, 2, 'a cap of two holds two, and the third slot stays free')
+  assert.ok(peak <= 2, `a cap of two means two commands at most (peak ${peak})`)
+  assert.equal(started, 4)
 })
 
 test('a cap of one leaves the other slots alone, and a cap file it cannot read is ignored', async (t) => {
@@ -301,4 +314,17 @@ test('usage is a distinct failure, and a missing cargo takes no slot', (t) => {
   assert.equal(missing.status, 127)
   assert.match(missing.stderr, /cargo not found/)
   assert.deepEqual(slotDirs(sb), [])
+})
+
+test('a held fake cargo exits once its hold folder is removed, so a failed test leaks no process', async (t) => {
+  const sb = sandbox(t)
+  const hold = mkdtempSync(join(tmpdir(), 'local-build-hold-'))
+  t.after(() => rmSync(hold, { recursive: true, force: true }))
+  const held = start(sb, ['check'], { FAKE_HOLD: join(hold, 'release') })
+  await waitForStatus(sb, 'summary: busy=1 ')
+  const began = Date.now()
+  rmSync(hold, { recursive: true, force: true })
+  const result = await held.done
+  assert.equal(result.code, 0, result.stderr)
+  assert.ok(Date.now() - began < 5000, `the holder exited ${Date.now() - began} ms after its folder went`)
 })

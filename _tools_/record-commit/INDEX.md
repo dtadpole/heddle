@@ -1,70 +1,41 @@
 ---
 title: Record commit
-version: 1.0.0
+version: 1.1.0
 description: Commits edits to the shared reflection record from a temporary worktree at a fresh origin/main, refusing a stale base and unioning append-only logs, so a record edit cannot silently drop another writer's entries.
 grounded_in:
   - source: _projects_/heddle/_context_/team-operations/working-model.md, commit from a temporary worktree at a fresh origin/main and count a landing only after reading it back
   - source: _projects_/heddle/_context_/team-operations/decision-log.yaml D-012, never stash or override another session's work in the shared tree
+created: 2026-10-23T03:43:51Z
+modified: 2026-10-24T05:06:33Z
 ---
 
 # `record-commit`
 
-The reflection tree is written by several sessions at once. Three decision entries and one seat log line were
-lost under this tree's nose because an edit made on a lagging checkout replaced content that had landed
-meanwhile. This tool makes that mistake impossible for the files it is given: it never commits in the live
-checkout.
+## What this folder is
+
+The tool that commits edits to the shared reflection record. It never commits in the live checkout, so an edit
+made on a lagging checkout cannot silently drop another writer's entries.
+
+## What belongs here
+
+The tool `record-commit.mjs`, its suites under [`_tests_/`](_tests_/INDEX.md), and the articles listed under
+Read next.
+
+## Use
 
 ```bash
 # a live-checkout edit, the common case
 node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
-  --message "record: ..." --file _projects_/heddle/_context_/team-operations/decision-log.yaml
+  --message "docs(hd): record the decision" --file _projects_/<team>/_context_/<record>.yaml
+
+# a commit that only appends to logs is log(<scope>)
+node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
+  --message "log(hd): two step lines" --file _logs_/repo-actions/action-log.jsonl
 
 # an edit kept in a staging tree, with the pre-edit original beside it
 node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
-  --message "record: ..." --staged /tmp/record-edits --base /tmp/record-base
+  --message "docs(hd): ..." --staged /tmp/record-edits --base /tmp/record-base
 ```
-
-## What it does, in order
-
-1. **Fetch**, then create a temporary worktree of the live checkout at the fetched `origin/main`.
-2. **Copy only the given files** there; nothing else in the live tree is read or written.
-3. **Check each file's base** against `origin/main`. A normal file whose base differs is refused — that edit
-   was made on a version origin no longer has. `--file` uses the live checkout's `HEAD:path` as the base;
-   `--staged DIR` uses `--base DIR/path` when given, else the live checkout's `HEAD:path`.
-4. **Union append-only logs** (`_logs_/**.jsonl`, `execution-review-log.jsonl`, plus any `--append PATH`):
-   origin's lines in their order, then the staged lines origin lacks. A log is never replaced, and the tool
-   verifies every line of both sides is present.
-5. **Run the frontmatter validator on the whole tree** in the temporary worktree. Errors refuse the commit;
-   warnings are counted and only listed with `--verbose`.
-6. **Commit with explicit paths** as `D.Tadpole <gsk390@gmail.com>` (D-018), **push `main`**, then **read back**
-   that `origin/main` is that commit and that it carries every staged byte (and, for a log, every line).
-7. **Fast-forward the live tree** with [`reflection-sync`](../reflection-sync/INDEX.md), so the next edit starts
-   from the new origin.
-
-A push rejected because another session landed first is **rebuilt from a fresh origin** — fetch, new worktree,
-re-union, re-check — up to `--retries` times (default 2). It never rebases and never force-pushes. If the record
-commits but the live tree cannot be fast-forwarded, that is exit 3: the record is safe and the live tree is
-retried next pass.
-
-## Exit codes
-
-| Code | Meaning |
-|---|---|
-| `0` | committed, read back, live tree synced (or `--no-sync`) |
-| `1` | refused or failed before the commit: stale base, validator error, nothing to commit, bad arguments |
-| `2` | the commit was pushed but `origin/main` does not carry it as expected |
-| `3` | committed and read back, but the live tree was not fast-forwarded |
-
-## Options that matter
-
-- `--dry-run` — fetch, base-check, union and run the validator, then stop before the commit. It is the safe way
-  to see whether a pass would land.
-- `--no-sync` — leave the live tree alone. After it, the live checkout is behind `origin/main`; the next edit
-  from it will fail the base check until it is synced.
-- `--validator PATH` — a runnable frontmatter validator; the default is the tree's own
-  `shared/_tools_/frontmatter-validator/validate-frontmatter.py`, run with a python that imports PyYAML
-  (`--python` overrides; `/opt/homebrew/bin/python3` is found first on this Mac).
-- `--message-file FILE`, `--author "Name <email>"`, `--repo DIR`, `--remote`, `--branch`.
 
 ## Tests
 
@@ -72,17 +43,13 @@ retried next pass.
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
-Sixteen tests against a scratch bare origin and clones: the happy path landing and syncing the live tree, a
-stale base refused with origin untouched, two writers' log lines both kept, a log edit that deletes an origin
-line unable to delete it from the commit, the validator seeing the whole tree and a failing validator refusing,
-a staging tree with `--base`, nothing-to-commit, a dry run that commits nothing, a simulated push race rebuilt
-from a fresh origin with both commits landing, a commit that cannot sync exiting 3, argument and path checks,
-and the read-back verifier's failure modes.
-
-A dry run against a scratch clone of the real record on 2026-10-23 ran the validator over **1839 files: 0
-errors, 44 warnings** and would have committed one unioned log — the live tree and origin were untouched.
+Last run 2026-10-23 22:05 PDT, on hd/tool-developer with main 445ea43 merged: `node --test _tools_/record-commit/_tests_/record/unit.test.mjs`, 24 passed, 0 failed.
 
 ## Read next
 
-[`../reflection-sync/INDEX.md`](../reflection-sync/INDEX.md) for the fast-forward it ends with, and
-[`../../rust/INDEX.md`](../../rust/INDEX.md) for the port's state.
+- [how-it-works.md](how-it-works.md) — why the tool exists, the seven steps of a run, and the push-race rebuild.
+- [every-file-or-none.md](every-file-or-none.md) — a run carries every given file or none.
+- [usage.md](usage.md) — the commit message, the options and the exit codes.
+- [test-coverage.md](test-coverage.md) — what the suite covers, and a dry run against the real record.
+- [`../reflection-sync/INDEX.md`](../reflection-sync/INDEX.md) — the fast-forward a run ends with.
+- [`../../rust/INDEX.md`](../../rust/INDEX.md) — the port's state.

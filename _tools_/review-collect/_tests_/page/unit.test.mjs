@@ -302,6 +302,39 @@ test('a fenced multi-line command and the counted result below it are one record
   )
 })
 
+test('a backticked verify-runner line with its result on one line is a recorded run', (t) => {
+  const w = world(t)
+  write(w.seat, 'rust/crates/fake-crate/INDEX.md', '# fake\n\n| 05 | `HEDDLE_BIN=<bin> node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json` | 10/10 passed, 2026-10-22 |\n')
+  const runs = recordedRuns({ worktree: w.seat, scopes: parseScopes({ write_scopes: ['heddle rust/crates/fake-crate/'] }) })
+  assert.equal(runs.recordedTotal, 1)
+  assert.equal(runs.recorded[0].command, 'HEDDLE_BIN=<bin> node _tools_/verify-runner/run.mjs _verifiers_/05-config-system/check*.mjs --json')
+  assert.equal(runs.recorded[0].date, '2026-10-22')
+})
+
+test('a run table moved into a linked article in the same folder is still a recorded run', (t) => {
+  const w = world(t)
+  write(w.seat, 'rust/crates/fake-crate/INDEX.md', '# fake\n\nThe entry point. Runs live in [status](status.md); design in [plan](port-plan.md#top).\nSee also [elsewhere](../other/status.md).\n')
+  write(w.seat, 'rust/crates/fake-crate/status.md', '# status\n\n`cargo test -p fake-crate` is green (12 tests), 2026-10-23.\n')
+  write(w.seat, 'rust/crates/fake-crate/port-plan.md', '# plan\n\nNo runs here.\n')
+  write(w.seat, 'rust/crates/fake-crate/notes.md', '`cargo test -p fake-crate` is green (99 tests), 2026-10-24.\n')
+  write(w.seat, 'rust/crates/other/status.md', '`cargo test -p other` is green (5 tests), 2026-10-24.\n')
+  const runs = recordedRuns({ worktree: w.seat, scopes: parseScopes({ write_scopes: ['heddle rust/crates/fake-crate/'] }) })
+  assert.equal(runs.recordedTotal, 1, 'only the linked sibling: not the unlinked notes.md, not another folder')
+  assert.equal(runs.recorded[0].file, 'rust/crates/fake-crate/status.md')
+  assert.equal(runs.recorded[0].command, 'cargo test -p fake-crate')
+  assert.equal(runs.recorded[0].date, '2026-10-23')
+})
+
+test('a split unit with no recorded run still shows the command one of its articles declares', (t) => {
+  const w = world(t)
+  write(w.seat, 'rust/crates/fake-crate/INDEX.md', '# fake\n\nSee [status](status.md).\n')
+  write(w.seat, 'rust/crates/fake-crate/status.md', '# status\n\n```bash\ncargo test -p fake-crate\n```\n')
+  const runs = recordedRuns({ worktree: w.seat, scopes: parseScopes({ write_scopes: ['heddle rust/crates/fake-crate/'] }) })
+  assert.equal(runs.recordedTotal, 0)
+  assert.equal(runs.declared[0].file, 'rust/crates/fake-crate/status.md')
+  assert.equal(runs.declared[0].command, 'cargo test -p fake-crate')
+})
+
 test('the page carries every section a review needs', (t) => {
   const w = world(t)
   const r = cli(w)
@@ -326,6 +359,24 @@ test('the page carries every section a review needs', (t) => {
   assert.match(r.output, /after review work/)
   assert.doesNotMatch(r.output, /early work/, 'the line before the review is not in the ledger')
   assert.match(r.output, /scope       include: rust\/crates\/fake-crate\//)
+})
+
+test('the page shows the pushed branch beside local HEAD: not pushed, then partly pushed', (t) => {
+  const w = world(t)
+  const unpushed = cli(w)
+  assert.equal(unpushed.status, OK, unpushed.output)
+  assert.match(unpushed.output, /pushed      NOT PUSHED: no origin\/hd\/fake-seat; every commit below is local only/)
+
+  // Push only the first of the three commits: the page must say 1 pushed, 2 local.
+  git(w.seat, ['push', '-q', 'origin', 'HEAD~2:refs/heads/hd/fake-seat'])
+  const partly = cli(w)
+  assert.equal(partly.status, OK, partly.output)
+  assert.match(partly.output, /tip         3 ahead, 0 behind/)
+  assert.match(partly.output, /pushed      origin\/hd\/fake-seat [0-9a-f]{7}: 1 ahead, 0 behind origin\/main; local HEAD has 2 unpushed commit\(s\)/)
+
+  git(w.seat, ['push', '-q', 'origin', 'HEAD:refs/heads/hd/fake-seat'])
+  const all = cli(w)
+  assert.match(all.output, /pushed      origin\/hd\/fake-seat [0-9a-f]{7}: 3 ahead, 0 behind origin\/main; local HEAD is the pushed tip/)
 })
 
 test('a seat whose work is all in scope reads clean', (t) => {

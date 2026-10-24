@@ -17,7 +17,7 @@
 // Exit 0 with the page, 1 when the seat or a required input is missing.
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -325,7 +325,9 @@ const COUNTED_RESULT = /\b\d+\s*(tests?|checks?|passed|failed|unjudged|cases?)\b
 // A recorded run carries a result: a count, a ratio, a pass word or a date. A usage line
 // ("sh verify.sh --list  # why any was unjudged") does not, and is not a run.
 const RESULT_HINT = /\b\d+\s*(tests?|checks?|passed|failed|unjudged|cases?)\b|\b\d+\/\d+\b|\b(green|passed|passes|all pass)\b|20\d\d-\d\d-\d\d/i
-const COMMAND_IN_LINE = /`([^`]*(?:cargo (?:test|check|clippy)|verify\.sh|node --test)[^`]*)`/
+// The same commands RUN_HINT names, so a backticked runner line is captured too
+// (developer-one: `HEDDLE_BIN=... node _tools_/verify-runner/run.mjs ...` was missed).
+const COMMAND_IN_LINE = /`([^`]*(?:cargo (?:test|check|clippy|build)|verify\.sh|node --test|verify-runner\/(?:run|all)\.mjs|local-build\/run\s+(?:test|check|build|clippy))[^`]*)`/
 
 // The INDEX of the unit a path belongs to: a crate, a verifier, a tool, a context folder.
 export function unitIndex(path) {
@@ -368,10 +370,24 @@ export function candidateIndexes({ worktree, scopes, touched = [] }) {
 // one line, outside a code fence), newest dated first; and, for an INDEX that records
 // none, the test command it declares, labelled as declared. Evidence to read, not a
 // verdict to trust blind.
-export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
-  const recorded = []
-  const declared = []
-  for (const { relativePath, file } of candidateIndexes({ worktree, scopes, touched })) {
+// The articles a unit's INDEX links in its own folder (status.md, port-plan.md): a seat
+// that splits its INDEX into an entry point and articles keeps its run table findable.
+// Links into other folders are not followed, so a unit is credited only with what its
+// own entry point points at.
+export function linkedArticles(file, relativePath) {
+  const text = readFileSync(file, 'utf8')
+  const names = new Set()
+  for (const match of text.matchAll(/\]\((?:\.\/)?([A-Za-z0-9][A-Za-z0-9._-]*\.md)(?:#[^)]*)?\)/g)) {
+    if (match[1] !== 'INDEX.md') names.add(match[1])
+  }
+  return [...names]
+    .map((name) => ({ file: join(dirname(file), name), relativePath: join(dirname(relativePath), name) }))
+    .filter((article) => existsSync(article.file))
+}
+
+// The run lines of one Markdown file: the last recorded run, and the first declared command.
+function scanRuns(file, relativePath) {
+  {
     const lines = readFileSync(file, 'utf8').split('\n')
     let best = null
     let firstDeclared = null
@@ -428,8 +444,21 @@ export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
         lastBlock = null
       }
     })
-    if (best) recorded.push(best)
-    else if (firstDeclared) declared.push(firstDeclared)
+    return { best, firstDeclared }
+  }
+}
+
+export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
+  const recorded = []
+  const declared = []
+  for (const unit of candidateIndexes({ worktree, scopes, touched })) {
+    const scans = [unit, ...linkedArticles(unit.file, unit.relativePath)].map((doc) => scanRuns(doc.file, doc.relativePath))
+    const bests = scans.map((scan) => scan.best).filter(Boolean)
+    if (bests.length > 0) recorded.push(...bests)
+    else {
+      const first = scans.map((scan) => scan.firstDeclared).find(Boolean)
+      if (first) declared.push(first)
+    }
   }
   // Newest dated first; undated keep the candidate order (touched units before scope names).
   recorded.sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')))
@@ -516,6 +545,7 @@ export function collectReview({ seat, team = process.env.HEDDLE_TEAM_FILE || nul
     main: { ref: mainRef, sha: mainSha, date: git(reviewerRepo, ['show', '-s', '--format=%cI', mainSha], { allowFailure: true }).stdout.trim() },
     notes,
     tip: null,
+    pushed: null,
     base: null,
     ahead: 0,
     behind: 0,
@@ -565,6 +595,26 @@ export function collectReview({ seat, team = process.env.HEDDLE_TEAM_FILE || nul
   const files = changed.map((path) => ({ path, ...classifyPath(path, scopes), group: groupPath(path).key }))
   const uncommitted = status.map((entry) => ({ ...entry, ...classifyPath(entry.path, scopes), group: groupPath(entry.path).key }))
 
+  // The pushed branch, read from the reviewer's freshly fetched clone: a seat's local
+  // commits are not a review's evidence until they are on origin.
+  const pushedRef = `origin/${branchName}`
+  const pushedResult = git(reviewerRepo, ['rev-parse', '--verify', '-q', pushedRef], { allowFailure: true })
+  if (pushedResult.status === 0) {
+    const pushedSha = pushedResult.stdout.trim()
+    const vsMain = git(reviewerRepo, ['rev-list', '--left-right', '--count', `${mainSha}...${pushedSha}`], { allowFailure: true })
+    const [pushedBehind, pushedAhead] = vsMain.status === 0 ? vsMain.stdout.trim().split(/\s+/).map(Number) : [null, null]
+    let unpushed = null
+    let localBehind = null
+    if (git(seatWorktree, ['cat-file', '-e', `${pushedSha}^{commit}`], { allowFailure: true }).status === 0) {
+      const vsLocal = git(seatWorktree, ['rev-list', '--left-right', '--count', `${pushedSha}...HEAD`]).stdout.trim().split(/\s+/).map(Number)
+      ;[localBehind, unpushed] = vsLocal
+    } else {
+      notes.push(`the seat clone lacks ${pushedRef} ${pushedSha.slice(0, 7)}; local and pushed are not compared`)
+    }
+    result.pushed = { ref: pushedRef, sha: pushedSha, ahead: pushedAhead, behind: pushedBehind, unpushed, localBehind }
+  } else {
+    result.pushed = { ref: pushedRef, sha: null }
+  }
   result.tip = { sha: tip, branch: branchNow }
   result.base = base
   result.behind = behind
@@ -593,6 +643,18 @@ export function render(result) {
   } else {
     push(`worktree    ${tilde(result.worktree)}  branch ${result.branch}  HEAD ${result.tip.sha.slice(0, 12)}${result.tip.branch !== result.branch ? `  (on ${result.tip.branch || 'detached'})` : ''}`)
     push(`tip         ${result.ahead} ahead, ${result.behind} behind  ${result.main.ref} ${result.main.sha.slice(0, 7)}${result.main.date ? ` (${result.main.date})` : ''}${result.fetched ? '' : '  [fetch failed]'}`)
+    const pushed = result.pushed
+    if (pushed === null || pushed.sha === null) {
+      push(`pushed      NOT PUSHED: no ${pushed?.ref ?? 'origin branch'}; every commit below is local only`)
+    } else {
+      const local =
+        pushed.unpushed === null
+          ? 'local HEAD not compared'
+          : pushed.unpushed === 0 && pushed.localBehind === 0
+            ? 'local HEAD is the pushed tip'
+            : `local HEAD has ${pushed.unpushed} unpushed commit(s)${pushed.localBehind ? ` and is ${pushed.localBehind} behind the pushed tip` : ''}`
+      push(`pushed      ${pushed.ref} ${pushed.sha.slice(0, 7)}: ${pushed.ahead ?? '?'} ahead, ${pushed.behind ?? '?'} behind ${result.main.ref}; ${local}`)
+    }
     const off = (entries) => entries.filter((entry) => entry.verdict === 'outside' || entry.verdict === 'excluded')
     const offCommitted = off(result.files)
     const offUncommitted = off(result.uncommitted)

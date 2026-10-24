@@ -124,7 +124,10 @@ function harness(label, options = {}) {
 
 async function supportsContext() {
   const help = await runCli(['--help'])
-  return /context/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /^\s{2}context\b/m.test(help.stdout) && /--turn/.test(help.stdout)
 }
 
 /** The one session a fixture recorded. */
@@ -513,7 +516,10 @@ test('a provider that refused the call gets one reduction and one retry, and onl
     assert.notEqual(third.code, 0, `a second refusal in one round fails the turn\n${third.stdout}${third.stderr}`)
   } finally {
     removeDir(h.home)
-    await new Promise((resolvePromise) => server.close(() => resolvePromise()))
+    await new Promise((resolvePromise) => {
+      server.close(() => resolvePromise())
+      server.closeAllConnections()
+    })
   }
 })
 

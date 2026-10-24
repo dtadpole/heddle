@@ -1,6 +1,6 @@
 ---
 title: The heddle binary sources
-version: 0.2.0
+version: 0.4.0
 description: The sources of the Rust port's binary and composition root, with their unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -23,10 +23,12 @@ verifiers judge the built binary from outside. Run them with
 | [`usage.rs`](usage.rs) | the help, line by line, gated by the capabilities the binary serves |
 | [`boot.rs`](boot.rs) | the boot and the loader: composition through `heddle-config`, entries and fiber states started to a fixed point, `settle`, `failed_entries`, `dispose`, the printed tree |
 | [`builtins.rs`](builtins.rs) | the built-in table, how a row's `name` resolves, the `Component` and `Catalog` traits |
-| [`adapters.rs`](adapters.rs) | one adapter per built-in, over the owning crate's own types: the model, sandbox and approvals rows so far |
+| [`adapters.rs`](adapters.rs) | one adapter per built-in, over the owning crate's own types — every row of the repository profile — and the outside-component row |
+| [`runtime.rs`](runtime.rs) | the process's one async runtime and the agent runtime every turn, subagent, goal round and teammate shares |
 | [`services.rs`](services.rs) | the service registry: a name with typed views, the injection gate |
 | [`ports.rs`](ports.rs) | what the binary asks of each crate, one trait per service |
-| [`commands.rs`](commands.rs) | every command and its dispatch, the configuration commands delegating to `heddle-config`, and the hook points `hooks` lists |
+| [`commands.rs`](commands.rs) | the dispatch: each command word to its owning crate's entry point, `--turn` to `heddle-agent`'s, `adapter-call` to `heddle-llm`'s, the bare application, the printed tree, the failed-row report and the tool allow list |
+| [`web.rs`](web.rs) | `heddle web`'s composition over `heddle-server` — developer-ten's file under D-047 |
 | [`output.rs`](output.rs) | the two streams a run writes to, and `JSON.stringify(value, null, 2)` |
 
 ## Read next

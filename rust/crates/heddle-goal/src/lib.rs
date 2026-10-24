@@ -20,7 +20,8 @@
 //! - [`SessionLog`] is the port this crate needs from `heddle-session`'s store; it is implemented for
 //!   `heddle_session::SessionStore`, so the boot passes the store itself.
 //! - [`RoundRunner`] is how a round is run — append the attributed user message and answer it with one turn;
-//!   the boot implements it over `heddle-agent`'s turn.
+//!   [`round::AgentRoundRunner`] implements it over `heddle-agent`'s real turn, for a boot to pass its runtime
+//!   (the binary keeps an equivalent adapter of its own).
 //! - [`DriverTrigger`] turns the session's own events (`session/event` on the bus) into driver requests; the
 //!   boot forwards each event's session id and type to it.
 //! - [`tool`] and [`http`] are the model's and the person's verbs, as functions the tool registry and the
@@ -33,6 +34,7 @@ pub mod command;
 mod driver;
 pub mod http;
 mod log;
+pub mod round;
 mod service;
 mod store;
 #[cfg(test)]
@@ -40,8 +42,8 @@ mod test_support;
 pub mod tool;
 
 pub use driver::{
-    DriverOutcome, DriverRun, DriverTrigger, GoalDriver, GoalRoundSource, QUEUE_FAILED_CODE,
-    ROUND_LIMIT_CODE, ResumeReport, RoundDecision, RoundRunner, SessionEdge,
+    DriverOutcome, DriverRun, DriverTrigger, GoalDriver, GoalRoundSource, NO_RUNTIME_SENTENCE,
+    QUEUE_FAILED_CODE, ROUND_LIMIT_CODE, ResumeReport, RoundDecision, RoundRunner, SessionEdge,
     classify_session_event, decide_goal_round, render_goal_round_prompt,
 };
 pub use log::{Clock, LogError, SessionLog, SystemClock, iso_timestamp};

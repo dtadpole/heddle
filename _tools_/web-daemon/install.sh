@@ -12,6 +12,11 @@
 #
 # HEDDLE_BIN=/abs/path/heddle serves with that binary instead of `node dist/cli.js`. HEDDLE_WEB_PORT overrides
 # the port: 3082 on macOS, behind the 8082 gate; 8082 on Linux, where nothing fronts the server.
+# HEDDLE_WEB_LABEL, HEDDLE_WEB_UNIT, HEDDLE_WEB_HOME and HEDDLE_WEB_LOG name a scratch service instead of the
+# deployment's; rehearse.sh uses them, so an experiment never touches the live agent.
+# HEDDLE_WEB_SESSION_ROOT, an absolute folder, adds `--session-root` to the server's arguments. HEDDLE_WEB_HOME alone
+# does not separate sessions: the repository profile pins the session row's root to ~/.heddle/sessions, so a second
+# service without this writes its sessions into the deployment's store (measured 2026-10-22 with the 3097 preview).
 # The file is written under the account's own home, so none of this needs sudo. Every step is idempotent:
 # running it twice leaves one service, and the paths it fills in come from the machine it runs on rather
 # than from the repository.
@@ -19,9 +24,18 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-label="com.dtadpole.heddle-web"
-unit="heddle-web.service"
-log="$HOME/.heddle/web.log"
+label="${HEDDLE_WEB_LABEL:-com.dtadpole.heddle-web}"
+unit="${HEDDLE_WEB_UNIT:-heddle-web.service}"
+# Where the service keeps its state and writes its log. Overridable so a **scratch** service (rehearse.sh) never
+# shares them with the deployment: the 8082 gate reads the newest launch token from the deployment's log, so a
+# rehearsal server that printed its token there would hand the gate a token the live server does not know.
+heddle_home="${HEDDLE_WEB_HOME:-$HOME/.heddle}"
+log="${HEDDLE_WEB_LOG:-$heddle_home/web.log}"
+session_root="${HEDDLE_WEB_SESSION_ROOT:-}"
+case "$session_root" in
+  ''|/*) ;;
+  *) echo "install.sh: HEDDLE_WEB_SESSION_ROOT must be an absolute path, got '$session_root'" >&2; exit 2 ;;
+esac
 
 # The platform decides the supervisor. HEDDLE_WEB_PLATFORM exists for the installer's own tests, which render
 # and drive both branches on one machine with stand-in launchctl, systemctl and loginctl commands.
@@ -46,7 +60,7 @@ case "$platform" in
 esac
 
 usage() {
-  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 node_bin() {
@@ -144,11 +158,17 @@ render_plist() {
   args=$(mktemp "${TMPDIR:-/tmp}/heddle-web-args.XXXXXX") || exit 2
   trap 'rm -f "$args"' EXIT HUP INT TERM
   if [ "$supervise" = yes ]; then
-    xml_strings "$node" "$here/supervisor.mjs" -- >> "$args"
+    # The supervisor watches the server's health route (a hung server keeps its port and answers nothing), reclaims a
+    # leftover of this same command on the port (the agent abandons its process group, so a killed supervisor leaves
+    # its server serving), and holds a lock so no second supervisor of this service ever runs beside it.
+    xml_strings "$node" "$here/supervisor.mjs" \
+      --health-url "http://127.0.0.1:$port/healthz" --health-every "${HEDDLE_HEALTH_EVERY:-5}" \
+      --reclaim-port "$port" --lock "$heddle_home/web-supervisor.$port.lock" -- >> "$args"
   fi
   xml_strings "$exe" >> "$args"
   if [ -n "$cli" ]; then xml_strings "$cli" >> "$args"; fi
   xml_strings web --host 127.0.0.1 --port "$port" --config "$repo/cordis.yml" >> "$args"
+  if [ -n "$session_root" ]; then xml_strings --session-root "$session_root" >> "$args"; fi
   awk -v list="$args" '
     /@PROGRAM_ARGUMENTS@/ { while ((getline line < list) > 0) print line; close(list); next }
     { print }
@@ -159,7 +179,7 @@ render_plist() {
       -e "s|@REPO@|$repo|g" \
       -e "s|@PORT@|$port|g" \
       -e "s|@LOG@|$log|g" \
-      -e "s|@HOME@|$HOME/.heddle|g" \
+      -e "s|@HOME@|$heddle_home|g" \
       -e "s|@HOME_DIR@|$HOME|g"
 }
 
@@ -173,7 +193,7 @@ xml_strings() {
 
 render_unit() {
   # systemd splits ExecStart on whitespace, so a path with a space would silently become two arguments.
-  case "$exe$cli$repo$HOME" in
+  case "$exe$cli$repo$HOME$session_root" in
     *" "*|*"	"*)
       echo "install.sh: a path contains whitespace, which a systemd ExecStart line would split: $exe $cli $repo" >&2
       exit 2
@@ -187,8 +207,9 @@ render_unit() {
     -e "s|@REPO@|$repo|g" \
     -e "s|@PORT@|$port|g" \
     -e "s|@LOG@|$log|g" \
-    -e "s|@HOME@|$HOME/.heddle|g" \
+    -e "s|@HOME@|$heddle_home|g" \
     -e "s|@HOME_DIR@|$HOME|g" \
+    -e "s|--config $repo/cordis.yml\$|--config $repo/cordis.yml${session_root:+ --session-root $session_root}|" \
     "$here/heddle-web.service.template"
 }
 
@@ -198,10 +219,17 @@ render() {
   if [ "$platform" = darwin ]; then render_plist; else render_unit; fi
 }
 
-write_definition() {
-  # Rendered to a string first, so a refusal leaves the installed file as it was rather than half written.
+prepare_definition() {
+  # Rendered to a string first, and **before anything is stopped**: a refusal (a checkout that is not committed main,
+  # a missing build, a bad HEDDLE_BIN) must leave both the installed file and the running service as they were.
+  # Measured 2026-10-23, and it was an outage: `--restart` booted the live agent out, then the render refused a
+  # deployment one commit behind a freshly fetched origin/main and exited, so nothing was loaded again — 8082
+  # answered 502 for about forty seconds until the agent was bootstrapped by hand.
   definition=$(render)
-  mkdir -p "$HOME/.heddle" "$(dirname -- "$target")"
+}
+
+write_definition() {
+  mkdir -p "$heddle_home" "$(dirname -- "$log")" "$(dirname -- "$target")"
   printf '%s\n' "$definition" > "$target"
   echo "wrote $target"
 }
@@ -228,12 +256,37 @@ loaded() {
   fi
 }
 
+bootstrap_agent() {
+  # Load the agent, retrying a refusal for a few seconds: even after the old job is gone, launchd can still answer
+  # `5: Input/output error` for a moment. A bootstrap that never succeeds is reported and exits non-zero, because an
+  # installer that reports success with nothing loaded is the worst answer it can give.
+  attempt=1
+  while :; do
+    if output=$(launchctl bootstrap "$domain" "$target" 2>&1); then return 0; fi
+    if [ "$attempt" -ge "${HEDDLE_BOOTSTRAP_ATTEMPTS:-10}" ]; then
+      echo "install.sh: launchctl bootstrap failed $attempt times; $label is NOT loaded: $output" >&2
+      echo "  Load it by hand once launchd settles: launchctl bootstrap $domain $target && launchctl kickstart -k $domain/$label" >&2
+      exit 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.5
+  done
+}
+
 load() {
   # Idempotent on both platforms: an existing service is replaced rather than duplicated.
   if [ "$platform" = darwin ]; then
-    if loaded; then launchctl bootout "$domain/$label" >/dev/null 2>&1 || true; fi
+    prepare_definition
+    if loaded; then
+      launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+      # `bootout` returns before launchd has finished removing the job, and a `bootstrap` of the same label in that
+      # window fails with `5: Input/output error` — measured 2026-10-23 on a rehearsal agent, where it left nothing
+      # loaded. So wait for the job to be gone (up to ten seconds) before loading it again.
+      waited=0
+      while loaded && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+    fi
     write_definition
-    launchctl bootstrap "$domain" "$target"
+    bootstrap_agent
     # Measured on this Mac (macOS 27.0, 26A428, 2026-10-22): `bootstrap` registers the job but its nondemand
     # spawn stays pending — `RunAtLoad` does not fire, so the job is `state = not running` with `runs = 0` until
     # it is asked for. A demand start is what makes an install an install rather than a file on disk.
@@ -243,6 +296,7 @@ load() {
     if [ -f "$log" ]; then chmod 600 "$log" 2>/dev/null || true; fi
   else
     require_linger
+    prepare_definition
     write_definition
     systemctl --user daemon-reload
     systemctl --user enable --quiet "$unit"
@@ -253,6 +307,50 @@ load() {
 
 name() {
   if [ "$platform" = darwin ]; then printf 'agent %s' "$label"; else printf 'unit %s' "$unit"; fi
+}
+
+# The agent abandons its process group, so a server whose supervisor died outlives a bootout. Uninstalling stops such a
+# leftover, but only one running this checkout's server on this port: its command line ends with exactly the
+# arguments this service renders. Anything else on the port is somebody else's, and is named and left alone.
+stop_leftover() {
+  lsof_bin="${HEDDLE_LSOF:-/usr/sbin/lsof}"; [ -x "$lsof_bin" ] || lsof_bin=lsof
+  pid=$("$lsof_bin" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+  [ -n "$pid" ] || return 0
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+  case "$cmd" in
+    *" web --host 127.0.0.1 --port $port --config $repo/cordis.yml${session_root:+ --session-root $session_root}")
+      kill "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do sleep 0.1; waited=$((waited + 1)); done
+      kill -9 "$pid" 2>/dev/null || true
+      echo "stopped the server this service left on port $port (pid $pid), which outlived its supervisor"
+      ;;
+    *) echo "port $port is held by pid $pid ($cmd), which is not this service; left alone" ;;
+  esac
+}
+
+# A start that is not verified is not a start (shared core-conventions/process-supervision.md): wait, bounded, for the
+# service to answer on its port, and exit 1 with the end of its log when it does not, rather than reporting an install
+# that is not running. HEDDLE_START_WAIT is the bound in seconds (default 15); 0 skips the check and says so.
+verify_start() {
+  bound="${HEDDLE_START_WAIT:-15}"
+  case "$bound" in ''|*[!0-9]*) echo "install.sh: HEDDLE_START_WAIT must be a number of seconds, got '$bound'" >&2; exit 2 ;; esac
+  if [ "$bound" -eq 0 ]; then
+    echo "not verified: HEDDLE_START_WAIT=0 skipped the check that port $port answers"
+    return 0
+  fi
+  tries=$((bound * 4))
+  attempt=0
+  until curl -fsS -m 1 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge "$tries" ]; then
+      echo "install.sh: $(name) is installed but port $port did not answer within ${bound} s; the end of its log:" >&2
+      tail -5 "$log" 2>/dev/null >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+  echo "verified: port $port answers"
 }
 
 # The guard line, and the crontab edits. Cron is the one scheduler this Mac was measured to run while launchd left
@@ -290,11 +388,13 @@ case "${1:-}" in
   --restart)
     load
     echo "restarted $(name)"
+    verify_start
     ;;
   --uninstall)
     if [ "$platform" = darwin ]; then
       if loaded; then launchctl bootout "$domain/$label" >/dev/null 2>&1 || true; fi
       rm -f "$target"
+      stop_leftover
     else
       systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
       rm -f "$target"
@@ -317,6 +417,7 @@ case "${1:-}" in
   "")
     load
     echo "loaded $(name) on port $port"
+    verify_start
     echo "log:  $log"
     # The token is minted per process and printed once, into the log — it is deliberately not stored, so
     # the log line is where a person gets it. Say that rather than printing a URL without one.

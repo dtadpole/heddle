@@ -1,6 +1,8 @@
 ---
 title: The heddle-agent crate
-version: 0.5.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T07:07:16Z
+version: 0.7.0
 description: The Rust port crate for the agentic loop, turns and subagents — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -34,6 +36,9 @@ The Rust port of the agentic loop, turns and subagents.
 | `adapters::LlmModel` | the `ModelPort` over `heddle-llm`'s `ModelService`: a Stop drops the provider stream, an unknown endpoint is one `NO_ENDPOINT` error item, the error keeps its code | the binary (boot) |
 | `adapters::Sessions`, `adapters::SessionSubagents` | the `SessionPort` and the `SubagentStore` over `heddle-session`'s `SessionService`; `model/request` written through the session crate's record in the TypeScript field order | the binary (boot) |
 | `command` (`Command::Turn`, `Args`, `Context`, `run`, `resolve_endpoint`, `StreamView`, `GoalAdvance`) | the `--turn` command in the owning crate (D-043): config problems, endpoint, the folder's session or `--resume`/`--new`, the turn, the goal join, the TypeScript text or `--json` key for key, exit 1 on any denial but `UNKNOWN_TOOL` | the binary's dispatch |
+| `adapters::ContextRecovery<S>` (`new`, `over_session_handles`) | the context service's `agent/request-error` listener: `recover_overflow`, a retry only when a forced reduction landed | the binary (boot), chained with the bus's `BusHooks` |
+| `register_subagent_row`, `LateSubagentRunner`, `SubagentConfig::from_row` | the whole `subagent-tool` row in one call: its configuration read and `delegate` registered, running children through a runner the boot binds to the runtime once it exists | the binary (boot) |
+| `ChainedTurnHooks` | several `TurnHooks` as one waterfall: `pre_step` threads each listener's step, `request_error` stops at the first answer | the binary (boot) |
 | `adapters::Context<S>` (`new`, `over_session_handles`) | the `ContextPort` over `heddle-context`'s `ContextService<S>`, generic over its store; `prepare` with no summariser override and `force: false`, `assemble` for a granted retry | the binary (boot) |
 | `has_new_input`, `parse_arguments`, `merge_usage`, `turn::tool_message_text`, `turn::is_hook_refusal` | the loop's pure rules | the loop; tests |
 | `upstream` | `heddle-llm`'s **own** `Message`, `Role`, `ContentPart`, `Chunk`, `TokenUsage`, `GenerateRequest`, `ToolCall`, `merge_token_usage`, re-exported; still **provisional mirrors**: `SessionEvent`, `SessionMeta`, `CreateSession`, `SurfaceView` (`heddle-session`); `ContextReport`, `PrepareOptions`, `RuntimeContextSection` (`heddle-context`). The sandbox and session-handle types are `heddle-tools`' re-exports, the sandbox ones already `heddle-sandbox`'s own | each mirror becomes a `pub use` of the owner's type when it lands |
@@ -42,6 +47,47 @@ The records the loop writes keep the TypeScript spelling: `model/request` (`Mode
 included), `assistant/chunk`, the `tool` message (`error (<code>): <message>`, the output, or
 `(the tool produced no output)`), `turn/retry`, `assistant/completed` (`text`, `reasoning`, `finishReason`,
 `rounds`, `denials`, `ended`), `turn/completed`.
+
+## Where the port stands
+
+As of 2026-10-22, branch `hd/developer-five-clean`. Every body is ported; no `todo!()` is left. The model types are
+`heddle-llm`'s own, `SessionEvent` is `heddle-session`'s, and the context records (`ContextReport`, `ContextSummary`,
+`RuntimeContextSection`, `ContextBreakdown`) are `heddle-context`'s. Three shapes stay this crate's on purpose:
+`PrepareOptions` (owned, where the context crate's borrows), `SurfaceView` (the two generations and the node list
+the loop reads), and the session-meta and create-session records, converted at the session seam. Unit tests: 74, green, with the workspace gate.
+
+- **Done:** `run_turn` and `begin_turn`, the live-turn registry, delegation and the `delegate` tool, the ports over
+  the real crates (`adapters::{LlmModel, Sessions, SessionSubagents, Context}`; `Context::over_session_handles` binds
+  `heddle-context`'s `impl ContextStore for SessionStore` directly, tested over the real store), and the D-043
+  `--turn` entry point (`command::run`), tested over the real built-ins, sandbox, session store and a scripted model.
+- **Measured through the binary (2026-10-22, rehearsal under the coordinator's rule — a scratch worktree at main
+  `cfa6a2b` and again at main `db3d76d` (after the context report became the context crate's own and the goal
+  driver moved to a pinned runtime), whose turn hooks chain the context service's overflow recovery after the event bus, with this branch
+  merged and only `usage::SERVED` edited to add Tools and Turn, a debug build, the verifiers through `HEDDLE_BIN`):**
+  `50-agentic-loop`'s `check.mjs` **6/6** and `check-subagents.mjs` **1/1** pass with the binary's own rows;
+  `check-teams.mjs` is unjudged (both checks need a turn served by the Web UI). An earlier rehearsal found and fixed
+  the delegation limit (`maxActive` never triggered, so a child's replayed `delegate` made a grandchild session).
+- **`check-teams.mjs` with web served (2026-10-22, the same rule, Tools, Turn and Web added to `SERVED` in a scratch
+  copy only):** 0/2 at the binary owner's web tip `51c7bf4` (the server had no workspace service; no team recovery
+  at web start), and still 0/2 at the web-file owner's `c4c14ce`, which fixed both. There the Lead's turn runs and
+  spawns the teammate, the tasks move through their revisions, and the mailed message lands in the teammate's log
+  and starts its second turn, which completes — but `send_message` answers `queued`, so the Lead's log never gets
+  `team/message/delivered`; and the boot still logs no `recovered N team(s)` line. Both are in the team service's
+  delivery and web-start recovery, not in this crate: `begin_turn` writes the prompt before it returns, and the
+  live-turn registry's clones share one table. `check.mjs` and `check-subagents.mjs` pass in the same runs.
+- **Through the binary owner's own advertising build (2026-10-22, `hd/developer-two` `09a3f14`, unmodified — it serves
+  Tools, Turn and Web itself):** `sh _verifiers_/50-agentic-loop/verify.sh` exits **0** — `check.mjs` 6/6,
+  `check-subagents.mjs` 1/1 and `check-teams.mjs` 2/2.
+- **Judged on main (2026-10-23):** the binary advertises Turn, Tools and Web on main (`b72cc1a`, D-048). The backend
+  lane's release binary passes part 5 in full, **9/9**; an unmodified debug build of main `d171876` agrees
+  (`verify.sh` exit 0).
+- **`--stream`:** the context takes a `StreamStarter`, called once the turn's session is open and before the turn
+  runs (the TypeScript order); `heddle-llm`'s own `StreamView` implements this crate's trait, so the binary's
+  starter builds `heddle_llm::command::print_stream(&handle.id, stderr)` and hands it to the session store's listener.
+- **Hooks:** `TurnHooks` over the bus is `heddle-events`' (`BusHooks`), which depends on this crate; adding
+  `heddle-events` as a dependency here would be a cycle.
+- **Verify:** `_tools_/local-build/run test -p heddle-agent` from `rust/`; the verifier from the lane worktree,
+  `HEDDLE_BIN="$PWD/rust/target/release/heddle" sh _verifiers_/50-agentic-loop/verify.sh`.
 
 ## Port plan
 

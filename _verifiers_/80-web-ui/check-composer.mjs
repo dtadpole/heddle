@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { evidencePath, chatDouble, fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { evidencePath, chatDouble, fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The composer's submission gestures and the queue buffer, judged in a browser.
@@ -168,7 +168,7 @@ function startCli(args, options) {
           child.kill('SIGKILL')
           reject(new Error(`the server printed no URL within 15s\n${output}`))
         }
-      }, 15_000)
+      }, 15_000).unref()
     })()
   })
 }
@@ -198,6 +198,7 @@ const press = (browser, init) =>
   })()`)
 
 test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends what is queued', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
    * A longer hold than the others: this test measures the dock's placement while a turn runs, and a turn that
@@ -310,6 +311,7 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
 })
 
 test('Ctrl+Enter on an empty draft sends everything still queued, in order', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('chord', { holdOpenMs: 1500 })
   const browser = await openBrowser()
@@ -362,6 +364,7 @@ test('a steered message is answered by the running turn, and a steer with nothin
    * message sitting in the transcript unanswered. The route's refusal is DSH's too: `session/steer-unavailable`
    * when the turn it would be delivered into has ended.
    */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('steer', { holdOpenMs: 1500 })
   const browser = await openBrowser()
@@ -404,6 +407,7 @@ test('a steered message is answered by the running turn, and a steer with nothin
  * full-width band with the editor in a card and the controls on the page background below it.
  */
 test('the composer is one card, and every control lives inside it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('card')
   const browser = await openBrowser()
@@ -450,6 +454,7 @@ test('the composer is one card, and every control lives inside it', async (conte
 
 /** The editor grows with the draft and stops at 336px, then scrolls — DSH's own cap. */
 test('the editor grows with the draft and stops at its cap', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('grow')
   const browser = await openBrowser()
@@ -485,6 +490,7 @@ test('the editor grows with the draft and stops at its cap', async (context) => 
  * drawing a failure. DSH draws the same pair.
  */
 test('a running turn offers Stop, and Stop ends it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('stop', { holdOpenMs: 60_000 })
   const browser = await openBrowser()
@@ -522,6 +528,7 @@ test('a running turn offers Stop, and Stop ends it', async (context) => {
 
 /** The access chip names the sandbox mode the server actually runs under — read, not guessed. */
 test('the access chip reports the server\u2019s sandbox mode', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('access')
   const browser = await openBrowser()
@@ -556,6 +563,7 @@ test('the access chip reports the server\u2019s sandbox mode', async (context) =
  * is the mismatch this judges: the input and the text must be one column, not two widths that disagree.
  */
 test('the composer is the text column plus 32px, and the handle widens both', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('column')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -644,6 +652,7 @@ test('the composer is the text column plus 32px, and the handle widens both', as
  * reports no usage leaves its phrases blank — the dock never invents a token count.
  */
 test('the session-statistics dock prints DSH\u2019s figures, and blanks what was not reported', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('stats', {
     usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 800 } },
@@ -801,6 +810,7 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
  * inserts a file's path at the cursor — DSH's `+`, reduced to what this harness has (files, not commands).
  */
 test('the + menu inserts a workspace file path into the draft', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach')
   const browser = await openBrowser()
@@ -855,6 +865,7 @@ test('the + menu inserts a workspace file path into the draft', async (context) 
  * of the window (the midpoint), clamped by the view area's budget and DSH's 640 floor.
  */
 test('the default column is the owner\u2019s 80-85% of the screen, clamped', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('column-default')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -899,6 +910,7 @@ test('the default column is the owner\u2019s 80-85% of the screen, clamped', asy
  * exact hue: the *behaviour* is the reference, the hue is the palette.
  */
 test('the action controls carry DSH\u2019s states', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('states')
   const browser = await openBrowser()
@@ -991,6 +1003,7 @@ test('the action controls carry DSH\u2019s states', async (context) => {
  * gauge — the rule that a number appears only when a provider gave the fact behind it.
  */
 test('the context gauge uses a window the provider reports, and stays blank when it reports none', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('context-window', {
     modelList: [{ id: 'held-model', context_window: 500000 }],
@@ -1059,6 +1072,7 @@ test('the context gauge uses a window the provider reports, and stays blank when
  * on disk are the file that was chosen.
  */
 test('the + menu adds a file as a pending card, and the draft stays clean', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('add-file')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1113,6 +1127,7 @@ test('the + menu adds a file as a pending card, and the draft stays clean', asyn
  * is offered, and choosing it asks for the picker.
  */
 test('the File action stays available while the workspace tree is open', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('add-file-nested')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1181,6 +1196,7 @@ test('the File action stays available while the workspace tree is open', async (
  * test was written against the 10 MiB cap and failed with the owner's own sentence.
  */
 test('a file larger than ten megabytes is accepted as a pending card', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('add-file-large')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1221,6 +1237,7 @@ test('a file larger than ten megabytes is accepted as a pending card', async (co
  * call, so "Tool time" is absent here — and that absence is asserted.
  */
 test('the dock elements open the reference\u2019s detail surfaces, and close again', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('dialogs', {
     usage: { prompt_tokens: 600, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 400 } },
@@ -1328,6 +1345,7 @@ async function recordedUserMessage(browser, sessionId) {
  * message kept a typed block rather than bytes.
  */
 test('a pending image is delivered to a vision route as image content', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-vision', { inputModalities: ['text', 'image'] })
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1379,6 +1397,7 @@ test('a pending image is delivered to a vision route as image content', async (c
  * be sent to it.
  */
 test('a pending image on a text-only route becomes the deterministic placeholder', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-text-only')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1410,6 +1429,7 @@ test('a pending image on a text-only route becomes the deterministic placeholder
  * prefix and the path, and the file's contents stay on disk for the agent's own file tools.
  */
 test('a pending document reaches the provider as DSH\'s file handle', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-document')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1442,6 +1462,7 @@ test('a pending document reaches the provider as DSH\'s file handle', async (con
  * fact into image content — without it the same attachment reaches the model as DSH's text placeholder.
  */
 test('a published image modality is discovered, and the image reaches the provider', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-discovered', {
     modelList: [{ id: 'held-model', input_modalities: ['text', 'image'], context_window: 2000 }],
@@ -1470,6 +1491,7 @@ test('a published image modality is discovered, and the image reaches the provid
 
 /** A published text-only modality is believed: the route gets the placeholder, never image bytes. */
 test('a published text-only modality keeps the deterministic placeholder', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-published-text', {
     modelList: [{ id: 'held-model', input_modalities: ['text'], context_window: 2000 }],
@@ -1501,6 +1523,7 @@ test('a published text-only modality keeps the deterministic placeholder', async
  * means the fold — not just the live event — carries the attachment's metadata.
  */
 test('a sent image becomes a transcript card served from the upload route', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-card')
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1560,6 +1583,7 @@ test('a sent image becomes a transcript card served from the upload route', asyn
 
 /** Two images in one message reach the provider as two parts and draw as DSH's 64px tiles. */
 test('two images in one message reach the provider and render as tiles', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-two', { inputModalities: ['text', 'image'] })
   const browser = await openBrowser({ width: 1400, height: 900 })
@@ -1595,6 +1619,7 @@ test('two images in one message reach the provider and render as tiles', async (
  * reaches the provider with the image attached.
  */
 test('a queued message keeps its image through an edit and reaches the provider', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('attach-queue-edit', { inputModalities: ['text', 'image'], holdOpenMs: 12_000 })
   const browser = await openBrowser({ width: 1400, height: 900 })

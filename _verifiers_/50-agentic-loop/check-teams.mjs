@@ -18,7 +18,8 @@ import { workspaceKey } from '../../src/session/layout.ts'
  * settles both members and delivers the mail.
  */
 
-const CAPABILITY = 'a turn with tools'
+/** Both checks start `web` and drive the Lead's turn through it, so the probe asks for the server. */
+const CAPABILITY = 'a turn with tools, served by the Web UI'
 
 /**
  * The store the second test boots on, **recorded as bytes** from the TypeScript build at heddle commit `a5b0c66`
@@ -110,6 +111,16 @@ async function api(url, cookie, path, init = {}) {
 }
 
 const metaOf = (root, id) => JSON.parse(readFileSync(join(dirname(transcriptFile(join(root, id))), `${id}.json`), 'utf8'))
+// Both builds write a session's metadata in place (truncate, then write), so a poll can catch the file empty or
+// half-written; measured in lane runs as "Unexpected end of JSON input" thrown out of the wait below. While polling, an
+// unreadable file means "not yet", never a verdict.
+const metaWhenReadable = (root, id) => {
+  try {
+    return metaOf(root, id)
+  } catch {
+    return undefined
+  }
+}
 const isUser = (event, text) => event.type === 'message' && event.message?.role === 'user' && JSON.stringify(event.message?.content ?? '').includes(text)
 
 async function waitFor(read, timeoutMs, what) {
@@ -123,7 +134,7 @@ async function waitFor(read, timeoutMs, what) {
 }
 
 test('a Lead spawns, delegates, tasks, messages and answers — and the team survives a restart', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
+  if (!skipUnless(context, /^  web\b/m.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
   const home = isolatedHome('team-e2e')
   const work = fixtureDir('team-e2e-work')
   const root = join(home, 'sessions')
@@ -153,8 +164,8 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
     assert.equal(turn.status, 200, 'the Lead turn ran')
     await turn.text()
 
-    const childId = await waitFor(() => sessionsUnder(root).find((id) => id !== session && metaOf(root, id).teamId === session), 15_000, 'the teammate session')
-    const child = metaOf(root, childId)
+    const childId = await waitFor(() => sessionsUnder(root).find((id) => id !== session && metaWhenReadable(root, id)?.teamId === session), 15_000, 'the teammate session')
+    const child = await waitFor(() => metaWhenReadable(root, childId), 5_000, 'the teammate metadata, readable')
     assert.equal(child.parentSession, session)
     assert.equal(child.origin, 'subagent')
     assert.equal(child.delegationDepth, 1)
@@ -201,7 +212,7 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
 })
 
 test('boot settles a previous process’s provisioning members and delivers its queued mail', async (context) => {
-  if (!skipUnless(context, /--turn/.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
+  if (!skipUnless(context, /^  web\b/m.test((await import('node:child_process')).execFileSync(...heddleCommand(['--help']), { encoding: 'utf8' })), CAPABILITY)) return
   const home = isolatedHome('team-recover')
   const work = fixtureDir('team-recover-work')
   const root = join(home, 'sessions')

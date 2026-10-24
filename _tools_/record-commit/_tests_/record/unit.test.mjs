@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -8,11 +8,14 @@ import { test } from 'node:test'
 import {
   OK,
   READ_BACK_FAILED,
+  INCOMPLETE,
   REFUSED,
   SYNC_REFUSED,
   baseCheck,
   collectFiles,
+  findPython,
   isLogPath,
+  messageWarnings,
   unionLines,
   verifyLanded,
 } from '../../record-commit.mjs'
@@ -102,7 +105,7 @@ function cli(w, args, extraEnv = {}) {
   return { ...r, output: `${r.stdout ?? ''}\n${r.stderr ?? ''}` }
 }
 
-const record = (w, path, message = 'record: edit') => ['--message', message, '--file', path, '--validator', w.validator]
+const record = (w, path, message = 'docs(test): edit the note') => ['--message', message, '--file', path, '--validator', w.validator]
 
 const originShow = (w, path) => {
   const r = spawnSync('git', ['show', `main:${path}`], { cwd: w.origin, encoding: 'utf8' })
@@ -161,7 +164,7 @@ test('the happy path commits, reads back, and fast-forwards the live tree', (t) 
   write(w.live, '_projects_/x/note.md', 'one\nedited\n')
   const r = cli(w, record(w, '_projects_/x/note.md'))
   assert.equal(r.status, OK, r.output)
-  assert.match(r.output, /read back: origin\/main [0-9a-f]{7} carries all 1 file\(s\)/)
+  assert.match(r.output, /read back: origin\/main [0-9a-f]{7} is the commit, and it carries all 1 given file\(s\)/)
   assert.match(r.output, /sync: .*fast-forwarded/)
   assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nedited\n')
   assert.equal(git(w.live, ['rev-parse', 'HEAD']), git(w.origin, ['rev-parse', 'main']))
@@ -188,7 +191,7 @@ test('two writers appending to a log both keep their lines, and it is never repl
   const w = world(t)
   write(w.live, '_logs_/run.jsonl', 'a\nb\nlocal\n')
   pushFrom(w, { '_logs_/run.jsonl': 'a\nb\nremote\n' })
-  const r = cli(w, record(w, '_logs_/run.jsonl', 'record: log'))
+  const r = cli(w, record(w, '_logs_/run.jsonl', 'log(test): append a line'))
   assert.equal(r.status, OK, r.output)
   assert.match(r.output, /union _logs_\/run\.jsonl/)
   const lines = originShow(w, '_logs_/run.jsonl').trim().split('\n')
@@ -201,7 +204,7 @@ test('a log edit that deletes an origin line cannot delete it from the commit', 
   const w = world(t)
   write(w.live, '_logs_/run.jsonl', 'a\nlocal\n') // line b is dropped locally
   pushFrom(w, { '_logs_/run.jsonl': 'a\nb\nremote\n' })
-  const r = cli(w, record(w, '_logs_/run.jsonl', 'record: log'))
+  const r = cli(w, record(w, '_logs_/run.jsonl', 'log(test): append a line'))
   assert.equal(r.status, OK, r.output)
   const lines = originShow(w, '_logs_/run.jsonl').trim().split('\n')
   for (const line of ['a', 'b', 'local', 'remote']) assert.ok(lines.includes(line), `${line} survived`)
@@ -219,7 +222,7 @@ test('the frontmatter validator sees the whole tree, and its failure refuses the
 
   write(w.live, '_projects_/x/note.md', 'worse\n')
   const landed = git(w.origin, ['rev-parse', 'main'])
-  const refused = cli(w, ['--message', 'record: bad', '--file', '_projects_/x/note.md', '--validator', w.failingValidator])
+  const refused = cli(w, ['--message', 'docs(test): a bad edit', '--file', '_projects_/x/note.md', '--validator', w.failingValidator])
   assert.equal(refused.status, REFUSED, refused.output)
   assert.match(refused.output, /frontmatter: the validator failed; nothing committed/)
   assert.equal(git(w.origin, ['rev-parse', 'main']), landed, 'the refused edit did not land')
@@ -229,7 +232,7 @@ test('the frontmatter validator sees the whole tree, and its failure refuses the
 test('validator warnings are counted, not dumped, unless --verbose asks for them', (t) => {
   const w = world(t)
   write(w.live, '_projects_/x/note.md', 'one\nwith warnings\n')
-  const quiet = cli(w, ['--message', 'record: warned', '--file', '_projects_/x/note.md', '--validator', w.warningValidator, '--no-sync'])
+  const quiet = cli(w, ['--message', 'docs(test): an edit with warnings', '--file', '_projects_/x/note.md', '--validator', w.warningValidator, '--no-sync'])
   assert.equal(quiet.status, OK, quiet.output)
   assert.match(quiet.output, /frontmatter: checked 9 file\(s\): 0 error\(s\), 1 warning\(s\)/)
   assert.match(quiet.output, /frontmatter: 1 warning\(s\), none blocking \(--verbose lists them\)/)
@@ -238,7 +241,7 @@ test('validator warnings are counted, not dumped, unless --verbose asks for them
   git(w.live, ['fetch', '-q', 'origin'])
   git(w.live, ['reset', '-q', '--hard', 'origin/main'])
   write(w.live, '_projects_/x/note.md', 'one\nverbose\n')
-  const loud = cli(w, ['--message', 'record: verbose', '--file', '_projects_/x/note.md', '--validator', w.warningValidator, '--no-sync', '--verbose'])
+  const loud = cli(w, ['--message', 'docs(test): a verbose edit', '--file', '_projects_/x/note.md', '--validator', w.warningValidator, '--no-sync', '--verbose'])
   assert.equal(loud.status, OK, loud.output)
   assert.match(loud.output, /warning fixture: a link does not resolve/)
 })
@@ -249,23 +252,151 @@ test('a staging tree is committed from --base, and a stale base refuses it', (t)
   const base = join(w.root, 'base')
   write(staged, '_projects_/x/note.md', 'one\nstaged\n')
   write(base, '_projects_/x/note.md', 'one\n')
-  const args = ['--message', 'record: staged', '--staged', staged, '--base', base, '--validator', w.validator, '--no-sync']
+  const args = ['--message', 'docs(test): a staged edit', '--staged', staged, '--base', base, '--validator', w.validator, '--no-sync']
   const ok = cli(w, args)
   assert.equal(ok.status, OK, ok.output)
   assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nstaged\n')
 
   pushFrom(w, { '_projects_/x/note.md': 'origin moved\n' })
-  const stale = cli(w, ['--message', 'record: stale', '--staged', staged, '--base', base, '--validator', w.validator, '--no-sync'])
+  const stale = cli(w, ['--message', 'docs(test): a stale edit', '--staged', staged, '--base', base, '--validator', w.validator, '--no-sync'])
   assert.equal(stale.status, REFUSED, stale.output)
   assert.match(stale.output, /base does not match origin\/main/)
   assert.equal(originShow(w, '_projects_/x/note.md'), 'origin moved\n')
 })
 
-test('content already equal to origin is nothing to commit', (t) => {
+test('content already equal to origin is a file the commit would not carry: exit 2, nothing committed', (t) => {
   const w = world(t)
+  const before = git(w.origin, ['rev-parse', 'main'])
   const r = cli(w, record(w, '_projects_/x/note.md'))
-  assert.equal(r.status, REFUSED, r.output)
-  assert.match(r.output, /nothing to commit/)
+  assert.equal(r.status, INCOMPLETE, r.output)
+  assert.match(r.output, /UNCHANGED _projects_\/x\/note\.md: its content already equals origin\/main/)
+  assert.equal(git(w.origin, ['rev-parse', 'main']), before)
+})
+
+// The 21:08 case: three files given, one carrying an edit, two whose edits never reached
+// the tree the tool reads. It committed the one with exit 0; it must refuse all three.
+test('three given files with two unchanged are refused together, exit 2, and nothing is committed', (t) => {
+  const w = world(t)
+  write(w.live, '_projects_/x/note.md', 'one\nedited\n')
+  const before = git(w.origin, ['rev-parse', 'main'])
+  const r = cli(w, ['--message', 'docs(test): three files', '--file', '_projects_/x/note.md', '--file', '_projects_/x/other.md', '--file', '_logs_/run.jsonl', '--validator', w.validator])
+  assert.equal(r.status, INCOMPLETE, r.output)
+  assert.match(r.output, /UNCHANGED _projects_\/x\/other\.md: its content already equals origin\/main/)
+  assert.match(r.output, /UNCHANGED _logs_\/run\.jsonl: every given line is already in origin\/main/)
+  assert.doesNotMatch(r.output, /UNCHANGED _projects_\/x\/note\.md/)
+  assert.match(r.output, /refusing: 2 of 3 given file\(s\) would not change/)
+  assert.equal(git(w.origin, ['rev-parse', 'main']), before, 'not even the changed file was committed')
+  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\n')
+  assert.equal(read(w.live, '_projects_/x/note.md'), 'one\nedited\n', 'the live edit is untouched')
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('a log whose new lines another writer already landed is unchanged, not a silent no-op', (t) => {
+  const w = world(t)
+  write(w.live, '_logs_/run.jsonl', 'a\nb\nnew line\n')
+  pushFrom(w, { '_logs_/run.jsonl': 'a\nb\nnew line\n' })
+  const r = cli(w, record(w, '_logs_/run.jsonl', 'log(test): append a line'))
+  assert.equal(r.status, INCOMPLETE, r.output)
+  assert.match(r.output, /UNCHANGED _logs_\/run\.jsonl/)
+})
+
+function raceHook(w, file, content) {
+  const hookDir = join(w.live, '.git', 'hooks')
+  mkdirSync(hookDir, { recursive: true })
+  writeFileSync(
+    join(hookDir, 'pre-push'),
+    `#!/bin/sh
+if [ ! -f "$RACE_MARKER" ]; then
+  touch "$RACE_MARKER"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  git -C "$WRITER" fetch -q origin
+  git -C "$WRITER" reset -q --hard origin/main
+  mkdir -p "$(dirname "$WRITER/${file}")"
+  printf '%s' '${content}' > "$WRITER/${file}"
+  git -C "$WRITER" add -A
+  git -C "$WRITER" commit -qm race
+  git -C "$WRITER" push -q
+fi
+exit 0
+`,
+  )
+  chmodSync(join(hookDir, 'pre-push'), 0o755)
+}
+
+// The coordinator's scenario: one staged file that another writer adds to origin between
+// this run's fetch and its push, alongside two other staged files. The record must carry
+// all three or refuse with exit 2, whatever bytes the other writer used.
+function threeFilesWithRace(w, racedContent) {
+  write(w.live, '_projects_/x/handover.md', 'handover\n')
+  write(w.live, '_projects_/x/note.md', 'one\nref to handover\n')
+  write(w.live, '_logs_/run.jsonl', 'a\nb\nstep line\n')
+  raceHook(w, '_projects_/x/handover.md', racedContent)
+  return cli(
+    w,
+    ['--message', 'docs(test): handover, its ref and a step line', '--file', '_projects_/x/handover.md', '--file', '_projects_/x/note.md', '--file', '_logs_/run.jsonl', '--validator', w.validator],
+    { RACE_MARKER: join(w.root, 'race'), WRITER: w.writer },
+  )
+}
+
+function assertNothingOfOursLanded(w) {
+  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\n', 'the second staged file was not committed on its own')
+  assert.equal(originShow(w, '_logs_/run.jsonl'), 'a\nb\n', 'the third staged file was not committed on its own')
+  assert.equal(git(w.origin, ['rev-list', '--count', 'main']), '2', 'base + the racing commit, nothing of ours')
+  assert.equal(worktreeCount(w), 1)
+}
+
+test('another writer adds one of three staged files with the same bytes between fetch and push: exit 2, none committed', (t) => {
+  const w = world(t)
+  const r = threeFilesWithRace(w, 'handover\n')
+  assert.equal(r.status, INCOMPLETE, r.output)
+  assert.match(r.output, /push rejected .*rebuilding from a fresh origin/)
+  assert.match(r.output, /UNCHANGED _projects_\/x\/handover\.md/)
+  assert.match(r.output, /refusing: 1 of 3 given file\(s\) would not change/)
+  assertNothingOfOursLanded(w)
+  assert.equal(originShow(w, '_projects_/x/handover.md'), 'handover\n')
+})
+
+test('another writer adds one of three staged files with different bytes between fetch and push: exit 2, none committed', (t) => {
+  const w = world(t)
+  const r = threeFilesWithRace(w, 'theirs\n')
+  assert.equal(r.status, INCOMPLETE, r.output)
+  assert.match(r.output, /push rejected .*rebuilding from a fresh origin/)
+  assert.match(r.output, /REFUSED _projects_\/x\/handover\.md: base does not match origin\/main/)
+  assert.match(r.output, /refusing: another writer changed 1 given file\(s\) while this run was pushing; nothing was committed/)
+  assertNothingOfOursLanded(w)
+  assert.equal(originShow(w, '_projects_/x/handover.md'), 'theirs\n', 'the other writer keeps its version')
+})
+
+test('the read-back counts the files it was given, not the files the commit happened to carry', () => {
+  const files = [
+    { path: 'a.md', kind: 'file', content: Buffer.from('a\n'), expected: Buffer.from('a\n') },
+    { path: 'b.md', kind: 'file', content: Buffer.from('b\n'), expected: Buffer.from('b\n') },
+  ]
+  const readOrigin = (path) => Buffer.from(path === 'a.md' ? 'a\n' : 'b\n')
+  const problems = verifyLanded({ commit: 'c1', originMain: 'c1', files, readOrigin, committedPaths: ['a.md'] })
+  assert.match(problems.join('\n'), /the commit carries 1 of the 2 given file\(s\); not carried: b\.md/)
+  assert.deepEqual(verifyLanded({ commit: 'c1', originMain: 'c1', files, readOrigin, committedPaths: ['a.md', 'b.md'] }), [])
+})
+
+test('a message outside <type>(<scope>): <subject> is warned about on stderr, and the commit still lands', (t) => {
+  assert.deepEqual(messageWarnings('docs(hd): record the handover', ['_projects_/x/a.md']), [])
+  // Every type of the shared commit-messages convention is accepted, and nothing else.
+  for (const type of ['feat', 'fix', 'docs', 'test', 'refactor', 'perf', 'ci', 'chore', 'revert']) {
+    assert.deepEqual(messageWarnings(`${type}(hd): a subject`, ['_projects_/x/a.md']), [], `${type} is a type`)
+  }
+  assert.match(messageWarnings('logs(hd): lines', ['_logs_/run.jsonl']).join(), /'logs' is not a commit type .*spelled log/)
+  assert.match(messageWarnings('hd(008): a seat as a type', ['_projects_/x/a.md']).join(), /'hd' is not a commit type/)
+  assert.deepEqual(messageWarnings('log(hd): two step lines', ['_logs_/repo-actions/action-log.jsonl']), [])
+  assert.match(messageWarnings('record: the handover', ['_projects_/x/a.md']).join(), /'record' is not a commit type .*a record edit is docs\(<scope>\)/)
+  assert.match(messageWarnings('Updated the handover', ['_projects_/x/a.md']).join(), /not <type>\(<scope>\): <subject>/)
+  assert.match(messageWarnings('record(hd): the handover', ['_projects_/x/a.md']).join(), /a record edit is docs\(<scope>\)/)
+  assert.match(messageWarnings('docs(hd): lines', ['_logs_/run.jsonl']).join(), /the type is log\(<scope>\), not docs/)
+  assert.match(messageWarnings('log(hd): more', ['_projects_/x/a.md', '_logs_/run.jsonl']).join(), /only appends to _logs_/)
+  const w = world(t)
+  write(w.live, '_projects_/x/note.md', 'one\nwarned\n')
+  const r = cli(w, ['--message', 'record: an old-style message', '--file', '_projects_/x/note.md', '--validator', w.validator, '--no-sync'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.stderr, /record-commit: warning: 'record' is not a commit type/)
 })
 
 test('a dry run validates and plans but commits nothing', (t) => {
@@ -302,7 +433,7 @@ exit 0
 `,
   )
   chmodSync(join(hookDir, 'pre-push'), 0o755)
-  const r = cli(w, record(w, '_projects_/x/note.md', 'record: raced'), { RACE_MARKER: marker, WRITER: w.writer })
+  const r = cli(w, record(w, '_projects_/x/note.md', 'docs(test): a raced edit'), { RACE_MARKER: marker, WRITER: w.writer })
   assert.equal(r.status, OK, r.output)
   assert.match(r.output, /push rejected .*rebuilding from a fresh origin/)
   assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nraced\n')
@@ -315,7 +446,7 @@ test('a commit that lands but cannot sync the live tree exits 3', (t) => {
   write(w.live, '_projects_/x/other.md', 'my unrelated edit\n')
   pushFrom(w, { '_projects_/x/other.md': 'their change\n' })
   write(w.live, '_projects_/x/note.md', 'one\nrecorded\n')
-  const r = cli(w, record(w, '_projects_/x/note.md', 'record: note'))
+  const r = cli(w, record(w, '_projects_/x/note.md', 'docs(test): the note'))
   assert.equal(r.status, SYNC_REFUSED, r.output)
   assert.match(r.output, /sync: the record is committed and pushed; the live tree was not fast-forwarded/)
   assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nrecorded\n', 'the record did land')
@@ -339,4 +470,30 @@ test('collectFiles refuses a path that escapes the checkout', (t) => {
   const files = collectFiles({ repo: w.live, flagFiles: ['_projects_/x/note.md'] })
   assert.equal(files.length, 1)
   assert.equal(files[0].base.toString(), 'one\n')
+})
+
+test('the validator python is the repository .venv when it has one, else a python3, and the choice is named', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'record-commit-python-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const fallback = findPython(null, dir)
+  assert.ok(fallback, 'some python with PyYAML exists on this Mac')
+  assert.match(fallback.why, /^no \.venv; /, 'without a .venv the fallback says so')
+  // A .venv whose python is this Mac's PyYAML python: the nearest .venv wins and is named.
+  mkdirSync(join(dir, '.venv', 'bin'), { recursive: true })
+  symlinkSync(fallback.command.includes('/') ? fallback.command : spawnSync('/bin/sh', ['-c', `command -v ${fallback.command}`], { encoding: 'utf8' }).stdout.trim(), join(dir, '.venv', 'bin', 'python'))
+  const venv = findPython(null, dir)
+  assert.equal(venv.command, join(dir, '.venv', 'bin', 'python'))
+  assert.equal(venv.why, "the repository's .venv")
+  assert.equal(findPython('/no/such/python', dir).why, "the repository's .venv", 'a missing explicit path is skipped')
+})
+
+test('a run with the repository validator names the python it used and why', (t) => {
+  const w = world(t)
+  // The record repository's own validator path, as on origin; a stand-in that passes.
+  pushFrom(w, { 'shared/_tools_/frontmatter-validator/validate-frontmatter.py': 'import yaml\nprint("checked 1 file(s): 0 error(s), 0 warning(s)")\n' })
+  git(w.live, ['pull', '-q', '--ff-only'])
+  write(w.live, '_projects_/x/note.md', 'one\nnamed\n')
+  const r = cli(w, ['--message', 'docs(test): name the python', '--file', '_projects_/x/note.md', '--no-sync', '--dry-run'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, /  python: \S+ \(no \.venv; a python3? with PyYAML\)/, 'no .venv in the scratch record repo, and the report says so')
 })

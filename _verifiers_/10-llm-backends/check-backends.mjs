@@ -22,14 +22,18 @@ const CAPABILITY = 'backend connections with a configured endpoint list'
 
 async function supportsBackends() {
   const help = await runCli(['--help'])
-  return /--endpoint/.test(help.stdout)
+  // The probe asks for every command this part's checks run, matched as a command line rather than as a word:
+  // a check that runs a command the harness does not advertise would fail, not skip, and that failure would
+  // be about the missing command, not about this part.
+  return /--endpoint/.test(help.stdout) && /--turn/.test(help.stdout) && /^\s{2}models\b/m.test(help.stdout)
 }
 
 test('the endpoint list is configuration and the command reports it', async (context) => {
   if (!skipUnless(context, await supportsBackends(), CAPABILITY)) return
   const home = isolatedHome('backends-list')
+  let double
   try {
-    const double = await chatDouble({ content: 'x' })
+    double = await chatDouble({ content: 'x' })
     const config = httpConfig({ home, name: 'not-the-first', baseUrl: double.baseUrl })
     const run = await runCli(['models', '--json'], { env: { HOME: home, HEDDLE_CONFIG: config } })
     assert.equal(run.code, 0, `the command ran\n${run.stdout}${run.stderr}`)
@@ -41,8 +45,8 @@ test('the endpoint list is configuration and the command reports it', async (con
     const configured = endpoints.find((endpoint) => endpoint.name === 'not-the-first')
     assert.equal(configured.kind, 'openai-chat', 'each endpoint declares its wire shape')
     assert.equal(configured.baseUrl, double.baseUrl, 'and the URL the configuration gave it')
-    await double.close()
   } finally {
+    await double?.close()
     removeDir(home)
   }
 })
@@ -50,8 +54,9 @@ test('the endpoint list is configuration and the command reports it', async (con
 test('a turn runs over the Chat Completions shape', async (context) => {
   if (!skipUnless(context, await supportsBackends(), CAPABILITY)) return
   const home = isolatedHome('backends-chat')
+  let double
   try {
-    const double = await chatDouble({ content: 'answered over chat completions' })
+    double = await chatDouble({ content: 'answered over chat completions' })
     const config = httpConfig({ home, name: 'chat', baseUrl: double.baseUrl })
     const run = await runCli(['--endpoint', 'chat', '--sandbox-root', home, '--turn', 'say something', '--json'], { env: { HOME: home, HEDDLE_CONFIG: config } })
     assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
@@ -60,8 +65,8 @@ test('a turn runs over the Chat Completions shape', async (context) => {
     assert.match(double.requests[0].url, /chat\/completions/, 'at the route that shape uses')
     const body = JSON.parse(double.requests[0].body)
     assert.ok(Array.isArray(body.messages) && body.messages.length > 0, 'and it carried the conversation')
-    await double.close()
   } finally {
+    await double?.close()
     removeDir(home)
   }
 })
@@ -69,8 +74,9 @@ test('a turn runs over the Chat Completions shape', async (context) => {
 test('a turn runs over the Responses shape, which is a different contract', async (context) => {
   if (!skipUnless(context, await supportsBackends(), CAPABILITY)) return
   const home = isolatedHome('backends-responses')
+  let double
   try {
-    const double = await responsesDouble({ content: 'answered over responses' })
+    double = await responsesDouble({ content: 'answered over responses' })
     const config = httpConfig({ home, name: 'codex', kind: 'openai-responses', baseUrl: double.baseUrl })
     const run = await runCli(['--endpoint', 'codex', '--sandbox-root', home, '--turn', 'say something', '--json'], { env: { HOME: home, HEDDLE_CONFIG: config } })
     assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
@@ -79,8 +85,8 @@ test('a turn runs over the Responses shape, which is a different contract', asyn
     const body = JSON.parse(double.requests[0].body)
     assert.ok(Array.isArray(body.input), 'input is a list, which that route requires')
     assert.equal(body.stream, true, 'and it is streamed, which that route also requires')
-    await double.close()
   } finally {
+    await double?.close()
     removeDir(home)
   }
 })
@@ -148,9 +154,10 @@ test('the configured default endpoint is the one a turn uses when none is named'
    * ordering.
    */
   const home = isolatedHome('backends-default')
+  let first, chosen
   try {
-    const first = await chatDouble({ content: 'the first endpoint answered' })
-    const chosen = await chatDouble({ content: 'the default endpoint answered' })
+    first = await chatDouble({ content: 'the first endpoint answered' })
+    chosen = await chatDouble({ content: 'the default endpoint answered' })
     const config = writeJson(join(home, 'heddle.json'), {
       default: 'chosen',
       endpoints: [
@@ -162,9 +169,9 @@ test('the configured default endpoint is the one a turn uses when none is named'
     assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
     assert.match(run.stdout, /the default endpoint answered/, 'the configured default answered')
     assert.equal(first.requests.length, 0, 'and the first endpoint in the list was never reached')
-    await first.close()
-    await chosen.close()
   } finally {
+    await first?.close()
+    await chosen?.close()
     removeDir(home)
   }
 })
@@ -177,14 +184,15 @@ test('listing the endpoints costs nothing and reaches no provider', async (conte
    * that records every request and requires the listing to leave it empty.
    */
   const home = isolatedHome('backends-list-free')
+  let double
   try {
-    const double = await chatDouble({ content: 'x' })
+    double = await chatDouble({ content: 'x' })
     const config = httpConfig({ home, name: 'double', baseUrl: double.baseUrl })
     const run = await runCli(['models', '--json'], { env: { HOME: home, HEDDLE_CONFIG: config } })
     assert.equal(run.code, 0, `the listing ran\n${run.stdout}${run.stderr}`)
     assert.equal(double.requests.length, 0, 'listing the endpoints made no request')
-    await double.close()
   } finally {
+    await double?.close()
     removeDir(home)
   }
 })

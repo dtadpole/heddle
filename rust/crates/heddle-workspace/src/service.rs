@@ -152,9 +152,11 @@ impl WorkspaceService {
                 source: error,
             })?;
         }
-        std::fs::write(&self.file, shape.to_file_text()).map_err(|error| WorkspaceError::Io {
-            path: self.file.clone(),
-            source: error,
+        heddle_session::write_atomic(&self.file, shape.to_file_text()).map_err(|error| {
+            WorkspaceError::Io {
+                path: self.file.clone(),
+                source: error,
+            }
         })
     }
 

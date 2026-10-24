@@ -127,6 +127,20 @@ pub fn boot(options: &BootOptions, catalog: &dyn Catalog) -> Result<Boot, BootEr
 /// what it requires is provided, repeatedly, until nothing more can start.
 pub fn load(rows: Vec<ComposedRow>, anchor: &Path, catalog: &dyn Catalog) -> Boot {
     let mut services = Services::new();
+    // One bus per process, its catalog exposed before any row can attach a listener: the model, the
+    // tools, the turn and every outside component reach the hook points through it.
+    let bus = heddle_events::EventBus::new();
+    heddle_events::bridge::expose_catalog(&bus);
+    services.provide("events", bus);
+    // The server's hub exists before the session store, which needs its listener when it is built:
+    // `heddle web` hands the same hub to the server, so the page sees every event the store appends.
+    services.provide("event-hub", heddle_server::EventHub::new());
+    // `--stream`'s live view is fed from the same listener, synchronously, so a delta reaches the terminal
+    // while the turn runs.
+    services.provide(
+        "stream-hub",
+        std::sync::Arc::new(heddle_llm::command::StreamHub::new()),
+    );
     let mut entries = Vec::new();
     // The component each entry starts, in the entries' own order; `None` when the row names nothing
     // the catalog knows, which leaves that entry failed rather than pending forever.
@@ -235,6 +249,22 @@ pub fn failed_entries(boot: &Boot) -> Vec<(String, String)> {
         .iter()
         .filter(|entry| entry.state == FiberState::Failed)
         .map(|entry| (entry.id.clone(), entry.name.clone()))
+        .collect()
+}
+
+/// What each failed row said when it failed, as the loader's log line: `<id>: <error>`. The TypeScript
+/// loader logs a plugin's thrown error through the console exporter, which is where a person (and a
+/// check) reads why a row did not start.
+pub fn failure_lines(boot: &Boot) -> Vec<String> {
+    boot.entries
+        .iter()
+        .filter(|entry| entry.state == FiberState::Failed)
+        .filter_map(|entry| {
+            entry
+                .error
+                .as_ref()
+                .map(|error| format!("{}: {error}", entry.id))
+        })
         .collect()
 }
 
