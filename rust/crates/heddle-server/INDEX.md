@@ -1,6 +1,8 @@
 ---
 title: The heddle-server crate
-version: 0.3.0
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-24T05:20:00Z
+version: 0.4.0
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -22,7 +24,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (140 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (142 tests on main `445ea43`). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -31,30 +33,18 @@ crates exist.
 
 ## Where the port stands
 
-As of 2026-10-22 21:08 PDT, branch `hd/developer-ten` at `2bc3d26`.
+As of 2026-10-24 on main `445ea43`.
 
-- **Answers and is tested (134 tests):** every module; the door over a real socket; `/api/turn`
-  streaming end to end; every `CORE_ROUTES` entry; route conflicts as `ServerError::Route`;
-  `mount_router` for state-applied feature routers; the approval answerer attached by `start` and
-  published questions relayed from `ApprovalService::subscribe`; a refused team fold and a panicking
-  handler answering `500 internal error: <message>`; and `adapters::StoreSessions` over
-  `heddle-session` (on `main`), tested against a real store and through the routes.
-- **Merged:** into the ui lane (`hd/integrator-two`, through `ca07d50`) and into integrator-one's
-  backend candidate (`ca07d50`), both gate-green. **Not on `main`**: held by the public-hygiene gate's
-  rule 22, which matches the placeholder session ids in this crate's tests (19 findings across the
-  range); the coordinator owns the private list and is deciding. Do not rewrite ids to dodge it.
-- **Not judged yet:** `90-web-ui-token` and `80-web-ui` need `heddle web`. The door-only example
-  (`examples/web_door.rs`) passes 7 of 9 checks of main's `90-web-ui-token` through `HEDDLE_BIN`; the
-  two failures need a turn. That is evidence, not a pass.
-- **Next steps, in order:**
-  1. (done) D-043: `web`'s entry point is `src/command.rs`; developer-two adds the dispatch line and
-     composes the `Context`.
-  2. (done in the commit after `b77d3d4`) developer-seven's two fidelity notes: an absent permission
-     mode is passed as `None` so it is refused as `'undefined'`, and the approval id and outcome are
-     checked before the missing-service 409.
-  3. The remaining adapters as their APIs reach `main` (workspace, model, turn, sandbox, approvals).
-  4. The day `heddle web` answers through `HEDDLE_BIN`, run `80-web-ui` and `90-web-ui-token` from the
-     ui lane and report the counts to integrator-two.
+- **On main and tested:** this crate (142 unit tests) and the `web` command that serves it, composed in
+  `rust/crates/heddle/src/web.rs` (D-047): sessions, workspaces, model, turns, sandbox, approvals, goals,
+  todos, team, statistics, uploads, markdown, the composer, files and trajectory routers, and the
+  context row.
+- **Judged:** part 9 is met through `HEDDLE_BIN` on main `33407a4` — `80-web-ui` passes 75 of 75 in two
+  runs and 85, 87 and 88 pass in full ([readings](../../../_verifiers_/80-web-ui/readings.md)). The
+  checks that are still intermittent, with their causes and owners, are listed in
+  [`rust/INDEX.md`](../../INDEX.md).
+- **Standing duty:** re-run `80-web-ui` and `90-web-ui-token` through `HEDDLE_BIN` on every candidate
+  that touches this crate or `web.rs`, and fix what fails here.
 
 ## Public API
 
@@ -150,7 +140,7 @@ Each step lands with its unit tests and is pushed; the verifier rows say what it
 | 4 | `transcript`, `selection`, and the session routes: list, chat view, create, `folders/session`, fork, flags, title, permission, steer, stop, and `/api/turn` streaming | done, unit-tested |
 | 5 | workspace routes (`/api/tree`, `/api/workspaces`) | done, unit-tested through the trait |
 | 6 | approvals, goal, todo, team, `/api/html`, `/vendor/purify.js` | done, unit-tested through the traits |
-| 7 | adapters over the real session, workspace and events crates as their APIs land; wiring `heddle web` with the binary's owner | **in progress**: `adapters::StoreSessions` over `heddle-session` (on `main`) is done and tested against a real store, and the routes are tested over it; the workspace, model, turn and sandbox adapters follow as those APIs land; `web`'s entry point moves into this crate under D-043 once the binary's convention is published |
+| 7 | adapters over the real session, workspace and events crates; wiring `heddle web` | **done**: `adapters::StoreSessions` over `heddle-session`; the other services are composed in `rust/crates/heddle/src/web.rs` (D-047), whose owner is this crate's |
 
 **What the binary must do to make the verifiers pass through `HEDDLE_BIN`** (the exact checklist sent
 to the binary's owner):
@@ -187,9 +177,9 @@ The cookie format is kept byte-compatible so the TypeScript token module can sta
 ## A door-only example
 
 `examples/web_door.rs` boots [`Harness::unavailable`] behind the real [`server`] builder: it prints the
-URL, answers `/healthz`, the token handshake and the page, and refuses every service route. It exists so
-the server crate can be driven as a real process before `heddle web` exists, and so a verifier's
-`HEDDLE_BIN` path can be exercised without the harness. It is **not the harness**: a check that needs a
+URL, answers `/healthz`, the token handshake and the page, and refuses every service route. It was the way
+to drive the server as a real process before `heddle web` existed, and it still runs the crate alone,
+without the harness. It is **not the harness**: a check that needs a
 turn, a session or a model judges nothing against it and fails, which is the honest result.
 
 ## Read next
