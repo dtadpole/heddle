@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::response::Response;
 use futures::{Stream, StreamExt};
 use serde::Serialize;
@@ -46,6 +46,52 @@ pub mod names {
 pub struct SseFrame {
     pub event: String,
     pub data: String,
+    /// Set when a subscriber takes the frame: marks it written once its last holder lets it go.
+    ack: Ack,
+}
+
+/// A taken frame's delivery mark. Its last holder is either the response body's bytes, which hyper's
+/// queued writes (the strategy for a TCP stream) release only once the socket has taken all of them, or a
+/// frame a reader filtered out; either way the drop counts the frame written. It never affects equality.
+#[derive(Clone, Default)]
+struct Ack(Option<Arc<AckOnDrop>>);
+
+struct AckOnDrop(Arc<Delivery>);
+
+impl Drop for AckOnDrop {
+    fn drop(&mut self) {
+        self.0.written.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl PartialEq for Ack {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Ack {}
+
+impl std::fmt::Debug for Ack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Ack(taken)"
+        } else {
+            "Ack"
+        })
+    }
+}
+
+/// A frame's bytes, holding its delivery mark until hyper has written them.
+struct Written {
+    bytes: Vec<u8>,
+    _ack: Arc<AckOnDrop>,
+}
+
+impl AsRef<[u8]> for Written {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl SseFrame {
@@ -54,6 +100,7 @@ impl SseFrame {
         SseFrame {
             event: event.into(),
             data: serde_json::to_string(data).expect("a serializable frame payload"),
+            ack: Ack::default(),
         }
     }
 
@@ -68,6 +115,7 @@ impl SseFrame {
                 serde_json::to_string(session).expect("a string serializes"),
                 serde_json::to_string(event).expect("an event serializes")
             ),
+            ack: Ack::default(),
         }
     }
 
@@ -76,12 +124,25 @@ impl SseFrame {
         SseFrame {
             event: names::APPROVAL.to_owned(),
             data: serde_json::to_string(request).expect("an approval request serializes"),
+            ack: Ack::default(),
         }
     }
 
     /// `event: <name>\ndata: <data>\n\n`.
     pub fn encode(&self) -> String {
         format!("event: {}\ndata: {}\n\n", self.event, self.data)
+    }
+
+    /// The frame as body bytes; a taken frame's bytes carry its delivery mark until they are written.
+    fn into_body_bytes(self) -> Bytes {
+        let text = self.encode();
+        match self.ack.0 {
+            Some(ack) => Bytes::from_owner(Written {
+                bytes: text.into_bytes(),
+                _ack: ack,
+            }),
+            None => Bytes::from(text),
+        }
     }
 
     /// The session a `session` frame belongs to, read from its data; `None` for any other frame.
@@ -120,15 +181,15 @@ struct HubInner {
     closed: bool,
 }
 
-/// How far one subscriber's reader has come: frames handed to its channel, and frames its stream has
-/// taken out (and so given to the response body). TypeScript writes every frame to every open response
-/// in the tick that publishes it; here a response task takes its frames when the runtime polls it, which
-/// on a busy machine can be after a later frame on another response. [`EventHub::flushed`] waits on
-/// these counts to restore TypeScript's order where it matters.
+/// How far one subscriber's reader has come: frames handed to its channel, and frames written — their bytes
+/// handed to the socket, or filtered out by the reader. TypeScript writes every frame to every open response
+/// in the tick that publishes it; here a response task takes and writes its frames when the runtime polls
+/// it, which on a busy machine can be after a later frame on another response. [`EventHub::flushed`] waits
+/// on these counts to restore TypeScript's order where it matters.
 #[derive(Default)]
 struct Delivery {
     sent: AtomicU64,
-    taken: AtomicU64,
+    written: AtomicU64,
     /// Set when the subscription is dropped: a reader that is gone is not waited on.
     closed: AtomicBool,
 }
@@ -153,7 +214,7 @@ impl EventHub {
         });
     }
 
-    /// Wait, at most `limit`, until every live subscriber has taken every frame published before this
+    /// Wait, at most `limit`, until every live subscriber has written every frame published before this
     /// call; `true` when they all have. A turn calls this before its terminal frame, so a page never
     /// sees its turn finish on one response while the turn's last text is still queued for another
     /// (`/api/events`, which draws the live text). A subscriber whose reader is gone is not waited on.
@@ -172,7 +233,7 @@ impl EventHub {
         loop {
             let behind = pending.iter().any(|(delivery, sent)| {
                 !delivery.closed.load(Ordering::SeqCst)
-                    && delivery.taken.load(Ordering::SeqCst) < *sent
+                    && delivery.written.load(Ordering::SeqCst) < *sent
             });
             if !behind {
                 return true;
@@ -238,18 +299,19 @@ impl Subscription {
     /// The next frame, or `None` once the hub has closed.
     pub async fn next_frame(&mut self) -> Option<SseFrame> {
         let frame = self.receiver.recv().await;
-        if frame.is_some() {
-            self.delivery.taken.fetch_add(1, Ordering::SeqCst);
-        }
-        frame
+        frame.map(|frame| self.taken(frame))
     }
 
     fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Option<SseFrame>> {
-        let polled = self.receiver.poll_recv(cx);
-        if let Poll::Ready(Some(_)) = &polled {
-            self.delivery.taken.fetch_add(1, Ordering::SeqCst);
-        }
-        polled
+        self.receiver
+            .poll_recv(cx)
+            .map(|frame| frame.map(|frame| self.taken(frame)))
+    }
+
+    /// Mark a frame this subscriber took; it counts as written when its last holder drops it.
+    fn taken(&self, mut frame: SseFrame) -> SseFrame {
+        frame.ack = Ack(Some(Arc::new(AckOnDrop(Arc::clone(&self.delivery)))));
+        frame
     }
 
     /// Only the `session` frames of one session — what a running turn relays on its own response.
@@ -306,8 +368,8 @@ pub fn sse_response<S>(frames: S) -> Response
 where
     S: Stream<Item = SseFrame> + Send + 'static,
 {
-    let body = futures::stream::once(async { Ok::<_, std::io::Error>(STREAM_OPEN.to_owned()) })
-        .chain(frames.map(|frame| Ok::<_, std::io::Error>(frame.encode())));
+    let body = futures::stream::once(async { Ok::<_, std::io::Error>(Bytes::from(STREAM_OPEN)) })
+        .chain(frames.map(|frame| Ok::<_, std::io::Error>(frame.into_body_bytes())));
     Response::builder()
         .status(200)
         .header("content-type", "text/event-stream")
@@ -382,7 +444,8 @@ mod tests {
         assert_eq!(
             SseFrame {
                 event: "session".into(),
-                data: "not json".into()
+                data: "not json".into(),
+                ack: Ack::default(),
             }
             .session_id(),
             None

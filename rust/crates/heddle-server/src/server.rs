@@ -2869,6 +2869,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_frame_counts_as_written_only_once_the_socket_has_taken_it() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let builder = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                port: Some(0),
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("written")),
+                ..ServerOptions::default()
+            },
+        );
+        let hub = builder.events();
+        let server = builder.start().await.expect("the server starts");
+        let port = server.port();
+        let handshake = raw_request(
+            port,
+            "GET /?token=test-token HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let cookie = handshake
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("set-cookie: ")
+                    .or_else(|| line.strip_prefix("Set-Cookie: "))
+            })
+            .map(|value| value.split(';').next().unwrap().to_owned())
+            .expect("the handshake sets a cookie");
+        let mut events = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        events
+            .write_all(
+                format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while hub.subscriber_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the live stream subscribed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // A frame far larger than the socket's buffers, and a reader that does not read yet: hyper cannot
+        // finish writing it, so it must not count as written.
+        let big = "x".repeat(16 * 1024 * 1024);
+        hub.publish(SseFrame::new("big", &big));
+        assert!(
+            !hub.flushed(std::time::Duration::from_millis(300)).await,
+            "the frame counted as written before the socket took it"
+        );
+        // The reader reads it all; now it has been written.
+        let mut received = 0usize;
+        let mut buffer = vec![0u8; 1 << 20];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while received < big.len() {
+            let n =
+                tokio::time::timeout(std::time::Duration::from_secs(2), events.read(&mut buffer))
+                    .await
+                    .expect("the stream keeps delivering")
+                    .unwrap();
+            assert!(n > 0, "the stream ended early");
+            received += n;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reading took too long"
+            );
+        }
+        assert!(
+            hub.flushed(std::time::Duration::from_secs(2)).await,
+            "the frame counted as written once the socket took it"
+        );
+        drop(events);
+    }
+
+    #[tokio::test]
     async fn the_door_behaves_the_same_over_a_real_socket() {
         let server = ServerBuilder::new(
             harness(),
