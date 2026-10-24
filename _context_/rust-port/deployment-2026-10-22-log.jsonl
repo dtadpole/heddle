@@ -53,3 +53,12 @@
 {"at": "2026-10-23T01:36-07:00", "deployed": "d53dcf9", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T01:40-07:00", "deployed": "58a49b8", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T01:42-07:00", "deployed": "709bee6", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T01:50-07:00", "deployed": "37da0fd", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T02:04-07:00", "deployed": "fc1b90e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T04:15-07:00", "deployed": "97ff843", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current (records only)"}
+{"at": "2026-10-23T04:19-07:00", "deployed": "e073f20", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T04:30-07:00", "deployed": "e69f552", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt (web default endpoint falls back to the first); a two-message conversation in one session verified through the page"}
+{"at": "2026-10-23T04:34-07:00", "deployed": "c1d59f5", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T04:42-07:00", "deployed": "ad29cd0", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt (web leaves goal edges to the goal-driver row); two turns in one session verified"}
+{"at": "2026-10-23T04:45-07:00", "deployed": "ce4961a", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T04:50-07:00", "deployed": "d4e584f", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
