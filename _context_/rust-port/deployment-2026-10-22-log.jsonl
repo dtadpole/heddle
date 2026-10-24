@@ -74,3 +74,16 @@
 {"at": "2026-10-23T23:41-07:00", "deployed": "7afb437", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T23:49-07:00", "deployed": "06cacfa", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-24T00:17-07:00", "deployed": "bc18fc7", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt (connections served with Nagle off); two messages verified through the page"}
+{"at": "2026-10-24T00:22-07:00", "deployed": "63a36fb", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T00:33-07:00", "deployed": "8979a35", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T01:12-07:00", "deployed": "4e66959", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T01:53-07:00", "deployed": "99849e2", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T02:34-07:00", "deployed": "b42d299", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T03:14-07:00", "deployed": "d5c80c4", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T03:51-07:00", "deployed": "311f31a", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T04:32-07:00", "deployed": "617f168", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T05:07-07:00", "deployed": "7efe3fd", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T05:31-07:00", "deployed": "97148e0", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T06:07-07:00", "deployed": "420faa4", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T06:32-07:00", "deployed": "b043617", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
+{"at": "2026-10-24T07:14-07:00", "deployed": "b03a8f3", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; records and docs only; preview current (bc18fc7)"}
