@@ -213,10 +213,23 @@ export function collectFiles({ repo, staged, base, flagFiles = [] }) {
   })
 }
 
-function findPython(explicit) {
-  for (const candidate of [explicit, process.env.PYTHON, '/opt/homebrew/bin/python3', 'python3', 'python'].filter(Boolean)) {
+// shared/_conventions_/core-conventions/python-environments.md: the nearest .venv wins
+// (the record repository's own, beside the validator), else a python3 that can import
+// PyYAML, and the report says which was used and why.
+export function findPython(explicit, repo = null) {
+  const candidates = [
+    [explicit, '--python'],
+    [process.env.PYTHON, '$PYTHON'],
+    [repo ? join(repo, '.venv', 'bin', 'python') : null, "the repository's .venv"],
+    ['/opt/homebrew/bin/python3', 'no .venv; a python3 with PyYAML'],
+    ['python3', 'no .venv; a python3 with PyYAML'],
+    ['python', 'no .venv; a python with PyYAML'],
+  ]
+  for (const [candidate, why] of candidates) {
+    if (!candidate) continue
+    if (candidate.includes('/') && !existsSync(candidate)) continue
     const probe = spawnSync(candidate, ['-c', 'import yaml'], { stdio: 'ignore' })
-    if (probe.status === 0) return candidate
+    if (probe.status === 0) return { command: candidate, why }
   }
   return null
 }
@@ -312,11 +325,13 @@ function attempt({ config, report, rebuild = false }) {
           report.push(`  frontmatter: validator not found at ${validatorPath}`)
           return { code: REFUSED, files: prepared, report }
         }
-        command = findPython(python)
-        if (!command) {
+        const found = findPython(python, repo)
+        if (!found) {
           report.push('  frontmatter: no python with PyYAML found; pass --python or --no-validate')
           return { code: REFUSED, files: prepared, report }
         }
+        command = found.command
+        report.push(`  python: ${found.command} (${found.why})`)
         commandArgs = [validatorPath, '--root', tmp]
       }
       const run = spawnSync(command, commandArgs, { cwd: tmp, encoding: 'utf8' })
