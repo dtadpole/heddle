@@ -1,8 +1,8 @@
 ---
 title: The heddle-llm crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:09:31Z
-version: 0.5.0
+modified: 2026-10-23T15:04:22Z
+version: 0.6.0
 description: The Rust port crate for the backend wire shapes, the HTTP client, streamed content and reasoning deltas, model info and usage — what it is, its state, and where to read next.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -21,8 +21,8 @@ registry with its `model/request` and `model/stream` hooks, the `--stream` view,
 | Judged by | `_verifiers_/10-llm-backends`, `_verifiers_/20-streaming`, `_verifiers_/98-model-endpoints`, through the `heddle` binary |
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-llm`, offline |
 
-**State.** Every body is ported and tested. What remains is outside the crate: the binary advertising its
-capabilities and feeding the `--stream` view (see the port plan).
+**State.** Every body is ported and tested, and the binary on main passes `20-streaming` and the six local checks of
+`10-llm-backends`; what remains is outside the crate (see the port plan).
 
 ## Read next
 
