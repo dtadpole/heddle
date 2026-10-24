@@ -1,8 +1,8 @@
 ---
 title: Web daemon guard rules
 created: 2026-10-23T03:53:51Z
-modified: 2026-10-23T05:31:53Z
-version: 1.1.0
+modified: 2026-10-24T05:55:00Z
+version: 1.2.0
 description: Component tests for guard.sh — the cases that tell a guard from a restart loop, from an answering port and a silent one with the job running or gone, to an unsupervised server and the cooldown.
 grounded_in:
   - source: _tools_/web-daemon/guard.sh
@@ -11,12 +11,9 @@ grounded_in:
 
 # `guard-rules`
 
-What [`guard.sh`](../../guard.sh) must not do, and the four readings that separate a guard from a restart loop.
-
-The claim is narrow: **act only when nothing is running the service**. A guard that acted on "the port did not
-answer" kicked a supervisor that was already restarting the server — measured 2026-10-23 in `guard.log`, three
-restores 75 s and 15 s apart — which killed the fresh server and started the restart over. So the tests drive the
-whole script against stand-in `curl`, `launchctl` and `systemctl` commands that record what they were asked to do:
+[`guard.sh`](../../guard.sh) acts **only when nothing is running the service**. A guard that acted on a silent port
+kicked a supervisor mid-restart and killed the fresh server (`guard.log`, 2026-10-23: three restores 75 s and 15 s
+apart). The tests drive the whole script against recording stand-ins for `curl`, `launchctl` and `systemctl`:
 
 | Reading | What the guard must do |
 |---|---|
