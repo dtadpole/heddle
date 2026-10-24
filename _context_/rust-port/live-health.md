@@ -1,14 +1,14 @@
 ---
 title: Live health - the record
 level: L2
-version: 2.0.0
+version: 2.1.0
 description: The pinned record of the live heddle deployment's health - what each entry holds, how to read it, how often it grows, and where its incidents are told.
 status: unverified
 grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the passes pinned in live-health.jsonl since 2026-10-22
 created: 2026-10-23T03:19:02Z
-modified: 2026-10-23T05:10:55Z
+modified: 2026-10-23T12:12:00Z
 ---
 
 # Live health - the record
@@ -24,7 +24,8 @@ node _tools_/live-health/summary.mjs --last=12   # the newest passes as a table
 
 **An entry holds** the time, the deployment block (commit, branch, dirty, behind and ahead against a
 freshly fetched main), each check's verdict and detail, the outage record when the address was down, the
-DSH reference counts and the pass verdict. What each check claims is in
+DSH reference counts, the pass verdict and, since 06:17 on 2026-10-23, a `preview` block for the Rust
+preview on 3097, judged separately from the deployment. What each check claims is in
 [`checks.md`](../../_tools_/live-health/checks.md); how a down reading is classified is in
 [`outages.md`](../../_tools_/live-health/outages.md).
 
