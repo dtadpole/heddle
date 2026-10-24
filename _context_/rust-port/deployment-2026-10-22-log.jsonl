@@ -63,3 +63,14 @@
 {"at": "2026-10-23T04:45-07:00", "deployed": "ce4961a", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T04:50-07:00", "deployed": "d4e584f", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
 {"at": "2026-10-23T22:44:31-07:00", "deployed": "42c6b3f", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "20 commits after a 15 h gap in this seat; no restart; the preview rebuilt (heddle-goal, heddle-session atomic writes); two messages in one session verified through the page, 0 console errors"}
+{"at": "2026-10-23T22:52-07:00", "deployed": "ce0afee", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T22:54-07:00", "deployed": "5810fd6", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T23:02-07:00", "deployed": "f7ac0cf", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt (a turn done waits for the live stream); two messages in one session verified through the page"}
+{"at": "2026-10-23T23:07-07:00", "deployed": "9591db9", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T23:17-07:00", "deployed": "4f68af9", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T23:23-07:00", "deployed": "0518faa", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T23:35-07:00", "deployed": "e4adc11", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt (a live frame counted when its socket takes it); two messages verified through the page"}
+{"at": "2026-10-23T23:39-07:00", "deployed": "305170e", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T23:41-07:00", "deployed": "7afb437", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-23T23:49-07:00", "deployed": "06cacfa", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; preview current"}
+{"at": "2026-10-24T00:17-07:00", "deployed": "bc18fc7", "how": "the deployment's own redeploy.sh", "verdict_96": "3/3", "note": "no restart; the preview rebuilt (connections served with Nagle off); two messages verified through the page"}
