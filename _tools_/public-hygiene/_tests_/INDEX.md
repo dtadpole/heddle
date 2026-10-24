@@ -4,6 +4,8 @@ version: 1.0.0
 description: The component suites of the public-hygiene gate, one folder per suite.
 grounded_in:
   - source: _tools_/INDEX.md section Where the tests live
+created: 2026-10-23T03:25:25Z
+modified: 2026-10-23T03:25:25Z
 ---
 
 # `_tools_/public-hygiene/_tests_`

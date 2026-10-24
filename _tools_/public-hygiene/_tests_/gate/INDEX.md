@@ -4,6 +4,8 @@ version: 1.0.0
 description: Unit tests for the public-hygiene gate — the private list, the redacted report, the identity check and what the exit code says.
 grounded_in:
   - source: _tools_/public-hygiene/gate.mjs
+created: 2026-10-23T03:25:25Z
+modified: 2026-10-23T03:25:25Z
 ---
 
 # `gate`

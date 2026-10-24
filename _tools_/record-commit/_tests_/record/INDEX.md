@@ -4,6 +4,8 @@ version: 1.0.0
 description: Unit tests for record-commit — a stale base is refused, a log keeps both sides, a failed read-back is an error, and a landed commit syncs the live tree.
 grounded_in:
   - source: _tools_/record-commit/record-commit.mjs
+created: 2026-10-23T03:43:51Z
+modified: 2026-10-23T03:43:51Z
 ---
 
 # `record`
