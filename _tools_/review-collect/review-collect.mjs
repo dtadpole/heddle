@@ -17,7 +17,7 @@
 // Exit 0 with the page, 1 when the seat or a required input is missing.
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -370,10 +370,24 @@ export function candidateIndexes({ worktree, scopes, touched = [] }) {
 // one line, outside a code fence), newest dated first; and, for an INDEX that records
 // none, the test command it declares, labelled as declared. Evidence to read, not a
 // verdict to trust blind.
-export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
-  const recorded = []
-  const declared = []
-  for (const { relativePath, file } of candidateIndexes({ worktree, scopes, touched })) {
+// The articles a unit's INDEX links in its own folder (status.md, port-plan.md): a seat
+// that splits its INDEX into an entry point and articles keeps its run table findable.
+// Links into other folders are not followed, so a unit is credited only with what its
+// own entry point points at.
+export function linkedArticles(file, relativePath) {
+  const text = readFileSync(file, 'utf8')
+  const names = new Set()
+  for (const match of text.matchAll(/\]\((?:\.\/)?([A-Za-z0-9][A-Za-z0-9._-]*\.md)(?:#[^)]*)?\)/g)) {
+    if (match[1] !== 'INDEX.md') names.add(match[1])
+  }
+  return [...names]
+    .map((name) => ({ file: join(dirname(file), name), relativePath: join(dirname(relativePath), name) }))
+    .filter((article) => existsSync(article.file))
+}
+
+// The run lines of one Markdown file: the last recorded run, and the first declared command.
+function scanRuns(file, relativePath) {
+  {
     const lines = readFileSync(file, 'utf8').split('\n')
     let best = null
     let firstDeclared = null
@@ -430,8 +444,21 @@ export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
         lastBlock = null
       }
     })
-    if (best) recorded.push(best)
-    else if (firstDeclared) declared.push(firstDeclared)
+    return { best, firstDeclared }
+  }
+}
+
+export function recordedRuns({ worktree, scopes, touched = [], limit = 3 }) {
+  const recorded = []
+  const declared = []
+  for (const unit of candidateIndexes({ worktree, scopes, touched })) {
+    const scans = [unit, ...linkedArticles(unit.file, unit.relativePath)].map((doc) => scanRuns(doc.file, doc.relativePath))
+    const bests = scans.map((scan) => scan.best).filter(Boolean)
+    if (bests.length > 0) recorded.push(...bests)
+    else {
+      const first = scans.map((scan) => scan.firstDeclared).find(Boolean)
+      if (first) declared.push(first)
+    }
   }
   // Newest dated first; undated keep the candidate order (touched units before scope names).
   recorded.sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')))
