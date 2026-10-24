@@ -170,9 +170,9 @@ impl std::fmt::Debug for SessionStore {
     }
 }
 
-/// Write a file whole, replacing what was there.
+/// Write a file whole, replacing what was there atomically, so a concurrent reader never sees it half-done.
 fn write_text(path: &str, text: &str) -> Result<(), SessionError> {
-    std::fs::write(path, text).map_err(|error| SessionError::io(path, error))
+    crate::fsio::write_atomic(path, text).map_err(|error| SessionError::io(path, error))
 }
 
 /// The entries of a directory, in byte order — which is what Node's `readdirSync` returns, and the
@@ -1002,7 +1002,7 @@ impl SessionStore {
         if bump_turns {
             meta.set("turns", Value::from(meta.turns() + 1));
         }
-        let _ = std::fs::write(&handle.meta, meta.to_file_text());
+        let _ = crate::fsio::write_atomic(&handle.meta, meta.to_file_text());
     }
 }
 
@@ -1050,6 +1050,45 @@ mod tests {
             }],
             source: None,
         }
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_session_vanish_while_its_meta_is_rewritten() {
+        // The server's goal route asks `meta(id)` while a resumed round rewrites the same file; a write that
+        // truncates first let about 4% of those reads see no session (measured by developer-ten, 377 of 8658).
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, store) = store();
+        let handle = store
+            .create(CreateOptions {
+                cwd: Some("/home/me/work".to_string()),
+                ..CreateOptions::default()
+            })
+            .unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let store = Arc::clone(&store);
+            let id = handle.id.clone();
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                for n in 0..1500 {
+                    store.rename(&id, &format!("title {n}")).unwrap();
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let (mut reads, mut missing) = (0u64, 0u64);
+        while !done.load(Ordering::SeqCst) {
+            reads += 1;
+            if store.meta(&handle.id).is_none() {
+                missing += 1;
+            }
+        }
+        writer.join().unwrap();
+        assert!(reads > 0);
+        assert_eq!(
+            missing, 0,
+            "{missing} of {reads} reads saw no session while its meta was rewritten"
+        );
     }
 
     #[test]
