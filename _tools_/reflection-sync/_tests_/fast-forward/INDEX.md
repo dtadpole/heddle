@@ -4,6 +4,8 @@ version: 1.0.0
 description: Unit tests for the shared-checkout fast-forward — what it moves, what it refuses, and what it reads back.
 grounded_in:
   - source: _tools_/reflection-sync/reflection-sync.mjs
+created: 2026-10-23T03:33:27Z
+modified: 2026-10-23T03:33:27Z
 ---
 
 # `fast-forward`

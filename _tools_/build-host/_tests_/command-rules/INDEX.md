@@ -4,6 +4,8 @@ version: 1.0.0
 description: Unit tests for the scripts and arguments the build-host tool sends to a build host.
 grounded_in:
   - source: _tools_/build-host/build-host.mjs
+created: 2026-10-23T00:55:27Z
+modified: 2026-10-23T00:55:27Z
 ---
 
 # `command-rules`

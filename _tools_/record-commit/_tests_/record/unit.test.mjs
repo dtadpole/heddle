@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -13,6 +13,7 @@ import {
   SYNC_REFUSED,
   baseCheck,
   collectFiles,
+  findPython,
   isLogPath,
   messageWarnings,
   unionLines,
@@ -469,4 +470,30 @@ test('collectFiles refuses a path that escapes the checkout', (t) => {
   const files = collectFiles({ repo: w.live, flagFiles: ['_projects_/x/note.md'] })
   assert.equal(files.length, 1)
   assert.equal(files[0].base.toString(), 'one\n')
+})
+
+test('the validator python is the repository .venv when it has one, else a python3, and the choice is named', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'record-commit-python-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const fallback = findPython(null, dir)
+  assert.ok(fallback, 'some python with PyYAML exists on this Mac')
+  assert.match(fallback.why, /^no \.venv; /, 'without a .venv the fallback says so')
+  // A .venv whose python is this Mac's PyYAML python: the nearest .venv wins and is named.
+  mkdirSync(join(dir, '.venv', 'bin'), { recursive: true })
+  symlinkSync(fallback.command.includes('/') ? fallback.command : spawnSync('/bin/sh', ['-c', `command -v ${fallback.command}`], { encoding: 'utf8' }).stdout.trim(), join(dir, '.venv', 'bin', 'python'))
+  const venv = findPython(null, dir)
+  assert.equal(venv.command, join(dir, '.venv', 'bin', 'python'))
+  assert.equal(venv.why, "the repository's .venv")
+  assert.equal(findPython('/no/such/python', dir).why, "the repository's .venv", 'a missing explicit path is skipped')
+})
+
+test('a run with the repository validator names the python it used and why', (t) => {
+  const w = world(t)
+  // The record repository's own validator path, as on origin; a stand-in that passes.
+  pushFrom(w, { 'shared/_tools_/frontmatter-validator/validate-frontmatter.py': 'import yaml\nprint("checked 1 file(s): 0 error(s), 0 warning(s)")\n' })
+  git(w.live, ['pull', '-q', '--ff-only'])
+  write(w.live, '_projects_/x/note.md', 'one\nnamed\n')
+  const r = cli(w, ['--message', 'docs(test): name the python', '--file', '_projects_/x/note.md', '--no-sync', '--dry-run'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, /  python: \S+ \(no \.venv; a python3? with PyYAML\)/, 'no .venv in the scratch record repo, and the report says so')
 })
