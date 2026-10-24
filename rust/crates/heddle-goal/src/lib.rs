@@ -20,7 +20,8 @@
 //! - [`SessionLog`] is the port this crate needs from `heddle-session`'s store; it is implemented for
 //!   `heddle_session::SessionStore`, so the boot passes the store itself.
 //! - [`RoundRunner`] is how a round is run — append the attributed user message and answer it with one turn;
-//!   [`round::AgentRoundRunner`] implements it over `heddle-agent`'s real turn, so the boot passes its runtime.
+//!   [`round::AgentRoundRunner`] implements it over `heddle-agent`'s real turn, for a boot to pass its runtime
+//!   (the binary keeps an equivalent adapter of its own).
 //! - [`DriverTrigger`] turns the session's own events (`session/event` on the bus) into driver requests; the
 //!   boot forwards each event's session id and type to it.
 //! - [`tool`] and [`http`] are the model's and the person's verbs, as functions the tool registry and the

@@ -12,8 +12,8 @@
 //! return await runTurn(ctx, { session: handle, endpoint, prompt, source, ...(meta?.model ? { model } : {}) })
 //! ```
 //!
-//! The boot builds one [`AgentRoundRunner`] from the agent runtime it already composes and the session store,
-//! and hands it to [`GoalDriver::new`](crate::GoalDriver::new).
+//! A boot builds one [`AgentRoundRunner`] from the agent runtime it already composes and the session store, and
+//! hands it to [`GoalDriver::new`](crate::GoalDriver::new). The binary keeps an equivalent adapter of its own.
 
 use std::sync::Arc;
 

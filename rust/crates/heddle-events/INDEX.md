@@ -1,8 +1,8 @@
 ---
 title: The heddle-events crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:24:47Z
-version: 0.4.1
+modified: 2026-10-24T05:15:59Z
+version: 0.5.0
 description: The Rust port crate for the event bus and the named hook points, with Cordis's emit, parallel, serial, bail and waterfall modes — its public API, who uses which part, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -76,7 +76,7 @@ feature crate adapts behind the seam). The binary is the only crate that builds 
 | 4b | The component shape (D-031): listeners declared in `initialize`, `merge` for a post-execute rewrite that keeps the tool's result, `RpcListener` so one process serves tools and listeners, and a child's own requests answered without id collisions | landed |
 | 4c | The port bridge: `llm`, `tools` and `agent` intercept through ports of their own, synchronous and without this crate; `bridge` makes an adapter over the bus a few lines in whichever crate holds it | landed |
 | 4d | The port adapters (`ports`): the boot passes one `BusHooks` where it passes the no-listener defaults today, for model requests, tool calls and rounds | landed |
-| 5 | `60-hooks` through `HEDDLE_BIN`: the verifier's process-hook branch and its `_tests_/process-hooks` are on main, and the boot wires the bus (`12b21d1`). Rehearsal with only `SERVED` edited (`Hooks` and `Turn`, which the probe requires together): **6 of 6 pass**, `verify.sh` verdict 0, on developer-two's `3df3cc6` and again on `main` at `e0c55bf`, where `_tests_/process-hooks` also passes 6 of 6 (2026-10-23). The rehearsal on `f45993a`, before the wiring, had 1 of 6 | passes in rehearsal; judged in the lane once the binary serves `hooks` and `--turn` |
+| 5 | `60-hooks` through `HEDDLE_BIN`: the binary advertises `hooks` and `--turn` since `main` `b72cc1a` (D-048), and the lane judges the part through the release binary: **6 of 6** (`rust/INDEX.md`, part 6). Re-run on every candidate that touches this crate, the hook points, the goal driver or the turn: 6 of 6 on `main` `445ea43` (2026-10-24), and the verifier's `_tests_/process-hooks` 6 of 6 | met |
 
 ## Read next
 
