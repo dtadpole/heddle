@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-24T06:34:37Z
+modified: 2026-10-24T06:48:34Z
 level: L3
-version: 1.7.0
+version: 1.8.0
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -21,7 +21,7 @@ grounded_in:
 | 23:53 to 23:58 | main `b72cc1a`, which advertises `web` (D-048), release binary, by the lane gate | 70 of 75: chat-view #15 (the weaving clock), composer #13 (the context gauge), context-view #1 and #2 (the context row) and file-view #1 (the highlighter) fail; nine of fourteen files pass in full |
 | 01:01 to 01:06 | main `4fc75f1`, release binary, by the lane gate (written as main's per-check baseline) | 73 of 75: chat-view #15 (weaving clock) and goal #4 fail. Alone after the readiness fix: goal #4 0 of 12; goal #1 1 of 12, a 404 "no session" on completing right after a restart |
 | 01:29 to 01:39 | main `33407a4`, release binary, by the lane gate, twice | **75 of 75 in both runs** |
-| 2026-10-23, 04:16 to 23:37 | chat-view #16 alone, repeated, release binaries | `fc1b90e` 1 in 26; then 30 runs each, alternating: `42c6b3f` 0, the take-counted done-flush (`4c6b17e`) 1 (a prefix), `4f68af9` 0, the delivery mark (`30f8e5d`) 0 |
+| 2026-10-23, 04:16 to 23:47 | chat-view #16 alone, repeated, release binaries | `fc1b90e` 1 in 26; then 30 runs each, alternating: `42c6b3f` 0, the take-counted done-flush (`4c6b17e`) 1 (a prefix), `4f68af9` 0, the delivery mark (`30f8e5d`) 0; then main `7afb437`, with the mark, 1 in 60 (a prefix) |
 
 **Part 9 through `HEDDLE_BIN` is met on main `33407a4`**: 80 passes all 75 checks in two runs, and 85, 87 and 88
 pass in full. Two checks are intermittent through the binary — chat-view #11 and #16 (goal #1's torn read was
