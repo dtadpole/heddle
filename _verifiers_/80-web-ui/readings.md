@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-23T11:19:27Z
+modified: 2026-10-24T06:02:32Z
 level: L3
-version: 1.5.0
+version: 1.6.0
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -21,11 +21,11 @@ grounded_in:
 | 23:53 to 23:58 | main `b72cc1a`, which advertises `web` (D-048), release binary, by the lane gate | 70 of 75: chat-view #15 (the weaving clock), composer #13 (the context gauge), context-view #1 and #2 (the context row) and file-view #1 (the highlighter) fail; nine of fourteen files pass in full |
 | 01:01 to 01:06 | main `4fc75f1`, release binary, by the lane gate (written as main's per-check baseline) | 73 of 75: chat-view #15 (weaving clock) and goal #4 fail. Alone after the readiness fix: goal #4 0 of 12; goal #1 1 of 12, a 404 "no session" on completing right after a restart |
 | 01:29 to 01:39 | main `33407a4`, release binary, by the lane gate, twice | **75 of 75 in both runs** |
-| 04:16 to 04:18, 2026-10-23 | chat-view #16 alone, repeated, main `fc1b90e`'s release binary | fails 1 in 26: the page settles on a prefix ('检测器抓到') while load is 5.03 and another seat builds; every failing sample so far is such a prefix |
+| 2026-10-23, 04:16 and 22:46 to 23:00 | chat-view #16 alone, repeated, release binaries; and the lane gate on main `42c6b3f` and with the done-flush (`4c6b17e`) | #16: 1 in 26 on `fc1b90e`; then 0 of 30 on `42c6b3f` and 1 of 30 with the flush — always a prefix; the gate: 89 and 90 of 90 |
 
 **Part 9 through `HEDDLE_BIN` is met on main `33407a4`**: 80 passes all 75 checks in two runs, and 85, 87 and 88
-pass in full. Three checks are intermittent through the binary — chat-view #11 and #16, goal #1 — and are listed
-with their owners in `rust/INDEX.md`.
+pass in full. Two checks are intermittent through the binary — chat-view #11 and #16 (goal #1's torn read was
+fixed in `4f65141`) — and are listed with their owners through `rust/INDEX.md`.
 
 The commands: `sh verify.sh --json` for the TypeScript build; the same with `HEDDLE_BIN` set to the binary for the
 port; and the lane gate, `HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs --json 80-web-ui 85-trajectory-view 87-resizable-panels 88-file-preview 90-web-ui-token`, which was green at `a871aae`: 18 files, 90 checks, all unjudged.
