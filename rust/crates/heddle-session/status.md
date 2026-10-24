@@ -1,9 +1,9 @@
 ---
 title: Where the heddle-session port stands
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:24:41Z
+modified: 2026-10-24T05:17:28Z
 level: L1
-version: 1.0.0
+version: 1.1.0
 description: What is merged and tested, what answers through the binary, what waits on whom, and the next step.
 status: unverified
 grounded_in:
@@ -31,6 +31,10 @@ interop is checked three ways:
   and the `model/request` event built exactly as `src/agent/loop.ts` builds it (mutation-checked).
 - **Floats print back.** serde_json's default parser re-prints `0.9999551342447491` as `…492`;
   `float_roundtrip` is on, and `event::tests` pins it, so `heddle transcript` keeps the bytes.
+- **Writes are atomic.** A meta file rewritten while another thread read it could be caught empty, so
+  `meta(id)` reported no session (the ui check-goal 404, 377 of 8658 reads in developer-ten's probe).
+  [`src/fsio.rs`](src/fsio.rs) writes a sibling file and renames it; a store test reading during 1500
+  renames failed 278 of 3362 on the old writes and passes now (`4f65141`).
 
 **Answers.** [`src/command.rs`](src/command.rs) answers `sessions` and `transcript` in the convention
 developer-two published (D-043): `run(Command, &Args, &Context, out, err) -> i32`, no binary dependency,

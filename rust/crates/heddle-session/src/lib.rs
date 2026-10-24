@@ -36,6 +36,7 @@ pub mod command;
 pub mod definition;
 pub mod error;
 pub mod event;
+pub mod fsio;
 pub mod layout;
 pub mod message;
 pub mod meta;
@@ -54,6 +55,7 @@ pub use error::{SessionError, SessionFlagError};
 pub use event::{
     AppendOptions, Events, NewEvent, SessionEvent, SessionHandle, SessionId, SurfaceOp,
 };
+pub use fsio::write_atomic;
 pub use layout::workspace_key;
 pub use message::{
     Chunk, ContentPart, FilePart, ImagePart, Message, RecordedMessage, Role, text_of,

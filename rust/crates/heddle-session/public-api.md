@@ -1,9 +1,9 @@
 ---
 title: The heddle-session public API
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:24:41Z
+modified: 2026-10-24T05:17:28Z
 level: L1
-version: 1.0.0
+version: 1.1.0
 description: Every item the crate re-exports at its root, and what each one is for.
 status: unverified
 grounded_in:
@@ -28,6 +28,7 @@ Everything is re-exported at the crate root.
 | `recorded_mode`, `effective_mode`, `inherit_recorded_mode`, `MODE_EVENT` | the `permission/mode` fold, generic over `M: Serialize + DeserializeOwned` — the vocabulary is `heddle-sandbox`'s `SandboxMode`, which fits as declared |
 | `write_session_definition`, `read_session_definition`, `update_session_definition`, `existing_session_names`, `ensure_sessions_folder`, `session_name` | `<branch>/_sessions_/<session-yyyymmdd-hhmm>/{session.json, INDEX.md}` |
 | `decode_transcript`, `encode_frame`, `split_frames`, `frame_end`, `looks_compressed` | the frame walk |
+| `write_atomic` | a whole-file write a concurrent reader never sees half-done (sibling temporary file, then rename); every meta, definition and workspace-record write goes through it |
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
 | `title_from`, `fork_title` | a session's label from its first message; `<title> (n)` |
 | `SessionError`, `SessionFlagError` | failures, with the TypeScript build's messages word for word |

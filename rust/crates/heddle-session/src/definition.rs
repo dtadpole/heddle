@@ -208,7 +208,7 @@ pub fn ensure_sessions_folder(branch: &str) -> Result<String, SessionError> {
         .map_err(|error| SessionError::io(dir.to_string_lossy(), error))?;
     let index = dir.join("INDEX.md");
     if !index.exists() {
-        std::fs::write(&index, SESSIONS_INDEX)
+        crate::fsio::write_atomic(&index, SESSIONS_INDEX)
             .map_err(|error| SessionError::io(index.to_string_lossy(), error))?;
     }
     Ok(dir.to_string_lossy().into_owned())
@@ -250,10 +250,10 @@ pub fn write_session_definition(
     }
     let definition_fields = SessionDefinitionFields { raw: fields };
     let file = dir.join(DEFINITION_FILE);
-    std::fs::write(&file, definition_fields.to_file_text())
+    crate::fsio::write_atomic(&file, definition_fields.to_file_text())
         .map_err(|error| SessionError::io(file.to_string_lossy(), error))?;
     let index = dir.join("INDEX.md");
-    std::fs::write(&index, index_for(&name, &canonical, &definition_fields))
+    crate::fsio::write_atomic(&index, index_for(&name, &canonical, &definition_fields))
         .map_err(|error| SessionError::io(index.to_string_lossy(), error))?;
 
     Ok(SessionDefinition {
@@ -302,7 +302,7 @@ pub fn update_session_definition(dir: &str, title: Option<&str>) -> Result<bool,
         }
     }
     let file = Path::new(dir).join(DEFINITION_FILE);
-    std::fs::write(&file, current.to_file_text())
+    crate::fsio::write_atomic(&file, current.to_file_text())
         .map_err(|error| SessionError::io(file.to_string_lossy(), error))?;
     Ok(true)
 }
