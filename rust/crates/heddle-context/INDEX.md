@@ -1,8 +1,8 @@
 ---
 title: The heddle-context crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T12:49:45Z
-version: 0.9.0
+modified: 2026-10-24T05:14:16Z
+version: 0.9.1
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -140,5 +140,6 @@ the TypeScript tests named.
 
 ## Read next
 
-[`../INDEX.md`](../INDEX.md) for the other crates; [`../../ULTIMATE_GOAL.md`](../../ULTIMATE_GOAL.md) for the parts;
+[`src/INDEX.md`](src/INDEX.md) for the sources and their unit tests; [`tests/INDEX.md`](tests/INDEX.md) for the
+tests that hold the port to the TypeScript build's own output; [`../INDEX.md`](../INDEX.md) for the other crates; [`../../ULTIMATE_GOAL.md`](../../ULTIMATE_GOAL.md) for the parts;
 [`../../../src/context/INDEX.md`](../../../src/context/INDEX.md) for the TypeScript module and its constants.
