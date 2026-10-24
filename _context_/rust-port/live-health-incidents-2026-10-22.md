@@ -1,7 +1,7 @@
 ---
 title: Live health - incidents of 2026-10-22
 level: L2
-version: 1.2.0
+version: 1.3.0
 description: What went wrong on the first evening of live monitoring - in the deployment, in the monitor's own actions and in the instrument - with the evidence and the fix for each.
 status: unverified
 grounded_in:
@@ -9,26 +9,23 @@ grounded_in:
   - source: the deployment's web.log, guard.log and session logs, read that evening
   - source: live-deploy's measurements, reported through the team inbox
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-24T06:05:05Z
+modified: 2026-10-24T06:13:36Z
 ---
 
 # Incidents of 2026-10-22
 
 Times are UTC; the passes are in [`live-health.jsonl`](live-health.jsonl), read through
-[`live-health.md`](live-health.md).
+[`live-health.md`](live-health.md). The deployment's incidents - the 03:16 and 03:57 outages, the silent turns
+before D-030 - are live-deploy's record,
+[`deployment-incidents-2026-10-22.md`](deployment-incidents-2026-10-22.md) (PDT), measured in
+[`deployment-measurements-2026-10-22.md`](deployment-measurements-2026-10-22.md). This record keeps what the
+monitor alone saw or did.
 
-## In the deployment
+## What the monitor saw
 
-- **03:16:49-03:21:41, the server down.** Gate `502`, ECONNREFUSED on 3082: live-deploy's
-  cleanup of a hand-started probe killed the agent's process, which launchd here does not restart; their
-  interim guard kickstarted it (`guard.log`).
-- **03:21-03:29, silent turns.** The session log shows `model/request endpoint=scripted`, then
-  `compaction/recovery code=SCRIPT`: the default endpoint reads `scripted.json` from the server's directory,
-  which the checkout lacks. D-030 gave it an offline fixture at 03:34. **Open for the ui lane:** a failed model call
+- **03:21-03:29, silent turns.** With a clean console, the session log showed `model/request
+  endpoint=scripted`, then `compaction/recovery code=SCRIPT`. **Open for the ui lane:** a failed model call
   renders as silence (reported to integrator-two).
-- **03:57:36-03:58:47, about 70 s down.** live-deploy's `kickstart -k` of a four-second-old job met
-  launchd's 10 s throttle and a reinstall refused to render; fixed on their side. A reinstall's gap is
-  288-364 ms.
 
 ## In the monitor's own actions
 

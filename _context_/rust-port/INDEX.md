@@ -1,12 +1,12 @@
 ---
 title: Rust port browser baselines
-version: 0.4.0
+version: 0.5.0
 description: The pinned reference pages the Rust port's Web UI is compared against - the TypeScript heddle page and DSH - measured with the browser-use tool, numbers only, and the records of the live deployment and its monitor.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking that heddle be verified with the browser-use tool and compared with DSH on localhost 8080 where needed
   - source: rust/ULTIMATE_GOAL.md, parts 9 to 11
 created: 2026-10-23T00:39:00Z
-modified: 2026-10-24T06:00:56Z
+modified: 2026-10-24T06:13:36Z
 ---
 
 # Rust port browser baselines
@@ -15,8 +15,8 @@ The Rust port serves the **same page** as the TypeScript build, so its Web UI is
 references: the TypeScript page, the oracle while the port is incomplete, and DSH where the page follows it.
 Each baseline names its build, because a stale page and a missing feature look alike.
 
-**Surface: headless**, captured with `_tools_/browser-use` (`--session=hd-rust --headless`). **Numbers
-only**: a capture shows the owner's workspace and session names, which this public repository does not carry.
+**Surface: headless**, captured with `_tools_/browser-use` (`--session=hd-rust`). **Numbers
+only**: captures show the owner's workspace and session names, kept out of this public repository.
 
 ## Baselines
 
@@ -29,9 +29,11 @@ only**: a capture shows the owner's workspace and session names, which this publ
 
 ## Records
 
-- [`deployment-2026-10-22.md`](deployment-2026-10-22.md) — live-deploy's record of the deployment.
+- [`deployment-2026-10-22.md`](deployment-2026-10-22.md) — live-deploy's deployment record, with its
+  [log](deployment-2026-10-22-log.jsonl), [incidents](deployment-incidents-2026-10-22.md) and
+  [measurements](deployment-measurements-2026-10-22.md).
 - [`live-health.md`](live-health.md) — how to read the monitor's record, [`live-health.jsonl`](live-health.jsonl).
-- [`live-health-incidents-2026-10-22.md`](live-health-incidents-2026-10-22.md) — the first evening's incidents.
+- [`live-health-incidents-2026-10-22.md`](live-health-incidents-2026-10-22.md) — the monitor's incidents that evening.
 
 ## Read next
 
