@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-24T07:16:27Z
+modified: 2026-10-24T19:16:31Z
 level: L3
-version: 1.9.0
+version: 1.10.0
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -23,7 +23,7 @@ grounded_in:
 | 01:29 to 01:39 | main `33407a4`, release binary, by the lane gate, twice | **75 of 75 in both runs** |
 | 2026-10-23, 04:16 to 10-24, 00:20 | chat-view #16 alone, repeated, release binaries | before the delivery mark 4 in 106 (the take-counted flush `4c6b17e` 1 of 30); with the mark (`30f8e5d`) 1 in 150, a prefix; with Nagle off too (`eb9cbf2`) 0 of 60 |
 
-**Part 9 through `HEDDLE_BIN` is met on main `33407a4`**: 80 passes all 75 checks in two runs, and 85, 87 and 88
+**Part 9 through `HEDDLE_BIN` is met on main `33407a4`, and again on `06cacfa` and `eb9cbf2`**: 80 passes all 75 checks, and 85, 87 and 88
 pass in full. Two checks are intermittent through the binary — chat-view #11 and #16 (goal #1's torn read was
 fixed in `4f65141`) — and are listed with their owners through `rust/INDEX.md`.
 
