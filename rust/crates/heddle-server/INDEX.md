@@ -1,8 +1,8 @@
 ---
 title: The heddle-server crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-24T06:52:44Z
-version: 0.4.3
+modified: 2026-10-25T12:46:37Z
+version: 0.4.4
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -24,7 +24,7 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 **State: implemented (server core).** Every module has its body and its unit tests: `token`, `fence`,
 `page`, `respond`, `stream`, `runs`, `transcript`, `selection`, `preview`, `services`, and the `server`
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
-`cargo test -p heddle-server` is green (148 tests). The door is judged over a real socket as
+`cargo test -p heddle-server` is green (144 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
 its `done` frame in one streamed response.
 
@@ -35,7 +35,7 @@ crates exist.
 
 As of 2026-10-24 on main `445ea43`.
 
-- **On main and tested:** this crate (148 unit tests) and the `web` command that serves it, composed in
+- **On main and tested:** this crate (144 unit tests) and the `web` command that serves it, composed in
   `rust/crates/heddle/src/web.rs` (D-047): sessions, workspaces, model, turns, sandbox, approvals, goals,
   todos, team, statistics, uploads, markdown, the composer, files and trajectory routers, and the
   context row.
@@ -55,7 +55,7 @@ As of 2026-10-24 on main `445ea43`.
 | `page` | the embedded page and its `heddle-page` build marker, the favicon, `page_access`, `token_form_page` |
 | `preview` | `html.ts`: the preview allow-lists, `PREVIEW_CSP`, `rewrite_resources`, `/api/html`'s prepared document, where `purify.min.js` is found |
 | `respond` | the response shapes every route answers with (`json`, `json_compact`, `text`, `html`, `error`, …), `JsonBody` (the `readJson` rules), `SessionId` / `SessionPath` (the `session-<36>` rule), `canonical_path` (the `canonicalPath` every workspace-bound route applies before `owns`), `inline_content_type`, `file_bytes` |
-| `stream` | `EventHub` (every session event and approval question, delivered to each subscriber unbounded; `flushed(limit)` waits until every live subscriber has written what was published — its socket took the bytes, or its reader filtered the frame out), `SseFrame`, `sse_response`, `session_event_forwarder` / `approval_request_forwarder` for the binary's bus listeners |
+| `stream` | `EventHub` (every session event and approval question, delivered to each subscriber unbounded), `SseFrame`, `sse_response`, `session_event_forwarder` / `approval_request_forwarder` for the binary's bus listeners |
 | `runs` | `RunRegistry` and `TurnGuard`: running counts, the per-turn clock, completion times, stop by `CancellationToken` |
 | `transcript` | `transcript_turns` and `attachments_of`: the chat view's fold of a session log, `ChatTurn` |
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
@@ -113,7 +113,7 @@ to confirm or move a row.
 | `GET /api/sessions/{id}/log` | heddle-web-trajectory | the decoded log download |
 | `POST /api/sessions/{id}/fork`, `/flags`, `/title`, `/permission`, `/steer`, `/stop` | heddle-server | |
 | `POST /api/sessions/{id}/model` | heddle-web-composer | the model switcher |
-| `POST /api/folders/session`, `POST /api/turn` | heddle-server | the turn streams its own session's events, runs to its end if its reader goes away, stops running when it returns, and sends its terminal frame once the `/api/events` responses have written its frames to their sockets (at most 1 s) |
+| `POST /api/folders/session`, `POST /api/turn` | heddle-server | the turn streams its own session's events, runs to its end if its reader goes away, stops running when it returns, and sends its terminal frame when it ends, without waiting for the `/api/events` readers, as web.ts does |
 | `GET /api/tree`, `POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}` | heddle-server | over `WorkspaceService` |
 | `POST /api/workspaces/pick` | heddle-web-files | the platform folder picker |
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |
