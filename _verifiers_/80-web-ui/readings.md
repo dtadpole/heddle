@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-24T19:16:31Z
+modified: 2026-10-25T13:25:20Z
 level: L3
-version: 1.10.0
+version: 1.11.0
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -21,9 +21,9 @@ grounded_in:
 | 23:53 to 23:58 | main `b72cc1a`, which advertises `web` (D-048), release binary, by the lane gate | 70 of 75: chat-view #15 (the weaving clock), composer #13 (the context gauge), context-view #1 and #2 (the context row) and file-view #1 (the highlighter) fail; nine of fourteen files pass in full |
 | 01:01 to 01:06 | main `4fc75f1`, release binary, by the lane gate (written as main's per-check baseline) | 73 of 75: chat-view #15 (weaving clock) and goal #4 fail. Alone after the readiness fix: goal #4 0 of 12; goal #1 1 of 12, a 404 "no session" on completing right after a restart |
 | 01:29 to 01:39 | main `33407a4`, release binary, by the lane gate, twice | **75 of 75 in both runs** |
-| 2026-10-23, 04:16 to 10-24, 00:20 | chat-view #16 alone, repeated, release binaries | before the delivery mark 4 in 106 (the take-counted flush `4c6b17e` 1 of 30); with the mark (`30f8e5d`) 1 in 150, a prefix; with Nagle off too (`eb9cbf2`) 0 of 60 |
+| 2026-10-23, 04:16 to 10-25, 06:22 | chat-view #16 alone, repeated, release binaries | before the delivery mark 4 in 106; with it (`30f8e5d`) 1 in 150; with Nagle off (`eb9cbf2`) 0 of 60; with `done` unwaited (`381d378`) 1 of 40, main 0 of 40. Always a prefix: the page's `renderSettledAnswers` overwrites late deltas |
 
-**Part 9 through `HEDDLE_BIN` is met on main `33407a4`, and again on `06cacfa` and `eb9cbf2`**: 80 passes all 75 checks, and 85, 87 and 88
+**Part 9 through `HEDDLE_BIN` is met on main `33407a4`, and again on `06cacfa`, `eb9cbf2` and `381d378`**: 80 passes all 75 checks, and 85, 87 and 88
 pass in full. Two checks are intermittent through the binary — chat-view #11 and #16 (goal #1's torn read was
 fixed in `4f65141`) — and are listed with their owners through `rust/INDEX.md`.
 
