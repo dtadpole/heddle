@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — readings
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-25T14:45:16Z
+modified: 2026-10-25T14:45:59Z
 level: L3
-version: 1.12.0
+version: 1.12.1
 description: The measured verdicts of 80-web-ui against the TypeScript build and the Rust binary, with the commits that changed them.
 status: unverified
 grounded_in:
@@ -19,7 +19,7 @@ grounded_in:
 | 21:05 to 22:40 | the TypeScript build, as the checks' own fixes landed (`d28625d` the listener release, `c4c9292` team-view's early-exit hang, `5ed8deb` the `web` probe, `cb6b392` the start timer) | every file passes after each; chat-view #11 is intermittent (17 of 18 once) |
 | 01:29 to 01:39 | main `33407a4`, release binary, by the lane gate, twice | **75 of 75 in both runs** |
 | 2026-10-23, 04:16 to 10-25, 06:22 | chat-view #16 alone, repeated, release binaries | before the delivery mark 4 in 106; with it (`30f8e5d`) 1 in 150; with Nagle off (`eb9cbf2`) 0 of 60; with `done` unwaited (`381d378`) 1 of 40. Always a prefix: `renderSettledAnswers` overwrote late deltas. With the page fix (`901fc48`) 0 of 40 |
-| 2026-10-25, 07:16 to 07:44 | the page fix `66612b5` on main `9d7e1ed` (landed as `901fc48`): Rust by the lane gate; TypeScript with `dist` built in scratch checkouts | Rust 89 of 90, none regressed (the miss, chat-view #11, also main's); TypeScript 72 of 75 against main's 73: #11 failed 10 of 20 alone on main, 8 patched, and both miss the approval pair |
+| 2026-10-25, 07:16 to 07:44 | the page fix `66612b5` on main `9d7e1ed` (landed as `901fc48`): Rust by the lane gate; TypeScript with `dist` built in scratch checkouts | Rust 89 of 90, none regressed (the miss, chat-view's settled answer, then passed 20 of 20 alone, as on main); TypeScript 72 of 75 against main's 73: #11 failed 10 of 20 alone on main, 8 patched, and both miss the approval pair |
 
 **Part 9 through `HEDDLE_BIN` is met on main `33407a4`, and again on `06cacfa`, `eb9cbf2` and `381d378`**: 80 passes all 75 checks, and 85, 87 and 88
 pass in full. Chat-view #11 is intermittent on both builds, and #16 has not failed since the page fix (`901fc48`); both are
