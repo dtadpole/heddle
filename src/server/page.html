@@ -3422,6 +3422,15 @@ async function renderSettledAnswers() {
         body: JSON.stringify({ text }),
       })
       const body = response.ok ? await response.json() : null
+      // The live stream can still be adding to this row: a turn's `done` arrives on its own connection and
+      // can be handled before the answer's last text deltas. Drawing the snapshot then would erase those
+      // deltas (80 check-chat-view #16), so a row that grew while its render was in flight is rendered
+      // again from what it holds now.
+      if (row.textContent !== text) {
+        delete row.dataset.rendered
+        void renderSettledAnswers()
+        return
+      }
       if (body !== null && typeof body.html === 'string') {
         row.classList.add('markdown')
         row.innerHTML = body.html
