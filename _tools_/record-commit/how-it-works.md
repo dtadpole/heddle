@@ -1,10 +1,10 @@
 ---
 title: How record-commit works
 created: 2026-10-24T05:00:49Z
-modified: 2026-10-24T05:00:49Z
+modified: 2026-10-26T14:40:22Z
 level: L2
-version: 1.0.0
-description: Why record-commit exists, the seven steps of a run, and how a push that lost a race is rebuilt from a fresh origin.
+version: 1.1.0
+description: Why record-commit exists, the seven steps of a run, and how a push that lost a race is replayed or rebuilt.
 status: unverified
 grounded_in:
   - source: the record-commit INDEX.md version 1.0.0 this was split from
@@ -37,5 +37,8 @@ meanwhile. The tool makes that mistake impossible for the files it is given.
 
 ## A push that lost a race
 
-A push rejected because another session landed first is **rebuilt from a fresh origin** — fetch, new worktree,
-re-union, re-check — up to `--retries` times (default 2). It never rebases and never force-pushes.
+A push rejected because another session landed first is **replayed** when the landed commits touch none of the
+given files: rebased onto the new tip and pushed at once, up to five times. That cannot drop anyone's lines, and it
+wins against a busy remote where a full rebuild kept losing. Otherwise the attempt is **rebuilt from a fresh
+origin** (fetch, new worktree, re-union, re-check) up to `--retries` times, default 2. It never rebases over a
+change to a given file and never force-pushes.

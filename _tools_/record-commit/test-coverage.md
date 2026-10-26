@@ -1,7 +1,7 @@
 ---
 title: What the record-commit tests cover
 created: 2026-10-24T05:00:49Z
-modified: 2026-10-24T05:06:46Z
+modified: 2026-10-26T14:40:22Z
 level: L2
 version: 1.0.0
 description: The cases the record-commit unit suite exercises, and one dry run against a scratch clone of the real record.
@@ -18,8 +18,8 @@ staged files added by another writer between fetch and push with the same bytes 
 both, none committed), the read-back counting given files, the message warnings against the convention's types, a
 stale base refused with origin untouched, two writers' log lines both kept, a log edit that deletes an origin
 line unable to delete it from the commit, the validator seeing the whole tree and a failing validator refusing,
-a staging tree with `--base`, nothing-to-commit, a dry run that commits nothing, a simulated push race rebuilt
-from a fresh origin with both commits landing, a commit that cannot sync exiting 3, argument and path checks,
+a staging tree with `--base`, nothing-to-commit, a dry run that commits nothing, a simulated push race replayed with both commits landing (and four in a row against a busy remote), a race
+on a given file rebuilt from a fresh origin and refused, a commit that cannot sync exiting 3, argument and path checks,
 the read-back verifier's failure modes, and the validator python (the repository's `.venv` first, else a
 `python3` with PyYAML, named in the report).
 
