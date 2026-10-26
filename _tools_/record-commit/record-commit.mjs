@@ -368,21 +368,45 @@ function attempt({ config, report, rebuild = false }) {
       return { code: INCOMPLETE, files: prepared, report }
     }
     git(tmp, ['-c', `user.name=${config.identity.name}`, '-c', `user.email=${config.identity.email}`, 'commit', '-q', '-m', message])
-    const commit = git(tmp, ['rev-parse', 'HEAD']).stdout.trim()
+    let commit = git(tmp, ['rev-parse', 'HEAD']).stdout.trim()
     report.push(`  commit ${commit.slice(0, 7)}: ${message.split('\n')[0]}`)
 
-    const push = git(tmp, ['push', '--porcelain', remote, `HEAD:refs/heads/${branch}`], { allowFailure: true })
-    if (push.status !== 0) {
-      // A rejection is a race only when the remote actually moved: fetch and compare
-      // with the tip this attempt was built on. Anything else (a hook, auth, a lock) is
-      // fatal, not something to retry around.
+    // A rejected push is usually another team landing first. A rejection is a race only
+    // when the remote actually moved; anything else (a hook, auth, a lock) is fatal. When
+    // the commits that landed touch none of the given files, this commit is replayed on
+    // the new tip and pushed at once: the replay cannot conflict or drop anyone's lines,
+    // and it is quick enough to win where a full rebuild (validator over the whole tree)
+    // kept losing to frequent pushes. When they touch a given file, the attempt is rebuilt
+    // from a fresh origin, where a log is unioned and anything else is refused.
+    let builtOn = originMain
+    for (let replays = 0; ; replays += 1) {
+      const push = git(tmp, ['push', '--porcelain', remote, `HEAD:refs/heads/${branch}`], { allowFailure: true })
+      if (push.status === 0) break
       git(tmp, ['fetch', '-q', remote], { allowFailure: true })
       const moved = git(tmp, ['rev-parse', mainRef], { allowFailure: true })
-      const remoteTip = moved.status === 0 ? moved.stdout.trim() : originMain
-      const retryable = remoteTip !== originMain
+      const remoteTip = moved.status === 0 ? moved.stdout.trim() : builtOn
       const detail = `${push.stdout ?? ''}${push.stderr ?? ''}`.trim().split('\n').filter(Boolean).at(-1) ?? ''
-      report.push(`  push rejected${retryable ? ' (the remote moved; rebuilding from a fresh origin)' : ''}: ${detail}`)
-      return { code: retryable ? 'retry' : REFUSED, files: prepared, report }
+      if (remoteTip === builtOn) {
+        report.push(`  push rejected: ${detail}`)
+        return { code: REFUSED, files: prepared, report }
+      }
+      const touched = git(tmp, ['diff', '--name-only', builtOn, remoteTip, '--', ...paths], { allowFailure: true })
+        .stdout.split('\n').filter(Boolean)
+      if (touched.length > 0 || replays >= (config.replays ?? 5)) {
+        const why = touched.length > 0 ? `the remote moved and changed ${touched.join(', ')}` : `the remote moved again after ${replays} replay(s)`
+        report.push(`  push rejected (${why}; rebuilding from a fresh origin): ${detail}`)
+        return { code: 'retry', files: prepared, report }
+      }
+      const identity = ['-c', `user.name=${config.identity.name}`, '-c', `user.email=${config.identity.email}`]
+      const rebased = git(tmp, [...identity, 'rebase', '-q', remoteTip], { allowFailure: true })
+      if (rebased.status !== 0) {
+        git(tmp, ['rebase', '--abort'], { allowFailure: true })
+        report.push(`  push rejected (the replay on ${remoteTip.slice(0, 7)} failed; rebuilding from a fresh origin): ${detail}`)
+        return { code: 'retry', files: prepared, report }
+      }
+      builtOn = remoteTip
+      commit = git(tmp, ['rev-parse', 'HEAD']).stdout.trim()
+      report.push(`  push rejected (the remote moved; none of the given files changed there): replayed as ${commit.slice(0, 7)} on ${remoteTip.slice(0, 7)}`)
     }
     git(tmp, ['fetch', '-q', remote])
     const landedMain = git(tmp, ['rev-parse', mainRef]).stdout.trim()

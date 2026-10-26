@@ -6,7 +6,7 @@ grounded_in:
   - source: _projects_/heddle/_context_/team-operations/working-model.md, commit from a temporary worktree at a fresh origin/main and count a landing only after reading it back
   - source: _projects_/heddle/_context_/team-operations/decision-log.yaml D-012, never stash or override another session's work in the shared tree
 created: 2026-10-23T03:43:51Z
-modified: 2026-10-24T05:06:33Z
+modified: 2026-10-26T14:40:22Z
 ---
 
 # `record-commit`
@@ -43,11 +43,11 @@ node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
-Last run 2026-10-23 22:05 PDT, on hd/tool-developer with main 445ea43 merged: `node --test _tools_/record-commit/_tests_/record/unit.test.mjs`, 24 passed, 0 failed.
+Last run 2026-10-26 07:40 PDT, on hd/tool-developer with main 1197991 merged: `node --test _tools_/record-commit/_tests_/record/unit.test.mjs`, 25 passed, 0 failed.
 
 ## Read next
 
-- [how-it-works.md](how-it-works.md) — why the tool exists, the seven steps of a run, and the push-race rebuild.
+- [how-it-works.md](how-it-works.md) — why the tool exists, the seven steps of a run, and push-race handling.
 - [every-file-or-none.md](every-file-or-none.md) — a run carries every given file or none.
 - [usage.md](usage.md) — the commit message, the options and the exit codes.
 - [test-coverage.md](test-coverage.md) — what the suite covers, and a dry run against the real record.

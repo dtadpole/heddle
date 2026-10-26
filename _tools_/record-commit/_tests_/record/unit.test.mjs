@@ -411,7 +411,7 @@ test('a dry run validates and plans but commits nothing', (t) => {
   assert.equal(worktreeCount(w), 1)
 })
 
-test('a push race is rebuilt from a fresh origin and both commits land', (t) => {
+test('a push race on another file is replayed on the new tip and both commits land', (t) => {
   const w = world(t)
   write(w.live, '_projects_/x/note.md', 'one\nraced\n')
   const marker = join(w.root, 'race.marker')
@@ -435,10 +435,48 @@ exit 0
   chmodSync(join(hookDir, 'pre-push'), 0o755)
   const r = cli(w, record(w, '_projects_/x/note.md', 'docs(test): a raced edit'), { RACE_MARKER: marker, WRITER: w.writer })
   assert.equal(r.status, OK, r.output)
-  assert.match(r.output, /push rejected .*rebuilding from a fresh origin/)
+  assert.match(r.output, /push rejected \(the remote moved; none of the given files changed there\): replayed as/)
   assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nraced\n')
   assert.equal(originShow(w, '_projects_/x/other.md'), 'racing\n', 'the racing commit was not dropped')
   assert.equal(git(w.origin, ['rev-list', '--count', 'main']), '3', 'base + race + record')
+})
+
+// The coordinator's report (2026-10-26 07:28): other teams pushed so often that every
+// rebuilt attempt, which reruns the validator over the whole tree, was beaten again, and
+// after three rejections nothing was committed. Here the remote moves on four pushes in a
+// row; the commit must still land, by replaying, with every racing commit kept and the
+// attempt built only once.
+test('a remote that moves on four pushes in a row is beaten by replays, and every racing commit is kept', (t) => {
+  const w = world(t)
+  write(w.live, '_projects_/x/note.md', 'one\nbusy remote\n')
+  const hookDir = join(w.live, '.git', 'hooks')
+  mkdirSync(hookDir, { recursive: true })
+  writeFileSync(
+    join(hookDir, 'pre-push'),
+    `#!/bin/sh
+n=$(cat "$RACE_COUNT" 2>/dev/null || echo 0)
+if [ "$n" -lt 4 ]; then
+  echo $((n + 1)) > "$RACE_COUNT"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  git -C "$WRITER" fetch -q origin
+  git -C "$WRITER" reset -q --hard origin/main
+  printf 'race %s\\n' "$n" > "$WRITER/_projects_/x/other-$n.md"
+  git -C "$WRITER" add -A
+  git -C "$WRITER" commit -qm "race $n"
+  git -C "$WRITER" push -q
+fi
+exit 0
+`,
+  )
+  chmodSync(join(hookDir, 'pre-push'), 0o755)
+  const r = cli(w, record(w, '_projects_/x/note.md', 'docs(test): an edit against a busy remote'), { RACE_COUNT: join(w.root, 'race.count'), WRITER: w.writer })
+  assert.equal(r.status, OK, r.output)
+  assert.equal((r.output.match(/replayed as/g) ?? []).length, 4, r.output)
+  assert.equal((r.output.match(/^record-commit: /gm) ?? []).length, 1, 'built once, never rebuilt')
+  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nbusy remote\n')
+  for (const n of [0, 1, 2, 3]) assert.equal(originShow(w, `_projects_/x/other-${n}.md`), `race ${n}\n`, `racing commit ${n} was kept`)
+  assert.equal(git(w.origin, ['rev-list', '--count', 'main']), '6', 'base + four races + record')
+  assert.equal(worktreeCount(w), 1)
 })
 
 test('a commit that lands but cannot sync the live tree exits 3', (t) => {

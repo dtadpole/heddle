@@ -5,7 +5,7 @@ description: Unit tests for record-commit — a stale base is refused, a log kee
 grounded_in:
   - source: _tools_/record-commit/record-commit.mjs
 created: 2026-10-23T03:43:51Z
-modified: 2026-10-23T03:43:51Z
+modified: 2026-10-26T14:40:22Z
 ---
 
 # `record`
@@ -13,7 +13,7 @@ modified: 2026-10-23T03:43:51Z
 The rules the helper keeps: a file is copied into a temporary worktree at a fresh `origin/main`, never
 committed in the live checkout; a base that origin has moved past is refused; an append-only log is unioned and
 verified line by line; the frontmatter validator runs over the whole tree; the push is read back from
-`origin/main` byte for byte; a push race is rebuilt rather than retried blindly; and the live tree is
+`origin/main` byte for byte; a push race is replayed when it touched none of the given files and rebuilt when it did; and the live tree is
 fast-forwarded only after the record is safe.
 
 ```bash
