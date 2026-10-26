@@ -361,6 +361,30 @@ export function conversationVerdict({ gate, first, second, sameSession }) {
   return { verdict: 'pass', detail: 'a two-message conversation completed in one session' }
 }
 
+/**
+ * Whether a follow-up stayed in the monitor's own health session. It must have landed `own`; when the
+ * first turn named its session the follow-up must name the same one, and when the first turn had to
+ * start a session (no title yet) the follow-up must have continued an existing one, which is then the
+ * session the first turn just started, the newest with the monitor's prefix.
+ */
+export function sameHealthSession(first, followUp) {
+  if (followUp?.landing?.landed !== 'own') return false
+  const title = first?.session?.title ?? null
+  return title === null ? followUp?.session?.reused === true : followUp?.session?.title === title
+}
+
+/**
+ * The deployment's two-message check (opt-in, `--deployment-conversation`): a follow-up on the same
+ * page load. With the flag the turn check claims both messages, so a follow-up that failed or could
+ * not be judged decides the turn's verdict; a first message that failed keeps its own story. The
+ * conversation is kept beside the turn in every case.
+ */
+export function deploymentTurnWithConversation(first, conversation) {
+  if (conversation === null || conversation === undefined) return first
+  if (conversation.verdict === 'pass' || first?.verdict !== 'pass') return { ...first, conversation }
+  return { ...first, verdict: conversation.verdict, detail: `${first.detail}; ${conversation.detail}`, conversation }
+}
+
 /** A fixture turn on the Rust preview completed: the prompt and an answer appeared, it settled, and it is the fixture's. */
 export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead }) {
   if (userAppeared !== true) return { verdict: 'fail', detail: 'the prompt never appeared in the log' }

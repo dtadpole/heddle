@@ -42,6 +42,7 @@
  *   _tools_/live-health/probe.mjs                     # one pass, summary, exit 0/1/3
  *   _tools_/live-health/probe.mjs --json --pin        # append the pass to the pinned JSONL
  *   _tools_/live-health/probe.mjs --no-turn           # judge the page, do not spend a turn
+ *   _tools_/live-health/probe.mjs --deployment-conversation   # 8082 also gets a follow-up, same page
  *   _tools_/live-health/probe.mjs --log=~/.heddle/web.log --deploy=~/heddle-live
  *
  * Exit: 0 when every judged check passes, 1 when one fails or the address does not answer (a live
@@ -80,6 +81,8 @@ import {
   tildeText,
   turnLanding,
   conversationVerdict,
+  deploymentTurnWithConversation,
+  sameHealthSession,
   turnVerdict,
 } from './rules.mjs'
 
@@ -106,6 +109,13 @@ const SEND_TURN = options['no-turn'] !== true
  * preview wrote into the deployment's session store. A paused turn is unjudged, never a pass.
  */
 const PREVIEW_TURN = options['no-preview-turn'] !== true
+/**
+ * The deployment's two-message check, on demand: the coordinator asked (review 255, 2026-10-25) for a
+ * two-message conversation on 8082 as well as 3097 once the page patch is deployed. The follow-up goes
+ * on the same page load, the window the page's settle-and-render race lives in. Off by default, so a
+ * scheduled pass still spends one deployment turn.
+ */
+const DEPLOYMENT_CONVERSATION = options['deployment-conversation'] === true
 
 /** The browser is a child of this pass, but its session outlives it: that is the tool's design. */
 process.env.HEDDLE_BROWSER_SESSION = SESSION
@@ -1084,6 +1094,18 @@ if (pass.checks.load.verdict === 'pass') {
   const pageId = pass.checks.load.pageId
   pass.checks.consoleOnLoad = await judgeConsole(pageId, 'load')
   pass.checks.turn = await judgeTurn(pageId, pass.checks.load.page)
+  if (DEPLOYMENT_CONVERSATION) {
+    const first = pass.checks.turn
+    let conversation = { verdict: 'unjudged', detail: 'the first message did not pass, so no follow-up was sent' }
+    if (first.verdict === 'pass') {
+      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null)
+      conversation = {
+        ...conversationVerdict({ gate: { open: true }, first, second: followUp, sameSession: sameHealthSession(first, followUp) }),
+        followUp: { landing: followUp.landing ?? null, answerHead: followUp.answerHead ?? null, settledMs: followUp.settledMs ?? null },
+      }
+    }
+    pass.checks.turn = deploymentTurnWithConversation(first, conversation)
+  }
   const after = await judgeConsole(pageId, 'after the turn')
   /**
    * One clean console is the claim. An error at either reading fails it; a reading that could not be
@@ -1137,6 +1159,7 @@ if (options.json === true) {
   say(`load        ${mark(pass.checks.load.verdict)}  ${pass.checks.load.detail}`)
   say(`marker      ${mark(pass.checks.marker.verdict)}  ${pass.checks.marker.detail}`)
   say(`turn        ${mark(pass.checks.turn.verdict)}  ${pass.checks.turn.detail}`)
+  if (pass.checks.turn.conversation) say(`            conversation ${pass.checks.turn.conversation.verdict}: ${pass.checks.turn.conversation.detail}`)
   say(`console     ${mark(pass.checks.console.verdict)}  ${pass.checks.console.detail}`)
   say(`dsh         ${mark(pass.dsh.verdict)}  ${pass.dsh.detail}`)
   say(`preview     ${mark(pass.preview.verdict)}  ${pass.preview.detail}${pass.preview.marker ? ` (marker ${pass.preview.marker})` : ''}`)

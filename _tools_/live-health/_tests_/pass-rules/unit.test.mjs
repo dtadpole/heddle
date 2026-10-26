@@ -29,6 +29,8 @@ import {
   sharedSessions,
   turnLanding,
   conversationVerdict,
+  deploymentTurnWithConversation,
+  sameHealthSession,
   parseArguments,
   passVerdict,
   processVerdict,
@@ -288,4 +290,33 @@ test('a preview conversation is pending until the fix is served, then needs both
   const base = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: pass, shared: 0 }
   assert.equal(previewVerdict({ ...base, conversation: { verdict: 'pending' } }).verdict, 'pass')
   assert.equal(previewVerdict({ ...base, conversation: { verdict: 'fail' } }).verdict, 'fail')
+})
+
+test('a deployment follow-up must land in the same health session the first turn used', () => {
+  const first = { session: { reused: true, via: 'tree', title: 'live health check 1' } }
+  assert.equal(sameHealthSession(first, { landing: { landed: 'own' }, session: { reused: true, title: 'live health check 1' } }), true)
+  assert.equal(sameHealthSession(first, { landing: { landed: 'own' }, session: { reused: true, title: 'live health check 2' } }), false, 'another health session')
+  assert.equal(sameHealthSession(first, { landing: { landed: 'other' }, session: { reused: true, title: 'live health check 1' } }), false, 'landed elsewhere')
+  // A first turn that started the session has no title yet: the follow-up must continue an existing one.
+  const started = { session: { reused: false, via: 'started', title: null } }
+  assert.equal(sameHealthSession(started, { landing: { landed: 'own' }, session: { reused: true, title: 'live health check 3' } }), true)
+  assert.equal(sameHealthSession(started, { landing: { landed: 'own' }, session: { reused: false, title: null } }), false, 'started yet another')
+})
+
+test('with the deployment conversation on, the turn check claims both messages', () => {
+  const first = { verdict: 'pass', detail: 'answer streamed' }
+  const passed = deploymentTurnWithConversation(first, { verdict: 'pass', detail: 'a two-message conversation completed in one session' })
+  assert.equal(passed.verdict, 'pass')
+  assert.equal(passed.detail, 'answer streamed', 'a passing conversation adds no noise to the turn detail')
+  assert.equal(passed.conversation.verdict, 'pass')
+  const failed = deploymentTurnWithConversation(first, { verdict: 'fail', detail: 'the follow-up message: no answer appeared' })
+  assert.equal(failed.verdict, 'fail')
+  assert.match(failed.detail, /follow-up/)
+  assert.equal(deploymentTurnWithConversation(first, { verdict: 'unjudged', detail: 'x' }).verdict, 'unjudged')
+  // A first message that failed keeps its own story; the conversation is still recorded beside it.
+  const broken = deploymentTurnWithConversation({ verdict: 'fail', detail: 'no answer' }, { verdict: 'unjudged', detail: 'no follow-up was sent' })
+  assert.equal(broken.detail, 'no answer')
+  assert.equal(broken.conversation.verdict, 'unjudged')
+  // Without the flag nothing changes.
+  assert.equal(deploymentTurnWithConversation(first, undefined), first)
 })
