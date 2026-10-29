@@ -776,6 +776,16 @@
   .turn.assistant.markdown td, .turn.assistant.markdown th { font-size: 14px; line-height: 20px; }
   .turn.assistant.markdown pre { margin: 16px 0; padding: 10px 12px; background: var(--chat-code); border-radius: 8px; overflow-x: auto; }
   .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: 12.5px; line-height: 19px; background: none; padding: 0; }
+  /**
+   * A fenced block's language, DSH's code-block label: drawn from the block's own `data-lang` in its top-right corner,
+   * inside the padding, so it adds no height when the answer settles and is never part of what Copy yields.
+   */
+  .turn.assistant.markdown pre[data-lang] { position: relative; }
+  .turn.assistant.markdown pre[data-lang]::before {
+    content: attr(data-lang); position: absolute; top: 4px; right: 8px; padding: 0 4px; border-radius: 4px;
+    font-family: var(--code-font); font-size: 11px; line-height: 15px; color: var(--text-3); background: var(--chat-code);
+    text-transform: lowercase; pointer-events: none;
+  }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
   /**
    * **The live state is a shimmer on the words, never a band across the row.**
@@ -3944,6 +3954,7 @@ function add(kind, text, merge = true, label, tool) {
     node.classList.add('markdown')
     node.dataset.rendered = 'true'
     node.innerHTML = tool.html
+    decorateCodeBlocks(node)
     /**
      * A history row is settled by construction, so it gets its actions here — the same ones the live path
      * attaches; `dataset.copyText` is snapshotted before the button is inside the row.
@@ -4377,6 +4388,63 @@ function userActions(row, iso) {
   return bar
 }
 
+/**
+ * An answer's code blocks, DSH's way: each fence names its language in a label, and is coloured by **one** highlighter
+ * whichever server drew it (C60). The two servers highlight on their own and were measured classifying the same tokens
+ * differently, so the page re-highlights a fence from its text with the highlight.js both servers serve under
+ * `/vendor/highlight/`, registering exactly the grammars and aliases `highlight.ts` registers - which is also what the
+ * TypeScript server's colours already are. A fence with no language is left as drawn. If the modules cannot be loaded,
+ * the server's own colours stay: the block is never left uncoloured or unreadable.
+ */
+const CODE_GRAMMARS = ['bash', 'c', 'cpp', 'css', 'diff', 'go', 'ini', 'java', 'javascript', 'json', 'markdown', 'php', 'plaintext', 'python', 'ruby', 'rust', 'sql', 'typescript', 'xml', 'yaml']
+const CODE_ALIASES = {
+  sh: 'bash', shell: 'bash', zsh: 'bash', console: 'bash',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', node: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', python3: 'python',
+  yml: 'yaml',
+  jsonc: 'json', json5: 'json',
+  html: 'xml', svg: 'xml', xhtml: 'xml',
+  md: 'markdown', mdown: 'markdown',
+  rs: 'rust', golang: 'go', 'c++': 'cpp', h: 'c', hpp: 'cpp',
+  rb: 'ruby', cfg: 'ini', conf: 'ini', text: 'plaintext', txt: 'plaintext', plain: 'plaintext',
+  toml: 'ini', properties: 'ini', env: 'ini',
+}
+let codeHighlighter = null
+function loadCodeHighlighter() {
+  codeHighlighter ??= (async () => {
+    const hljs = (await import('/vendor/highlight/core.js')).default
+    const grammars = await Promise.all(CODE_GRAMMARS.map(async (name) => [name, (await import(`/vendor/highlight/languages/${name}.js`)).default]))
+    for (const [name, grammar] of grammars) hljs.registerLanguage(name, grammar)
+    return hljs
+  })().catch(() => null)
+  return codeHighlighter
+}
+function decorateCodeBlocks(root) {
+  const blocks = []
+  for (const code of root.querySelectorAll('pre > code[class*="language-"]')) {
+    const requested = ([...code.classList].find((name) => name.startsWith('language-')) ?? '').slice('language-'.length)
+    if (requested === '') continue
+    code.parentElement.dataset.lang = requested
+    blocks.push([code, requested.toLowerCase()])
+  }
+  if (blocks.length === 0) return
+  void loadCodeHighlighter().then((hljs) => {
+    if (hljs === null) return
+    for (const [code, requested] of blocks) {
+      if (!code.isConnected || code.dataset.highlighted !== undefined) continue
+      const named = CODE_ALIASES[requested] ?? requested
+      const language = CODE_GRAMMARS.includes(named) ? named : 'plaintext'
+      try {
+        code.innerHTML = hljs.highlight(code.textContent, { language }).value
+      } catch {
+        code.innerHTML = hljs.highlight(code.textContent, { language: 'plaintext' }).value
+      }
+      code.dataset.highlighted = language
+    }
+  })
+}
+
 async function renderSettledAnswers() {
   for (const row of log.querySelectorAll('.turn.assistant:not([data-rendered])')) {
     const text = row.textContent
@@ -4405,6 +4473,7 @@ async function renderSettledAnswers() {
       if (body !== null && typeof body.html === 'string') {
         row.classList.add('markdown')
         row.innerHTML = body.html
+        decorateCodeBlocks(row)
         row.dataset.rendered = 'true'
         /** What a copy should yield is the **drawn** answer, so the snapshot is refreshed after drawing. */
         row.dataset.copyText = row.innerText

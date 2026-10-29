@@ -6,7 +6,8 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, inlineContentType, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
+import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, HIGHLIGHT_GRAMMARS, highlightAsset, inlineContentType, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
+import { highlightCode } from '../src/server/highlight.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -589,4 +590,46 @@ test('a transcript names its session in every attachment address, and leaves oth
   assert.equal(first.attachments?.[0]?.url, `/api/uploads/a%20b.png?session=${session}`, 'the card is read for this session')
   assert.equal('attachments' in second, false, 'a turn without attachments is unchanged')
   assert.deepEqual(third.attachments, [], 'and an empty list stays empty')
+})
+
+test('the page highlights a code block exactly as the TypeScript server does, from the modules both servers serve', async () => {
+  /**
+   * C60: the two servers classified the same tokens differently, so the page re-highlights an answer's code blocks with
+   * the highlight.js both serve. That is only parity if the served modules, registered as the page registers them,
+   * colour a fence the way the TypeScript server's own `highlightCode` does - judged here on real files.
+   */
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { pathToFileURL } = await import('node:url')
+  const read = (relative: string) => readFileSync(join('node_modules/highlight.js', relative), 'utf8')
+  const dir = mkdtempSync(join(tmpdir(), 'heddle-hljs-'))
+  try {
+    const core = highlightAsset('core.js', read)
+    assert.ok(core !== null && core.endsWith('export default module.exports;\n'), 'the CommonJS core is served as an ES module')
+    writeFileSync(join(dir, 'core.mjs'), core)
+    const hljs = (await import(pathToFileURL(join(dir, 'core.mjs')).href)).default as {
+      registerLanguage: (name: string, grammar: unknown) => void
+      highlight: (code: string, options: { language: string }) => { value: string }
+    }
+    for (const name of HIGHLIGHT_GRAMMARS) {
+      const grammar = highlightAsset(`languages/${name}.js`, read)
+      assert.ok(grammar !== null, `the ${name} grammar is served`)
+      writeFileSync(join(dir, `${name}.mjs`), grammar)
+      hljs.registerLanguage(name, (await import(pathToFileURL(join(dir, `${name}.mjs`)).href)).default)
+    }
+    const fences: [string, string][] = [
+      ['typescript', 'const x: number = 1 // one\ninterface A { b?: string }'],
+      ['rust', 'fn main() { let v: Vec<u8> = vec![1]; println!("{}", v.len()); }'],
+      ['json', '{"a": [1, true, null], "b": "c"}'],
+      ['python', 'def greet(name):\n    return f"hi {name}"'],
+    ]
+    for (const [language, code] of fences) {
+      assert.equal(hljs.highlight(code, { language }).value, highlightCode(code, language), `${language} is coloured as the server colours it`)
+    }
+    assert.equal(highlightAsset('languages/haskell.js', read), null, 'a grammar the server does not register is not served')
+    assert.equal(highlightAsset('languages/../lib/core.js', read), null, 'nor any other file')
+    assert.equal(highlightAsset('lib/core.js', read), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

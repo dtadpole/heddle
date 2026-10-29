@@ -754,6 +754,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  /** highlight.js for the page's code blocks: see {@link highlightAsset}. */
+  if (url.pathname.startsWith('/vendor/highlight/') && request.method === 'GET') {
+    const answer = highlightAsset(url.pathname.slice('/vendor/highlight/'.length), (relative) =>
+      readFileSync(new URL(`../../node_modules/highlight.js/${relative}`, import.meta.url), 'utf8'),
+    )
+    if (answer === null) {
+      respond(response, 404, 'text/plain', 'that highlighter module is not served\n')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+    response.end(answer)
+    return
+  }
+
   /**
    * DOMPurify's browser build, served from the installed package.
    *
@@ -3425,6 +3439,39 @@ export function attachmentsOf(
     })
   }
   return attachments
+}
+
+/**
+ * The grammars the page's code-block highlighter registers: exactly the set and the order `highlight.ts` registers on
+ * the server, so a fence the TypeScript server classified is classified the same in the page, on either build.
+ */
+export const HIGHLIGHT_GRAMMARS = [
+  'bash', 'c', 'cpp', 'css', 'diff', 'go', 'ini', 'java', 'javascript', 'json', 'markdown', 'php', 'plaintext', 'python',
+  'ruby', 'rust', 'sql', 'typescript', 'xml', 'yaml',
+] as const
+
+/**
+ * One module of highlight.js for the browser, or `null` for anything else: `core.js`, and `languages/<name>.js` for a
+ * grammar in {@link HIGHLIGHT_GRAMMARS}.
+ *
+ * DSH highlights a chat code block in the browser; heddle's two servers each highlight on their own (highlight.js here,
+ * a grammar engine in the Rust port) and were measured classifying the same tokens differently (C60). The page now
+ * re-highlights an answer's code blocks itself with the one highlight.js both servers serve from `node_modules`, so a
+ * block is coloured the same whichever server drew it. The package's ES grammars are standalone modules; its core is
+ * CommonJS with no `require`, so it is served wrapped as an ES module. Only listed names are served, so the route cannot
+ * name another file.
+ */
+export function highlightAsset(name: string, read: (relative: string) => string): string | null {
+  try {
+    if (name === 'core.js') {
+      return `const module = { exports: {} };\nconst exports = module.exports;\n${read('lib/core.js')}\nexport default module.exports;\n`
+    }
+    const match = /^languages\/([a-z]+)\.js$/.exec(name)
+    if (match === null || !(HIGHLIGHT_GRAMMARS as readonly string[]).includes(match[1] as string)) return null
+    return read(`es/languages/${match[1]}.js`)
+  } catch {
+    return null
+  }
 }
 
 /**
