@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-29T14:53:00Z
+modified: 2026-10-29T15:12:00Z
 level: L3
-version: 1.11.0
+version: 1.12.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `874d318` (tool arguments checked before a tool runs; part 70's
+**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `fb49fb6` (the todo and goal tools at DSH parity; part 70's
 browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
@@ -27,8 +27,9 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**132 checks: 131 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 40
-gained `check-argument-validation.mjs`: a call with a wrong argument is refused by code, and no tool's root is closed.
+**141 checks: 140 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 50
+gained `check-todo-tool.mjs` and `check-goal-tool.mjs`: both tools refuse and answer in DSH's words. Part 1's
+two live checks were re-run after a gateway rate limit (429) had left them unjudged in the gate's run.
 
 **Failing:** none in the backend lane. Part 98 reads the machine's recorded validation, so it judges the configuration:
 every configured model now passes it. For the Claude models that means several text deltas, not arrival as they are
@@ -46,7 +47,7 @@ list.
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 9 of 9 |
 | 4 tools | `40-pluggable-tools` | **passes** — 8 of 8 |
-| 5 agentic loop | `50-agentic-loop` | **passes** — 16 of 16 |
+| 5 agentic loop | `50-agentic-loop` | **passes** — 25 of 25 |
 | 6 hooks | `60-hooks` | **passes** — 6 of 6 |
 | 7 workspaces and sessions | `70-workspaces-sessions` | **passes** — 48 of 48 |
 | 8 sandbox | `75-permission-sandbox` | **passes** — 17 of 17 |
