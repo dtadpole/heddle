@@ -124,3 +124,27 @@ test('the page reads a Mac the way DSH does, from navigator.platform and without
   assert.equal(onMac({ platform: 'Linux x86_64' }), false, 'Linux')
   assert.equal(onMac({ platform: '' }), false, 'unknown')
 })
+
+test('Mod+Alt+O adds a workspace, with the key value a Mac delivers', () => {
+  /** DSH's Web default for `workspace.add` (`dsh-client-ui-workspace`); the page had no chord for it (S35). */
+  assert.equal(shortcutFor(keydown({ code: 'KeyO', key: 'ø', metaKey: true, altKey: true }), mac), 'add-workspace')
+  assert.equal(shortcutFor(keydown({ code: 'KeyO', key: 'o', ctrlKey: true, altKey: true }), elsewhere), 'add-workspace')
+  assert.match(page, /if \(action === 'add-workspace'\) \{\n\s+void openWorkspacePicker\(\)/, 'the chord opens the picker')
+})
+
+test('two Escape presses within 500 ms stop the running turn, as DSH does', () => {
+  /** DSH's fixed action: two independent Escape presses in the chat or composer, `stopSequenceMs` 500 by default (S43). */
+  const source = /function isStopSequence\([^)]*\) \{[\s\S]*?\n\}/.exec(page)
+  assert.ok(source, 'the page has an isStopSequence function')
+  const isStopSequence = runInNewContext(`const STOP_SEQUENCE_MS = 500\n${source[0]}\nisStopSequence`) as (previous: number | null, now: number) => boolean
+  assert.equal(isStopSequence(null, 1000), false, 'a first press only arms it')
+  assert.equal(isStopSequence(1000, 1200), true, 'a second press 200 ms later stops')
+  assert.equal(isStopSequence(1000, 1500), true, 'at the interval it still stops')
+  assert.equal(isStopSequence(1000, 1501), false, 'past the interval it re-arms instead')
+  assert.equal(isStopSequence(1000, 900), false, 'a clock that went back is not a sequence')
+  assert.match(page, /const STOP_SEQUENCE_MS = 500/)
+  assert.match(page, /if \(event\.repeat \|\| event\.isComposing \|\| event\.defaultPrevented\) return/, 'repeats, composition and taken presses do not count')
+  assert.match(page, /if \(document\.querySelector\('dialog\[open\]'\) !== null\) return/, 'nor presses while a dialog is open')
+  assert.match(page, /if \(target === null \|\| target\.closest\('main'\) === null\) return/, 'only presses in the conversation column count')
+  assert.match(page, /if \(isStopSequence\(stopEscapeAt, now\) && anyRunning\(\)\) \{\n\s+stopEscapeAt = null\n\s+void stopTurn\(\)/, 'and the sequence stops the turn')
+})

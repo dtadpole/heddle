@@ -35,6 +35,7 @@ fn every_chord_in_the_table_names_its_physical_key() {
         ("KeyB", "sidebar"),
         ("KeyN", "new-session"),
         ("Comma", "settings"),
+        ("KeyO", "add-workspace"),
     ] {
         let entry = source
             .lines()
@@ -74,4 +75,12 @@ fn the_matcher_compares_the_code_and_reads_mod_by_platform() {
         source.contains("const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform"),
         "a Mac is read as DSH reads it, from navigator.platform and without minding case"
     );
+}
+
+/// Two Escape presses within DSH's `stopSequenceMs` (500 ms) stop the running turn (DSH parity R-developer-seven-10).
+#[test]
+fn two_escape_presses_stop_the_running_turn() {
+    assert!(PAGE_SOURCE.contains("const STOP_SEQUENCE_MS = 500"));
+    assert!(PAGE_SOURCE.contains("function isStopSequence(previous, now)"));
+    assert!(PAGE_SOURCE.contains("if (isStopSequence(stopEscapeAt, now) && anyRunning()) {"));
 }

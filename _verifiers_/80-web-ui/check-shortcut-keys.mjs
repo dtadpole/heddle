@@ -35,6 +35,7 @@ const CHORDS = {
   newSession: { code: 'KeyN', macKey: 'Dead', key: 'n', keyCode: 78, alt: true },
   settings: { code: 'Comma', macKey: '≤', key: ',', keyCode: 188, alt: true },
   fork: { code: 'KeyF', macKey: 'F', key: 'F', keyCode: 70, shift: true },
+  addWorkspace: { code: 'KeyO', macKey: 'ø', key: 'o', keyCode: 79, alt: true },
 }
 
 function startServer(label) {
@@ -43,7 +44,11 @@ function startServer(label) {
       const { spawn } = await import('node:child_process')
       const home = isolatedHome(`shortcut-keys-${label}`)
       const work = fixtureDir(`shortcut-keys-${label}-work`)
-      const { config } = scriptedConfig({ home, steps: [{ text: 'answer one' }, { text: 'answer two' }] })
+      /** The seed turn, then a slow turn (a six-second command) for the double-Escape stop. */
+      const { config } = scriptedConfig({
+        home,
+        steps: [{ text: 'answer one' }, { toolCall: { name: 'bash', arguments: { command: 'sleep 6' } } }, { text: 'slow turn done' }],
+      })
       const child = spawn(
         ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', `${home}/sessions`]),
         { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
@@ -222,6 +227,37 @@ test('the session shortcuts fire on the physical key, with the key values the br
         await settle()
         assert.equal(await sidebarState(), 'expanded', 'Control+Option+B on a Mac leaves the sidebar alone')
       }
+    })
+
+    await t.test('add workspace: Mod+Alt+O opens the folder picker', async () => {
+      await press(browser, CHORDS.addWorkspace, { onMac })
+      await settle(800)
+      assert.equal(await browser.evaluate(`!!document.getElementById('workspace-picker')?.open`), true, 'the picker is open')
+      await browser.evaluate(`(() => { document.getElementById('workspace-picker').close(); return true })()`)
+    })
+
+    await t.test('two Escape presses within 500 ms stop the running turn; one press does not', async () => {
+      const running = async () => (await sessions(browser)).find((s) => s.id === target)?.running === true
+      const escape = async () => {
+        const base = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }
+        await browser.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base })
+        await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+      }
+      void call(browser, 'POST', '/api/turn', { session: target, prompt: 'run the slow command' })
+      const deadline = Date.now() + 8000
+      while (!(await running()) && Date.now() < deadline) await settle(150)
+      assert.equal(await running(), true, 'the slow turn is running')
+      await settle(400)
+      await browser.evaluate(`(() => { document.querySelector('#prompt textarea').focus(); return true })()`)
+      await escape()
+      await settle(1200)
+      assert.equal(await running(), true, 'one press leaves the turn running')
+      await escape()
+      await settle(150)
+      await escape()
+      const stopBy = Date.now() + 2500
+      while ((await running()) && Date.now() < stopBy) await settle(150)
+      assert.equal(await running(), false, 'two presses stopped it well before the command would have finished')
     })
 
     await t.test('archive: Mod+Alt+A archives the open session', async () => {

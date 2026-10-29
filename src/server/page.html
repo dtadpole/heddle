@@ -2613,7 +2613,7 @@
         <line x1="10.2" y1="10.2" x2="13.5" y2="13.5" stroke="currentColor" stroke-width="1.4"/>
       </svg>
     </button>
-    <button id="add-workspace" type="button" title="register a folder as a workspace root" aria-label="register a folder">+</button>
+    <button id="add-workspace" type="button" title="register a folder as a workspace root (⌥⌘O)" aria-label="register a folder" aria-keyshortcuts="Meta+Alt+O">+</button>
     <span id="view-options"></span>
   </h1>
   <!--
@@ -10107,6 +10107,8 @@ const SESSION_SHORTCUTS = [
   { code: 'KeyN', key: 'n', alt: true, action: 'new-session' },
   /** DSH's chord for Settings, read from its menu in the same session. */
   { code: 'Comma', key: ',', alt: true, action: 'settings' },
+  /** DSH's Web chord for Add workspace (`dsh-client-ui-workspace`, `workspace.add`, Mod+Alt+O); it opens the picker. */
+  { code: 'KeyO', key: 'o', alt: true, action: 'add-workspace' },
 ]
 
 /**
@@ -10190,6 +10192,10 @@ document.addEventListener('keydown', (event) => {
     void showSettings()
     return
   }
+  if (action === 'add-workspace') {
+    void openWorkspacePicker()
+    return
+  }
   if (action === 'search') {
     /** The field is put away while the sidebar is a rail, so reaching it means putting the panel back first. */
     if (sidebarCollapsed()) setSidebarCollapsed(false)
@@ -10207,6 +10213,39 @@ document.addEventListener('keydown', (event) => {
   if (action === 'archive') void archiveSession(node)
   else if (action === 'fork') void forkSession(node)
   else if (action === 'rename') renameSession(node)
+})
+
+/**
+ * Two independent Escape presses stop the running turn, DSH's fixed action (`dsh-client-ui-conversation`: "two
+ * independent Escape presses in the focused Chat or Composer stop its current running turn and preserve queued
+ * messages"; the interval is the shortcuts service's `stopSequenceMs`, 500 ms by default). Only presses in the
+ * conversation column count (the chat and the composer live in `main`); a held repeat, a composing input method, a press
+ * another control took, an open dialog, or a press with any modifier does not, and the second press must come within the
+ * interval. The stop route ends the turn alone, so queued messages stay queued. Stop was a click only
+ * (DSH parity R-developer-seven-10, row S43).
+ */
+const STOP_SEQUENCE_MS = 500
+let stopEscapeAt = null
+function isStopSequence(previous, now) {
+  return previous !== null && now - previous >= 0 && now - previous <= STOP_SEQUENCE_MS
+}
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') {
+    stopEscapeAt = null
+    return
+  }
+  if (event.repeat || event.isComposing || event.defaultPrevented) return
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+  if (document.querySelector('dialog[open]') !== null) return
+  const target = event.target instanceof Element ? event.target : document.activeElement
+  if (target === null || target.closest('main') === null) return
+  const now = performance.now()
+  if (isStopSequence(stopEscapeAt, now) && anyRunning()) {
+    stopEscapeAt = null
+    void stopTurn()
+    return
+  }
+  stopEscapeAt = now
 })
 
 /** The `…` control: a button, and the one list it opens. */
