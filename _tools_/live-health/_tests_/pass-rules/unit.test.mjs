@@ -25,6 +25,7 @@ import {
   FIXTURE_PREFIX,
   fixtureOnly,
   expectedSeatLabel,
+  healthSessionExpired,
   lowestEffort,
   modelLabel,
   REAL_MODEL,
@@ -266,6 +267,16 @@ test('a real-model turn (D-052) is judged on completion, never on its wording', 
   const missing = previewTurnVerdict({ ...done, selection: { ok: false, reason: 'deepseek-official/deepseek-flash is not configured' } })
   assert.equal(missing.verdict, 'fail', 'a model that cannot be selected fails; no other model is tried')
   assert.match(missing.detail, /not configured/)
+})
+
+test('a real-model pass rolls its health session over once a UTC day; an unreadable date keeps it', () => {
+  const now = new Date('2026-10-29T11:30:00Z')
+  assert.equal(healthSessionExpired('2026-10-23T03:21:46.171Z', now), true, "last week's session is retired")
+  assert.equal(healthSessionExpired('2026-10-28T23:59:59Z', now), true, "yesterday's is retired")
+  assert.equal(healthSessionExpired('2026-10-29T00:00:01Z', now), false, "today's is kept")
+  assert.equal(healthSessionExpired(Date.parse('2026-10-29T09:00:00Z'), now), false, 'epoch milliseconds read too')
+  assert.equal(healthSessionExpired(null, now), false, 'no date: keep the session rather than start one every pass')
+  assert.equal(healthSessionExpired('not a date', now), false)
 })
 
 test('the lowest effort is the least common level declared, else the first, else none', () => {
