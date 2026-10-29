@@ -582,26 +582,37 @@ async fn run_turn_body(
             break;
         }
 
+        // The step's calls run as DSH's loop runs them (`dsh-agent-loop` `runGroup`): a call whose tool is
+        // parallel-safe (`Tool::concurrency_safe`, DSH's `isConcurrencySafe`) joins the consecutive safe calls around
+        // it in a pool of `tools.maxParallelToolCalls`; any other call runs alone, a barrier between groups. Results
+        // commit in model order after each group (`buffered` keeps it), so a call that finishes first is still
+        // answered in its place, and the step boundary where steered input is claimed stays after the whole step.
+        //
         // Every call the model asked for is answered in the log, even one that cannot run: a call without an
-        // answer breaks every later request.
-        for (id, name, arguments) in calls {
+        // answer breaks every later request. A call a stop overtook before it started is answered as interrupted.
+        let limit = runtime.tools.max_parallel_tool_calls().max(1);
+        let safe = |name: &str| limit > 1 && runtime.tools.is_concurrency_safe(name);
+        let run_call = |name: String, arguments: String| {
             let args = parse_arguments(&arguments);
-            let result = if stopped() {
-                ToolResult::refused(
-                    codes::INTERRUPTED,
-                    "the turn was stopped before this call ran",
-                )
-            } else {
-                let context = ToolContext {
-                    cwd: cwd.clone(),
-                    session: Some(session.clone()),
-                    cancel: cancel.clone(),
-                    log: turn_log(),
-                };
+            let context = ToolContext {
+                cwd: cwd.clone(),
+                session: Some(session.clone()),
+                cancel: cancel.clone(),
+                log: turn_log(),
+            };
+            let stopped = &stopped;
+            let tools = &runtime.tools;
+            async move {
+                if stopped() {
+                    return ToolResult::refused(
+                        codes::INTERRUPTED,
+                        "the turn was stopped before this call ran",
+                    );
+                }
                 // A call that escapes the registry (a failing `tools/pre-execute` listener) is still answered,
                 // as the TypeScript catch answers it: the stop's sentence when the turn was stopped, else the
                 // failure's own.
-                match runtime.tools.try_call(&name, args, context).await {
+                match tools.try_call(&name, args, context).await {
                     Ok(result) => result,
                     Err(failure) => ToolResult::refused(
                         codes::INTERRUPTED,
@@ -612,25 +623,49 @@ async fn run_turn_body(
                         },
                     ),
                 }
-            };
-            tool_calls.push(ToolCallRecord {
-                name: name.clone(),
-                arguments,
-                result: result.clone(),
-            });
-            if let Some(error) = &result.error {
-                denials.push(Denial {
-                    tool: name,
-                    code: error.code.clone(),
-                    message: error.message.clone(),
-                });
             }
-            let mut answer = Message::new(
-                Role::Tool,
-                vec![ContentPart::text(tool_message_text(&result))],
-            );
-            answer.tool_call_id = Some(id);
-            runtime.session.message(session, answer)?;
+        };
+        let calls: Vec<(String, String, String)> = calls.into_iter().collect();
+        let mut first = 0;
+        while first < calls.len() {
+            let mut end = first + 1;
+            if safe(&calls[first].1) {
+                while end < calls.len() && safe(&calls[end].1) {
+                    end += 1;
+                }
+            }
+            let group = &calls[first..end];
+            // The futures are made first, so the stream holds owned futures rather than a closure over the group's
+            // borrows (which a `Send` turn future cannot carry); `buffered` still starts them lazily, in order.
+            let pending: Vec<_> = group
+                .iter()
+                .map(|(_, name, arguments)| run_call(name.clone(), arguments.clone()))
+                .collect();
+            let results: Vec<ToolResult> = futures::stream::iter(pending)
+                .buffered(limit)
+                .collect()
+                .await;
+            for ((id, name, arguments), result) in group.iter().cloned().zip(results) {
+                tool_calls.push(ToolCallRecord {
+                    name: name.clone(),
+                    arguments,
+                    result: result.clone(),
+                });
+                if let Some(error) = &result.error {
+                    denials.push(Denial {
+                        tool: name,
+                        code: error.code.clone(),
+                        message: error.message.clone(),
+                    });
+                }
+                let mut answer = Message::new(
+                    Role::Tool,
+                    vec![ContentPart::text(tool_message_text(&result))],
+                );
+                answer.tool_call_id = Some(id);
+                runtime.session.message(session, answer)?;
+            }
+            first = end;
         }
     }
 
@@ -1398,6 +1433,128 @@ pub(crate) mod tests {
         }
     }
 
+    type Stamps = Arc<Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>>;
+
+    /// A tool that sleeps `ms` and stamps when it ran; parallel-safe or not as asked.
+    fn sleepy_tool(name: &str, safe: bool, stamps: Stamps) -> Arc<dyn Tool> {
+        let tool = tool_fn(
+            ToolSpec {
+                name: name.into(),
+                description: "sleeps and stamps".into(),
+                parameters: serde_json::json!({}),
+            },
+            move |args, _ctx| {
+                let stamps = Arc::clone(&stamps);
+                Box::pin(async move {
+                    let tag = args
+                        .get("tag")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let ms = args
+                        .get("ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let start = std::time::Instant::now();
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    stamps
+                        .lock()
+                        .unwrap()
+                        .push((tag.clone(), start, std::time::Instant::now()));
+                    Ok(ToolResult::ok(format!("ran {tag}")))
+                })
+            },
+        );
+        if safe {
+            heddle_tools::parallel_safe(tool)
+        } else {
+            tool
+        }
+    }
+
+    fn registry_with_limit(tools: Vec<Arc<dyn Tool>>, limit: usize) -> Arc<ToolRegistry> {
+        let registry = ToolRegistry::from_config(
+            ToolGates {
+                approvals: Arc::new(AllowAll),
+                sandbox: Arc::new(FlatSandbox),
+                modes: Arc::new(DefaultModes),
+                hooks: Arc::new(NoToolHooks),
+            },
+            &heddle_tools::ToolsConfig {
+                include_builtins: false,
+                max_parallel_tool_calls: limit,
+                ..heddle_tools::ToolsConfig::default()
+            },
+        );
+        for tool in tools {
+            registry.register(tool).unwrap();
+        }
+        Arc::new(registry)
+    }
+
+    /// One step asking for `calls` (tool, tag, ms), then an answer; the stamps and the tool messages' call ids.
+    async fn parallel_step(calls: &[(&str, &str, u64)], limit: usize) -> (Stamps, Vec<String>) {
+        let stamps: Stamps = Arc::default();
+        let mut chunks: Vec<Chunk> = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (tool, tag, ms))| {
+                call_chunk(
+                    &format!("c{index}"),
+                    tool,
+                    serde_json::json!({ "tag": tag, "ms": ms }),
+                )
+            })
+            .collect();
+        chunks.push(done("tool_calls"));
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(chunks),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let session = RecordingSession::new();
+        let registry = registry_with_limit(
+            vec![
+                sleepy_tool("sleepy_read", true, Arc::clone(&stamps)),
+                sleepy_tool("sleepy_write", false, Arc::clone(&stamps)),
+            ],
+            limit,
+        );
+        let runtime = runtime(
+            model,
+            Arc::clone(&session),
+            registry,
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "done");
+        let ids = session
+            .state
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .filter_map(|message| message.tool_call_id.clone())
+            .collect();
+        (stamps, ids)
+    }
+
+    fn stamp(stamps: &Stamps, tag: &str) -> (std::time::Instant, std::time::Instant) {
+        let stamps = stamps.lock().unwrap();
+        let found = stamps.iter().find(|(name, _, _)| name == tag).unwrap();
+        (found.1, found.2)
+    }
+
     fn call_chunk(id: &str, name: &str, arguments: serde_json::Value) -> Chunk {
         Chunk::ToolCall(crate::upstream::ToolCall {
             id: id.into(),
@@ -1797,6 +1954,60 @@ pub(crate) mod tests {
             "a compaction landed"
         );
         assert!(result.context.unwrap().compacted);
+    }
+
+    #[tokio::test]
+    async fn two_parallel_safe_calls_run_together_and_commit_in_model_order() {
+        let (stamps, ids) = parallel_step(
+            &[("sleepy_read", "slow", 300), ("sleepy_read", "quick", 40)],
+            10,
+        )
+        .await;
+        let (slow_start, slow_end) = stamp(&stamps, "slow");
+        let (quick_start, quick_end) = stamp(&stamps, "quick");
+        assert!(
+            quick_start < slow_end,
+            "the second started before the first ended"
+        );
+        assert!(quick_end < slow_end, "and finished first");
+        let _ = slow_start;
+        assert_eq!(ids, ["c0", "c1"], "yet each is answered in its place");
+    }
+
+    #[tokio::test]
+    async fn a_parallel_cap_of_one_runs_the_same_calls_one_after_the_other() {
+        let (stamps, ids) = parallel_step(
+            &[("sleepy_read", "first", 120), ("sleepy_read", "second", 40)],
+            1,
+        )
+        .await;
+        assert!(
+            stamp(&stamps, "second").0 >= stamp(&stamps, "first").1,
+            "serial"
+        );
+        assert_eq!(ids, ["c0", "c1"]);
+    }
+
+    #[tokio::test]
+    async fn an_exclusive_call_is_a_barrier_between_parallel_groups() {
+        let (stamps, ids) = parallel_step(
+            &[
+                ("sleepy_read", "before", 120),
+                ("sleepy_write", "write", 60),
+                ("sleepy_read", "after", 40),
+            ],
+            10,
+        )
+        .await;
+        assert!(
+            stamp(&stamps, "write").0 >= stamp(&stamps, "before").1,
+            "the write waited for the read before it"
+        );
+        assert!(
+            stamp(&stamps, "after").0 >= stamp(&stamps, "write").1,
+            "the read after it waited for the write"
+        );
+        assert_eq!(ids, ["c0", "c1", "c2"]);
     }
 
     #[tokio::test]

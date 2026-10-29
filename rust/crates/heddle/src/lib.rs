@@ -77,5 +77,27 @@ pub fn run(invocation: &Invocation, out: &mut output::Output<'_>) -> Exit {
         out.out(&usage::usage(usage::SERVED));
         return Exit::Success;
     }
+    if let Some(template) = &args.from_default_profile {
+        // DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of
+        // a shipped template, then the command boots it as usual. A profile named by a directory is not one this can
+        // replace, so the flag needs a plain name. The template is the checkout this binary was built from.
+        let Some(name) = args
+            .profile
+            .as_deref()
+            .filter(|name| !name.starts_with('/'))
+        else {
+            return out.fail("--from-default-profile needs --profile <name>, a profile under $HEDDLE_HOME/profiles");
+        };
+        let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let checkout = checkout.canonicalize().unwrap_or(checkout);
+        if let Err(error) =
+            heddle_config::reset_profile_from_template(name, template, &checkout, &invocation.env)
+        {
+            return out.fail(&error.problems().join("; "));
+        }
+        out.err(&format!(
+            "heddle: profile '{name}' replaced by a fresh copy of the '{template}' template\n"
+        ));
+    }
     commands::dispatch(&args, invocation, out)
 }

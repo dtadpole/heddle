@@ -822,6 +822,8 @@ impl Component for ToolsComponent {
                 "allow": { "type": "array", "items": { "type": "string" } },
                 "includeBuiltins": { "type": "boolean" },
                 "bashTimeoutMs": { "type": "number" },
+                "bashOutputLimit": { "type": "number" },
+                "maxParallelToolCalls": { "type": "number" },
             },
         }))
         .ok()

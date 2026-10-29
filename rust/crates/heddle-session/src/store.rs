@@ -618,6 +618,24 @@ impl SessionStore {
             if message.role == Role::System {
                 continue;
             }
+            if let Some(node) = by_seq.get(&seq).filter(|node| node.kind == "context/note") {
+                // A note the harness wrote stays a **note**, as DSH's fork seed keeps the source's own
+                // events (dsh-session/lib/types/fork.js:18-27): re-appended as a `message`, a runtime-context
+                // snapshot became a user bubble and one turn too many in the child (R-developer-eight-15).
+                // Origin and identity come along; the source's surface positions name seqs the child lacks.
+                let mut fields = node.fields.clone();
+                fields.shift_remove("surfaceOp");
+                fields.shift_remove("sourceEventSeqs");
+                self.append(
+                    &handle,
+                    NewEvent {
+                        kind: node.kind.clone(),
+                        fields,
+                    },
+                    AppendOptions::default(),
+                )?;
+                continue;
+            }
             self.message(&handle, message)?;
         }
         Ok(Some(handle))
@@ -2054,6 +2072,149 @@ mod tests {
             texts,
             vec!["question", "answer"],
             "the dangling prompt is not copied"
+        );
+    }
+
+    #[test]
+    fn a_fork_keeps_a_harness_note_a_note_and_counts_the_same_turns() {
+        // R-developer-eight-15: the fork re-appended the runtime-context snapshot as a user `message`, so the
+        // child's chat drew it as a bubble and counted one turn more than its source. DSH's fork seed keeps
+        // the source's own events (dsh-session/lib/types/fork.js:18-27).
+        const SNAPSHOT: &str =
+            "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.";
+        let (_dir, store) = store();
+        let source = store
+            .create(CreateOptions {
+                title: Some("Source".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let appended = || AppendOptions {
+            surface_op: Some(SurfaceOp::Append),
+            ..Default::default()
+        };
+        let answer = |text: &str| Message {
+            role: Role::Assistant,
+            ..user(text)
+        };
+        store
+            .append(
+                &source,
+                NewEvent::new("context/note")
+                    .field(
+                        "message",
+                        json!({"role": "system", "content": [{"type": "text", "text": "you are heddle"}]}),
+                    )
+                    .field("origin", "system-prompt"),
+                appended(),
+            )
+            .unwrap();
+        store.message(&source, user("first question")).unwrap();
+        store
+            .append(
+                &source,
+                NewEvent::new("context/note")
+                    .field(
+                        "message",
+                        json!({"role": "user", "content": [{"type": "text", "text": SNAPSHOT}], "source": {"kind": "runtime-context"}}),
+                    )
+                    .field("origin", "runtime-context")
+                    .field("identity", SNAPSHOT),
+                appended(),
+            )
+            .unwrap();
+        store.message(&source, answer("answer one")).unwrap();
+        store
+            .append(
+                &source,
+                NewEvent::new("turn/completed"),
+                AppendOptions::default(),
+            )
+            .unwrap();
+        store.message(&source, user("second question")).unwrap();
+        store.message(&source, answer("answer two")).unwrap();
+        store
+            .append(
+                &source,
+                NewEvent::new("turn/completed"),
+                AppendOptions::default(),
+            )
+            .unwrap();
+
+        let fork = store
+            .fork(
+                &source.id,
+                ForkAttribution {
+                    parent_session: Some(source.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .expect("the source exists");
+        let events = store.read(&fork).unwrap();
+
+        let prompts: Vec<String> = events
+            .iter()
+            .filter(|event| event.kind == "message")
+            .filter(|event| {
+                event.get("message").and_then(|m| m.get("role")) == Some(&json!("user"))
+            })
+            .map(|event| event.get("message").unwrap()["content"][0]["text"].to_string())
+            .collect();
+        assert_eq!(
+            prompts,
+            vec!["\"first question\"", "\"second question\""],
+            "no message carries the snapshot"
+        );
+        let turns = |id: &str| {
+            store
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == id)
+                .unwrap()
+                .turns()
+        };
+        assert_eq!(
+            turns(&fork.id),
+            turns(&source.id),
+            "the child counts as many turns"
+        );
+
+        let notes: Vec<&Arc<SessionEvent>> = events
+            .iter()
+            .filter(|event| event.kind == "context/note")
+            .collect();
+        assert_eq!(notes.len(), 1, "the snapshot came across as one note");
+        assert_eq!(notes[0].get("origin"), Some(&json!("runtime-context")));
+        assert_eq!(notes[0].get("identity"), Some(&json!(SNAPSHOT)));
+        assert_eq!(
+            notes[0].get("surfaceOp"),
+            None,
+            "the source's positions stay behind"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.to_line().contains("you are heddle")),
+            "the system prompt is not inherited"
+        );
+
+        let texts: Vec<String> = store
+            .messages(&fork)
+            .unwrap()
+            .iter()
+            .map(|message| crate::message::text_of(&message.content))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "first question",
+                SNAPSHOT,
+                "answer one",
+                "second question",
+                "answer two"
+            ],
+            "the model still reads what the source's model read"
         );
     }
 

@@ -1046,6 +1046,65 @@ test('a session one process is writing refuses a second writer, so its log never
   }
 })
 
+test('a turn into a one-shot subagent\'s session is refused the way DSH refuses it, and the child is left as it was', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * DSH parity C23 (R-developer-eight-26). A delegated child is a one-shot record: DSH's generic session route leaves it to
+   * subagent routing and refuses a prompt into it with session/agent-busy, the sentence 'session "<id>" is owned by
+   * subagent routing' and the reason 'use subagent delivery for this child session' (dsh-api-session-controller
+   * lib/index.js:128-142). Phase A measured POST /api/turn into one answering 200 in both builds and growing its log from
+   * one turn to two. The child is made the way a person makes one, by a parent turn that delegates.
+   */
+  const home = isolatedHome('subagent-turn')
+  const work = fixtureDir('subagent-turn-work')
+  const root = join(home, 'sessions')
+  const { config } = scriptedConfig({
+    home,
+    steps: [
+      { toolCall: { name: 'delegate', arguments: { prompt: 'child task' } } },
+      { text: 'parent started the child' },
+      { purpose: 'subagent', text: 'child answer' },
+      { purpose: 'subagent-notice', text: 'parent read the notice' },
+    ],
+  })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  let live
+  try {
+    const run = await runCli(['--config', join(repoRoot, 'cordis.yml'), '--session-root', root, '--turn', 'parent prompt'], { env, cwd: work })
+    assert.equal(run.code, 0, `the delegating turn ran\n${run.stdout}${run.stderr}`)
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', root], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const sessions = async () => (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()
+    const before = await sessions()
+    const child = before.find((meta) => meta.origin === 'subagent')
+    assert.ok(child !== undefined, `the delegation made a subagent child\nsaw: ${JSON.stringify(before)}`)
+    assert.equal(child.turns, 1, 'the child ran its one task')
+    const eventsBefore = readTranscript(join(root, child.id)).length
+
+    const response = await fetch(origin + '/api/turn', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: child.id, prompt: 'write into child' }),
+    })
+    const text = await response.text()
+    assert.equal(response.status, 409, `the turn is refused\nsaw: ${response.status} ${text.slice(0, 300)}`)
+    assert.deepEqual(
+      JSON.parse(text),
+      { error: `session "${child.id}" is owned by subagent routing`, code: 'session/agent-busy', reason: 'use subagent delivery for this child session' },
+      'with DSH\'s code, sentence and reason',
+    )
+    const after = (await sessions()).find((meta) => meta.id === child.id)
+    assert.equal(after?.turns, 1, 'the child still records one turn')
+    assert.equal(readTranscript(join(root, child.id)).length, eventsBefore, 'and its log gained nothing')
+  } finally {
+    live?.kill()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
@@ -2430,6 +2489,69 @@ test('a session forks into a new one named after it, with its conversation and i
     const labels = (tree.children ?? []).filter((node) => node.kind === 'session').map((node) => node.label)
     assert.ok(labels.includes(forked.name), 'the tree draws the fork beside its parent')
     assert.ok(labels.length >= 2, 'and the parent is still there')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a fork shows its source's turns and no more: the runtime-context note stays a note", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-notes')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    for (const prompt of ['the first question', 'the second question']) {
+      const turn = await runCli(adminArgs(h, ['--turn', prompt]), { env: h.env, cwd: branch })
+      assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+    }
+    /**
+     * The loop writes DSH's runtime-context snapshot into the source's log as a harness note. Without one the check
+     * would prove nothing, so its presence is asserted first.
+     */
+    const isSnapshot = (event) => event.type === 'context/note' && event.origin === 'runtime-context'
+    assert.ok(readTranscript(join(h.home, 'sessions', made.session)).some(isSnapshot), 'the source holds a runtime-context note')
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const response = await fetch(new URL(`/api/sessions/${made.session}/fork`, live.url), { method: 'POST', headers: { cookie } })
+    assert.equal(response.status, 200, `the session forks\n${await response.clone().text()}`)
+    const forked = await response.json()
+
+    /**
+     * DSH's fork seeds the child with the source's own events (dsh-session fork.js buildForkSeed), so the snapshot is
+     * still a snapshot there and the child's chat shows exactly the source's prompts. Measured in phase A on both builds
+     * (R-developer-eight-15): the child drew a "Current runtime context..." user bubble and counted one turn more.
+     */
+    const prompts = async (id) => {
+      const detail = await (await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })).json()
+      return (detail.turns ?? []).filter((turn) => turn.kind === 'user').map((turn) => turn.text)
+    }
+    const fromSource = await prompts(made.session)
+    assert.deepEqual(fromSource, ['the first question', 'the second question'], 'the source shows its two prompts')
+    assert.deepEqual(await prompts(forked.session), fromSource, 'and the fork shows the same two, with no runtime-context bubble')
+
+    const listed = await sessionsOf(h)
+    assert.equal(
+      listed.find((meta) => meta.id === forked.session)?.turns,
+      listed.find((meta) => meta.id === made.session)?.turns,
+      `the fork counts as many turns as its source\nsaw: ${JSON.stringify(listed.map((meta) => [meta.id === forked.session ? 'fork' : meta.id === made.session ? 'source' : 'other', meta.turns]))}`,
+    )
+
+    const copied = readTranscript(join(h.home, 'sessions', forked.session))
+    assert.ok(copied.some(isSnapshot), "the fork's log carries the snapshot as a runtime-context note")
+    assert.ok(
+      !copied.some((event) => event.type === 'message' && JSON.stringify(event.message ?? {}).includes('Current runtime context')),
+      'and no message carries it',
+    )
   } finally {
     live?.kill()
     removeDir(h.home)

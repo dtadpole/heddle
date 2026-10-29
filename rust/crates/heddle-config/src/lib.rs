@@ -62,6 +62,7 @@ mod references;
 mod retry;
 mod schema;
 mod settings;
+mod template;
 mod validate;
 mod value;
 
@@ -96,6 +97,7 @@ pub use settings::{
     SettingsView, SettingsWrite, commit_settings_write, describe_settings, handle_settings_request,
     is_secret_key, plan_settings_write, settings_target,
 };
+pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
     ValidationResult, read_component_manifest, validate_rows,

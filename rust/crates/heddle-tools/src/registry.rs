@@ -65,6 +65,7 @@ pub struct ToolRegistry {
     commands: RwLock<Vec<Arc<dyn Command>>>,
     gates: ToolGates,
     allow: Vec<String>,
+    max_parallel_tool_calls: usize,
 }
 
 impl ToolRegistry {
@@ -80,6 +81,7 @@ impl ToolRegistry {
             commands: RwLock::new(Vec::new()),
             gates,
             allow,
+            max_parallel_tool_calls: crate::config::DEFAULT_MAX_PARALLEL_TOOL_CALLS,
         }
     }
 
@@ -91,10 +93,12 @@ impl ToolRegistry {
     /// [`Self::filter_to`] with [`Self::allow_list`] once the whole tree has loaded and fails the run on
     /// [`Self::missing`].
     pub fn from_config(gates: ToolGates, config: &ToolsConfig) -> Self {
-        let registry = Self::with_allow_list(gates, config.allow.clone());
+        let mut registry = Self::with_allow_list(gates, config.allow.clone());
+        registry.max_parallel_tool_calls = config.max_parallel_tool_calls.max(1);
         if config.include_builtins {
             let options = BuiltinOptions {
                 bash_timeout_ms: config.bash_timeout_ms,
+                bash_output_limit: config.bash_output_limit,
             };
             for tool in builtin_tools(Arc::clone(&registry.gates.sandbox), options) {
                 registry
@@ -211,6 +215,19 @@ impl ToolRegistry {
                 description: command.description().to_owned(),
             })
             .collect()
+    }
+
+    /// Whether a call to `name` may share a step's parallel group ([`Tool::concurrency_safe`]); an unknown tool
+    /// is exclusive, so it fails alone.
+    pub fn is_concurrency_safe(&self, name: &str) -> bool {
+        self.read_tools()
+            .iter()
+            .any(|tool| tool.spec().name == name && tool.concurrency_safe())
+    }
+
+    /// Parallel-safe calls one step may run at once (`tools.maxParallelToolCalls`); 1 runs every call alone.
+    pub fn max_parallel_tool_calls(&self) -> usize {
+        self.max_parallel_tool_calls
     }
 
     /// Whether a tool exists, so a caller can tell unknown from refused.
@@ -561,6 +578,24 @@ pub(crate) mod tests {
         })
     }
 
+    #[test]
+    fn the_read_only_built_ins_are_parallel_safe_and_the_cap_is_configured() {
+        let config = ToolsConfig {
+            max_parallel_tool_calls: 3,
+            ..ToolsConfig::default()
+        };
+        let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
+        assert_eq!(
+            ["read_file", "list_dir", "write_file", "bash", "unknown"]
+                .map(|name| registry.is_concurrency_safe(name)),
+            [true, true, false, false, false]
+        );
+        assert_eq!(registry.max_parallel_tool_calls(), 3);
+        assert_eq!(
+            ToolRegistry::new(gates(SandboxMode::WorkspaceWrite)).max_parallel_tool_calls(),
+            10
+        );
+    }
     #[test]
     fn a_tool_without_a_name_is_refused_at_registration() {
         let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
@@ -1247,6 +1282,8 @@ pub(crate) mod tests {
             allow: vec!["read_file".into(), "absent".into()],
             include_builtins: true,
             bash_timeout_ms: 5,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
+            max_parallel_tool_calls: 10,
         };
         let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
         assert_eq!(
@@ -1269,6 +1306,8 @@ pub(crate) mod tests {
             allow: Vec::new(),
             include_builtins: false,
             bash_timeout_ms: 0,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
+            max_parallel_tool_calls: 10,
         };
         let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
         assert!(registry.names().is_empty());
