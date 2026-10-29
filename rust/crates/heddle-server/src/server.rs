@@ -2182,7 +2182,8 @@ mod tests {
     /// A secret path in a folder of its own, owned by the calling test: labels are unique per test, so no two
     /// running tests share a folder, and the folder goes when the test's thread ends.
     fn temp_secret(label: &str) -> PathBuf {
-        let folder = std::env::temp_dir().join(format!("heddle-server-test-{label}-{}", std::process::id()));
+        let folder =
+            std::env::temp_dir().join(format!("heddle-server-test-{label}-{}", std::process::id()));
         TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
         folder.join("web-secret")
     }
@@ -2199,7 +2200,10 @@ mod tests {
         })
         .join()
         .unwrap();
-        assert!(!folder.exists(), "the folder went with the thread that made it");
+        assert!(
+            !folder.exists(),
+            "the folder went with the thread that made it"
+        );
         let panicked = std::thread::spawn(|| {
             let secret = temp_secret("cleanup-probe-panic");
             std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
@@ -2207,7 +2211,10 @@ mod tests {
         })
         .join();
         assert!(panicked.is_err());
-        let folder = std::env::temp_dir().join(format!("heddle-server-test-cleanup-probe-panic-{}", std::process::id()));
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-server-test-cleanup-probe-panic-{}",
+            std::process::id()
+        ));
         assert!(!folder.exists(), "and a panicking test cleans up too");
     }
 
