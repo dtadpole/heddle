@@ -126,6 +126,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/team"),
     ("GET", "/api/html"),
     ("GET", "/vendor/purify.js"),
+    ("GET", "/vendor/highlight/core.js"),
 ];
 
 /// How the server is started — the flags of `heddle web` that reach it.
@@ -456,7 +457,9 @@ impl ServerBuilder {
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
-            .route("/vendor/purify.js", get(purify));
+            .route("/vendor/purify.js", get(purify))
+            .route("/vendor/highlight/core.js", get(highlight_core))
+            .route("/vendor/highlight/languages/{grammar}", get(highlight_grammar));
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
@@ -2006,6 +2009,31 @@ async fn html_preview(
     };
     let document = preview::prepare_document(&path, &source, metadata.len());
     respond::json(StatusCode::OK, &document)
+}
+
+/// `GET /vendor/highlight/core.js`: highlight.js's core for the page's code blocks ([`preview::highlight_asset`]).
+async fn highlight_core(State(state): State<AppState>) -> Response {
+    highlight_module(&state, "core.js")
+}
+
+/// `GET /vendor/highlight/languages/<name>.js`: one of the grammars the TypeScript server registers.
+async fn highlight_grammar(
+    State(state): State<AppState>,
+    axum::extract::Path(grammar): axum::extract::Path<String>,
+) -> Response {
+    highlight_module(&state, &format!("languages/{grammar}"))
+}
+
+fn highlight_module(state: &AppState, name: &str) -> Response {
+    match preview::highlight_asset(&state.options().asset_roots, name) {
+        Some(module) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(module))
+            .expect("a response builder with static headers"),
+        None => respond::text(StatusCode::NOT_FOUND, "that highlighter module is not served\n"),
+    }
 }
 
 async fn purify(State(state): State<AppState>) -> Response {

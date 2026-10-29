@@ -277,6 +277,35 @@ pub fn purify_path(roots: &[PathBuf]) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// The grammars the page's code-block highlighter loads: exactly the set `src/server/highlight.ts` registers, so
+/// a fence is coloured the same in the page whichever server drew it (C60).
+pub const HIGHLIGHT_GRAMMARS: [&str; 20] = [
+    "bash", "c", "cpp", "css", "diff", "go", "ini", "java", "javascript", "json", "markdown", "php", "plaintext",
+    "python", "ruby", "rust", "sql", "typescript", "xml", "yaml",
+];
+
+/// One highlight.js module for the page, as the TypeScript route serves it, or `None` for any other name:
+/// `core.js` (the package's CommonJS core, which has no `require`, wrapped as an ES module) and
+/// `languages/<name>.js` for a grammar in [`HIGHLIGHT_GRAMMARS`] (the package's standalone ES grammar). Read from
+/// the first root holding `node_modules/highlight.js`.
+pub fn highlight_asset(roots: &[PathBuf], name: &str) -> Option<String> {
+    let package = roots
+        .iter()
+        .map(|root| root.join("node_modules/highlight.js"))
+        .find(|candidate| candidate.join("lib/core.js").is_file())?;
+    if name == "core.js" {
+        let core = std::fs::read_to_string(package.join("lib/core.js")).ok()?;
+        return Some(format!(
+            "const module = {{ exports: {{}} }};\nconst exports = module.exports;\n{core}\nexport default module.exports;\n"
+        ));
+    }
+    let grammar = name.strip_prefix("languages/")?.strip_suffix(".js")?;
+    if !HIGHLIGHT_GRAMMARS.contains(&grammar) {
+        return None;
+    }
+    std::fs::read_to_string(package.join("es/languages").join(format!("{grammar}.js"))).ok()
+}
+
 /// The answer `/api/html` gives for a readable document: `{ path, html, csp, bytes }`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PreparedDocument {
@@ -411,6 +440,28 @@ mod tests {
             document.html,
             r#"<img src="/api/raw?path=%2Fw%2Fdocs%2Fa.png">"#
         );
+    }
+
+    #[test]
+    fn highlight_modules_are_served_wrapped_and_only_from_the_list() {
+        let root = std::env::temp_dir().join(format!("heddle-hljs-{}", std::process::id()));
+        let package = root.join("node_modules/highlight.js");
+        std::fs::create_dir_all(package.join("lib")).unwrap();
+        std::fs::create_dir_all(package.join("es/languages")).unwrap();
+        std::fs::write(package.join("lib/core.js"), "module.exports = { core: true };").unwrap();
+        std::fs::write(package.join("es/languages/rust.js"), "export default function rust() {}").unwrap();
+        std::fs::write(package.join("es/languages/haskell.js"), "export default function haskell() {}").unwrap();
+        let roots = vec![PathBuf::from("/nowhere"), root.clone()];
+        assert_eq!(
+            highlight_asset(&roots, "core.js").as_deref(),
+            Some("const module = { exports: {} };\nconst exports = module.exports;\nmodule.exports = { core: true };\nexport default module.exports;\n")
+        );
+        assert_eq!(highlight_asset(&roots, "languages/rust.js").as_deref(), Some("export default function rust() {}"));
+        assert_eq!(highlight_asset(&roots, "languages/haskell.js"), None, "a grammar the server does not register is not served");
+        assert_eq!(highlight_asset(&roots, "languages/../lib/core.js"), None, "nor any other file");
+        assert_eq!(highlight_asset(&roots, "lib/core.js"), None);
+        assert_eq!(highlight_asset(&[PathBuf::from("/nowhere")], "core.js"), None, "no package, no module");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
