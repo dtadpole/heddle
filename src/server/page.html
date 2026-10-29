@@ -5588,6 +5588,12 @@ events.addEventListener('session', (message) => {
     }
     paintRunningMarks()
     /**
+     * The composer follows its session's running state: a turn that starts on the panel's session, however it was
+     * started (the queue, the CLI, a goal round), turns Send into Stop. This handler marked the session running but
+     * never redrew the composer, so a drained queued turn ran under an idle Send (live issue developer-ten-6).
+     */
+    if (!wasRunning && payload.session === composerKey) renderComposerState()
+    /**
      * A turn this page did **not** start — a goal round continuing itself, the CLI, or another window — is a
      * running turn all the same, and `model/request` is its start signal. Only the page's own send used to refresh
      * the running row, so a goal-driven session showed no "Weaving" at all (the owner's "missing again").
@@ -6185,8 +6191,20 @@ function turnInFlight() {
  */
 let directTurnPending = 0
 
+/**
+ * Queues whose pump has a turn out: from the moment the pump sends a queued message until that turn's stream settles.
+ *
+ * `sendNow` holds `directTurnPending` for the whole of its turn, and the pump had no equivalent: its row counts as
+ * running only while it is `sending`, and `retire` removes the row the moment the turn is accepted. From then until the
+ * stream's `model/request` arrived nothing said running, and the composer was drawn idle under a running turn: Send
+ * instead of Stop, and a message typed then went out at once as a **second** turn on the same session (live issue
+ * developer-ten-6, measured on 8082 on 2026-10-29). Held per queue, not as a count, so a queue being pumped for another
+ * session cannot show Stop on this one; `adoptSession` moves the same array to the session a fresh panel's turn created.
+ */
+const queueTurnOut = new WeakSet()
+
 function anyRunning() {
-  return directTurnPending > 0 || turnInFlight() || sessionRunning()
+  return directTurnPending > 0 || queueTurnOut.has(queueOf()) || turnInFlight() || sessionRunning()
 }
 
 /**
@@ -6585,6 +6603,9 @@ async function pumpQueue(key = composerKey) {
         if (at !== -1) queue.splice(at, 1)
         renderQueue()
       }
+      /** The turn is running from here until its stream settles, whatever the stream announces and when. */
+      queueTurnOut.add(queue)
+      renderComposerState()
       try {
         await runTurn(item.text, forKey, item.attachments ?? [], retire)
         const at = queue.findIndex((entry) => entry.id === item.id)
@@ -6610,6 +6631,9 @@ async function pumpQueue(key = composerKey) {
           if (at !== -1) queue.splice(at, 1)
         }
         add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+      } finally {
+        queueTurnOut.delete(queue)
+        renderComposerState()
       }
       renderQueue()
     }
