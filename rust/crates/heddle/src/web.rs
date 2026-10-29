@@ -189,7 +189,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         events: boot.services.get::<heddle_server::EventHub>("event-hub"),
         routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref())
             .into_iter()
-            .chain(settings_router(args, invocation))
+            .chain(settings_router(args, invocation, &boot))
             .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
@@ -351,7 +351,7 @@ fn page_routers(
 /// as a writable surface, as DSH's settings controller offers it. Every answer is `heddle-config`'s
 /// ([`heddle_config::handle_settings_request`]); the service is built from the same layer options, in-memory
 /// layers and catalog the boot used, and it is mounted behind the door like the other feature routers.
-fn settings_router(args: &Args, invocation: &Invocation) -> Option<axum::Router> {
+fn settings_router(args: &Args, invocation: &Invocation, boot: &Boot) -> Option<axum::Router> {
     let options = crate::cli::layer_options(args, &invocation.cwd, &invocation.env);
     let overrides: Vec<heddle_config::NamedLayer> =
         crate::cli::root_overrides(args, &invocation.cwd)
@@ -366,11 +366,40 @@ fn settings_router(args: &Args, invocation: &Invocation) -> Option<axum::Router>
         Box::new(catalog),
     )
     .ok()?;
+    let service = with_model_live(service, boot);
     Some(
         axum::Router::new()
             .route("/api/settings", axum::routing::any(settings_answer))
             .route("/api/settings/{ns}", axum::routing::any(settings_answer))
             .with_state(Arc::new(service)),
+    )
+}
+
+/// The model row applies a write to the running tree as it lands, as DSH's settings do: its service re-reads the row's
+/// composition on the next request once the shared `model-row` source holds the written configuration. The other rows
+/// apply at the next boot (`applies: restart`) until their components can take a new configuration in place.
+fn with_model_live(
+    service: heddle_config::SettingsService,
+    boot: &Boot,
+) -> heddle_config::SettingsService {
+    let Some(source) = boot
+        .services
+        .get::<Arc<heddle_config::ModelRowSource>>("model-row")
+    else {
+        return service;
+    };
+    let live: Vec<String> = boot
+        .rows
+        .iter()
+        .filter(|composed| {
+            crate::builtins::resolve_component(&composed.row.component(&boot.anchor))
+                == crate::builtins::ComponentRef::Builtin(crate::builtins::Builtin::Model)
+        })
+        .filter_map(|composed| composed.row.id.clone())
+        .collect();
+    service.with_live(
+        live,
+        Box::new(move |_, config| source.set_row_config(config)),
     )
 }
 
@@ -1335,7 +1364,7 @@ mod tests {
             profile: Some("dev".into()),
             ..Args::default()
         };
-        let router = settings_router(&args, &invocation).expect("a settings router");
+        let router = settings_router(&args, &invocation, &empty_boot()).expect("a settings router");
         drop(router);
         let options = crate::cli::layer_options(&args, &invocation.cwd, &invocation.env);
         let service = Arc::new(
@@ -1556,6 +1585,80 @@ mod tests {
         // A nominated default that exists wins.
         service.nominate_default("second");
         assert_eq!(models.default_endpoint().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn a_settings_write_to_the_model_row_reaches_the_running_model_service() {
+        let root =
+            std::env::temp_dir().join(format!("heddle-web-settings-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let profile = root.join("home/profiles/dev");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("cordis.yml"),
+            "- insert:\n    - id: model\n      name: ./src/plugins/model.ts\n    - id: tools\n      name: ./src/plugins/tools.ts\n",
+        )
+        .unwrap();
+        let machine = root.join("heddle.json");
+        std::fs::write(
+            &machine,
+            r#"{"default": "one", "exclude": ["scripted"], "endpoints": [
+                {"name": "one", "kind": "openai-chat", "baseUrl": "http://127.0.0.1:9/v1", "model": "m"},
+                {"name": "two", "kind": "openai-chat", "baseUrl": "http://127.0.0.1:9/v1", "model": "m"}]}"#,
+        )
+        .unwrap();
+        let env = heddle_config::Env::default()
+            .with("HEDDLE_HOME", root.join("home").to_string_lossy())
+            .with("HOME", root.to_string_lossy())
+            .with("HEDDLE_CONFIG", machine.to_string_lossy());
+        let args = Args {
+            profile: Some("dev".into()),
+            ..Args::default()
+        };
+        let options = crate::cli::layer_options(&args, &root, &env);
+        let layers = heddle_config::default_layers(&options, &env).unwrap();
+        let mut boot = empty_boot();
+        boot.rows = heddle_config::compose(&layers, &env).unwrap();
+        boot.anchor = profile.clone();
+        let source = Arc::new(heddle_config::ModelRowSource::new(
+            Vec::new(),
+            None,
+            true,
+            env.clone(),
+        ));
+        boot.services.provide("model-row", Arc::clone(&source));
+        let catalog = crate::builtins::BuiltinCatalog::new(env.clone(), root.clone());
+        let service = with_model_live(
+            heddle_config::SettingsService::new(&options, &[], env.clone(), Box::new(catalog))
+                .unwrap(),
+            &boot,
+        );
+        let view = service.describe().unwrap();
+        let applies = |ns: &str| {
+            view.namespaces
+                .iter()
+                .find(|entry| entry.ns == ns)
+                .map(|entry| entry.applies.clone())
+        };
+        assert_eq!(applies("model").as_deref(), Some("live"));
+        assert_eq!(applies("tools").as_deref(), Some("restart"));
+        assert_eq!(source.compose().unwrap().nominated.as_deref(), Some("one"));
+        let mut fields = serde_json::Map::new();
+        fields.insert("default".to_owned(), serde_json::json!("two"));
+        let entry = service
+            .write("model", &heddle_config::SettingsWrite::Update(fields), None)
+            .unwrap();
+        assert_eq!(entry.apply_error, None);
+        let changed = source
+            .changed()
+            .expect("the write reached the source")
+            .unwrap();
+        assert_eq!(
+            changed.nominated.as_deref(),
+            Some("two"),
+            "the next request takes the written default"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn empty_boot() -> Boot {
