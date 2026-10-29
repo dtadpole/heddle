@@ -9651,14 +9651,13 @@ function menuItemsFor(node) {
         run: async () => {
           const title = window.prompt('Rename this conversation', node.session.title ?? '')
           if (title === null) return
-          const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+          const result = await sessionRequest('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ title }),
-          })
-          const body = await response.json().catch(() => ({}))
-          if (!response.ok) {
-            setNote(body.error ?? 'could not rename that conversation')
+          }, 'rename that conversation')
+          if (!result.ok) {
+            setNote(result.error)
             return
           }
           setNote('')
@@ -9683,10 +9682,34 @@ function definitionFolder(node) {
   return node.session === undefined || node.session === null ? undefined : definitionOf.get(node.session.id)
 }
 
+/**
+ * One request from a session row's action, resolved to an answer or to a failure the reader can see — never a rejection.
+ *
+ * DSH's client resolves every call to ok or error (`dsh-api-gateway`, "Client service"), and its row actions show the
+ * failure: Rename keeps its dialog open with the reason in the error colour, Pin and Unpin raise a warning toast, and a
+ * rejected call is also logged (`session archive rejected:`). A `fetch` that cannot reach the server **rejects** instead
+ * of answering, and the handlers here awaited it unguarded: measured with the server stopped under an open page, Rename
+ * and Archive changed nothing on screen and left `Failed to fetch` as an unhandled rejection (R-developer-six-3). The
+ * failure now lands in the sidebar note, the channel the other sidebar actions already use, and in the console.
+ *
+ * `what` completes "could not …", for example `rename that session`.
+ */
+async function sessionRequest(path, init, what) {
+  let response
+  try {
+    response = await fetch(path, init)
+  } catch (error) {
+    console.warn(`session request rejected (${what}):`, error)
+    return { ok: false, error: `could not ${what}: ${error && error.message ? error.message : String(error)}` }
+  }
+  const body = await response.json().catch(() => ({}))
+  return response.ok ? { ok: true, body } : { ok: false, error: body.error ?? `could not ${what}` }
+}
+
 async function renameSession(node) {
   const title = window.prompt('Rename this session', node.session?.title ?? '')
   if (title === null) return
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+  const result = await sessionRequest('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     /**
@@ -9694,10 +9717,9 @@ async function renameSession(node) {
      * session with no definition (bound to a folder by a run) renames in the store alone.
      */
     body: JSON.stringify({ title, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    setNote(body.error ?? 'could not rename that session')
+  }, 'rename that session')
+  if (!result.ok) {
+    setNote(result.error)
     return
   }
   setNote('')
@@ -9710,10 +9732,9 @@ async function renameSession(node) {
  * where it was, because a fork is a branch rather than a departure.
  */
 async function forkSession(node) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    setNote(body.error ?? 'could not fork that session')
+  const result = await sessionRequest('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' }, 'fork that session')
+  if (!result.ok) {
+    setNote(result.error)
     return
   }
   setNote('')
@@ -9749,14 +9770,20 @@ async function archiveSession(node) {
  * a row's menu only decides which of the two it is changing.
  */
 async function setSessionFlags(node, patch, extra = {}) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
+  // The failure names the change that failed, as DSH's notices do ("Pin failed", "Unpin failed").
+  const what =
+    patch.archived === true ? 'archive that session'
+    : patch.archived === false ? 'unarchive that session'
+    : patch.pinned === true ? 'pin that session'
+    : patch.pinned === false ? 'unpin that session'
+    : 'change that session'
+  const result = await sessionRequest('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    setNote(body.error ?? 'could not change that session')
+  }, what)
+  if (!result.ok) {
+    setNote(result.error)
     return
   }
   setNote('')

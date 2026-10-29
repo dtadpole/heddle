@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-29T11:59:56Z
 level: L3
-version: 1.1.0
+version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -41,6 +41,10 @@ grounded_in:
   sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
   workspace* and *Delete workspace* dialogs end to end.
+- [`check-row-errors.mjs`](check-row-errors.mjs) — a session row's Rename and Archive with the server stopped under
+  an open page: each shows its failure in the sidebar note ("could not rename that session: …", "could not archive
+  that session: …") and leaves no unhandled rejection, as DSH resolves every call to ok or error and shows the failure
+  (R-developer-six-3, parity S81; before the fix both builds showed nothing and left `Failed to fetch` unhandled).
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
