@@ -229,6 +229,24 @@ impl SessionPort for Sessions {
             .map(drop)
             .map_err(port_error)
     }
+
+    fn claim_pending_input(&self, session: &SessionHandle) -> Result<usize, PortError> {
+        heddle_session::inbox::claim_next_step(self.service.store(), session, |content, source| {
+            self.service.user_content(session, content, source)
+        })
+        .map(|claimed| claimed.len())
+        .map_err(port_error)
+    }
+
+    fn has_pending_input(&self, session: &SessionHandle) -> bool {
+        match heddle_session::inbox::has_pending_step(self.service.store(), session) {
+            Ok(pending) => pending,
+            Err(error) => {
+                read_failed(session, "reading the inbox", error);
+                false
+            }
+        }
+    }
 }
 
 /// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,
