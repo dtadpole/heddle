@@ -11,7 +11,7 @@ pub mod model;
 pub mod service;
 pub mod tool;
 
-pub use http::{get_questions, is_question_id, post_question, HttpAnswer, Steer};
+pub use http::{get_questions, is_question_id, post_question, HttpAnswer};
 pub use log::{LogError, QuestionLog};
 pub use model::{codes, validate_answers, validate_questions, Answer, Question, QuestionError, QuestionOption};
 pub use service::{fold_questions, late_answer_message, AnswerOutcome, AskOutcome, Mode, QuestionConfig, QuestionService};
@@ -225,22 +225,20 @@ mod tests {
         });
         let id = first_open(&questions, &fixture.session).await["id"].as_str().unwrap().to_owned();
         let body = |answers: Value| json!({ "session": fixture.session, "answers": answers });
-        let (bad, _) = post_question(Some(&questions), &id, false, &body(json!([{ "id": "q", "selected": ["No"] }])), |_| false);
+        let bad = post_question(Some(&questions), &id, false, &body(json!([{ "id": "q", "selected": ["No"] }])));
         assert_eq!((bad.status, bad.body.as_str()), (400, "{\"error\":\"'No' is not an option of question 'q'\",\"code\":\"INVALID_ANSWERS\"}\n"));
-        let (ok, steer) = post_question(Some(&questions), &id, false, &body(json!([{ "id": "q", "selected": ["Go"] }])), |_| false);
+        let ok = post_question(Some(&questions), &id, false, &body(json!([{ "id": "q", "selected": ["Go"] }])));
         assert_eq!(ok.status, 200);
-        assert!(steer.is_none());
         assert!(ok.body.starts_with("{\n  \"answered\": true,\n  \"late\": false,\n  \"request\": {"));
         asking.await.unwrap().unwrap();
-        let (again, _) = post_question(Some(&questions), &id, false, &body(json!([])), |_| false);
+        let again = post_question(Some(&questions), &id, false, &body(json!([])));
         assert_eq!(again.status, 409);
 
         let after = service(&fixture, Mode::Timed, 1);
         let pending = after.ask(&fixture.session, &one(), None, None).await.unwrap();
         let AskOutcome::Pending { call_id } = pending else { panic!("expected pending") };
-        let (late, steer) = post_question(Some(&after), &call_id, false, &body(json!([{ "id": "q", "selected": [] }])), |_| true);
-        assert!(late.body.contains("\"delivered\": \"steer\""));
-        assert!(!late.body.contains("\"message\""));
-        assert!(steer.unwrap().text.starts_with(r#"{"kind":"answer_to_pending_question""#));
+        let late = post_question(Some(&after), &call_id, false, &body(json!([{ "id": "q", "selected": [] }])));
+        assert!(late.body.contains("\"delivered\": \"none\""), "a late answer is handed back, never steered in");
+        assert!(late.body.contains("\"message\": \"{\\\"kind\\\":\\\"answer_to_pending_question\\\""));
     }
 }
