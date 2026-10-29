@@ -59,3 +59,13 @@ fn the_tab_title_follows_the_open_session() {
         "the title is repainted from each list read, so a rename shows"
     );
 }
+
+/// A refused send is DSH's Toast: announced, gone by itself, DSH's sentence for `session/writer-held` (DSH parity
+/// R-developer-seven-1). Executed by `test/page-send-toast.test.ts`.
+#[test]
+fn a_refused_send_is_an_announced_toast() {
+    assert!(PAGE_SOURCE.contains("<div id=\"composer-toast\" role=\"alert\" hidden>"));
+    assert!(PAGE_SOURCE.contains("error.code === 'session/writer-held'"));
+    assert_eq!(PAGE_SOURCE.matches("showToast(sendRefusalText(error))").count(), 2);
+    assert!(!PAGE_SOURCE.contains("the message could not be sent"));
+}

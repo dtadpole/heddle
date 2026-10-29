@@ -1574,6 +1574,20 @@
    */
   main:has(#queue:not([hidden])) #composer { padding-top: 0; }
   form { display: flex; flex-direction: column; gap: .4rem; padding: 0; border-top: none; background: none; }
+  /**
+   * The send-error Toast, DSH's (`dsh-client-ui-conversation`): a warning that names the refusal above the composer card,
+   * is announced, and goes away by itself. Fixed and placed from the card's rectangle when shown, so it lays out nothing
+   * else and no menu inside the composer changes its containing block.
+   */
+  #composer-toast {
+    position: fixed; z-index: 40; transform: translate(-50%, -100%);
+    display: flex; align-items: center; gap: 8px; max-width: min(560px, calc(100vw - 32px));
+    padding: 8px 14px; border-radius: 12px; background: var(--surface); color: var(--text);
+    box-shadow: 0 0 0 .5px color-mix(in oklab, var(--text) 16%, transparent), var(--shadow-menu);
+    font-size: 13px; line-height: 1.4;
+  }
+  #composer-toast[hidden] { display: none; }
+  #composer-toast .toast-icon { color: #f5a524; flex: none; }
   #composer-card {
     width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto;
     display: flex; flex-direction: column;
@@ -2846,6 +2860,7 @@
     </div>
   </div>
   <form id="prompt">
+    <div id="composer-toast" role="alert" hidden><span class="toast-icon" aria-hidden="true">⚠</span><span class="toast-text"></span></div>
     <div id="composer-card">
       <!--
         Pending files, DSH's order: the cards sit **above the editor inside the card** and the draft stays
@@ -6306,7 +6321,7 @@ async function sendNow(text, attachments = []) {
   } catch (error) {
     if (field.value.trim() === '') field.value = text
     growComposer()
-    add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    showToast(sendRefusalText(error))
   } finally {
     directTurnPending = Math.max(0, directTurnPending - 1)
     if (directTurnPending === 0) {
@@ -6643,7 +6658,7 @@ async function pumpQueue(key = composerKey) {
           const at = queue.findIndex((entry) => entry.id === item.id)
           if (at !== -1) queue.splice(at, 1)
         }
-        add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+        showToast(sendRefusalText(error))
       }
       renderQueue()
     }
@@ -6702,6 +6717,41 @@ async function sendTurn(body) {
   }
 }
 
+/**
+ * The words for a refused send, DSH's (`dsh-client-ui-conversation`): a session another process is writing gets DSH's
+ * sentence for `session/writer-held`; a refusal with a code reads `<sentence> (<code>)`; anything else is the server's
+ * own sentence.
+ */
+function sendRefusalText(error) {
+  if (error && error.code === 'session/writer-held') {
+    return 'This session is already in use, possibly by another running heddle (such as heddle web or a command-line turn). Quit the other one and try again.'
+  }
+  const reason = (error && (error.reason ?? error.message)) || String(error)
+  return error && typeof error.code === 'string' ? `${reason} (${error.code})` : reason
+}
+
+/**
+ * Show one Toast above the composer card and take it away after a few seconds; a newer one replaces it. The element is
+ * `role=alert`, so the sentence is announced. A refused send used to become a permanent `denied` line in the
+ * conversation, outside any live region (DSH parity R-developer-seven-1, row S27).
+ */
+let toastTimer = null
+const TOAST_MS = 6000
+function showToast(text) {
+  const toast = document.getElementById('composer-toast')
+  if (toast === null) return
+  const card = document.getElementById('composer-card').getBoundingClientRect()
+  toast.style.left = `${card.left + card.width / 2}px`
+  toast.style.top = `${card.top - 8}px`
+  toast.querySelector('.toast-text').textContent = text
+  toast.hidden = false
+  if (toastTimer !== null) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.hidden = true
+    toastTimer = null
+  }, TOAST_MS)
+}
+
 async function runTurn(text, key, attachments = [], onAccepted) {
   liveTurns += 1
   updateStatusBar()
@@ -6732,7 +6782,18 @@ async function runTurn(text, key, attachments = [], onAccepted) {
      * not a diagnosis; the body is.
      */
     const detail = await response.text().catch(() => '')
-    throw new Error(detail.trim().replace(/\s+/g, ' ').slice(0, 300) || `the server refused it (${response.status})`)
+    const refusal = new Error(detail.trim().replace(/\s+/g, ' ').slice(0, 300) || `the server refused it (${response.status})`)
+    /** A JSON refusal keeps its sentence and its code apart, so the Toast can word it the way DSH does. */
+    try {
+      const parsed = JSON.parse(detail)
+      if (parsed !== null && typeof parsed === 'object' && typeof parsed.error === 'string') {
+        refusal.reason = parsed.error
+        if (typeof parsed.code === 'string') refusal.code = parsed.code
+      }
+    } catch {
+      // a plain-text refusal is its own sentence
+    }
+    throw refusal
   }
   /**
    * Accepted: the message is in the log and the turn is running. DSH retires a local submission echo when the host
