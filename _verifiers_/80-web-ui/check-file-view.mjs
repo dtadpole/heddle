@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -396,6 +396,39 @@ test('a file named beyond ASCII downloads whole under its real name, with only A
     assert.ok(session !== undefined, `the turn that sends the upload names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
     const named = await download(`the upload route for ${leaf}`, `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, '第一行\n')
     assert.equal(named, leaf, `the upload route's disposition names the stored file ${leaf} as it is`)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a file that cannot be read answers 404 at once, and never leaves the request hanging', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, process.getuid?.() !== 0, 'a user whom file permissions bind (not root)')) return
+  /**
+   * Live issue developer-two-13 (2026-10-29): the TypeScript raw route wrote its 200 head before reading the file,
+   * so a file without read permission threw after the head was out, the catch's 404 threw in turn, and the response
+   * was never ended: the request hung with no status at all. The Rust binary answered 404 at once.
+   */
+  const server = await startServer('unreadable')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const locked = join(server.work, 'locked.txt')
+    writeFileSync(locked, 'secret\n')
+    chmodSync(locked, 0o000)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    let response
+    try {
+      response = await fetch(new URL(`/api/raw?path=${encodeURIComponent(locked)}`, server.url), { headers: { cookie }, signal: AbortSignal.timeout(5000) })
+    } catch (error) {
+      assert.fail(`the raw route never answered for an unreadable file (${error.name}: ${error.message})`)
+    } finally {
+      chmodSync(locked, 0o644)
+    }
+    const body = await response.text()
+    assert.equal(response.status, 404, `an unreadable file answers 404 (${response.status}: ${body.slice(0, 40)})`)
+    assert.equal(body, 'no such asset\n', 'with the route\'s own sentence')
+    assert.equal(response.headers.get('content-security-policy'), FILE_POLICY, 'sandboxed, as every answer of the route')
   } finally {
     await server.close()
   }
