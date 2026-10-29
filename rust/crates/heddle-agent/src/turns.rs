@@ -19,6 +19,8 @@ struct Inner {
     /// Per session, in the order sessions first began a turn.
     sessions: Mutex<Vec<(String, LiveTurns)>>,
     next: AtomicU64,
+    /// Woken whenever a session's last live turn is removed, for [`TurnRegistry::when_idle`].
+    idle: tokio::sync::Notify,
 }
 
 impl Inner {
@@ -31,6 +33,8 @@ impl Inner {
             sessions[index].1.retain(|(existing, _)| *existing != key);
             if sessions[index].1.is_empty() {
                 sessions.remove(index);
+                drop(sessions);
+                self.idle.notify_waiters();
             }
         }
     }
@@ -117,6 +121,25 @@ impl TurnRegistry {
         sessions
             .iter()
             .any(|(id, turns)| id == session_id && !turns.is_empty())
+    }
+
+    /// Resolve once `session_id` has no turn in flight: at once when it has none now, otherwise when its
+    /// last live turn settles.
+    ///
+    /// A background child's settlement notice needs it (`TurnRegistry.whenIdle` in the TypeScript build): a
+    /// notice written into a running turn is answered by that turn only if the turn notices it before ending,
+    /// so the deliverer waits here and then checks. The waiter is registered **before** the check, so a turn
+    /// that settles between the check and the wait cannot be missed.
+    pub async fn when_idle(&self, session_id: &str) {
+        loop {
+            let notified = self.inner.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_running(session_id) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Every session with a turn in flight, in the order each first began one.

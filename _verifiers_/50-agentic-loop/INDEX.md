@@ -1,6 +1,6 @@
 ---
 title: Verifier 5 — Agentic Loop
-version: 1.0.0
+version: 1.1.0
 description: the agentic loop runs with tool calls.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -24,7 +24,11 @@ from configuration, `check-subagents.mjs` judges the delegation boundary: a chil
 session, attributed to its parent, and its final answer returns as the parent's tool result, and
 `check-teams.mjs` judges Agent Teams end to end — a Lead's real turn spawns a teammate, creates and completes a
 shared task, mails the teammate and answers, the team survives a server restart, and boot recovery settles a
-previous process's provisioning members and delivers its queued mail.
+previous process's provisioning members and delivers its queued mail. `check-goal-rounds.mjs` judges that a goal's
+round cap holds when the goal is edited during a round: a real `heddle web` on slow scripted rounds, an edit while
+round 2 runs, and exactly three rounds (1/3, 2/3, 3/3) before the `round-limit` block under a cap of three, as DSH's
+fold counts rounds across revisions (R-developer-two-31; it failed on both builds before the fix with rounds
+1, 2, 3, 3, 3).
 
 ## Running it
 

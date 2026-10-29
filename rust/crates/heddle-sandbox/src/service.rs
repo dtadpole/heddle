@@ -116,6 +116,9 @@ impl SandboxDenial {
 pub struct SandboxService {
     mode: SandboxMode,
     workspace_root: PathBuf,
+    /// Whether the operator named the root (`--sandbox-root`, the row's `workspaceRoot`) rather than inheriting
+    /// the process's directory; a named root applies to every session ([`SandboxService::root_for`]).
+    root_named: bool,
     extra_writable_roots: Vec<PathBuf>,
     harness_home: PathBuf,
     backend: Option<Arc<dyn SandboxBackend>>,
@@ -152,9 +155,37 @@ impl SandboxService {
         SandboxService {
             mode: config.mode,
             workspace_root,
+            root_named: config.workspace_root.is_some(),
             extra_writable_roots,
             harness_home: host.harness_home.clone(),
             backend,
+        }
+    }
+
+    /// The folder one session's calls are rooted at: their working directory and their `workspace-write`
+    /// boundary (`rootFor`).
+    ///
+    /// DSH's rule (`dsh-sandbox-policy` `resolve`, `dsh-working-directory` `get`): a session's recorded folder is
+    /// its workspace, and the configured root is the fallback for a call with no folder. One strengthening is
+    /// kept: a root the operator **named** applies to every session, because `--sandbox-root` promises to confine
+    /// file effects to that directory. Without this rule every turn ran in the server's launch directory.
+    pub fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        match folder {
+            Some(folder) if !self.root_named && !folder.as_os_str().is_empty() => canonical(folder),
+            _ => self.workspace_root.clone(),
+        }
+    }
+
+    /// The same service rooted at `root` (canonicalised): one call's fence, kernel profile and policy sentence,
+    /// with the mode, the extra roots, the harness home and the backend unchanged.
+    pub fn rooted_at(&self, root: impl AsRef<Path>) -> SandboxService {
+        SandboxService {
+            mode: self.mode,
+            workspace_root: canonical(root.as_ref()),
+            root_named: self.root_named,
+            extra_writable_roots: self.extra_writable_roots.clone(),
+            harness_home: self.harness_home.clone(),
+            backend: self.backend.clone(),
         }
     }
 
@@ -491,6 +522,53 @@ mod tests {
             service.workspace_root(),
             canonical(dir.path()),
             "the process's directory is the workspace when the profile names none"
+        );
+    }
+
+    /// R-developer-eight-10: a session's calls are rooted at its own folder when the operator named no root, as
+    /// DSH roots them at the session's directory; a named root (`--sandbox-root`) still holds for every session.
+    #[test]
+    fn a_sessions_folder_roots_its_calls_unless_the_operator_named_a_root() {
+        let launch = TempDir::new("svc-root-launch");
+        let folder = TempDir::new("svc-root-folder");
+        let mut unnamed_config = config(SandboxMode::WorkspaceWrite, launch.path());
+        unnamed_config.workspace_root = None;
+        let unnamed =
+            SandboxService::with_backend(&unnamed_config, &host(&launch, Platform::Other), None);
+        assert_eq!(
+            unnamed.root_for(Some(folder.path())),
+            canonical(folder.path())
+        );
+        assert_eq!(
+            unnamed.root_for(None),
+            canonical(launch.path()),
+            "a call with no folder falls back to the process's directory"
+        );
+
+        let rooted = unnamed.rooted_at(folder.path());
+        assert_eq!(rooted.workspace_root(), canonical(folder.path()));
+        assert_eq!(rooted.mode(), SandboxMode::WorkspaceWrite);
+        assert_eq!(
+            rooted.resolve_path("note.txt"),
+            canonical(folder.path()).join("note.txt"),
+            "a relative path joins the folder"
+        );
+        assert_eq!(
+            rooted.policy(SandboxMode::WorkspaceWrite).workspace_root,
+            canonical(folder.path()),
+            "the workspace-write boundary is the folder"
+        );
+
+        let named_root = TempDir::new("svc-root-named");
+        let named = SandboxService::with_backend(
+            &config(SandboxMode::WorkspaceWrite, named_root.path()),
+            &host(&launch, Platform::Other),
+            None,
+        );
+        assert_eq!(
+            named.root_for(Some(folder.path())),
+            canonical(named_root.path()),
+            "a named root confines every session"
         );
     }
 

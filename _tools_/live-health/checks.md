@@ -1,7 +1,7 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.6.0
+version: 1.8.0
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
@@ -51,6 +51,24 @@ target then gets **one minimal real turn per pass**:
   other model is tried.
 - **No follow-up:** the preview sends no follow-up. Its conversation is recorded `not-sent`, never
   judged.
+- **A fresh session each UTC day:** a real model is sent the whole session as context, and the reused
+  8082 session held about 478 fixture turns by 2026-10-29. That day a real turn's first delta rose from
+  about 2 s to 24 s. So a real-model pass retires a health session created before the current UTC day
+  and starts a new one with the page's New session control (`healthSessionExpired`, recorded as
+  `session.retired`). That is at most one new session per target per day. The retired session is left
+  as it is. Only a session the server newly lists after New session is the monitor's own. On
+  2026-10-29 at 11:35Z, 8082's New session opened an existing empty session someone else had created.
+  It listed no new id, and a turn written there landed `other`. So a New session that lists nothing new
+  sends no turn. `--no-deployment-turn` pauses the deployment's turn alone until the coordinator
+  answers.
+- **8082's real turn has its own workspace and session** (the coordinator's option b, 2026-10-29). The
+  monitor's own folder `~/.heddle-live-monitor/health`, under no user workspace, is registered on the
+  deployment (`POST /api/workspaces`, idempotent). The session is created there with `POST /api/sessions`
+  and titled `live health check <UTC date>`; its id comes from the reply. The model is recorded with
+  `POST /api/sessions/<id>/model`, and exactly that id's tree row is opened in the page.
+  - The day's id is kept in `~/.heddle-live-monitor/state.json` and used again only while it is the
+    same UTC day and the server still lists it (`--health-session=pass` makes one every pass).
+  - Nothing on 8082 is chosen by title, so no session someone else made can be adopted.
 
 **Verdicts.** Staleness against a fresh `origin/main` (`dirty`, `behind`, `ahead`) is recorded,
 not failed. `passVerdict` fails on any failed check and is unjudged on any unjudged one: exit `0`
