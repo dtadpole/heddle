@@ -185,8 +185,20 @@ test('the session shortcuts fire on the physical key, with the key values the br
       await settle()
       await browser.evaluate(`(() => { window.__askedFor = null; window.prompt = (message) => { window.__askedFor = message; return 'renamed by chord' }; return true })()`)
       await press(browser, CHORDS.rename, { onMac })
+      await settle(600)
+      /** The page asks in DSH's Rename session dialog (main from 99e7c710) or, on an older page, through window.prompt. */
+      if (await browser.evaluate(`!!document.getElementById('session-rename')?.open`)) {
+        await browser.evaluate(`(() => {
+          const input = document.getElementById('session-rename-input')
+          input.value = 'renamed by chord'
+          input.dispatchEvent(new Event('input', { bubbles: true }))
+          document.getElementById('session-rename-confirm').click()
+          return true
+        })()`)
+      } else {
+        assert.equal(await browser.evaluate(`window.__askedFor`), 'Rename this session', 'the rename prompt opened')
+      }
       await settle(900)
-      assert.equal(await browser.evaluate(`window.__askedFor`), 'Rename this session', 'the rename prompt opened')
       assert.equal((await sessions(browser)).find((s) => s.id === target)?.title, 'renamed by chord', 'and the title changed')
     })
 
