@@ -2563,7 +2563,35 @@ export function transcriptTurns(
     turns[index] = { ...turn, result, state: /^error/i.test(result) ? 'error' : 'ok' }
   }
 
+  /** Where each slash command's row sits, by its run id (src/commands/, developer-three). */
+  const commandAt = new Map<string, number>()
+
   for (const event of events) {
+    /**
+     * A slash command is a row of its own, outside the conversation: `command/run` opens it and `command/done`
+     * settles it with the host's words. Neither is a message, so the model never saw either.
+     */
+    if (event.type === 'command/run' && typeof event.commandId === 'string') {
+      closeRuns()
+      commandAt.set(event.commandId, turns.length)
+      turns.push({
+        kind: 'command',
+        text: '',
+        commandId: event.commandId,
+        name: typeof event.name === 'string' ? event.name : '',
+        ...(typeof event.args === 'string' ? { args: event.args } : {}),
+        state: 'running',
+      })
+      continue
+    }
+    if (event.type === 'command/done' && typeof event.commandId === 'string') {
+      const index = commandAt.get(event.commandId)
+      const turn = index === undefined ? undefined : turns[index]
+      if (index !== undefined && turn !== undefined) {
+        turns[index] = { ...turn, state: event.kind === 'error' ? 'error' : 'done', text: typeof event.text === 'string' ? event.text : '' }
+      }
+      continue
+    }
     if (event.type === 'message') {
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
@@ -2690,7 +2718,7 @@ export interface TurnAttachment {
 }
 
 export interface ChatTurn {
-  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool'
+  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'command'
   /**
    * When the logged event happened, as its own `at` — the **user message's clock**, which the page shows beside
    * the bubble and the copy button (DSH's `MessageIconActions` reads the same event time). It is the recorded
@@ -2727,8 +2755,12 @@ export interface ChatTurn {
   readonly toolCallId?: string
   /** What the tool answered — on the same turn, which is what makes one element of it. */
   readonly result?: string
-  /** DSH's phases, simplified: a call is running until its result says otherwise. */
-  readonly state?: 'running' | 'ok' | 'error'
+  /** DSH's phases, simplified: a call is running until its result says otherwise; a command is done or failed. */
+  readonly state?: 'running' | 'ok' | 'error' | 'done'
+  /** A slash command's run id, which pairs its `command/run` and `command/done` (src/commands/). */
+  readonly commandId?: string
+  /** What followed the command's name, when the log kept it. */
+  readonly args?: string
 }
 
 /**

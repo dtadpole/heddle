@@ -5421,6 +5421,16 @@ async function showSession(id) {
      * recorded in the DOM as a visible note so the failure is not silent.
      */
     for (const turn of body.turns ?? []) {
+      /** A command's row is held in place now and drawn by the menu module once it has loaded. */
+      if (turn.kind === 'command') {
+        const holder = document.createElement('div')
+        holder.className = 'turn hc-command'
+        holder.dataset.kind = 'command'
+        holder.dataset.commandId = String(turn.commandId)
+        log.append(holder)
+        void slashReady.then((commands) => commands?.drawTurn(turn))
+        continue
+      }
       try {
         add(turn.kind, turn.text, false, turn.label, turn)
       } catch (error) {
@@ -5615,6 +5625,11 @@ events.addEventListener('session', (message) => {
     }
   }
   if (current && payload.session !== current) return
+  /** A slash command's row, whichever window ran it (src/commands/menu.js). */
+  if (event.type === 'command/run' || event.type === 'command/done') {
+    void slashReady.then((commands) => commands?.draw(event))
+    return
+  }
   /**
    * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
    * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.
@@ -5933,6 +5948,37 @@ const runningSessions = new Set()
 
 const composer = document.getElementById('prompt')
 const field = composer.elements.prompt
+
+/**
+ * The slash-command menu (src/commands/menu.js, developer-three, D-057), imported after the page so the composer never
+ * waits for it. Until it has loaded nothing is claimed, so a line typed in that instant is an ordinary message.
+ */
+let slashCommands = null
+const slashReady = import('/commands/menu.js')
+  .then((module) => {
+    slashCommands = module.install({
+      field,
+      anchor: document.getElementById('composer-card'),
+      sessionId: () => (composerKey === QUEUE_KEY_NONE ? null : composerKey),
+      ensureSession: async () => {
+        await startNewSession()
+        return composerKey === QUEUE_KEY_NONE ? null : composerKey
+      },
+      sendAsPrompt: (text) => (anyRunning() ? enqueue(text, 'queue', []) : void sendNow(text, [])),
+      addRow: (node) => {
+        log.append(node)
+        followChatTail()
+      },
+      notice: (text) => add('denied', text),
+      openModelMenu: () => openModelMenu(),
+      openFilePicker: () => document.getElementById('attach-file').click(),
+    })
+    return slashCommands
+  })
+  .catch((error) => {
+    console.warn('the slash-command menu did not load', error)
+    return null
+  })
 const sendButton = document.getElementById('send')
 const stopButton = document.getElementById('stop')
 const attachButton = document.getElementById('attach')
@@ -6202,6 +6248,14 @@ function submitDraft(gesture) {
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
+    return
+  }
+  /** A slash command runs on the host and is never a message; a line it does not claim goes on as one. */
+  if (slashCommands !== null && slashCommands.claims(text)) {
+    field.value = ''
+    growComposer()
+    updateSendDisabled()
+    void slashCommands.submit(text)
     return
   }
   field.value = ''
