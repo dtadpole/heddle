@@ -139,8 +139,9 @@ const STYLE = `
  * `api` is what the page lends: `field` (the textarea), `anchor` (what the menu sits above), `sessionId()` (the
  * session the composer is attached to, or null), `ensureSession()` (start one when there is none), `sendAsPrompt(text)`
  * (the page's ordinary send, for a line the host does not recognise), `addRow(node)` (append to the transcript),
- * `notice(text)` (say something went wrong), and optionally `openFilePicker()`, `openModelMenu()` and
- * `openAccessMenu()` (the page's `window.heddlePage` affordances).
+ * `notice(text)` (say something went wrong), and optionally `openFilePicker()`, `openModelMenu()`,
+ * `openAccessMenu()`, `setModeChip(chip | null)` and `setPlaceholder(text | null)` (the page's `window.heddlePage`
+ * affordances).
  */
 export function install(api) {
   const field = api.field
@@ -383,6 +384,10 @@ export function install(api) {
       }
       draw({ type: 'command/run', commandId: body.commandId, name: body.name })
       draw({ type: 'command/done', commandId: body.commandId, kind: body.kind, ...(body.text !== undefined ? { text: body.text } : {}) })
+      // `/plan <words>`: the mode is on, and the words go to the model as the ordinary message DSH steers in.
+      if (body.kind === 'success' && body.action?.kind === 'prompt' && typeof body.action.text === 'string') {
+        api.sendAsPrompt(body.action.text)
+      }
       if (body.kind === 'success' && body.action?.kind === 'download' && typeof body.action.href === 'string') {
         const link = document.createElement('a')
         link.href = body.action.href
@@ -396,6 +401,66 @@ export function install(api) {
       if (field.value.trim() === '') field.value = text
       field.dispatchEvent(new Event('input', { bubbles: true }))
       api.notice?.(`the command could not run: ${(error && error.message) || error}`)
+    }
+  }
+
+  /**
+   * Plan mode's composer face (DSH): a blue "Plan" chip that turns it off, and the placeholder "describe your task to
+   * generate plan". Drawn only through the page's own affordances, when it lends them; the state comes from
+   * `GET /api/sessions/{id}/plan` when a session is shown and from `plan/mode` events after that.
+   */
+  let planOn = false
+  let planSession = null
+
+  async function sessionShown(id) {
+    planSession = typeof id === 'string' && id.length > 0 ? id : null
+    planOn = false
+    if (planSession !== null) {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(planSession)}/plan`, { credentials: 'same-origin' })
+        if (response.ok && planSession === id) planOn = (await response.json()).active === true
+      } catch {
+        // No plan service, or the server is away: the composer shows the default mode.
+      }
+    }
+    renderPlan()
+  }
+
+  function renderPlan() {
+    if (typeof api.setModeChip === 'function') {
+      api.setModeChip(
+        planOn
+          ? {
+              id: 'plan',
+              label: 'Plan',
+              title: 'Plan mode on — click to turn off (/plan off)',
+              ariaLabel: 'Plan mode on, press to turn off',
+              onClick: () => void leavePlan(),
+            }
+          : null,
+      )
+    }
+    if (typeof api.setPlaceholder === 'function') api.setPlaceholder(planOn ? 'describe your task to generate plan' : null)
+  }
+
+  async function leavePlan() {
+    try {
+      const id = api.sessionId()
+      if (id === null) throw new Error('no session')
+      const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/commands`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ line: '/plan off' }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || body.matched !== true || body.kind !== 'success') throw new Error(body.text ?? body.error ?? 'refused')
+      draw({ type: 'command/run', commandId: body.commandId, name: body.name, args: 'off' })
+      draw({ type: 'command/done', commandId: body.commandId, kind: body.kind, ...(body.text !== undefined ? { text: body.text } : {}) })
+      planOn = false
+      renderPlan()
+    } catch {
+      api.notice?.('Failed to exit plan mode')
     }
   }
 
@@ -436,6 +501,11 @@ export function install(api) {
 
   /** Draw a live `command/run` or `command/done` event; repeats of one event change nothing. */
   function draw(event) {
+    if (event.type === 'plan/mode') {
+      planOn = event.active === true
+      renderPlan()
+      return
+    }
     if (typeof event.commandId !== 'string') return
     if (event.type === 'command/run') {
       const row = rowFor(event.commandId, event.name)
@@ -467,5 +537,7 @@ export function install(api) {
     refresh,
     /** For a session switch: rows belong to the transcript that is being replaced. */
     forget: () => drawn.clear(),
+    /** The page shows a session: plan mode's chip and placeholder follow it. */
+    sessionShown,
   }
 }
