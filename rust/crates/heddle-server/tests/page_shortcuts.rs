@@ -36,6 +36,7 @@ fn every_chord_in_the_table_names_its_physical_key() {
         ("KeyN", "new-session"),
         ("Comma", "settings"),
         ("KeyO", "add-workspace"),
+        ("Slash", "shortcuts-reference"),
     ] {
         let entry = source
             .lines()
@@ -83,4 +84,12 @@ fn two_escape_presses_stop_the_running_turn() {
     assert!(PAGE_SOURCE.contains("const STOP_SEQUENCE_MS = 500"));
     assert!(PAGE_SOURCE.contains("function isStopSequence(previous, now)"));
     assert!(PAGE_SOURCE.contains("if (isStopSequence(stopEscapeAt, now) && anyRunning()) {"));
+}
+
+/// Mod+/ opens DSH's keyboard reference, one dialog titled Keyboard shortcuts (DSH parity R-developer-seven-11).
+#[test]
+fn the_keyboard_reference_is_one_dialog() {
+    assert!(PAGE_SOURCE.contains("<dialog id=\"shortcut-reference\" class=\"ws-dialog\""));
+    assert!(PAGE_SOURCE.contains("<h2 id=\"shortcut-reference-title\">Keyboard shortcuts</h2>"));
+    assert!(PAGE_SOURCE.contains("function shortcutReferenceRows(query, mac)"));
 }

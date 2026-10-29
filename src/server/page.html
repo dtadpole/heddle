@@ -1883,6 +1883,15 @@
    * Escape, focus containment and the backdrop are the platform's; the card is the access gate's (surface, 16px radius,
    * right-aligned actions).
    */
+  /** DSH's keyboard reference: a 480×600 card that shrinks to the window, search above an internally scrolling list. */
+  #shortcut-reference { width: min(480px, calc(100vw - 32px)); height: min(600px, calc(100vh - 32px)); }
+  #shortcut-reference[open] { display: flex; flex-direction: column; }
+  #shortcut-reference-search { margin: 0 0 8px; }
+  #shortcut-reference-list { overflow-y: auto; flex: 1; }
+  #shortcut-reference-list .group { margin: 12px 0 4px; color: var(--muted); font-size: 12px; }
+  #shortcut-reference-list .shortcut-row { display: flex; align-items: center; justify-content: space-between; height: 42px; gap: 12px; }
+  #shortcut-reference-list .shortcut-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #shortcut-reference-list kbd { font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px; background: var(--surface-2, var(--surface)); }
   .ws-dialog {
     width: min(92vw, 440px); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
     background: var(--surface); color: var(--text); box-shadow: var(--shadow-menu);
@@ -2937,6 +2946,14 @@
   holds credentials and is never rendered, so what a reader gets is what this machine is configured with, not a way to
   change it. Writing configuration from the page is recorded in SIDEBAR_PANEL.md as the next feature, not half-built.
 -->
+<dialog id="shortcut-reference" class="ws-dialog" aria-labelledby="shortcut-reference-title">
+  <div class="ws-head">
+    <h2 id="shortcut-reference-title">Keyboard shortcuts</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <input type="search" id="shortcut-reference-search" aria-label="Search shortcuts" placeholder="Search by action or key" spellcheck="false" autocomplete="off">
+  <div id="shortcut-reference-list" role="list"></div>
+</dialog>
 <dialog id="settings-dialog" aria-labelledby="settings-title">
   <header id="settings-head">
     <h2 id="settings-title">Settings</h2>
@@ -10109,6 +10126,8 @@ const SESSION_SHORTCUTS = [
   { code: 'Comma', key: ',', alt: true, action: 'settings' },
   /** DSH's Web chord for Add workspace (`dsh-client-ui-workspace`, `workspace.add`, Mod+Alt+O); it opens the picker. */
   { code: 'KeyO', key: 'o', alt: true, action: 'add-workspace' },
+  /** DSH's keyboard reference (`dsh-client-ui-shortcuts`): Mod+/ opens it, and closes it when it is in front. */
+  { code: 'Slash', key: '/', action: 'shortcuts-reference' },
 ]
 
 /**
@@ -10188,7 +10207,13 @@ document.addEventListener('keydown', (event) => {
     void startNewSession()
     return
   }
+  if (action === 'shortcuts-reference') {
+    toggleShortcutReference()
+    return
+  }
   if (action === 'settings') {
+    /** While the reference is in front, the Settings command neither opens nor closes Settings (DSH). */
+    if (shortcutReference.open) return
     void showSettings()
     return
   }
@@ -10214,6 +10239,98 @@ document.addEventListener('keydown', (event) => {
   else if (action === 'fork') void forkSession(node)
   else if (action === 'rename') renameSession(node)
 })
+
+/**
+ * The keyboard reference, DSH's (`dsh-client-ui-shortcuts`): one dialog, *Keyboard shortcuts*, listing the commands in
+ * DSH's product order with the chord this page binds, then the fixed message-input actions (read-only); a search
+ * matches an ordered subsequence of a label, its English alias or its keys, ignoring case. Mod+/ opens it when no
+ * dialog is open or Settings is in front and closes it when it is in front. The page had no list of its keys at all
+ * (DSH parity R-developer-seven-11, row S40).
+ */
+const shortcutReference = document.getElementById('shortcut-reference')
+const SHORTCUT_LABELS = {
+  'new-session': ['New session', 'new chat'],
+  search: ['Search sessions', 'find'],
+  'add-workspace': ['Add workspace', 'folder'],
+  rename: ['Rename session', 'title'],
+  fork: ['Fork session', 'branch copy'],
+  archive: ['Archive session', 'hide'],
+  sidebar: ['Toggle sidebar', 'panel'],
+  settings: ['Open settings', 'preferences'],
+  'shortcuts-reference': ['Keyboard shortcuts', 'keys help'],
+}
+const FIXED_INPUT_ACTIONS = [
+  { label: 'Send message', alias: 'submit', keys: 'Enter' },
+  { label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
+  { label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
+]
+function chordText(shortcut, mac) {
+  const glyph = shortcut.code === 'Comma' ? ',' : shortcut.code === 'Slash' ? '/' : shortcut.code.replace(/^Key/, '')
+  if (mac) return `${shortcut.alt ? '⌥' : ''}${shortcut.shift ? '⇧' : ''}⌘${glyph}`
+  return ['Ctrl', shortcut.alt ? 'Alt' : null, shortcut.shift ? 'Shift' : null, glyph].filter((part) => part !== null).join('+')
+}
+function subsequenceMatch(text, query) {
+  const haystack = String(text).toLowerCase()
+  let at = 0
+  for (const character of String(query).toLowerCase().replace(/\s+/g, '')) {
+    at = haystack.indexOf(character, at)
+    if (at === -1) return false
+    at += 1
+  }
+  return true
+}
+function shortcutReferenceRows(query, mac) {
+  const rows = []
+  for (const action of Object.keys(SHORTCUT_LABELS)) {
+    const shortcut = SESSION_SHORTCUTS.find((entry) => entry.action === action)
+    const [label, alias] = SHORTCUT_LABELS[action]
+    const keys = shortcut === undefined ? 'No shortcut' : chordText(shortcut, mac)
+    rows.push({ group: 'Commands', label, alias, keys, fixed: false })
+  }
+  for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: 'Message input', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
+  const wanted = String(query ?? '').trim()
+  return wanted === '' ? rows : rows.filter((row) => [row.label, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
+}
+function renderShortcutReference() {
+  const list = document.getElementById('shortcut-reference-list')
+  list.replaceChildren()
+  let group = null
+  for (const row of shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC)) {
+    if (row.group !== group) {
+      group = row.group
+      const heading = document.createElement('div')
+      heading.className = 'group'
+      heading.textContent = group
+      list.append(heading)
+    }
+    const item = document.createElement('div')
+    item.className = 'shortcut-row'
+    item.setAttribute('role', 'listitem')
+    if (row.fixed) item.dataset.fixed = 'true'
+    const label = document.createElement('span')
+    label.className = 'label'
+    label.textContent = row.label
+    const keys = document.createElement('kbd')
+    keys.textContent = row.keys
+    item.append(label, keys)
+    list.append(item)
+  }
+}
+function toggleShortcutReference() {
+  if (shortcutReference.open) {
+    shortcutReference.close()
+    return
+  }
+  const front = document.querySelector('dialog[open]')
+  if (front !== null && front.id !== 'settings-dialog') return
+  const search = document.getElementById('shortcut-reference-search')
+  search.value = ''
+  renderShortcutReference()
+  shortcutReference.showModal()
+  search.focus()
+}
+document.getElementById('shortcut-reference-search').addEventListener('input', renderShortcutReference)
+shortcutReference.querySelector('[data-ws-close]').addEventListener('click', () => shortcutReference.close())
 
 /**
  * Two independent Escape presses stop the running turn, DSH's fixed action (`dsh-client-ui-conversation`: "two

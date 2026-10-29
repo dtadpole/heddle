@@ -36,6 +36,7 @@ const CHORDS = {
   settings: { code: 'Comma', macKey: '≤', key: ',', keyCode: 188, alt: true },
   fork: { code: 'KeyF', macKey: 'F', key: 'F', keyCode: 70, shift: true },
   addWorkspace: { code: 'KeyO', macKey: 'ø', key: 'o', keyCode: 79, alt: true },
+  reference: { code: 'Slash', macKey: '/', key: '/', keyCode: 191 },
 }
 
 function startServer(label) {
@@ -234,6 +235,21 @@ test('the session shortcuts fire on the physical key, with the key values the br
       await settle(800)
       assert.equal(await browser.evaluate(`!!document.getElementById('workspace-picker')?.open`), true, 'the picker is open')
       await browser.evaluate(`(() => { document.getElementById('workspace-picker').close(); return true })()`)
+    })
+
+    await t.test('keyboard reference: Mod+/ opens it, the search narrows it, Mod+/ closes it', async () => {
+      await press(browser, CHORDS.reference, { onMac })
+      await settle(500)
+      const opened = await browser.evaluate(`(() => {
+        const dialog = document.getElementById('shortcut-reference')
+        return dialog === null ? null : { open: dialog.open, rows: dialog.querySelectorAll('.shortcut-row').length, fixed: dialog.querySelectorAll('.shortcut-row[data-fixed]').length, title: dialog.querySelector('h2')?.textContent }
+      })()`)
+      assert.deepEqual(opened, { open: true, rows: 12, fixed: 3, title: 'Keyboard shortcuts' })
+      await browser.evaluate(`(() => { const field = document.getElementById('shortcut-reference-search'); field.value = 'rename'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+      assert.deepEqual(await browser.evaluate(`Array.from(document.querySelectorAll('#shortcut-reference .shortcut-row .label')).map((label) => label.textContent)`), ['Rename session'])
+      await press(browser, CHORDS.reference, { onMac })
+      await settle(300)
+      assert.equal(await browser.evaluate(`document.getElementById('shortcut-reference').open`), false, 'the same chord closes it')
     })
 
     await t.test('two Escape presses within 500 ms stop the running turn; one press does not', async () => {

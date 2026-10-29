@@ -148,3 +148,27 @@ test('two Escape presses within 500 ms stop the running turn, as DSH does', () =
   assert.match(page, /if \(target === null \|\| target\.closest\('main'\) === null\) return/, 'only presses in the conversation column count')
   assert.match(page, /if \(isStopSequence\(stopEscapeAt, now\) && anyRunning\(\)\) \{\n\s+stopEscapeAt = null\n\s+void stopTurn\(\)/, 'and the sequence stops the turn')
 })
+
+test('Mod+/ opens DSH\'s keyboard reference: every command in product order, then the fixed input actions', () => {
+  /** `dsh-client-ui-shortcuts`: one dialog, ordered commands with their chords, read-only input actions (S40). */
+  assert.equal(shortcutFor(keydown({ code: 'Slash', key: '/', metaKey: true }), mac), 'shortcuts-reference')
+  const pieces = ['SESSION_SHORTCUTS', 'SHORTCUT_LABELS', 'FIXED_INPUT_ACTIONS', 'function chordText', 'function subsequenceMatch', 'function shortcutReferenceRows']
+  const take = (start: string) => {
+    const at = page.indexOf(start === 'SESSION_SHORTCUTS' ? 'const SESSION_SHORTCUTS' : start.startsWith('function') ? start : `const ${start}`)
+    assert.ok(at !== -1, `${start} is in the page`)
+    const end = start.startsWith('function') ? page.indexOf('\n}\n', at) + 2 : page.indexOf('\n]\n', at) !== -1 && page.indexOf('\n]\n', at) < page.indexOf('\n}\n', at) ? page.indexOf('\n]\n', at) + 2 : page.indexOf('\n}\n', at) + 2
+    return page.slice(at, end)
+  }
+  const source = pieces.map(take).join('\n')
+  const rows = runInNewContext(`const SHORTCUTS_ON_MAC = true\n${source}\n({ all: shortcutReferenceRows('', true), byKey: shortcutReferenceRows('⌥⌘g', true), byAlias: shortcutReferenceRows('prefs', true), other: shortcutReferenceRows('', false) })`) as Record<string, Array<{ label: string; keys: string; fixed: boolean; group: string }>>
+  const plain = JSON.parse(JSON.stringify(rows)) as typeof rows
+  assert.deepEqual(plain.all.filter((row) => !row.fixed).map((row) => row.label), ['New session', 'Search sessions', 'Add workspace', 'Rename session', 'Fork session', 'Archive session', 'Toggle sidebar', 'Open settings', 'Keyboard shortcuts'])
+  assert.equal(plain.all.find((row) => row.label === 'New session')?.keys, '⌥⌘N')
+  assert.equal(plain.all.find((row) => row.label === 'Fork session')?.keys, '⇧⌘F')
+  assert.equal(plain.other.find((row) => row.label === 'Rename session')?.keys, 'Ctrl+Alt+G')
+  assert.deepEqual(plain.all.filter((row) => row.fixed).map((row) => row.label), ['Send message', 'Insert a new line', 'Stop the current response'])
+  assert.deepEqual(plain.byKey.map((row) => row.label), ['Rename session'], 'a key combination finds its command')
+  assert.deepEqual(plain.byAlias.map((row) => row.label), ['Open settings'], 'an English alias finds it by subsequence')
+  assert.match(page, /if \(front !== null && front\.id !== 'settings-dialog'\) return/, 'it opens over Settings or nothing else')
+  assert.match(page, /if \(shortcutReference\.open\) return\n\s+void showSettings\(\)/, 'and Settings stays put while it is in front')
+})
