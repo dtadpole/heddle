@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 
-import { anthropicVertexAdapter, openAiChatAdapter, openAiResponsesAdapter } from '../src/llm/adapters.ts'
+import { anthropicMessagesAdapter, anthropicVertexAdapter, openAiChatAdapter, openAiResponsesAdapter } from '../src/llm/adapters.ts'
 import { canonicalFinishReason, type Chunk, type EndpointConfig } from '../src/llm/types.ts'
 
 /**
- * One vocabulary for three wire shapes.
+ * One vocabulary for four wire shapes.
  *
  * The loop treats `stop` and `tool_calls` as a healthy end and reports anything else on the answer. Each provider
  * spells the same outcomes differently — Chat Completions says `stop`/`tool_calls`/`length`, the Responses shape
@@ -63,6 +63,7 @@ async function runAdapter(
 const chat: EndpointConfig = { name: 'chat', kind: 'openai-chat', baseUrl: '', model: 'm' }
 const responses: EndpointConfig = { name: 'responses', kind: 'openai-responses', baseUrl: '', model: 'm' }
 const anthropic: EndpointConfig = { name: 'anthropic', kind: 'anthropic-vertex', baseUrl: '', project: 'p', region: 'global', model: 'm' }
+const messages: EndpointConfig = { name: 'messages', kind: 'anthropic-messages', baseUrl: '', model: 'm' }
 
 test('a healthy end is stop on every wire shape', async () => {
   const cases: [string, EndpointConfig, readonly string[], typeof openAiChatAdapter][] = [
@@ -78,6 +79,12 @@ test('a healthy end is stop on every wire shape', async () => {
       anthropic,
       [sse('message_start', { message: { usage: { input_tokens: 1 } } }), sse('message_delta', { delta: { stop_reason: 'end_turn' } }), sse('message_stop', {})],
       anthropicVertexAdapter,
+    ],
+    [
+      'anthropic-messages',
+      messages,
+      [sse('message_start', { message: { usage: { input_tokens: 1 } } }), sse('message_delta', { delta: { stop_reason: 'end_turn' } }), sse('message_stop', {})],
+      anthropicMessagesAdapter,
     ],
   ]
   // The chat case needs its own stream, whose finish_reason is written below.
@@ -114,6 +121,10 @@ test('a round that asked for tools ends as tool_calls on every wire shape', asyn
 
   const anthropicResult = await runAdapter(anthropic, anthropicStream, anthropicVertexAdapter)
   assert.equal(anthropicResult.finish, 'tool_calls', 'Anthropic says tool_use')
+
+  const messagesResult = await runAdapter(messages, anthropicStream, anthropicMessagesAdapter)
+  assert.equal(messagesResult.finish, 'tool_calls', 'and so does its own Messages API')
+  assert.equal(messagesResult.calls, 1, 'with the assembled call')
 })
 
 test('a reply cut by its budget says so on every wire shape', async () => {
@@ -130,6 +141,9 @@ test('a reply cut by its budget says so on every wire shape', async () => {
 
   const anthropicResult = await runAdapter(anthropic, anthropicStream, anthropicVertexAdapter)
   assert.equal(anthropicResult.finish, 'max_output_tokens', "Anthropic's max_tokens is the same fact")
+
+  const messagesResult = await runAdapter(messages, anthropicStream, anthropicMessagesAdapter)
+  assert.equal(messagesResult.finish, 'max_output_tokens', 'on the Messages API too')
 
   const responsesResult = await runAdapter(responses, responsesStream, openAiResponsesAdapter)
   assert.equal(responsesResult.finish, 'max_output_tokens')

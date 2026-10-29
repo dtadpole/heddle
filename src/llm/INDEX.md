@@ -1,6 +1,6 @@
 ---
 title: LLM
-version: 1.1.0
+version: 1.2.0
 description: The model service, its wire adapters and the HTTP client they share.
 grounded_in:
   - source: human-authored
@@ -14,6 +14,22 @@ This is a source folder rather than a type folder: it carries code, not instance
 registered content type. Its entry point exists so that a reader who opens it learns
 what belongs here and what to read next, which is the same duty every `INDEX.md` in
 this tree carries.
+
+## The wire shapes
+
+An endpoint's `kind` names its wire shape, and `adapterFor` in `adapters.ts` picks the adapter:
+
+| `kind` | Route | Reasoning level on the wire |
+|---|---|---|
+| `openai-chat` | `POST {baseUrl}/chat/completions` | `reasoning_effort` |
+| `openai-responses` | `POST {baseUrl}/responses` (always streamed) | `reasoning.effort`, with `summary: 'auto'` when the models reason |
+| `anthropic-messages` | `POST {baseUrl}/messages`, `x-api-key` and `anthropic-version` headers | summarized thinking: adaptive + `output_config.effort` for a string value, `budget_tokens` for a number |
+| `anthropic-vertex` | `{baseUrl}/projects/…/publishers/anthropic/models/{model}:streamRawPredict` | adaptive summarized thinking + `output_config.effort` |
+| `scripted` | a local JSON script (offline) | — |
+
+The two Anthropic kinds share the conversation translation (`toAnthropicMessages`) and the event fold
+(`anthropicChunks`); the Messages adapter also passes each tool-call fragment on live as a `tool-call-delta`. Its
+`baseUrl` is the versioned API root, as for `openai-chat` (`https://api.anthropic.com/v1`, or a gateway's `…/v1`).
 
 ## Where a request goes
 

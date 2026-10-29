@@ -22,6 +22,7 @@ const endpointSchema = Schema.object({
     Schema.const('openai-chat' as const),
     Schema.const('openai-responses' as const),
     Schema.const('anthropic-vertex' as const),
+    Schema.const('anthropic-messages' as const),
     Schema.const('scripted' as const),
   ]),
   baseUrl: Schema.string(),

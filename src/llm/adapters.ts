@@ -14,9 +14,10 @@ import {
 } from './types.ts'
 
 /**
- * The two wire shapes this project speaks, plus the scripted one the checks use.
+ * The wire shapes this project speaks — Chat Completions, Responses, Anthropic's Messages API and Anthropic on a
+ * cloud publisher route — plus the scripted one the checks use.
  *
- * Both HTTP adapters are thin on purpose. What varies between providers is the
+ * Every HTTP adapter is thin on purpose. What varies between providers is the
  * request body, where a text delta lives in the event, and how the stream ends;
  * everything else — adding a tool call, counting tokens, one `done` chunk — is
  * the same and lives here once.
@@ -653,11 +654,7 @@ export function anthropicCall(
   if (model === undefined || model.length === 0) {
     throw new ModelError(`'${endpoint.name}' names no model`, { endpoint: endpoint.name, code: 'NO_MODEL' })
   }
-  const system = request.messages
-    .filter((message) => message.role === 'system')
-    .map((message) => message.content.filter((part) => part.type === 'text').map((part) => (part.type === 'text' ? part.text : '')).join(''))
-    .filter((text) => text.length > 0)
-    .join('\n\n')
+  const system = anthropicSystem(request.messages)
   const maxTokens = request.maxOutputTokens ?? endpoint.maxOutputTokens ?? DEFAULT_MAX_TOKENS
   const effort = reasoningValue(endpoint, request)
 
@@ -740,6 +737,25 @@ function toAnthropicMessages(messages: GenerateRequest['messages']): Record<stri
   return turns
 }
 
+/** How {@link anthropicChunks} folds, beyond the shape every Anthropic route shares. */
+export interface AnthropicFoldOptions {
+  /**
+   * Pass each tool-call fragment on as a `tool-call-delta` while the model writes it, beside the one assembled
+   * `tool-call` the round ends with — the live half the Chat Completions adapter already emits. Off by default so
+   * the publisher route's output is exactly what its checks pin; the Messages adapter turns it on.
+   */
+  readonly liveToolCalls?: boolean
+}
+
+/** The system prompt as Anthropic takes it: every system message's text, as one top-level string. */
+function anthropicSystem(messages: GenerateRequest['messages']): string {
+  return messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content.filter((part) => part.type === 'text').map((part) => (part.type === 'text' ? part.text : '')).join(''))
+    .filter((text) => text.length > 0)
+    .join('\n\n')
+}
+
 /**
  * Fold Anthropic's event stream into the harness vocabulary.
  *
@@ -751,6 +767,7 @@ function toAnthropicMessages(messages: GenerateRequest['messages']): Record<stri
 export async function* anthropicChunks(
   events: AsyncIterable<{ readonly event?: string; readonly data: string }>,
   endpointName: string,
+  options: AnthropicFoldOptions = {},
 ): AsyncIterable<Chunk> {
   const calls = new Map<number, PartialToolCall>()
   let finishReason = 'stop'
@@ -777,6 +794,15 @@ export async function* anthropicChunks(
       const index = typeof parsed.index === 'number' ? parsed.index : 0
       if (block?.type === 'tool_use') {
         calls.set(index, { id: block.id ?? `call-${index}`, name: block.name ?? '', arguments: '' })
+        if (options.liveToolCalls === true) {
+          yield {
+            type: 'tool-call-delta',
+            index,
+            ...(block.id !== undefined ? { id: block.id } : {}),
+            ...(block.name !== undefined ? { name: block.name } : {}),
+            argumentsDelta: '',
+          }
+        }
       }
     } else if (type === 'content_block_delta') {
       const delta = parsed.delta as { type?: string; text?: string; thinking?: string; partial_json?: string } | undefined
@@ -787,8 +813,12 @@ export async function* anthropicChunks(
         yield { type: 'reasoning-delta', text: delta.thinking }
       } else if (delta?.type === 'input_json_delta') {
         const call = calls.get(index) ?? { id: `call-${index}`, name: '', arguments: '' }
-        call.arguments += String(delta.partial_json ?? '')
+        const fragment = String(delta.partial_json ?? '')
+        call.arguments += fragment
         calls.set(index, call)
+        if (options.liveToolCalls === true && fragment.length > 0) {
+          yield { type: 'tool-call-delta', index, argumentsDelta: fragment }
+        }
       }
     } else if (type === 'message_delta') {
       const delta = parsed.delta as { stop_reason?: string } | undefined
@@ -848,6 +878,183 @@ export function anthropicVertexAdapter(
       })
     }
     yield* anthropicChunks(readSse(result.stream), endpoint.name)
+  })()
+}
+
+/**
+ * The API version the Messages route requires.
+ *
+ * A **header** on this shape (`anthropic-version`), where the publisher route carries its version in the body. A
+ * configured `headers` entry of the same name wins, which is how an endpoint pins a newer version.
+ */
+export const ANTHROPIC_MESSAGES_VERSION = '2023-06-01'
+
+/**
+ * The thinking a declared reasoning level asks for on the Messages route, in the form its value names.
+ *
+ * The level's **value** decides the form, because the two forms are not interchangeable and the route says which
+ * one a model takes — measured 2026-10-29 against the Conclave gateway's `/v1/messages`:
+ *
+ * - a **string** (`low` … `max`) is an effort: `thinking: {type: 'adaptive'}` plus `output_config.effort`. Every
+ *   current Claude model there takes it; the newest Opus model refuses the budget form outright ("use adaptive and
+ *   output_config.effort to control thinking behavior");
+ * - a **number** is a thinking budget in tokens: `thinking: {type: 'enabled', budget_tokens}`. `claude-sonnet-4-5`
+ *   refuses adaptive thinking ("adaptive thinking is not supported on this model") and answers the budget form, so
+ *   a model of that generation declares its levels as budgets.
+ *
+ * Both carry `display: 'summarized'`, which is what makes the thinking **visible**: with adaptive thinking alone the
+ * same route streamed one empty `thinking_delta` (0 characters) before an 814-character answer, and with the display
+ * asked for, 21 deltas / 243 characters. A value of `null` declares a level that sends nothing.
+ */
+export function anthropicThinking(value: string | number | null | undefined): {
+  readonly thinking?: Record<string, unknown>
+  readonly outputConfig?: Record<string, unknown>
+  readonly budget?: number
+} {
+  if (value === undefined || value === null) return {}
+  if (typeof value === 'number') {
+    return { thinking: { type: 'enabled', budget_tokens: value, display: 'summarized' }, budget: value }
+  }
+  return { thinking: { type: 'adaptive', display: 'summarized' }, outputConfig: { effort: value } }
+}
+
+/**
+ * The request for Anthropic's Messages API, `POST {baseUrl}/messages`.
+ *
+ * Pure and exported so the translation is judged without a socket, and **key-free**: the adapter adds the
+ * credential when it sends, so nothing that prints a prepared call can print a key. `baseUrl` is the versioned API
+ * root, as for the Chat Completions kind — `https://api.anthropic.com/v1`, or a gateway's `http://127.0.0.1:8088/v1`.
+ *
+ * The conversation is translated exactly as for the publisher route ({@link toAnthropicMessages}: a top-level system
+ * prompt, `tool_use` blocks with parsed input, `tool_result` on a user turn, alternating turns, reasoning never
+ * replayed). What differs is the envelope — the model in the body, the version in a header — and four rules, each a
+ * refusal from the route when wrong:
+ *
+ * - **the cap covers the thinking.** `max_tokens` must exceed a thinking budget, so a cap at or below the budget is
+ *   raised by the budget: the caller's number stays room for the answer. A cheap probe at 16 tokens with a 2048
+ *   budget sends 2064 rather than being refused;
+ * - **no temperature beside thinking.** The route refuses any `temperature` but 1 when thinking is on (measured:
+ *   "`temperature` may only be set to 1 when thinking is enabled or in adaptive mode"), so a request that asks for a
+ *   level sends none;
+ * - **reasoning is not replayed.** Measured: a second tool round whose assistant turn carries the `tool_use` with no
+ *   thinking block is answered normally in both thinking forms, so no signature has to be kept;
+ * - **streaming is the default.** `stream: false` on the endpoint asks for one JSON message instead, folded into the
+ *   same chunks.
+ */
+export function anthropicMessagesCall(
+  endpoint: Adapter['endpoint'],
+  request: GenerateRequest,
+): {
+  readonly url: string
+  readonly body: Record<string, unknown>
+  readonly headers: Record<string, string>
+  readonly stream: boolean
+} {
+  const model = request.model ?? endpoint.model
+  if (model === undefined || model.length === 0) {
+    throw new ModelError(`'${endpoint.name}' names no model`, { endpoint: endpoint.name, code: 'NO_MODEL' })
+  }
+  const system = anthropicSystem(request.messages)
+  const { thinking, outputConfig, budget } = anthropicThinking(reasoningValue(endpoint, request)?.value)
+  const cap = request.maxOutputTokens ?? endpoint.maxOutputTokens ?? DEFAULT_MAX_TOKENS
+  const streaming = endpoint.stream ?? request.stream ?? true
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: toAnthropicMessages(request.messages),
+    max_tokens: budget !== undefined && cap <= budget ? budget + cap : cap,
+    stream: streaming,
+    ...(system.length > 0 ? { system } : {}),
+    ...(request.tools && request.tools.length > 0
+      ? {
+          tools: request.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.parameters,
+          })),
+        }
+      : {}),
+    ...(request.temperature !== undefined && thinking === undefined ? { temperature: request.temperature } : {}),
+    ...(thinking !== undefined ? { thinking } : {}),
+    ...(outputConfig !== undefined ? { output_config: outputConfig } : {}),
+  }
+
+  return {
+    url: `${baseUrlFor(endpoint, request.model)}/messages`,
+    body,
+    headers: titleCaseHeaders({ 'anthropic-version': ANTHROPIC_MESSAGES_VERSION, ...(endpoint.headers ?? {}) }),
+    stream: streaming,
+  }
+}
+
+/**
+ * One non-streamed Messages answer, reduced to the same chunks a stream folds into.
+ *
+ * The answer is `{content: [...blocks], stop_reason, usage}`; a `thinking` block is reasoning, a `text` block text and
+ * a `tool_use` block a finished call whose `input` is already parsed JSON.
+ */
+export function* anthropicMessageChunks(json: unknown): Generator<Chunk> {
+  const answer = (json ?? {}) as {
+    content?: { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }[]
+    stop_reason?: string | null
+    usage?: unknown
+  }
+  const blocks = Array.isArray(answer.content) ? answer.content : []
+  let calls = 0
+  for (const block of blocks) {
+    if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.length > 0) {
+      yield { type: 'reasoning-delta', text: block.thinking }
+    } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+      yield { type: 'text-delta', text: block.text }
+    } else if (block.type === 'tool_use') {
+      calls += 1
+      yield {
+        type: 'tool-call',
+        id: block.id ?? `call-${calls - 1}`,
+        name: block.name ?? '',
+        arguments: JSON.stringify(block.input ?? {}),
+      }
+    }
+  }
+  const usage = anthropicUsage(answer.usage)
+  yield {
+    type: 'done',
+    finishReason: canonicalFinishReason(answer.stop_reason ?? undefined, calls),
+    ...(usage !== undefined ? { usage } : {}),
+  }
+}
+
+/**
+ * Anthropic's own Messages API, `POST /v1/messages` — the wire DSH speaks to Anthropic and to the Conclave gateway.
+ *
+ * Distinct from the publisher route for a measured reason: a gateway may serve Claude on its Chat Completions route
+ * **buffered** — Conclave's `/v1/chat/completions` answered a 30-line count as one content chunk — while its
+ * `/v1/messages` streams the same answer incrementally (21 text deltas, measured 2026-10-29). Speaking this shape is
+ * what makes a Claude answer arrive as it is written. The credential travels as `x-api-key`, Anthropic's header;
+ * the gateway accepts it too.
+ */
+export function anthropicMessagesAdapter(
+  endpoint: Adapter['endpoint'],
+  request: GenerateRequest,
+  signal?: AbortSignal,
+): AsyncIterable<Chunk> {
+  return (async function* messages() {
+    const call = anthropicMessagesCall(endpoint, request)
+    const result = await post({
+      url: call.url,
+      body: call.body,
+      headers: { ...call.headers, ...(endpoint.apiKey !== undefined ? { 'X-Api-Key': endpoint.apiKey } : {}) },
+      ...(endpoint.timeoutMs !== undefined ? { timeoutMs: endpoint.timeoutMs } : {}),
+      ...hop(endpoint),
+      stream: call.stream,
+      endpoint: endpoint.name,
+      ...(signal !== undefined ? { signal } : {}),
+    })
+    if ('json' in result) {
+      yield* anthropicMessageChunks(result.json)
+      return
+    }
+    yield* anthropicChunks(readSse(result.stream), endpoint.name, { liveToolCalls: true })
   })()
 }
 
@@ -949,6 +1156,8 @@ export function adapterFor(endpoint: Adapter['endpoint']): Adapter {
       return { endpoint, stream: (request, signal) => openAiResponsesAdapter(endpoint, request, signal) }
     case 'anthropic-vertex':
       return { endpoint, stream: (request, signal) => anthropicVertexAdapter(endpoint, request, signal) }
+    case 'anthropic-messages':
+      return { endpoint, stream: (request, signal) => anthropicMessagesAdapter(endpoint, request, signal) }
     case 'scripted':
       return { endpoint, stream: (request, signal) => scriptedAdapter(endpoint, request, signal) }
     default: {
