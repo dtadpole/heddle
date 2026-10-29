@@ -37,6 +37,8 @@ pub mod codes {
     pub const HOOKED: &str = "HOOKED";
     /// The arguments were malformed.
     pub const BAD_ARGS: &str = "BAD_ARGS";
+    /// The arguments break the tool's declared parameter schema (DSH's `INVALID_ARGS`).
+    pub const INVALID_ARGS: &str = "INVALID_ARGS";
     /// A wider sandbox mode was asked for and not granted.
     pub const ESCALATION_REFUSED: &str = "ESCALATION_REFUSED";
     /// The sandbox refused the effect.
