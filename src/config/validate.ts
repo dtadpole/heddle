@@ -94,6 +94,25 @@ export async function validateRows(layers: readonly NamedLayer[], env: NodeJS.Pr
 }
 
 /**
+ * The JSON form of a row's plugin schema (Schemastery's `toJSON()`), or `null` when the plugin declares
+ * none or cannot be imported: what the settings view sends so a page can build a form. The row's name
+ * resolves against the first layer's directory, as `validateRows` resolves it.
+ */
+export async function rowSchemaJson(row: { readonly name: string }, layers: readonly NamedLayer[]): Promise<unknown> {
+  const { pathToFileURL } = await import('node:url')
+  const anchor = layers[0]?.file
+  const baseUrl = anchor === undefined ? undefined : pathToFileURL(anchor.replace(/[^/]*$/, '')).href
+  const specifier =
+    baseUrl !== undefined && (row.name.startsWith('.') || row.name.startsWith('/')) ? new URL(row.name, baseUrl).href : row.name
+  try {
+    const schema = findSchema((await import(specifier)) as Record<string, unknown>) as { toJSON?: () => unknown } | undefined
+    return typeof schema?.toJSON === 'function' ? schema.toJSON() : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Where a Cordis plugin's schema lives.
  *
  * Two shapes, both measured against the loader's own behaviour: a class plugin carries
