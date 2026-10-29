@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentsOf, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentsOf, inlineContentType, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -139,6 +139,19 @@ test('a path written twice keeps the lines of its last successful write', () => 
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'the second write failed' } },
   ])
   assert.deepEqual(turns.find((turn) => turn.kind === 'assistant')?.files, [{ path: '/w/a.txt', added: 3 }], 'the failed second write does not overwrite the first')
+})
+
+test('a stylesheet is served inline as CSS, so an HTML preview can apply it; a page or a script is still a download', () => {
+  /**
+   * DSH parity R-developer-twelve-14, measured 2026-10-29: an HTML preview's `<link rel="stylesheet">` is rewritten
+   * to `/api/raw`, which served the CSS as a download type, and a standards-mode document refuses such a stylesheet,
+   * so the preview showed unstyled.
+   */
+  assert.equal(inlineContentType('/w/style.css'), 'text/css; charset=utf-8')
+  assert.equal(inlineContentType('/w/THEME.CSS'), 'text/css; charset=utf-8', 'the extension is matched case-insensitively')
+  for (const path of ['/w/page.html', '/w/app.js', '/w/README.md', '/w/data.json', '/w/LICENSE', '/w/x.xhtml']) {
+    assert.equal(inlineContentType(path), null, `${path} is still a download`)
+  }
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {

@@ -441,8 +441,12 @@ pub(crate) fn inline_content_type(path: &str) -> Option<&'static str> {
         .map(|(_, mime)| *mime)
 }
 
-/// Images, video, audio, fonts and PDF — what an `<img>`, a `<video>` or an `@font-face` needs. Nothing a browser
-/// would run as a page or a script.
+/// Images, video, audio, fonts, PDF and stylesheets — what an `<img>`, a `<video>`, an `@font-face` or a
+/// `<link rel="stylesheet">` needs. Nothing a browser would run as a page or a script.
+///
+/// A stylesheet is here because an HTML preview's `<link rel="stylesheet">` is rewritten to `/api/raw`, and a browser
+/// refuses a stylesheet whose type is not `text/css` in a standards-mode document: measured 2026-10-29 (DSH parity
+/// R-developer-twelve-14), a preview's relative CSS never applied because it arrived as a download type.
 pub(crate) const INLINE_TYPES: &[(&str, &str)] = &[
     (".png", "image/png"),
     (".jpg", "image/jpeg"),
@@ -463,6 +467,7 @@ pub(crate) const INLINE_TYPES: &[(&str, &str)] = &[
     (".ttf", "font/ttf"),
     (".otf", "font/otf"),
     (".pdf", "application/pdf"),
+    (".css", "text/css; charset=utf-8"),
 ];
 
 #[cfg(test)]
@@ -474,6 +479,19 @@ mod tests {
         assert_eq!(inline_content_type("/w/heddle.svg"), Some("image/svg+xml"));
         assert_eq!(inline_content_type("/w/SHOT.PNG"), Some("image/png"));
         assert_eq!(inline_content_type("/w/doc.pdf"), Some("application/pdf"));
+    }
+
+    #[test]
+    fn a_stylesheet_is_served_inline_as_css_so_an_html_preview_can_apply_it() {
+        // DSH parity R-developer-twelve-14: served as a download type, a preview's relative CSS never applied.
+        assert_eq!(
+            inline_content_type("/w/style.css"),
+            Some("text/css; charset=utf-8")
+        );
+        assert_eq!(
+            inline_content_type("/w/THEME.CSS"),
+            Some("text/css; charset=utf-8")
+        );
     }
 
     #[test]
