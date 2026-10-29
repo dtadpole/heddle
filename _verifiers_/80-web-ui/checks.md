@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-29T13:05:00Z
 level: L3
-version: 1.1.0
+version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -46,6 +46,12 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-session-archive.mjs`](check-session-archive.mjs) — unarchive and stop-and-archive at DSH parity
+  (R-developer-eight-14, -13): an archived session restored from **Archived only** through its row menu, every item of
+  which can be pressed across its whole width (nothing lies over the menu), and from **search**, where the archived
+  result carries `Unarchive session` and choosing it says it cannot be opened without clearing the query; a quiet
+  archive's undo notice; and a running session's archive asking first in DSH's dialog, listing the work the server
+  named, Cancel leaving it running, Stop and archive stopping and archiving it, and undo restoring it.
 
 ## What it deliberately does not judge
 
