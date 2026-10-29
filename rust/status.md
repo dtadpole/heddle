@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-29T10:04:00Z
+modified: 2026-10-29T10:09:00Z
 level: L3
-version: 1.1.2
+version: 1.2.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `3483778` (the binary nominates `heddle.json`'s default), with the
+**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `f1e3505` (the `anthropic-messages` endpoint kind), with the
 machine's endpoint file configured, against the previous `main`'s per-check baseline:**
 
 ```bash
@@ -27,7 +27,8 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**117 checks: 115 pass, 1 fail, 1 unjudged; none that passed on the previous `main` stopped passing.**
+**119 checks: 116 pass, 1 fail, 2 unjudged; none that passed on the previous `main` stopped passing.** Part 1 gained
+`check-messages-route.mjs` (two checks) with the kind.
 
 **Failing:** part 98's "every configured model passes streaming, reasoning and tool-call validation". The check reads
 the machine's recorded validation (`npm run validate:endpoints`), so it judges the configuration, not the binary: the
@@ -36,12 +37,13 @@ streaming criterion. Heddle has no `anthropic-messages` endpoint kind (`heddle-l
 build). The ui parts, run on the same binary, pass 88 of 90; their two failures also
 fail on the previous `main`'s binary ([`status-notes.md`](status-notes.md)).
 
-**Unjudged:** part 1's publisher-route check needs a publisher-route endpoint, which the machine's file does not list.
+**Unjudged:** part 1's publisher-route and Messages-route live checks need an endpoint of that kind, which the
+machine's file does not list yet.
 
 | Part | Verifier, in `_verifiers_/` | On the binary |
 |---|---|---|
 | 0 configuration | `05-config-system` | **passes** — 10 of 10 |
-| 1 LLM backends | `10-llm-backends` | 7 pass, 1 unjudged (publisher route) |
+| 1 LLM backends | `10-llm-backends` | 8 pass, 2 unjudged (publisher and Messages routes, live) |
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 9 of 9 |
 | 4 tools | `40-pluggable-tools` | **passes** — 6 of 6 |
