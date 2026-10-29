@@ -3,6 +3,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import type { CommandDefinition } from '../commands/registry.ts'
 import type { GenerateRequest } from '../llm/types.ts'
 import type { SessionHandle } from '../session/store.ts'
+import type { PlanRouteHost } from './http.ts'
 import { planActive, setPlanMode, type PlanLog } from './mode.ts'
 import { withPlanPolicy } from './policy.ts'
 import { exitPlanModeTool, type PlanReviewChannel } from './tool.ts'
@@ -61,6 +62,8 @@ export function applyPlanPolicy(
  */
 export class PlanService extends Service {
   readonly log: PlanLog
+  /** What `GET /api/sessions/{id}/plan` reads (`http.ts`). */
+  readonly routes: PlanRouteHost
 
   constructor(ctx: Context) {
     super(ctx, 'plan')
@@ -69,6 +72,8 @@ export class PlanService extends Service {
       read: (handle) => store.read(handle),
       append: (handle, event, options) => store.append(handle, event, options ?? {}),
     }
+
+    this.routes = { open: (id) => store.open(id), active: (handle) => this.active(handle) }
 
     ctx.commands.registry.register(planCommand(this.log))
 

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { CommandRegistry, type CommandLog } from '../src/commands/registry.ts'
 import type { GenerateRequest } from '../src/llm/types.ts'
+import { handlePlanRequest } from '../src/plan/http.ts'
 import { PLAN_EVENT, PLAN_OFF_NOTICE, PLAN_ON_NOTICE, planActive, setPlanMode, type PlanLog } from '../src/plan/mode.ts'
 import { PLAN_POLICY_SECTION, withPlanPolicy } from '../src/plan/policy.ts'
 import { applyPlanPolicy, planCommand } from '../src/plan/service.ts'
@@ -209,4 +211,31 @@ test('an approved plan leaves plan mode; keeping on planning and dismissing do n
 test("a plan's title is its first heading at any level", () => {
   assert.equal(planTitle('intro\n## Phase one  \n# Later'), 'Phase one')
   assert.equal(planTitle('no heading'), undefined)
+})
+
+test('GET /api/sessions/{id}/plan answers whether the session is in plan mode', async () => {
+  const { store, handle, log } = session()
+  const host = { open: (id: string) => store.open(id), active: (target: typeof handle) => planActive(store.read(target)) }
+  const server = createServer((incoming, response) => {
+    void handlePlanRequest(host, incoming, response, new URL(incoming.url ?? '/', 'http://localhost')).then((handled) => {
+      if (!handled) {
+        response.writeHead(418)
+        response.end()
+      }
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert.ok(address !== null && typeof address === 'object')
+  const base = `http://127.0.0.1:${address.port}`
+  try {
+    assert.deepEqual(await (await fetch(`${base}/api/sessions/${handle.id}/plan`)).json(), { session: handle.id, active: false })
+    setPlanMode(log, handle, true)
+    assert.deepEqual(await (await fetch(`${base}/api/sessions/${handle.id}/plan`)).json(), { session: handle.id, active: true })
+    assert.equal((await fetch(`${base}/api/sessions/nope/plan`)).status, 400)
+    assert.equal((await fetch(`${base}/api/sessions/session-00000000-0000-4000-8000-000000000000/plan`)).status, 404)
+    assert.equal((await fetch(`${base}/api/sessions/${handle.id}/plan`, { method: 'POST' })).status, 418, 'only GET is the route')
+  } finally {
+    server.close()
+  }
 })
