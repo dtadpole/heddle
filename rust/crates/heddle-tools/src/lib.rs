@@ -32,6 +32,7 @@ pub mod protocol;
 pub mod registry;
 pub mod tool;
 pub mod upstream;
+pub mod validate;
 
 pub use builtin::{BuiltinOptions, builtin_tools, escalation_fields};
 pub use config::ToolsConfig;
@@ -45,6 +46,7 @@ pub use tool::{
     Command, LogSink, Tool, ToolArgs, ToolContext, ToolError, ToolFailure, ToolFuture, ToolResult,
     ToolRunContext, codes, tool_fn,
 };
+pub use validate::{argument_violations, invalid_arguments, open_root};
 pub use upstream::{
     ApprovalDecision, ApprovalMode, ConfinedArgv, EscalationRefusal, EscalationRefusalCode,
     EscalationSubject, RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode,
