@@ -252,6 +252,14 @@ pub trait TurnHooks: Send + Sync {
         let _ = payload;
         Box::pin(async { None })
     }
+
+    /// Right after a round's runtime-context snapshot is recorded, before its request is assembled: the harness's
+    /// own per-step notes (the time context, `recordTimeContext` in `src/agent/loop.ts`). `step` is the round's
+    /// number in its turn, from 1. A failure fails the turn, as a failed snapshot does.
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        let _ = (session, step);
+        Ok(())
+    }
 }
 
 /// A [`TurnHooks`] with no listeners.
@@ -297,6 +305,12 @@ impl TurnHooks for ChainedTurnHooks {
             }
             None
         })
+    }
+
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        self.hooks
+            .iter()
+            .try_for_each(|hooks| hooks.record_step_context(session, step))
     }
 }
 

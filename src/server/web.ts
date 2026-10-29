@@ -28,6 +28,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -170,6 +171,11 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     for (const client of subscribers) {
       client.write(line)
     }
+  })
+
+  // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
+  ctx.on('schedule/changed', () => {
+    for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
   })
 
   /**
@@ -855,6 +861,9 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Errors carry the goal service's own stable code next to the sentence, so a client can distinguish "the
    * goal moved while you were looking" (409) from "no goal is current" (404) without parsing prose.
    */
+  // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
+  if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
     if (goals === undefined) {
