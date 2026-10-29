@@ -1046,6 +1046,65 @@ test('a session one process is writing refuses a second writer, so its log never
   }
 })
 
+test('a turn into a one-shot subagent\'s session is refused the way DSH refuses it, and the child is left as it was', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * DSH parity C23 (R-developer-eight-26). A delegated child is a one-shot record: DSH's generic session route leaves it to
+   * subagent routing and refuses a prompt into it with session/agent-busy, the sentence 'session "<id>" is owned by
+   * subagent routing' and the reason 'use subagent delivery for this child session' (dsh-api-session-controller
+   * lib/index.js:128-142). Phase A measured POST /api/turn into one answering 200 in both builds and growing its log from
+   * one turn to two. The child is made the way a person makes one, by a parent turn that delegates.
+   */
+  const home = isolatedHome('subagent-turn')
+  const work = fixtureDir('subagent-turn-work')
+  const root = join(home, 'sessions')
+  const { config } = scriptedConfig({
+    home,
+    steps: [
+      { toolCall: { name: 'delegate', arguments: { prompt: 'child task' } } },
+      { text: 'parent started the child' },
+      { purpose: 'subagent', text: 'child answer' },
+      { purpose: 'subagent-notice', text: 'parent read the notice' },
+    ],
+  })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  let live
+  try {
+    const run = await runCli(['--config', join(repoRoot, 'cordis.yml'), '--session-root', root, '--turn', 'parent prompt'], { env, cwd: work })
+    assert.equal(run.code, 0, `the delegating turn ran\n${run.stdout}${run.stderr}`)
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', root], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const sessions = async () => (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()
+    const before = await sessions()
+    const child = before.find((meta) => meta.origin === 'subagent')
+    assert.ok(child !== undefined, `the delegation made a subagent child\nsaw: ${JSON.stringify(before)}`)
+    assert.equal(child.turns, 1, 'the child ran its one task')
+    const eventsBefore = readTranscript(join(root, child.id)).length
+
+    const response = await fetch(origin + '/api/turn', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: child.id, prompt: 'write into child' }),
+    })
+    const text = await response.text()
+    assert.equal(response.status, 409, `the turn is refused\nsaw: ${response.status} ${text.slice(0, 300)}`)
+    assert.deepEqual(
+      JSON.parse(text),
+      { error: `session "${child.id}" is owned by subagent routing`, code: 'session/agent-busy', reason: 'use subagent delivery for this child session' },
+      'with DSH\'s code, sentence and reason',
+    )
+    const after = (await sessions()).find((meta) => meta.id === child.id)
+    assert.equal(after?.turns, 1, 'the child still records one turn')
+    assert.equal(readTranscript(join(root, child.id)).length, eventsBefore, 'and its log gained nothing')
+  } finally {
+    live?.kill()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {

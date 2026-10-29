@@ -2119,6 +2119,34 @@ export function abortSession(controllers: Map<string, Set<AbortController>>, id:
   return stopped
 }
 
+/**
+ * The refusal a turn into a one-shot subagent's session gets, or `null` when the session takes turns.
+ *
+ * DSH's generic session route leaves a subagent's child to subagent routing and answers a prompt into it with
+ * `session/agent-busy`, `session "<id>" is owned by subagent routing`, reason `use subagent delivery for this child
+ * session` (dsh-api-session-controller `lib/index.js:128-142`, reached from `prompt` at `:925-926` through
+ * `resolveAgent` `:221-246`). A one-shot child has no delivery at all: heddle's `delegate` runs it for one task and
+ * settles it. Phase A measured `POST /api/turn` into one answering `200` and growing its log from one turn to two
+ * (R-developer-eight-26). The answer is `409`, the status this server gives the steer refusal DSH words the same way,
+ * with DSH's code, sentence and reason in the body.
+ *
+ * A teammate (`teamId`) is a continuable child — DSH's teammates are — and this route is the delivery heddle's page
+ * uses for it, so it is not refused here.
+ */
+export function subagentTurnRefusal(
+  meta: Pick<SessionMeta, 'id' | 'origin' | 'teamId'> | undefined,
+): { readonly status: 409; readonly body: { readonly error: string; readonly code: 'session/agent-busy'; readonly reason: string } } | null {
+  if (meta?.origin !== 'subagent' || (typeof meta.teamId === 'string' && meta.teamId.length > 0)) return null
+  return {
+    status: 409,
+    body: {
+      error: `session "${meta.id}" is owned by subagent routing`,
+      code: 'session/agent-busy',
+      reason: 'use subagent delivery for this child session',
+    },
+  }
+}
+
 export function resolveTurnEndpoint(sources: {
   readonly requested?: string
   readonly recorded?: string
@@ -2243,6 +2271,18 @@ export function sessionRequestSelection(
     ...(requested !== undefined ? { endpoint: requested } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(requestedEffort !== undefined ? { reasoningEffort: requestedEffort } : {}),
+  }
+  /**
+   * A one-shot subagent's session takes no turn from here (`subagentTurnRefusal`), and the refusal comes before the session
+   * is opened, so a refused request writes nothing into the child's log.
+   */
+  if (typeof body.session === 'string' && body.session.length > 0) {
+    const resumeId = body.session
+    const refusal = subagentTurnRefusal(ctx.session.list().find((entry) => entry.id === resumeId))
+    if (refusal !== null) {
+      respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
+      return
+    }
   }
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
