@@ -2258,7 +2258,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_turn_through_the_real_model_service_runs_a_scripted_task_to_its_answer() {
-        let service = crate::adapters::tests::scripted_service(
+        let (service, _scripted) = crate::adapters::tests::scripted_service(
             "turn",
             serde_json::json!([
                 { "toolCall": { "name": "read_file", "arguments": { "path": "one.txt" } } },
@@ -2310,12 +2310,12 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_turn_recorded_through_the_real_session_store_writes_what_the_loop_verifier_reads() {
-        let sessions = crate::adapters::tests::sessions_at("verifier");
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("verifier");
         let handle = sessions
             .store()
             .create(heddle_session::CreateOptions::default())
             .unwrap();
-        let service = crate::adapters::tests::scripted_service(
+        let (service, _scripted) = crate::adapters::tests::scripted_service(
             "verifier",
             serde_json::json!([
                 { "toolCall": { "name": "write_file", "arguments": { "path": "one.txt", "content": "first" } } },
@@ -2432,11 +2432,10 @@ pub(crate) mod tests {
         sessions: &Arc<heddle_session::SessionService>,
         steps: serde_json::Value,
         tools: Vec<Arc<dyn Tool>>,
-    ) -> AgentRuntime {
-        AgentRuntime {
-            model: Arc::new(crate::adapters::LlmModel::new(
-                crate::adapters::tests::scripted_service("steer", steps),
-            )),
+    ) -> (AgentRuntime, crate::adapters::tests::ScratchDir) {
+        let (models, scripted) = crate::adapters::tests::scripted_service("steer", steps);
+        let runtime = AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(models)),
             session: Arc::new(crate::adapters::Sessions::new(Arc::clone(sessions))),
             context: Arc::new(crate::adapters::tests::SessionMessages {
                 sessions: Arc::clone(sessions),
@@ -2444,7 +2443,8 @@ pub(crate) mod tests {
             tools: registry_with(tools),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(TurnRegistry::new()),
-        }
+        };
+        (runtime, scripted)
     }
 
     /// The log's messages in order, as `role:text`.
@@ -2473,12 +2473,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_steer_sent_during_a_tool_call_is_written_after_its_result_and_answered_by_the_same_turn()
      {
-        let sessions = crate::adapters::tests::sessions_at("steer-order");
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("steer-order");
         let handle = sessions
             .store()
             .create(heddle_session::CreateOptions::default())
             .unwrap();
-        let runtime = real_runtime(
+        let (runtime, _scripted) = real_runtime(
             &sessions,
             serde_json::json!([
                 { "toolCall": { "name": "slow_tool", "arguments": {} } },
@@ -2538,13 +2538,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_stop_during_a_tool_call_keeps_the_steer_pending_and_the_next_turn_writes_it_before_its_prompt()
      {
-        let sessions = crate::adapters::tests::sessions_at("steer-stop");
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("steer-stop");
         let handle = sessions
             .store()
             .create(heddle_session::CreateOptions::default())
             .unwrap();
         let stop = CancellationToken::new();
-        let runtime = real_runtime(
+        let (runtime, _scripted) = real_runtime(
             &sessions,
             serde_json::json!([
                 { "toolCall": { "name": "slow_tool", "arguments": {} } },
@@ -2579,7 +2579,7 @@ pub(crate) mod tests {
         );
 
         // The next turn, with a script that answers at once (rounds count from step 0 again).
-        let next_runtime = real_runtime(
+        let (next_runtime, _next_scripted) = real_runtime(
             &sessions,
             serde_json::json!([{ "text": "both answered" }]),
             Vec::new(),
