@@ -489,6 +489,50 @@ test('a sibling folder whose path shares a prefix is not a member', async (conte
   }
 })
 
+test('a letter-case variant of a registered folder is that workspace, and a session started there lists under it', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('case')
+  /**
+   * One folder is one workspace however it is spelled. DSH stores `fs.realpath` of the path and compares strings
+   * (`dsh-workspace/README.md:93`, "one record per canonical path"); the native `realpath` answers with the spelling
+   * the disk stores, so on a case-insensitive volume — macOS by default — `proj` and `PROJ` are one record. The same
+   * canon is why a symlink to a registered folder collides with it rather than becoming a second workspace: that is
+   * DSH's rule too, not a gap. Skipped on a case-sensitive volume, where the two spellings are two folders.
+   */
+  const proj = join(h.work, 'proj')
+  const variant = join(h.work, 'PROJ')
+  try {
+    mkdirSync(proj, { recursive: true })
+    if (!skipUnless(context, existsSync(variant), 'this volume is case-sensitive, so the two spellings are two folders')) return
+    const first = await runCli(adminArgs(h, ['workspace', 'add', proj, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `registering the folder worked\n${first.stdout}${first.stderr}`)
+    assert.equal(parseJson(first.stdout).created, true, 'and created its workspace')
+
+    const again = await runCli(adminArgs(h, ['workspace', 'add', variant, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(again.code, 0, `registering the other spelling is not an error\n${again.stdout}${again.stderr}`)
+    const record = parseJson(again.stdout)
+    assert.equal(record.created, false, `it reports the workspace already there\nsaw: ${JSON.stringify(record)}`)
+    assert.equal(record.path, proj, 'under the spelling the disk stores')
+
+    const created = await runCli(adminArgs(h, ['session', 'new', variant, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(created.code, 0, `a session starts at the other spelling\n${created.stdout}${created.stderr}`)
+    const session = parseJson(created.stdout).session
+
+    const workspaces = await workspacesOf(h)
+    const spellings = workspaces.filter((workspace) => String(workspace.path).toLowerCase() === proj.toLowerCase())
+    assert.deepEqual(
+      spellings.map((workspace) => workspace.path),
+      [proj],
+      `one folder is one workspace\nsaw: ${workspaces.map((workspace) => workspace.path).join(', ')}`,
+    )
+    assert.ok((spellings[0]?.sessions ?? []).includes(session), `and the session started at ${variant} lists under it`)
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('the nearest registered root owns a session when roots nest', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
