@@ -456,6 +456,18 @@ pub trait TodoService: Send + Sync {
     fn get(&self, session: &str) -> Option<Value>;
 }
 
+/// The questions a model asks a person (`ask_user_question`), as the three routes see them.
+///
+/// The binary adapts `heddle-questions`, whose answers are already the TypeScript route's exact status and body;
+/// the server only matches the path and, for a late answer to a session with a running turn, appends the returned
+/// text as the user message, as a steer would.
+pub trait QuestionService: Send + Sync {
+    /// `GET /api/questions?session=<id>[&all=1]`: the status and the body.
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String);
+    /// `POST /api/questions/<id>` (or its `/hold`): the status, the body, and the user message to steer in.
+    fn post(&self, id: &str, hold: bool, body: &Value, running: &dyn Fn(&str) -> bool) -> (u16, String, Option<(String, String)>);
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -509,6 +521,7 @@ pub struct Harness {
     pub approvals: Option<Arc<dyn ApprovalService>>,
     pub goals: Option<Arc<dyn GoalService>>,
     pub todos: Option<Arc<dyn TodoService>>,
+    pub questions: Option<Arc<dyn QuestionService>>,
     pub team: Option<Arc<dyn TeamService>>,
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
@@ -536,6 +549,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -580,6 +594,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -756,6 +771,11 @@ impl HarnessBuilder {
 
     pub fn todos(mut self, service: Arc<dyn TodoService>) -> Self {
         self.harness.todos = Some(service);
+        self
+    }
+
+    pub fn questions(mut self, service: Arc<dyn QuestionService>) -> Self {
+        self.harness.questions = Some(service);
         self
     }
 
