@@ -6,7 +6,7 @@ grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
   - source: rust/INDEX.md, the build environment of the Rust port
 created: 2026-10-23T03:10:31Z
-modified: 2026-10-29T13:08:51Z
+modified: 2026-10-29T13:50:08Z
 ---
 
 # `local-build`
@@ -30,13 +30,14 @@ _tools_/local-build/run status                                               # w
 
 ## Browser slot
 
-Every browser gate holds the one browser slot. Take it through the queue, not with a bare mkdir:
+Every browser gate holds a browser slot: `browser-cap` sets how many, and can reserve one for integrators.
+Take one through the queue, not with a bare mkdir:
 
 ```bash
 _tools_/local-build/browser-slot take --seat <key> --purpose "ui gate"   # exit 75: queued, run it again
 _tools_/local-build/browser-slot release --seat <key>
 _tools_/local-build/browser-slot run --seat <key> -- <gate command>      # take, run, always release
-_tools_/local-build/browser-slot status                                  # holder, age, browser.next, queue
+_tools_/local-build/browser-slot status                                  # slots, holders, memory, next, queue
 ```
 
 [browser-slot.md](browser-slot.md) has the rules, including the coordinator's `browser.next`, stale holders

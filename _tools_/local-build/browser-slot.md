@@ -1,35 +1,43 @@
 ---
 title: Browser slot queue
 created: 2026-10-29T13:08:51Z
-modified: 2026-10-29T13:08:51Z
+modified: 2026-10-29T13:50:08Z
 level: L2
 version: 1.0.0
-description: How browser-slot shares the team's one browser slot fairly. It covers the queue and tickets, the coordinator's priority turn, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
+description: How browser-slot shares the team's browser slots fairly. It covers the slot count and the integrator reservation, the queue and tickets, the coordinator's priority turn, the memory gate, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
 status: unverified
 grounded_in:
   - source: coordinator task 2026-10-29 - replace the ad-hoc browser lock with a fair FIFO tool, since 30-second retries starved some seats for an hour
   - source: '[hd] build-and-resources.md, Browser lock bullet: mkdir browser.lock with an owner file, at most 10 minutes, browser.next for a P0 gate'
+  - source: 'coordinator D-060, 2026-10-29: a slot count in browser-cap, a slot reserved for integrators (browser.lock2), and no new holder while memory is short'
 ---
 
 # Browser slot queue
 
-Twelve seats share one browser slot. Retrying a mkdir every 30 seconds served whoever happened to ask at the
+Twelve seats share the browser slots. Retrying a mkdir every 30 seconds served whoever happened to ask at the
 right moment, so some seats waited an hour. `browser-slot` serves the seats in the order they asked.
 
-## The slot and the queue
+## The slots and the queue
 
-- **The slot** is still `~/.hd-build-slots/browser.lock`, a mkdir directory with an `owner` file inside. The
+- **The slots.** `~/.hd-build-slots/browser-cap` reads `<count> [reserve=<role>]`, and is 1 when the file is
+  missing. Today it is `2 reserve=integrator`. Slot 1 is `browser.lock`, and slot n is `browser.lock<n>`. With
+  a reservation, the last slot serves only that role and the other slots serve everyone else. A seat's role
+  is `--role`, or `integrator` for an `integrator-*` key.
+- **Each slot** is a mkdir directory with an `owner` file inside. The
   owner's first line keeps the old format, `<seat> <purpose> <HH:MM:SS>`. The tool adds `seat=`, `pid=` and
   `start=` lines.
 - **A ticket** in `browser.queue/` holds each waiting seat's place, one per seat. It is named by the time the
   seat first asked. Every `take` refreshes it. A ticket not refreshed for 5 minutes is dropped: that seat
   stopped asking.
-- **`take`** waits up to `--wait` seconds (default 100, inside the two-minute tool-call bound). It gets the slot
-  only when the slot is free and the seat is first in line. Otherwise it exits 75 and keeps the ticket, so the
+- **`take`** waits up to `--wait` seconds (default 100, inside the two-minute tool-call bound). It gets a slot
+  only when that slot is free and the seat is the first waiter that slot serves. Otherwise it exits 75 and keeps the ticket, so the
   next `take` keeps the place.
 - **`browser.next`**, written by the coordinator, puts its first word's seat first while that seat is queued.
   It does not hold the slot for a seat that is not asking. It is deleted when that seat takes the slot, and
   ignored once it is 30 minutes old.
+
+**Memory gate (D-060).** No new holder is admitted while `memory_pressure` reports under 25% free, or
+`vm.swapusage` used is at or over 7168M. The seat stays queued, and the exit-75 line says why.
 
 ## Holding and releasing
 
@@ -53,8 +61,9 @@ Once every seat uses the tool, the queue is the only way in.
 |---|---|
 | `0` | took, released, already holding, or `status` |
 | `75` | still queued after `--wait`; the ticket is kept, run `take` again |
-| `1` | `release` refused: another seat holds the slot (`--force` clears it) |
+| `1` | `release` refused: this seat holds no slot (`--force`, with `--slot n` when two are held, clears one) |
 | `64` | usage: a verb or `--seat` missing |
 
 `run` exits with the command's status. Environment for tests: `LOCAL_BUILD_SLOT_ROOT`,
-`BROWSER_SLOT_STALE_SECONDS`, `BROWSER_SLOT_TICKET_SECONDS`, `BROWSER_SLOT_NEXT_SECONDS`, `BROWSER_SLOT_POLL_MS`.
+`BROWSER_SLOT_STALE_SECONDS`, `BROWSER_SLOT_TICKET_SECONDS`, `BROWSER_SLOT_NEXT_SECONDS`, `BROWSER_SLOT_POLL_MS`,
+`BROWSER_SLOT_MIN_FREE_PCT`, `BROWSER_SLOT_SWAP_STOP_MB`, and `BROWSER_SLOT_FAKE_FREE_PCT` / `BROWSER_SLOT_FAKE_SWAP_MB`, which stand in for the readings.
