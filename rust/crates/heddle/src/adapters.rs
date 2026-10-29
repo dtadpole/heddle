@@ -823,6 +823,7 @@ impl Component for ToolsComponent {
                 "includeBuiltins": { "type": "boolean" },
                 "bashTimeoutMs": { "type": "number" },
                 "bashOutputLimit": { "type": "number" },
+                "maxParallelToolCalls": { "type": "number" },
             },
         }))
         .ok()
