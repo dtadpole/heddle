@@ -1418,6 +1418,16 @@
    */
   #tree .status-dot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--text-3); }
   #tree .status-dot .spinner-motion { transform-origin: center; animation: heddle-spin 1.5s linear infinite; }
+  /**
+   * DSH's other row states (dsh-client-ui-workspace, Pending interactions): a session waiting for an approval shows the
+   * shared warning dot and says **Approval** where its age was; a turn that finished while another session was open
+   * shows the done dot until that session is opened. Idle rows carry no dot.
+   */
+  #tree .status-dot[data-state='warning']::before,
+  #tree .status-dot[data-state='done']::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  #tree .status-dot[data-state='warning'] { color: #f5a524; }
+  #tree .status-dot[data-state='done'] { color: var(--accent); }
+  #tree .age[data-pending] { color: #f5a524; }
   #tree .status-dot circle { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
   #tree .status-dot .spinner-track { opacity: .25; }
   #tree .status-dot .spinner-arc { stroke-dasharray: 12 150; animation: heddle-dash 1.5s ease-in-out infinite; }
@@ -5381,6 +5391,8 @@ async function showSession(id) {
   updateStatusBar()
   current = id
   paintEmptyState()
+  /** Opening a session is reading it: its finished turn is no longer unread (DSH clears `completionUnread` here). */
+  if (completionUnread.delete(id)) paintRunningMarks()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
   applySessionAccess(null)
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
@@ -5482,6 +5494,7 @@ async function refreshSessions() {
     let changed = false
     for (const id of [...runningSessions]) {
       if (!live.has(id)) {
+        noteSessionStopped(id)
         runningSessions.delete(id)
         runningSince.delete(id)
         changed = true
@@ -5491,6 +5504,7 @@ async function refreshSessions() {
       if (id.length === 0) continue
       if (!runningSessions.has(id)) {
         runningSessions.add(id)
+        completionUnread.delete(id)
         changed = true
       }
       /**
@@ -5582,6 +5596,7 @@ events.addEventListener('session', (message) => {
      */
     const wasRunning = runningSessions.has(payload.session)
     runningSessions.add(payload.session)
+    completionUnread.delete(payload.session)
     if (!wasRunning || !runningSince.has(payload.session)) {
       const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
       runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
@@ -5601,6 +5616,7 @@ events.addEventListener('session', (message) => {
     }
   }
   else if (event.type === 'turn/completed') {
+    if (runningSessions.has(payload.session)) noteSessionStopped(payload.session)
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
     paintRunningMarks()
@@ -8884,32 +8900,85 @@ function runningSpinner() {
   return svg
 }
 
-function runningMark() {
+/**
+ * Sessions with an approval waiting for a person, from the pending list (`GET /api/approvals`) and the `approval` stream
+ * event — DSH's `pendingInteraction` for approvals. Without it a wait in a session that is not open was invisible: its
+ * row looked like any running row and the card shows only for the open session (DSH parity R-developer-seven-3).
+ */
+const pendingApprovalSessions = new Set()
+
+/**
+ * Sessions whose turn finished while another session was open, until they are opened — DSH's `completionUnread`
+ * (`dsh-client-ui-session`): kept by this page alone, as DSH keeps it, and dropped when the session runs again or opens.
+ */
+const completionUnread = new Set()
+
+/** A session stopped running: unread, unless it is the one on screen. */
+function noteSessionStopped(id) {
+  if (typeof id === 'string' && id.length > 0 && id !== current) completionUnread.add(id)
+}
+
+/**
+ * One session row's status, in DSH's order (`dsh-client-ui-workspace` `sessionStatuses`): a pending interaction, then
+ * running, then a finished turn nobody has looked at, then idle. `trailing` replaces the row's age while a person is
+ * waited on, as DSH's row says **Approval** there; the full sentence is the mark's label and tooltip.
+ */
+function sessionRowStatus(id, sets) {
+  if (sets.pending.has(id)) return { state: 'warning', label: 'Waiting for approval', trailing: 'Approval' }
+  if (sets.running.has(id)) return { state: 'ongoing', label: 'Running', trailing: null }
+  if (sets.unread.has(id)) return { state: 'done', label: 'Completed', trailing: null }
+  return { state: 'idle', label: 'Idle', trailing: null }
+}
+
+function rowStatusSets() {
+  return { pending: pendingApprovalSessions, running: runningSessions, unread: completionUnread }
+}
+
+function statusMark(status) {
   const mark = document.createElement('span')
   mark.className = 'status-dot'
-  mark.dataset.state = 'ongoing'
+  mark.dataset.state = status.state
   mark.setAttribute('role', 'img')
-  mark.setAttribute('aria-label', 'Running')
-  mark.title = 'Running'
-  mark.append(runningSpinner())
+  mark.setAttribute('aria-label', status.label)
+  mark.title = status.label
+  if (status.state === 'ongoing') mark.append(runningSpinner())
   return mark
 }
 
+function runningMark() {
+  return statusMark({ state: 'ongoing', label: 'Running' })
+}
+
+/**
+ * Repaint every drawn session row's status mark and trailing label from the three sets, without redrawing the tree. An
+ * archived row keeps the cell blank, as DSH's does.
+ */
 function paintRunningMarks() {
+  const sets = rowStatusSets()
   for (const entry of rowIndex.values()) {
     const { node, li } = entry
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
     const row = li.querySelector(':scope > .row')
     if (row === null) continue
+    const status = node.archived ? { state: 'idle', trailing: null } : sessionRowStatus(node.session.id, sets)
     const existing = row.querySelector(':scope > .status-dot')
-    const running = runningSessions.has(node.session.id)
-    if (running && existing === null) {
-      const mark = runningMark()
-      row.querySelector(':scope > .icon')?.after(mark)
+    if (status.state === 'idle') {
+      existing?.remove()
+    } else if (existing === null || existing.dataset.state !== status.state) {
+      const mark = statusMark(status)
+      if (existing !== null) existing.replaceWith(mark)
+      else row.querySelector(':scope > .icon')?.after(mark)
       /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
       for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
-    } else if (!running && existing !== null) {
-      existing.remove()
+    }
+    const age = row.querySelector('.age')
+    if (age === null) continue
+    if (status.trailing !== null) {
+      age.dataset.pending = 'true'
+      age.textContent = status.trailing
+    } else if (age.dataset.pending !== undefined) {
+      delete age.dataset.pending
+      age.textContent = relativeAge(age.dataset.stamp)
     }
   }
 }
@@ -9112,7 +9181,7 @@ function svgPath(d) {
  * stop saying it without a reload. One interval repaints the text only — it does not re-fetch or redraw the tree.
  */
 function paintAges() {
-  for (const cell of document.querySelectorAll('#tree .age[data-stamp]')) {
+  for (const cell of document.querySelectorAll('#tree .age[data-stamp]:not([data-pending])')) {
     cell.textContent = relativeAge(cell.dataset.stamp)
   }
 }
@@ -10681,10 +10750,13 @@ function nodeRow(node, depth = 0) {
    * rotating ring with a breathing arc, and the row repaints it from `runningSessions` (fed by `model/request` and
    * `turn/completed` on the stream) so the mark says "still working" without a re-fetch.
    */
-  if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
-    const mark = runningMark()
-    row.append(mark)
-    for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
+  if (node.kind === 'session' && node.session !== undefined && node.session !== null && !node.archived) {
+    const status = sessionRowStatus(node.session.id, rowStatusSets())
+    if (status.state !== 'idle') {
+      const mark = statusMark(status)
+      row.append(mark)
+      for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
+    }
   }
   if (node.badge) {
     const badge = document.createElement('span')
@@ -11843,6 +11915,7 @@ async function answerApproval(outcome) {
     const body = await response.json().catch(() => ({}))
     if (response.ok && body.answered === true) {
       hideApproval()
+      void refreshApprovals()
       return
     }
     note.textContent = body.error ?? 'that answer did not land: the question is no longer waiting'
@@ -11860,7 +11933,12 @@ document.getElementById('approval-allow').addEventListener('click', () => void a
 document.getElementById('approval-reject').addEventListener('click', () => void answerApproval('rejected'))
 events.addEventListener('approval', (message) => {
   try {
-    showApproval(JSON.parse(message.data))
+    const request = JSON.parse(message.data)
+    if (typeof request.session === 'string' && !pendingApprovalSessions.has(request.session)) {
+      pendingApprovalSessions.add(request.session)
+      paintRunningMarks()
+    }
+    showApproval(request)
   } catch {
     // a frame that is not a question is not this card's business
   }
@@ -11870,7 +11948,15 @@ async function refreshApprovals() {
     const response = await fetch('/api/approvals')
     if (!response.ok) return
     const body = await response.json()
-    const request = (body.requests ?? []).find((entry) => entry.session === undefined || entry.session === current)
+    const requests = body.requests ?? []
+    /** Every session waited on, not only the open one: the rows say so wherever the person is looking. */
+    const waiting = new Set(requests.map((entry) => entry.session).filter((id) => typeof id === 'string'))
+    if (waiting.size !== pendingApprovalSessions.size || [...waiting].some((id) => !pendingApprovalSessions.has(id))) {
+      pendingApprovalSessions.clear()
+      for (const id of waiting) pendingApprovalSessions.add(id)
+      paintRunningMarks()
+    }
+    const request = requests.find((entry) => entry.session === undefined || entry.session === current)
     if (request !== undefined) showApproval(request)
   } catch {
     // a page that cannot read pending questions still answers the next one it is shown
@@ -11880,7 +11966,6 @@ async function refreshApprovals() {
 /** Questions wait for a person, so the card is discovered from the pending list as well as pushed by the stream. */
 setInterval(() => {
   if (document.hidden) return
-  if (current === null) return
   void refreshApprovals()
 }, 2000)
 

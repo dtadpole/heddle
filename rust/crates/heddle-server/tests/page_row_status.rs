@@ -1,0 +1,47 @@
+//! Session rows in the page this binary serves say when a session waits for a person and when it finished unseen.
+//!
+//! The binary embeds `src/server/page.html` (`page::PAGE_SOURCE`). DSH's rows show the warning dot and **Approval** while
+//! an approval waits, the done dot for a finished turn nobody opened, the spinner while running, and nothing when idle
+//! (`dsh-client-ui-workspace`, Pending interactions; `completionUnread` in `dsh-client-ui-session`). The page showed only
+//! the spinner (DSH parity R-developer-seven-3). The rule is executed by `test/page-row-status.test.ts` and judged in a
+//! browser by `_verifiers_/80-web-ui/check-row-status.mjs`; this test is the removal detector on the embedded page.
+
+use heddle_server::page::PAGE_SOURCE;
+
+#[test]
+fn the_row_status_follows_dsh_order() {
+    let start = PAGE_SOURCE
+        .find("function sessionRowStatus(")
+        .expect("the page has a sessionRowStatus function");
+    let body = &PAGE_SOURCE[start..];
+    let body = &body[..body.find("\n}\n").expect("the function ends")];
+    let order = [
+        "sets.pending.has(id)",
+        "sets.running.has(id)",
+        "sets.unread.has(id)",
+    ];
+    let positions: Vec<usize> = order
+        .iter()
+        .map(|needle| body.find(needle).unwrap_or_else(|| panic!("{needle} is checked")))
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "pending, then running, then unread: {positions:?}"
+    );
+    assert!(body.contains("label: 'Waiting for approval', trailing: 'Approval'"));
+    assert!(body.contains("state: 'done', label: 'Completed'"));
+}
+
+#[test]
+fn the_page_keeps_the_waiting_and_unread_sets() {
+    assert!(PAGE_SOURCE.contains("const pendingApprovalSessions = new Set()"));
+    assert!(PAGE_SOURCE.contains("const completionUnread = new Set()"));
+    assert!(
+        PAGE_SOURCE.contains("if (runningSessions.has(payload.session)) noteSessionStopped(payload.session)"),
+        "a turn that ends unseen becomes unread"
+    );
+    assert!(
+        PAGE_SOURCE.contains("if (completionUnread.delete(id)) paintRunningMarks()"),
+        "opening a session reads it"
+    );
+}
