@@ -12,8 +12,10 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  acrossMove,
   classifyOutage,
   consoleVerdict,
+  deploymentMove,
   deploymentDown,
   doorVerdict,
   expectedPage,
@@ -296,6 +298,22 @@ test('the real model is chosen from the catalogue at its lowest effort, or the r
   assert.match(realModelChoice({ endpoints: [{ name: 'deepseek-official', models: [{ id: 'deepseek-pro' }] }] }).reason, /deepseek-official\/deepseek-flash is not configured/)
   assert.equal(realModelChoice(null).ok, false)
   assert.equal(modelLabel({ endpoint: 'e', model: 'm', effort: null }), 'e/m')
+})
+
+test('a redeploy inside a pass leaves its failures unjudged, with the move named (2026-10-29 11:08Z)', () => {
+  const start = { head: 'aefbd9c9d7f7d6b9', marker: '68527116cd03' }
+  assert.equal(deploymentMove(start, { ...start }), null, 'nothing moved')
+  assert.equal(deploymentMove(start, { head: null, marker: null }), null, 'a missing end reading is not a move')
+  const move = deploymentMove(start, { head: '551c0a44b65915b8', marker: 'e7c848afdc92' })
+  assert.deepEqual(move, { fromHead: 'aefbd9c9d7f7', toHead: '551c0a44b659', fromMarker: '68527116cd03', toMarker: 'e7c848afdc92' })
+  assert.notEqual(deploymentMove(start, { head: start.head, marker: 'e7c848afdc92' }), null, 'a rebuilt page alone is a move')
+  const marker = { verdict: 'fail', detail: 'the served page is not this build' }
+  const judged = acrossMove(marker, move)
+  assert.equal(judged.verdict, 'unjudged')
+  assert.match(judged.detail, /moved during the pass \(aefbd9c9d7f7 -> 551c0a44b659\).*not this build/)
+  assert.deepEqual(acrossMove({ verdict: 'pass', detail: 'ok' }, move), { verdict: 'pass', detail: 'ok' }, 'a pass stays a pass')
+  assert.equal(acrossMove(marker, null), marker, 'without a move a failure stays a failure')
+  assert.equal(passVerdict({ gate: { verdict: 'pass' }, marker: judged }), 'unjudged')
 })
 
 test("one real turn per pass: a conversation that is not sent is recorded, never judged", () => {

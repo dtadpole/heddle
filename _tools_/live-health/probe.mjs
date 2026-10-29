@@ -59,8 +59,10 @@ import { fileURLToPath } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 
 import {
+  acrossMove,
   classifyOutage,
   consoleVerdict,
+  deploymentMove,
   deploymentDown,
   doorVerdict,
   expectedPage,
@@ -1235,6 +1237,21 @@ pass.compare = {
   note: 'counts only; they move with content (session rows in the tree, turns in the log), so compare them at equal content and name a move at equal content as a regression for the ui lane',
 }
 
+/**
+ * A redeploy can land inside a pass (2026-10-29 11:08Z). The checkout is read again here: when its
+ * head or built page moved since the start, a failure measured against the start's build is unjudged
+ * and the move is recorded; the next pass judges the new build.
+ */
+const endBuilt = existsSync(deployment.pagePath) ? readFileSync(deployment.pagePath) : null
+const move = deploymentMove(
+  { head: deployment.head, marker: deployment.expectedMarker },
+  { head: gitAt(DEPLOY_ROOT, 'rev-parse', 'HEAD'), marker: endBuilt === null ? null : createHash('sha256').update(endBuilt).digest('hex').slice(0, 12) },
+)
+if (move !== null) {
+  pass.deploymentMoved = move
+  for (const name of Object.keys(pass.checks)) pass.checks[name] = acrossMove(pass.checks[name], move)
+}
+
 pass.verdict = passVerdict(pass.checks)
 
 /** The pinned and printed record is redacted at the boundary: home paths under ~, tokens gone. */
@@ -1250,6 +1267,10 @@ if (options.json === true) {
   const mark = (verdict) => (verdict === 'pass' ? 'pass' : verdict === 'fail' ? 'FAIL' : '----')
   say(`live-health ${pass.at}`)
   say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}${deployment.mainTipFresh ? '' : ' (ref not refreshed)'}, behind ${deployment.behind ?? '?'}, ahead ${deployment.ahead ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
+  if (pass.deploymentMoved !== undefined) {
+    const moved = pass.deploymentMoved
+    say(`moved       the deployment moved during the pass: ${moved.fromHead} -> ${moved.toHead} (page ${moved.fromMarker} -> ${moved.toMarker}); failures are unjudged`)
+  }
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
   if (pass.outage !== undefined) {
     say(
