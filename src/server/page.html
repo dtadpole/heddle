@@ -11174,28 +11174,31 @@ function decodeRawPath(href) {
   }
 }
 
+/* chat-links:begin */
 /**
- * The file a link in a chat answer names, resolved against the session's folder, or `null` for a link that is not a
- * file: a remote or `mailto:` address, a bare `#fragment`, or a protocol-relative URL.
+ * The file a link in a chat answer names, resolved against `folder` (the session's own), or `null` for a link that is
+ * not a file: a remote or `mailto:` address, a bare `#fragment`, or a protocol-relative URL.
  *
  * A model writes `README.md` or `src/app.ts` meaning the session's workspace, so a relative path is joined to the
  * folder the session runs in, with `.` and `..` resolved; an absolute path is taken as written, and the file route's
- * own sandbox decides whether it may be read.
+ * own sandbox decides whether it may be read. A link to this server's raw route names its file in the query. Pure, and
+ * fenced by these markers, so a unit test (test/page-chat-links.test.ts) judges it directly.
  */
-function chatLinkPath(href) {
+function chatLinkPath(href, folder) {
   if (href === '' || href.startsWith('#') || href.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(href)) return null
-  const raw = decodeRawPath(href)
-  if (raw !== null) return raw
   let target
   try {
-    target = decodeURIComponent(href.split('#')[0].split('?')[0])
+    const raw = href.indexOf('/api/raw?path=')
+    target = raw !== -1
+      ? decodeURIComponent(href.slice(raw + '/api/raw?path='.length).split('#')[0].split('&')[0])
+      : decodeURIComponent(href.split('#')[0].split('?')[0])
   } catch {
     return null
   }
   if (target === '') return null
   if (!target.startsWith('/')) {
-    if (activeFolder === null) return null
-    target = `${activeFolder.replace(/\/+$/, '')}/${target}`
+    if (typeof folder !== 'string' || folder === '') return null
+    target = `${folder.replace(/\/+$/, '')}/${target}`
   }
   const parts = []
   for (const part of target.split('/')) {
@@ -11205,6 +11208,7 @@ function chatLinkPath(href) {
   }
   return `/${parts.join('/')}`
 }
+/* chat-links:end */
 
 /**
  * A file link in an answer opens the file in the page's preview (DSH opens a chat file link in its sidebar; heddle's
@@ -11217,7 +11221,7 @@ log.addEventListener('click', (clickEvent) => {
   if (anchor === null) return
   if (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.shiftKey || clickEvent.altKey || clickEvent.button !== 0) return
   const href = anchor.getAttribute('href') ?? ''
-  const path = chatLinkPath(href)
+  const path = chatLinkPath(href, activeFolder)
   if (path === null) return
   clickEvent.preventDefault()
   const fragment = href.split('#')[1] ?? ''
