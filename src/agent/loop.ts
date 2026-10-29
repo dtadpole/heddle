@@ -8,6 +8,7 @@ import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
 import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
+import { recordTimeContext } from '../schedule/time-context.ts'
 
 /**
  * A model failure, read the way a seam has to read it: **by its code, not by its class**.
@@ -299,6 +300,8 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode), cwd)),
       },
     ])
+    /** The clock reading reminders depend on (DSH's dsh-time-context): due at most once per ten minutes. */
+    recordTimeContext(ctx.session.store, options.session, { step: round + 1 })
 
     let inputBefore = userInputSeqs(ctx, options.session)
 
