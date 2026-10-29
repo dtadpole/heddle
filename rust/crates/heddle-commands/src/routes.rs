@@ -493,6 +493,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uploaded_files_reach_goal_through_the_route_as_the_parts_a_turn_records() {
+        use crate::goal::{
+            GOAL_ATTACHMENTS_REFUSED, GOAL_ATTACHMENTS_TEXT, GoalFollowupSink, goal_command,
+        };
+        use heddle_session::{Message, SessionHandle};
+        use std::sync::Mutex;
+
+        let fixture = Fixture::new("routes-goal-attachments");
+        let goals = Arc::new(heddle_goal::GoalService::new(
+            fixture.store.clone(),
+            heddle_goal::GoalConfig::default(),
+        ));
+        let followups = Arc::new(Mutex::new(Vec::<Message>::new()));
+        let record = Arc::clone(&followups);
+        let sink: GoalFollowupSink = Arc::new(move |_: &SessionHandle, message: Message| {
+            record.lock().unwrap().push(message);
+        });
+        let registry = CommandRegistry::new();
+        registry
+            .register(goal_command(goals.clone(), Some(sink)))
+            .unwrap();
+        let app = app_over(&fixture, registry);
+        let spec = fixture.upload("2026-10-29T00-00-00-000Z-spec.md", b"# the release\n");
+        let path = post_path(&fixture.handle.id);
+        let post = |line: &str| {
+            let app = app.clone();
+            let path = path.clone();
+            let body = json!({"line": line, "attachments": [spec]}).to_string();
+            async move { call(app, Method::POST, &path, Some(&body)).await }
+        };
+
+        let paused = post("/goal pause").await;
+        assert_eq!(
+            paused.status(),
+            StatusCode::OK,
+            "/goal accepts attachments, so the layer runs it"
+        );
+        let answer = json_of(paused).await;
+        assert_eq!(
+            (&answer["kind"], &answer["text"]),
+            (&json!("error"), &json!(GOAL_ATTACHMENTS_REFUSED))
+        );
+        assert_eq!(goals.get(&fixture.handle.id).unwrap(), None);
+
+        let created = json_of(post("/goal ship the release").await).await;
+        assert_eq!(created["kind"], json!("success"));
+        assert!(
+            created["text"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Goal created\nStatus: active\nObjective: ship the release\n"),
+            "{created}"
+        );
+        let followups = followups.lock().unwrap().clone();
+        assert_eq!(followups.len(), 1, "one follow-up message for the create");
+        let content = &followups[0].content;
+        assert_eq!(content.len(), 2);
+        match &content[0] {
+            ContentPart::File(file) => {
+                assert_eq!(
+                    file.name, "spec.md",
+                    "the upload stamp is not part of the name"
+                );
+                assert_eq!(file.bytes, 14);
+                assert_eq!(
+                    std::fs::canonicalize(&file.path).unwrap(),
+                    std::fs::canonicalize(&spec).unwrap()
+                );
+            }
+            other => panic!("a file part, got {other:?}"),
+        }
+        assert_eq!(content[1], ContentPart::text(GOAL_ATTACHMENTS_TEXT));
+    }
+
+    #[tokio::test]
     async fn the_menu_module_is_served_as_the_typescript_tree_has_it() {
         let fixture = Fixture::new("routes-menu");
         let response = call(app(&fixture), Method::GET, MENU_PATH, None).await;

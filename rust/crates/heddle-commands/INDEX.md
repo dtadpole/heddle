@@ -1,11 +1,13 @@
 ---
 title: The heddle-commands crate
 created: 2026-10-29T12:21:02Z
-modified: 2026-10-29T14:52:00Z
-version: 0.2.0
-description: The Rust port crate for the host's slash commands — the registry, the line parser, the five built-in commands and the two routes the composer's slash menu uses — its public API, what it needs from other crates, and how it is mounted.
+modified: 2026-10-29T15:40:00Z
+version: 0.3.0
+description: The Rust port crate for the host's slash commands — the registry, the line parser, the five built-in commands (with DSH's /goal) and the two routes the composer's slash menu uses — its public API, what it needs from other crates, and how it is mounted.
 grounded_in:
   - source: src/commands/registry.ts, src/commands/builtins.ts, src/commands/http.ts, src/commands/service.ts and src/commands/INDEX.md, read 2026-10-29
+  - source: src/commands/goal.ts and test/commands-goal.test.ts (commit 3729bdf6), read 2026-10-29
+  - source: _projects_/heddle/_designs_/dsh-parity/goals-todo-spec.md section B1
   - source: test/commands.test.ts
   - source: _verifiers_/80-web-ui/check-slash-commands.mjs
 ---
@@ -20,11 +22,11 @@ ordinary prompt, which is how `/skillname` and a typo like `/compcat` still reac
 
 | | |
 |---|---|
-| Ported from | `src/commands/` (`registry.ts`, `builtins.ts`, `http.ts`, `service.ts`) |
+| Ported from | `src/commands/` (`registry.ts`, `builtins.ts`, `goal.ts`, `http.ts`, `service.ts`) |
 | Judged by | `_verifiers_/80-web-ui/check-slash-commands.mjs`, through the `heddle` binary (`HEDDLE_BIN`) |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **mounted by `heddle web`** (`rust/crates/heddle/src/web.rs`, `commands_host`); 42 unit tests port `test/commands.test.ts` case by case; through a debug `HEDDLE_BIN` the check's four server checks pass, the browser check is judged separately under the browser lock |
-| Owner | `developer-three` (D-057), with the TypeScript layer |
+| Status | **mounted by `heddle web`** (`rust/crates/heddle/src/web.rs`, `commands_host`); 75 unit tests port `test/commands.test.ts` and `test/commands-goal.test.ts` case by case; through a debug `HEDDLE_BIN` the check's four server checks pass, the browser check is judged separately under the browser lock |
+| Owner | `developer-three` (D-057), with the TypeScript layer; what `/goal` means (`src/goal.rs`) is `developer-nine`'s (D-059), landed through this crate and credited under D-055 |
 
 ## Routes
 
@@ -46,8 +48,9 @@ feature crate's, and the session segment is named `{id}` as the server's router 
 
 `attachments` is the list of uploaded paths a turn takes, read by the turn's reader
 (`heddle_web_files::attachments::read_attachments` over `<heddle home>/uploads`) into the parts a user message
-records (`heddle_session::ContentPart`), and handed to the handler as `CommandContext::attachments`. No built-in
-accepts them yet (`CommandInput::attachments`), so each refuses a line that carries files. `command/run` records
+records (`heddle_session::ContentPart`), and handed to the handler as `CommandContext::attachments`. Only `/goal`
+declares that it accepts them (`CommandInput::attachments`), and its handler reads them from the context; every other
+built-in refuses a line that carries files. `command/run` records
 `args` as the raw remainder after the name, separating whitespace included, as DSH does; the handler's
 `CommandContext::args` is trimmed.
 
@@ -60,7 +63,7 @@ A reload draws a command's row from the session's history: `heddle-server`'s tra
 | Command | Input | Section | What it does |
 |---|---|---|---|
 | `/compact` | none | Commands | the context service's forced reduction (`prepare(…, force: true)`), measured before and after: "Compacted N history items (~T tokens)." or "No compactable history yet." |
-| `/goal` | `[<objective>\|clear\|edit <objective>\|pause\|resume]` | Add | the goal service's create, show, edit, pause, resume and clear |
+| `/goal` | `[<objective>\|clear\|edit <objective>\|pause\|resume]`, attachments allowed | Add | DSH's `dsh-command-goal`, word for word: the parse (whole-input `clear`/`pause`/`resume` in any case, `edit <objective>`, anything else a create), the goal card (title, `Status`, `Blocker` when blocked, `Objective`, `Rounds`, `Activation`, a per-state `Commands` hint), "Goal created/updated/paused/resumed", and every goal-service refusal as "The goal command is not valid for the current state. Run /goal to view available commands." |
 | `/feedback` | `<text>` | Add | a `feedback/record` `{text, anonymousUser}` event; the id is a UUID kept in `<heddle home>/feedback-user-id` (mode 600); the text is kept out of `command/run` |
 | `/permission` | `<preset>` | Commands | the session's sandbox mode; widening to `danger-full-access` is refused and left to the access chip's risk gate |
 | `/export` | none | Commands | `action: {kind: "download", href: "/api/sessions/<id>/log"}`, the same bytes as Download log |
@@ -72,7 +75,8 @@ A reload draws a command's row from the session's history: `heddle-server`'s tra
 | `CommandRegistry` (`register` → `Disposer`, `has`, `list`, `execute(log, session, line, attachments)`) | names unique and `[a-z][a-z0-9_-]*`; run ids `cmd-<8 hex>-<n>`; `execute` answers `None` for a line that is not a registered command, `CommandError::Input` (nothing written) for attachments a command does not accept, `CommandError::Log` when the log refuses an append |
 | `parse_command_line`, `is_command_name`, `default_label` | the TypeScript `COMMAND_LINE` and `COMMAND_NAME` rules, without a regex crate |
 | `CommandDefinition` (`new`, `sync`, `label`, `section`, `input`, `record_input`), `CommandContext` (`session`, `command_id`, `raw_input`, `args`, `attachments`), `CommandResult`, `CommandAction`, `CommandDescriptor`, `CommandExecution`, `CommandLog`, `CommandError` | the shapes; a handler's `Err` (or panic) is a result of kind `error` |
-| `goal_command`, `compact_command`, `feedback_command`, `permission_command`, `export_command`, `describe_goal` | the built-ins over `GoalHost`, `CompactionHost`, `CommandLog` + `AnonymousUser`, `PermissionHost` |
+| `compact_command`, `feedback_command`, `permission_command`, `export_command` | the built-ins over `CompactionHost`, `CommandLog` + `AnonymousUser`, `PermissionHost` |
+| `goal_command(GoalHost, Option<GoalFollowupSink>)`, `execute_goal_command`, `parse_goal_command`, `render_goal`, `command_hint`, `goal_attachment_followup`, `GoalHostError`, `GOAL_USAGE`, `GOAL_STATE_ERROR`, … | `/goal` (`goal.rs`): the handler that reads `CommandContext::attachments`, the parse, the card, and the refusal split (`Refused` → the one sentence, `Failed` → the run's error) |
 | `Commands` (`new(CommandServices)`, `with_registry(sessions, registry, upload_dir)`, `open`, `read_attachments`, `execute`), `CommandServices` (… `heddle_home`, `upload_dir`) | the host the routes read, wired to the real services and the turn's upload directory |
 | `router(Arc<Commands>) -> axum::Router`, `ROUTES`, `MAX_COMMAND_LINE` | the mount |
 
@@ -81,9 +85,9 @@ A reload draws a command's row from the session's history: `heddle-server`'s tra
 | From | What |
 |---|---|
 | `heddle-session` | `SessionService` (`open`, `meta`, `events`, `effective_mode`, `set_mode`) and the store's `append` |
-| `heddle-goal` | `GoalService` (`get`, `create`, `edit`, `pause`, `resume`, `clear`); absent → "the goal service is not loaded in this profile" |
+| `heddle-goal` | `GoalService` (`get`, `create`, `edit`, `pause`, `resume`, `clear`), `GoalView`, `GoalRef`, `GoalError`; absent → the run's error "the goal service is not loaded in this profile" |
 | `heddle-context` | `ContextService<SessionStore>::prepare` and `measure`; absent → "Compaction is unavailable because the context service is not loaded." |
-| `heddle-llm` | `ModelService::default_endpoint(None)` when the session records no endpoint; none at all → "Compaction is unavailable because no model endpoint is configured to summarise with." |
+| `heddle-llm` | `ModelService::default_endpoint(None)` when the session records no endpoint; none at all → "Compaction is unavailable because no model endpoint is configured to summarise with." `ContentPart` and `Message` for `/goal`'s attachment follow-up |
 | `heddle-sandbox` | `SandboxMode` (the vocabulary and its rank); the binary passes the deployment's mode as the default |
 | `heddle-web-files` | `attachments::read_attachments` and `AttachmentPart` — the reader a turn uses — for a line's `attachments`; `uploads::upload_directory` in the tests |
 
@@ -105,6 +109,11 @@ so a command line's attachments are read exactly as a turn's.
 - A session-log append that fails is answered `500 {"error": …}` by the route, where `http.ts` throws to the
   server's catch-all.
 - The ids (`cmd-<8 hex>`, the anonymous UUID) are random but not cryptographic: neither is a secret.
+- As in the TypeScript build, `/goal`'s attachments do not go on to a turn yet: the route reads them into
+  `CommandContext::attachments` and the registered handler passes them to `execute_goal_command` (refused on every
+  form but a create or an edit; on those the follow-up message is built), but nothing in the layer can start the
+  follow-up turn DSH's `agent.followup` starts, so `Commands::new` passes no follow-up sink — the TODO is in
+  `goal.rs`.
 
 ## Read next
 
