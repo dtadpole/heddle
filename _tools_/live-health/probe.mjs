@@ -939,9 +939,11 @@ async function judgePreview() {
   const endpoints = await previewFetch(`${origin}/api/endpoints`, cookie)
   const tree = await previewFetch(`${origin}/api/tree`, cookie)
   const page = await previewFetch(`${origin}/`, cookie)
+  // Endpoints are recorded by kind only: a machine's endpoint names can carry private literals, and
+  // the pinned JSONL is published through main (public-hygiene gate, 2026-10-29).
   let kinds = null
   try {
-    kinds = (JSON.parse(endpoints.body ?? '').endpoints ?? []).map((item) => ({ name: item.name ?? null, kind: item.kind ?? null }))
+    kinds = (JSON.parse(endpoints.body ?? '').endpoints ?? []).map((item) => ({ kind: item.kind ?? null }))
   } catch {}
   let roots = null
   try {

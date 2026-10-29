@@ -1,14 +1,14 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.4.0
+version: 1.4.1
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the 96-deployment and 90-web-ui-token verifiers, whose claims the process, marker and door checks reuse
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-25T14:33:06Z
+modified: 2026-10-29T10:00:00Z
 ---
 
 # The checks
@@ -30,7 +30,8 @@ A pass judges `8082`, the server behind it on `3082` (topology in
 | `preview` | its own session store, token link `303`, `/api/endpoints` and `/api/tree` `200`, a fixture turn, a two-message conversation | `previewVerdict`, `previewTurnVerdict` |
 
 **The preview is read-only and separate:** its own launch link, only statuses, sizes and counts pinned,
-a verdict that never changes the deployment's. A turn goes only when `/api/endpoints`
+a verdict that never changes the deployment's. Endpoints are pinned by kind only, never by name,
+because a machine's endpoint names can carry private literals (public-hygiene gate). A turn goes only when `/api/endpoints`
 lists just the offline fixture (`fixtureOnly`) and no session id is shared with `3082`
 (`sharedSessions`). Its conversation counts once its build contains the follow-up fix
 `4da44cf` (`conversationVerdict`).
