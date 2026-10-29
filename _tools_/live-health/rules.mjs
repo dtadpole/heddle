@@ -407,6 +407,20 @@ export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, a
  */
 export const REAL_MODEL = { endpoint: 'deepseek-official', model: 'deepseek-flash' }
 
+/**
+ * Whether a real-model pass retires its health session and starts a new one: when the session was
+ * created before the current UTC day. A real model receives the whole session as context, and the
+ * reused 8082 session had grown to ~478 fixture turns by 2026-10-29 (a real turn's first delta went
+ * from ~2 s to 24 s). Rolling daily keeps every real turn small and adds at most one session a day
+ * per target. A creation time that cannot be read keeps the session: never a new session every pass.
+ */
+export function healthSessionExpired(created, now = new Date()) {
+  const at = typeof created === 'number' ? created : Date.parse(String(created ?? ''))
+  if (!Number.isFinite(at)) return false
+  const day = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  return at < day
+}
+
 /** Reasoning levels from least to most effort, for catalogues whose ids follow the common names. */
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 

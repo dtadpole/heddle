@@ -42,6 +42,7 @@
  *   _tools_/live-health/probe.mjs                     # one pass, summary, exit 0/1/3
  *   _tools_/live-health/probe.mjs --json --pin        # append the pass to the pinned JSONL
  *   _tools_/live-health/probe.mjs --no-turn           # judge the page, do not spend a turn
+ *   _tools_/live-health/probe.mjs --no-deployment-turn   # 8082's turn alone paused; the preview's still goes
  *   _tools_/live-health/probe.mjs --deployment-conversation   # 8082 also gets a follow-up, same page
  *   _tools_/live-health/probe.mjs --real-model=deepseek-official/deepseek-flash   # the real turn's model (D-052 default)
  *   _tools_/live-health/probe.mjs --log=~/.heddle/web.log --deploy=~/heddle-live
@@ -74,6 +75,7 @@ import {
   parseArguments,
   expectedSeatLabel,
   fixtureOnly,
+  healthSessionExpired,
   modelLabel,
   REAL_MODEL,
   realModelChoice,
@@ -116,6 +118,12 @@ const SEND_TURN = options['no-turn'] !== true
  * preview wrote into the deployment's session store. A paused turn is unjudged, never a pass.
  */
 const PREVIEW_TURN = options['no-preview-turn'] !== true
+/**
+ * The deployment's turn alone can be paused too: a turn that landed in a session the monitor does not
+ * own pauses that turn until the coordinator answers (2026-10-29 11:35Z, a new-session draft on 8082
+ * turned out to be someone's existing empty session). A paused turn is unjudged, never a pass.
+ */
+const DEPLOYMENT_TURN = options['no-deployment-turn'] !== true
 /**
  * The deployment's two-message check, on demand: the coordinator asked (review 255, 2026-10-25) for a
  * two-message conversation on 8082 as well as 3097 once the page patch is deployed. The follow-up goes
@@ -629,7 +637,25 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
      * and by the page's own selection function when the tree does not draw it. Only a deployment with
      * no health session yet gets a new one.
      */
-    const healthSession = (await callTool(
+    /**
+     * Which turn this target gets (the coordinator's D-052 decision, 2026-10-29), read before the
+     * session is chosen because a real-model pass rolls its session daily. With only the offline
+     * fixture configured, the fixture turn as before; otherwise one minimal real turn on WANT_MODEL at
+     * its lowest effort, and a model that cannot be had fails the turn - no other model is ever tried.
+     * Endpoints are read by kind only (public-hygiene).
+     */
+    const catalogue = (await callTool(
+      'evaluate_script',
+      { pageId, function: `(async () => { try { return await (await fetch('/api/endpoints')).json() } catch { return null } })` },
+      15_000,
+    ))?.value ?? null
+    const kinds = Array.isArray(catalogue?.endpoints) ? catalogue.endpoints.map((item) => ({ kind: item?.kind ?? null })) : null
+    const mode = fixtureOnly(kinds) ? 'fixture' : 'real'
+    const choice = mode === 'real' ? realModelChoice(catalogue, WANT_MODEL) : null
+    if (choice !== null && choice.ok !== true) {
+      return { mode, selection: choice, session: { reused: false, via: 'none', title: null }, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
+    }
+    const found = (await callTool(
       'evaluate_script',
       {
         pageId,
@@ -641,13 +667,20 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
           if (hit === null) return null
           const rows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
           const row = rows.find((item) => (item.querySelector('.label')?.textContent ?? '') === hit.title) ?? null
-          if (row === null) return { id: hit.id, title: hit.title, row: null }
+          if (row === null) return { id: hit.id, title: hit.title, created: hit.created ?? null, row: null }
           const rect = row.getBoundingClientRect()
-          return { id: hit.id, title: hit.title, row: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } }
+          return { id: hit.id, title: hit.title, created: hit.created ?? null, row: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } }
         })`,
       },
       20_000,
     ))?.value ?? null
+    /**
+     * A real model is sent the whole session as context, so a real-model pass retires a health session
+     * from an earlier UTC day and starts a new one (`healthSessionExpired`): the old one is left as it
+     * is, never written into again by a real turn.
+     */
+    const retired = mode === 'real' && found !== null && healthSessionExpired(found.created) ? found.title : null
+    const healthSession = retired === null ? found : null
     /** The session list as the page's server holds it: id and `updated` only, never titles of others. */
     const sessionsNow = async () =>
       (await callTool(
@@ -680,7 +713,13 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
         target = ((await sessionsNow()) ?? []).find((item) => !known.has(item.id))?.id ?? null
       }
       if (target === null) {
-        return { verdict: 'unjudged', detail: 'New session started nothing the server lists, so no turn was sent', session: { reused: false, via: 'none', title: null } }
+        /**
+         * No new id: send nothing. An empty log cannot tell a page-side draft from an existing empty
+         * session someone else created - on 2026-10-29 at 11:35Z 8082's New session opened such a
+         * session and a turn written there landed `other`. Only a session the server newly lists is
+         * the monitor's own.
+         */
+        return { mode, verdict: 'unjudged', detail: 'New session started nothing the server lists, so no turn was sent', session: { reused: false, via: 'none', title: null, ...(retired !== null ? { retired } : {}) } }
       }
       reused = 'started'
     }
@@ -693,27 +732,9 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       reused = 'selection'
     }
     if (reused !== 'new') await new Promise((done) => setTimeout(done, 400))
-    const sessionNote = { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null }
-    /**
-     * Which turn this target gets (the coordinator's D-052 decision, 2026-10-29). With only the offline
-     * fixture configured, the fixture turn as before. Otherwise one minimal real turn: the monitor's own
-     * session is switched onto WANT_MODEL at its lowest effort through the page's own selection
-     * function before the prompt goes, and a model that cannot be had fails the turn - no other model is
-     * ever tried. Endpoints are read by kind only (public-hygiene).
-     */
-    const catalogue = (await callTool(
-      'evaluate_script',
-      { pageId, function: `(async () => { try { return await (await fetch('/api/endpoints')).json() } catch { return null } })` },
-      15_000,
-    ))?.value ?? null
-    const kinds = Array.isArray(catalogue?.endpoints) ? catalogue.endpoints.map((item) => ({ kind: item?.kind ?? null })) : null
-    const mode = fixtureOnly(kinds) ? 'fixture' : 'real'
+    const sessionNote = { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null, ...(retired !== null ? { retired } : {}) }
     let selection = null
     if (mode === 'real') {
-      const choice = realModelChoice(catalogue, WANT_MODEL)
-      if (choice.ok !== true) {
-        return { mode, selection: choice, session: sessionNote, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
-      }
       /**
        * The page's script is a module, so its selection functions are not reachable from outside: the
        * choice is made the way a person makes it, through the model seat's own menu (Model row, the
@@ -1199,7 +1220,9 @@ pass.checks.marker = judgeMarker(pass.checks.load)
 if (pass.checks.load.verdict === 'pass') {
   const pageId = pass.checks.load.pageId
   pass.checks.consoleOnLoad = await judgeConsole(pageId, 'load')
-  pass.checks.turn = await judgeTurn(pageId, pass.checks.load.page)
+  pass.checks.turn = DEPLOYMENT_TURN
+    ? await judgeTurn(pageId, pass.checks.load.page)
+    : { verdict: 'unjudged', detail: 'the deployment turn is paused (--no-deployment-turn)' }
   if (DEPLOYMENT_CONVERSATION) {
     const first = pass.checks.turn
     let conversation = { verdict: 'unjudged', detail: 'the first message did not pass, so no follow-up was sent' }
