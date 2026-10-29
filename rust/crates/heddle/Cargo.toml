@@ -20,6 +20,7 @@ path = "src/main.rs"
 axum.workspace = true
 futures.workspace = true
 heddle-agent.workspace = true
+heddle-commands = { path = "../heddle-commands" }
 heddle-config.workspace = true
 heddle-context.workspace = true
 heddle-events.workspace = true

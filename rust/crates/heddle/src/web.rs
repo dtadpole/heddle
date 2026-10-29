@@ -321,7 +321,31 @@ fn page_routers(
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
+    routers.push(heddle_commands::router(commands_host(boot, &host)));
     routers
+}
+
+/// The slash commands (`/commands/menu.js`, `GET /api/commands`, `POST /api/sessions/{id}/commands`): the
+/// built-ins wired to the booted session, goal, context and model services, with the sandbox's mode as a
+/// session's default.
+fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands> {
+    let services = &boot.services;
+    Arc::new(heddle_commands::Commands::new(
+        heddle_commands::CommandServices {
+            sessions: Arc::clone(&host.sessions),
+            goals: services.get::<Arc<heddle_goal::GoalService>>("goal"),
+            context: services
+                .get::<Arc<heddle_context::ContextService<heddle_session::SessionStore>>>(
+                    "context",
+                ),
+            models: services.get::<Arc<heddle_llm::ModelService>>("model"),
+            sandbox_default: services
+                .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
+                .map(|sandbox| sandbox.mode())
+                .unwrap_or(heddle_sandbox::SandboxMode::WorkspaceWrite),
+            heddle_home: host.home.clone(),
+        },
+    ))
 }
 
 /// What the composer's routes read: the booted session store, the model service and the sandbox.
