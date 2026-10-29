@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { ALLOWED_ATTRS, ALLOWED_TAGS, PREVIEW_CSP, rewriteResources } from '../src/server/html.ts'
+import { ALLOWED_ATTRS, ALLOWED_TAGS, isHtmlDocument, PREVIEW_CSP, rewriteResources } from '../src/server/html.ts'
 import { rendererFor, renderSource } from '../src/server/code.ts'
 
 /**
@@ -75,4 +75,14 @@ test('an html file is a renderer of its own, and produces no markup on the serve
   assert.deepEqual(renderSource('/x/page.html', '<h1>hi</h1>'), { renderer: 'html' })
   /** And XML is not a page, so the grammar it had is still there. */
   assert.deepEqual(rendererFor('/x/data.xml'), { renderer: 'code', language: 'xml' })
+})
+
+test('only an .html or .htm file is a page to preview, as DSH registers its HTML renderer', () => {
+  for (const path of ['/w/page.html', '/w/PAGE.HTM', '/w/a.b/index.Html', 'C:\\w\\page.htm']) {
+    assert.equal(isHtmlDocument(path), true, path)
+  }
+  // A Word document goes to DSH's Office renderer, text to its own; none is ever framed as a page.
+  for (const path of ['/w/report.docx', '/w/notes.txt', '/w/readme.md', '/w/page.html.bak', '/w/html', '/w/.html', '/w/x.xhtml']) {
+    assert.equal(isHtmlDocument(path), false, path)
+  }
 })
