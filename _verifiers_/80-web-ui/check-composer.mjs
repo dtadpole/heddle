@@ -1748,3 +1748,45 @@ test('a queued message keeps its image through an edit and reaches the provider'
     await server.close()
   }
 })
+
+test('a queued message runs as a turn with Stop on offer, and a message typed meanwhile waits for it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue developer-ten-6 (P1, measured on 8082 on 2026-10-29): once the queue had sent its message as a turn of
+   * its own, the composer was drawn idle under that running turn: Send instead of Stop, so the turn could not be
+   * stopped, and a message typed then went out at once as a second turn beside it on the same session. DSH: "While a
+   * normal composer is running, its primary pointer action remains Stop when the draft is empty"; a turn started from
+   * the queue is a running turn like any other.
+   */
+  const server = await startServer('queued-stop', { holdOpenMs: 2500 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the panel is up')
+    await type(browser, 'first')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length >= 1), 'the first turn reached the endpoint')
+    await type(browser, 'queued one')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the second message waits in the dock')
+    assert.ok(await until(() => server.double.requests.length >= 2, 15_000), 'the first turn ended and the queue sent its message as a turn of its own')
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === true', 10_000), 'the dock has drained')
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        stop: !document.getElementById('stop').hidden,
+        send: !document.getElementById('send').hidden,
+        label: document.getElementById('send').getAttribute('aria-label'),
+      })`),
+    )
+    assert.deepEqual(state, { stop: true, send: false, label: 'Queue message' }, 'while the queued turn runs, the composer offers Stop and Enter queues')
+    const asked = server.double.requests.length
+    await type(browser, 'typed meanwhile')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 5_000), 'a message typed meanwhile waits in the dock')
+    assert.equal(server.double.requests.length, asked, 'and no second turn started beside the running one')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
