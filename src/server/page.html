@@ -11174,6 +11174,58 @@ function decodeRawPath(href) {
   }
 }
 
+/**
+ * The file a link in a chat answer names, resolved against the session's folder, or `null` for a link that is not a
+ * file: a remote or `mailto:` address, a bare `#fragment`, or a protocol-relative URL.
+ *
+ * A model writes `README.md` or `src/app.ts` meaning the session's workspace, so a relative path is joined to the
+ * folder the session runs in, with `.` and `..` resolved; an absolute path is taken as written, and the file route's
+ * own sandbox decides whether it may be read.
+ */
+function chatLinkPath(href) {
+  if (href === '' || href.startsWith('#') || href.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(href)) return null
+  const raw = decodeRawPath(href)
+  if (raw !== null) return raw
+  let target
+  try {
+    target = decodeURIComponent(href.split('#')[0].split('?')[0])
+  } catch {
+    return null
+  }
+  if (target === '') return null
+  if (!target.startsWith('/')) {
+    if (activeFolder === null) return null
+    target = `${activeFolder.replace(/\/+$/, '')}/${target}`
+  }
+  const parts = []
+  for (const part of target.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
+
+/**
+ * A file link in an answer opens the file in the page's preview (DSH opens a chat file link in its sidebar; heddle's
+ * one preview surface is the panel, by the owner's rule). Measured before this: a link to `README.md` in an answer
+ * navigated the whole page to the server's `not found`. A remote link keeps opening its own tab, which is DSH's
+ * behaviour without an in-app browser, and a modified click is left to the browser.
+ */
+log.addEventListener('click', (clickEvent) => {
+  const anchor = clickEvent.target instanceof Element ? clickEvent.target.closest('.turn.assistant a[href]') : null
+  if (anchor === null) return
+  if (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.shiftKey || clickEvent.altKey || clickEvent.button !== 0) return
+  const href = anchor.getAttribute('href') ?? ''
+  const path = chatLinkPath(href)
+  if (path === null) return
+  clickEvent.preventDefault()
+  const fragment = href.split('#')[1] ?? ''
+  void openPath(path).then(() => {
+    if (fragment.length > 0) scrollToHeading(fragment)
+  })
+})
+
 /** Open a file by its path, which is what a link names and what a tree row carries. */
 async function openPath(path) {
   await showFile({ path, label: path.split('/').pop() ?? path, kind: 'file' })
