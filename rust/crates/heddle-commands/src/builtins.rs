@@ -3,7 +3,8 @@
 //! Ported from `src/commands/builtins.ts`. Each is a factory over the smallest host it needs, so a command is
 //! judged against a double and wired to the real services in one place ([`crate::service`]). The words a
 //! person reads are DSH's, re-read from its source on 2026-10-29; where heddle has no equivalent fact (a ZIP
-//! archive, an approval preset) the sentence says what heddle does instead.
+//! archive, an approval preset) the sentence says what heddle does instead. `/goal` has its own module,
+//! [`crate::goal`].
 
 use std::sync::Arc;
 
@@ -16,170 +17,6 @@ use crate::registry::{
     CommandAction, CommandDefinition, CommandInput, CommandLog, CommandResult, CommandSection,
 };
 use crate::text;
-
-/// A goal reference, as the goal service takes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GoalRefLike {
-    /// The goal.
-    pub id: String,
-    /// The revision a change is compared against.
-    pub revision: u64,
-}
-
-/// A goal, as the goal service shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GoalLike {
-    /// The goal.
-    pub id: String,
-    /// Its revision.
-    pub revision: u64,
-    /// What completes it.
-    pub objective: String,
-    /// `active`, `paused`, `blocked` or `complete`.
-    pub phase: String,
-    /// The round cap.
-    pub max_goal_rounds: u64,
-    /// The rounds admitted so far, when known.
-    pub rounds_started: Option<u64>,
-    /// `armed` or `disarmed`, when known.
-    pub activation: Option<String>,
-}
-
-impl GoalLike {
-    /// The reference a change of this goal names.
-    pub fn goal_ref(&self) -> GoalRefLike {
-        GoalRefLike {
-            id: self.id.clone(),
-            revision: self.revision,
-        }
-    }
-}
-
-/// The goal operations `/goal` drives: the goal service's own methods. An `Err` is the service's sentence.
-pub trait GoalHost: Send + Sync {
-    /// The current goal, if any.
-    fn get(&self, session: &SessionHandle) -> Result<Option<GoalLike>, String>;
-    /// Create a goal with this objective.
-    fn create(&self, session: &SessionHandle, objective: &str) -> Result<GoalLike, String>;
-    /// Replace the objective.
-    fn edit(
-        &self,
-        session: &SessionHandle,
-        goal: &GoalRefLike,
-        objective: &str,
-    ) -> Result<GoalLike, String>;
-    /// Pause it.
-    fn pause(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<GoalLike, String>;
-    /// Resume it.
-    fn resume(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<GoalLike, String>;
-    /// Clear it.
-    fn clear(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<(), String>;
-}
-
-/// `/goal` — set, show, edit, pause, resume or clear the session's goal.
-///
-/// DSH's argument forms: nothing shows the goal; `clear`, `pause` and `resume` (any case) act on it;
-/// `edit <objective>` replaces its objective; any other text creates one, which is refused while an unfinished
-/// goal exists.
-pub fn goal_command(goals: Arc<dyn GoalHost>) -> CommandDefinition {
-    CommandDefinition::sync(
-        "goal",
-        "Set or view the goal for a long-running task",
-        move |context| {
-            let session = &context.session;
-            let args = context.args.as_str();
-            let current = goals.get(session)?;
-            let word = args.to_lowercase();
-            if args.is_empty() {
-                return Ok(match current {
-                    None => CommandResult::success_text(
-                        "No goal is set. Use /goal <objective> to set one.",
-                    ),
-                    Some(goal) => CommandResult::success_text(describe_goal(&goal)),
-                });
-            }
-            if matches!(word.as_str(), "clear" | "pause" | "resume") {
-                let Some(current) = current else {
-                    return Ok(CommandResult::error(format!("There is no goal to {word}.")));
-                };
-                let reference = current.goal_ref();
-                return Ok(match word.as_str() {
-                    "clear" => {
-                        goals.clear(session, &reference)?;
-                        CommandResult::success_text("Goal cleared.")
-                    }
-                    "pause" => {
-                        goals.pause(session, &reference)?;
-                        CommandResult::success_text("Goal paused.")
-                    }
-                    _ => {
-                        goals.resume(session, &reference)?;
-                        CommandResult::success_text("Goal resumed.")
-                    }
-                });
-            }
-            if word == "edit"
-                || word.starts_with("edit ")
-                || word.starts_with("edit\t")
-                || word.starts_with("edit\n")
-            {
-                // `args.slice(4)`: the four characters `word` starts with are ASCII in `args` as well.
-                let objective = text::trim(args.get(4..).unwrap_or(""));
-                if objective.is_empty() {
-                    return Ok(CommandResult::error("Usage: /goal edit <objective>"));
-                }
-                let Some(current) = current else {
-                    return Ok(CommandResult::error(
-                        "There is no goal to edit. Use /goal <objective> to set one.",
-                    ));
-                };
-                let edited = goals.edit(session, &current.goal_ref(), objective)?;
-                return Ok(CommandResult::success_text(format!(
-                    "Goal updated: {}",
-                    edited.objective
-                )));
-            }
-            if let Some(current) = &current
-                && current.phase != "complete"
-            {
-                return Ok(CommandResult::error(format!(
-                    "A goal is already {}. Use /goal edit <objective> to change it, or /goal clear to remove it.",
-                    current.phase
-                )));
-            }
-            let created = goals.create(session, args)?;
-            Ok(CommandResult::success_text(format!(
-                "Goal set: {}",
-                created.objective
-            )))
-        },
-    )
-    .label("Goal")
-    .section(CommandSection::Add)
-    .input(CommandInput::hint(
-        "[<objective>|clear|edit <objective>|pause|resume]",
-    ))
-}
-
-/// The goal as `/goal` shows it: DSH's status, objective, rounds, activation and commands lines.
-pub fn describe_goal(goal: &GoalLike) -> String {
-    let mut lines = vec![
-        format!("Status: {}", goal.phase),
-        format!("Objective: {}", goal.objective),
-        format!(
-            "Rounds: {}/{}",
-            goal.rounds_started.unwrap_or(0),
-            goal.max_goal_rounds
-        ),
-    ];
-    if let Some(activation) = &goal.activation {
-        lines.push(format!("Activation: {activation}"));
-    }
-    lines.push(
-        "Commands: /goal edit <objective> · /goal pause · /goal resume · /goal clear".to_owned(),
-    );
-    lines.join("\n")
-}
 
 /// What a manual compaction reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -362,6 +199,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::goal::{GOAL_USAGE, GoalHost, goal_command};
     use crate::registry::{COMMAND_RUN_EVENT, CommandRegistry};
     use crate::test_support::Fixture;
 
@@ -383,6 +221,19 @@ mod tests {
         CommandResult::error(text)
     }
 
+    /// `/goal`'s card as DSH renders it, for a goal with no rounds under the default cap and no blocker.
+    fn goal_card(
+        title: &str,
+        objective: &str,
+        phase: &str,
+        activation: &str,
+        hint: &str,
+    ) -> String {
+        format!(
+            "{title}\nStatus: {phase}\nObjective: {objective}\nRounds: 0/100\nActivation: {activation}\n\nCommands: {hint}"
+        )
+    }
+
     #[tokio::test]
     async fn goal_sets_shows_edits_pauses_resumes_and_clears_the_goal_through_the_goal_service() {
         let fixture = Fixture::new("goal");
@@ -392,7 +243,7 @@ mod tests {
         ));
         let registry = CommandRegistry::new();
         registry
-            .register(goal_command(goals.clone() as Arc<dyn GoalHost>))
+            .register(goal_command(goals.clone() as Arc<dyn GoalHost>, None))
             .unwrap();
         let session = fixture.handle.id.clone();
         let objective = || goals.get(&session).unwrap().map(|view| view.goal.objective);
@@ -402,52 +253,77 @@ mod tests {
                 .unwrap()
                 .map(|view| view.goal.phase.as_str())
         };
+        let armed = "/goal edit <objective>, /goal pause, /goal clear";
+        let stopped = "/goal edit <objective>, /goal resume, /goal clear";
 
         assert_eq!(
             run(&registry, &fixture, "/goal").await,
-            success("No goal is set. Use /goal <objective> to set one.")
+            success(&format!("No goal is currently set.\n{GOAL_USAGE}"))
         );
         assert_eq!(
             run(&registry, &fixture, "/goal ship the parity table").await,
-            success("Goal set: ship the parity table")
+            success(&goal_card(
+                "Goal created",
+                "ship the parity table",
+                "active",
+                "armed",
+                armed
+            ))
         );
         assert_eq!(objective().as_deref(), Some("ship the parity table"));
         assert_eq!(
             run(&registry, &fixture, "/goal something else").await,
             error(
-                "A goal is already active. Use /goal edit <objective> to change it, or /goal clear to remove it."
+                "A goal is already active. Use /goal edit <objective> to change it or /goal clear before replacing it."
             )
         );
-        let shown = run(&registry, &fixture, "/goal").await;
-        assert_eq!(shown.kind(), "success");
-        let shown = shown.text().unwrap().to_owned();
-        let lines: Vec<&str> = shown.lines().collect();
-        assert_eq!(lines[0], "Status: active");
-        assert_eq!(lines[1], "Objective: ship the parity table");
-        let rounds = lines[2].strip_prefix("Rounds: 0/").expect("rounds line");
-        assert!(rounds.parse::<u64>().is_ok(), "{shown}");
-        assert!(
-            matches!(lines[3], "Activation: armed" | "Activation: disarmed"),
-            "{shown}"
+        assert_eq!(
+            run(&registry, &fixture, "/goal").await,
+            success(&goal_card(
+                "Goal",
+                "ship the parity table",
+                "active",
+                "armed",
+                armed
+            ))
         );
-        assert!(lines[4].starts_with("Commands: "), "{shown}");
         assert_eq!(
             run(&registry, &fixture, "/goal edit").await,
-            error("Usage: /goal edit <objective>")
+            error(&format!(
+                "Goal editing requires a replacement objective.\n{GOAL_USAGE}"
+            ))
         );
         assert_eq!(
             run(&registry, &fixture, "/goal edit ship it twice").await,
-            success("Goal updated: ship it twice")
+            success(&goal_card(
+                "Goal updated",
+                "ship it twice",
+                "active",
+                "armed",
+                armed
+            ))
         );
         assert_eq!(
             run(&registry, &fixture, "/goal PAUSE").await,
-            success("Goal paused."),
+            success(&goal_card(
+                "Goal paused",
+                "ship it twice",
+                "paused",
+                "disarmed",
+                stopped
+            )),
             "the words are case-insensitive"
         );
         assert_eq!(phase(), Some("paused"));
         assert_eq!(
             run(&registry, &fixture, "/goal resume").await,
-            success("Goal resumed.")
+            success(&goal_card(
+                "Goal resumed",
+                "ship it twice",
+                "active",
+                "armed",
+                armed
+            ))
         );
         assert_eq!(phase(), Some("active"));
         assert_eq!(
@@ -457,11 +333,15 @@ mod tests {
         assert_eq!(objective(), None);
         assert_eq!(
             run(&registry, &fixture, "/goal pause").await,
-            error("There is no goal to pause.")
+            error(&format!(
+                "No goal is currently set; /goal pause requires one. {GOAL_USAGE}"
+            ))
         );
         assert_eq!(
             run(&registry, &fixture, "/goal edit x").await,
-            error("There is no goal to edit. Use /goal <objective> to set one.")
+            error(&format!(
+                "No goal is currently set; /goal edit requires one. {GOAL_USAGE}"
+            ))
         );
         assert!(
             fixture
@@ -473,44 +353,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_goal_service_refusal_is_the_runs_error() {
+    async fn a_goal_service_refusal_is_dshs_one_sentence_recorded_as_the_runs_error() {
         let fixture = Fixture::new("goal-refusal");
         let goals = Arc::new(GoalService::new(
             fixture.store.clone(),
             GoalConfig::default(),
         ));
         let registry = CommandRegistry::new();
-        registry.register(goal_command(goals)).unwrap();
+        registry.register(goal_command(goals, None)).unwrap();
         let long = "x".repeat(heddle_goal::MAX_OBJECTIVE_LENGTH + 1);
-        let refused = run(&registry, &fixture, &format!("/goal {long}")).await;
-        assert_eq!(refused.kind(), "error");
-        assert!(!refused.text().unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_goal_is_described_with_its_status_objective_rounds_activation_and_commands() {
-        let goal = GoalLike {
-            id: "g".to_owned(),
-            revision: 1,
-            objective: "o".to_owned(),
-            phase: "paused".to_owned(),
-            max_goal_rounds: 9,
-            rounds_started: Some(2),
-            activation: None,
-        };
         assert_eq!(
-            describe_goal(&goal),
-            "Status: paused\nObjective: o\nRounds: 2/9\nCommands: /goal edit <objective> · /goal pause · /goal resume · /goal clear"
+            run(&registry, &fixture, &format!("/goal {long}")).await,
+            error(
+                "The goal command is not valid for the current state. Run /goal to view available commands."
+            )
         );
-        let armed = GoalLike {
-            rounds_started: None,
-            activation: Some("armed".to_owned()),
-            ..goal
-        };
-        assert_eq!(
-            describe_goal(&armed),
-            "Status: paused\nObjective: o\nRounds: 0/9\nActivation: armed\nCommands: /goal edit <objective> · /goal pause · /goal resume · /goal clear"
-        );
+        let done = fixture
+            .events()
+            .iter()
+            .rfind(|event| event.kind == crate::registry::COMMAND_DONE_EVENT)
+            .cloned()
+            .expect("command/done");
+        assert_eq!(done.get("kind"), Some(&json!("error")));
     }
 
     /// A compaction that answers the outcomes it was given, in order, and counts its calls.
@@ -779,7 +643,7 @@ mod tests {
             fixture.store.clone(),
             GoalConfig::default(),
         ));
-        registry.register(goal_command(goals)).unwrap();
+        registry.register(goal_command(goals, None)).unwrap();
         registry
             .register(compact_command(Arc::new(Outcomes {
                 outcomes: Mutex::new(Vec::new()),

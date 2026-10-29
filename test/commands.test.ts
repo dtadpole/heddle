@@ -8,15 +8,14 @@ import { after, test } from 'node:test'
 
 import {
   compactCommand,
-  describeGoal,
   exportCommand,
   FEEDBACK_CATEGORIES,
   feedbackCommand,
   FEEDBACK_EVENT,
-  goalCommand,
   permissionCommand,
   type CompactionOutcome,
 } from '../src/commands/builtins.ts'
+import { goalCommand, GOAL_USAGE } from '../src/commands/goal.ts'
 import { handleCommandRequest, type CommandRouteHost } from '../src/commands/http.ts'
 import {
   COMMAND_DONE_EVENT,
@@ -189,35 +188,44 @@ test('/goal sets, shows, edits, pauses, resumes and clears the goal through the 
   const registry = new CommandRegistry()
   registry.register(goalCommand(goals))
   const run = async (line: string) => (await registry.execute(log, handle, line))?.result
+  const card = (title: string, objective: string, phase: string, activation: string, hint: string) =>
+    `${title}\nStatus: ${phase}\nObjective: ${objective}\nRounds: 0/100\nActivation: ${activation}\n\nCommands: ${hint}`
 
-  assert.deepEqual(await run('/goal'), { kind: 'success', text: 'No goal is set. Use /goal <objective> to set one.' })
-  assert.deepEqual(await run('/goal ship the parity table'), { kind: 'success', text: 'Goal set: ship the parity table' })
+  assert.deepEqual(await run('/goal'), { kind: 'success', text: `No goal is currently set.\n${GOAL_USAGE}` })
+  assert.deepEqual(await run('/goal ship the parity table'), {
+    kind: 'success',
+    text: card('Goal created', 'ship the parity table', 'active', 'armed', '/goal edit <objective>, /goal pause, /goal clear'),
+  })
   assert.equal(goals.get(handle)?.objective, 'ship the parity table')
   assert.deepEqual(await run('/goal something else'), {
     kind: 'error',
-    text: 'A goal is already active. Use /goal edit <objective> to change it, or /goal clear to remove it.',
+    text: 'A goal is already active. Use /goal edit <objective> to change it or /goal clear before replacing it.',
   })
-  const shown = await run('/goal')
-  assert.equal(shown?.kind, 'success')
-  assert.match(shown?.text ?? '', /^Status: active\nObjective: ship the parity table\nRounds: 0\/\d+\nActivation: (armed|disarmed)\nCommands: /)
-  assert.deepEqual(await run('/goal edit'), { kind: 'error', text: 'Usage: /goal edit <objective>' })
-  assert.deepEqual(await run('/goal edit ship it twice'), { kind: 'success', text: 'Goal updated: ship it twice' })
-  assert.deepEqual(await run('/goal PAUSE'), { kind: 'success', text: 'Goal paused.' }, 'the words are case-insensitive')
+  assert.deepEqual(await run('/goal'), {
+    kind: 'success',
+    text: card('Goal', 'ship the parity table', 'active', 'armed', '/goal edit <objective>, /goal pause, /goal clear'),
+  })
+  assert.deepEqual(await run('/goal edit'), { kind: 'error', text: `Goal editing requires a replacement objective.\n${GOAL_USAGE}` })
+  assert.deepEqual(await run('/goal edit ship it twice'), {
+    kind: 'success',
+    text: card('Goal updated', 'ship it twice', 'active', 'armed', '/goal edit <objective>, /goal pause, /goal clear'),
+  })
+  assert.deepEqual(
+    await run('/goal PAUSE'),
+    { kind: 'success', text: card('Goal paused', 'ship it twice', 'paused', 'disarmed', '/goal edit <objective>, /goal resume, /goal clear') },
+    'the words are case-insensitive',
+  )
   assert.equal(goals.get(handle)?.phase, 'paused')
-  assert.deepEqual(await run('/goal resume'), { kind: 'success', text: 'Goal resumed.' })
+  assert.deepEqual(await run('/goal resume'), {
+    kind: 'success',
+    text: card('Goal resumed', 'ship it twice', 'active', 'armed', '/goal edit <objective>, /goal pause, /goal clear'),
+  })
   assert.equal(goals.get(handle)?.phase, 'active')
   assert.deepEqual(await run('/goal clear'), { kind: 'success', text: 'Goal cleared.' })
   assert.equal(goals.get(handle), undefined)
-  assert.deepEqual(await run('/goal pause'), { kind: 'error', text: 'There is no goal to pause.' })
-  assert.deepEqual(await run('/goal edit x'), { kind: 'error', text: 'There is no goal to edit. Use /goal <objective> to set one.' })
+  assert.deepEqual(await run('/goal pause'), { kind: 'error', text: `No goal is currently set; /goal pause requires one. ${GOAL_USAGE}` })
+  assert.deepEqual(await run('/goal edit x'), { kind: 'error', text: `No goal is currently set; /goal edit requires one. ${GOAL_USAGE}` })
   assert.ok(store.read(handle).some((event) => event.type === 'goal/change'), 'the goal service wrote its own events')
-})
-
-test('a goal is described with its status, objective, rounds, activation and commands', () => {
-  assert.equal(
-    describeGoal({ id: 'g', revision: 1, objective: 'o', phase: 'paused', maxGoalRounds: 9, roundsStarted: 2 }),
-    'Status: paused\nObjective: o\nRounds: 2/9\nCommands: /goal edit <objective> · /goal pause · /goal resume · /goal clear',
-  )
 })
 
 test('/compact takes no arguments, reports what it compacted, and says when there was nothing to compact', async () => {
@@ -414,18 +422,19 @@ test('the routes list commands, run a registered line, and answer matched:false 
 
 test("a session's history shows each command as its own row, settled by its done event, outside the conversation", async () => {
   const { transcriptTurns } = await import('../src/server/web.ts')
+  const created = 'Goal created\nStatus: active\nObjective: ship it\nRounds: 0/256\nActivation: armed\n\nCommands: /goal edit <objective>, /goal pause, /goal clear'
   const turns = transcriptTurns([
     { type: 'message', seq: 0, message: { role: 'user', content: [{ type: 'text', text: 'hello' }] } },
     { type: 'command/run', seq: 1, commandId: 'cmd-0000abcd-1', name: 'goal', args: 'ship it', source: { kind: 'user' } },
     { type: 'goal/change', seq: 2 },
-    { type: 'command/done', seq: 3, commandId: 'cmd-0000abcd-1', kind: 'success', text: 'Goal set: ship it' },
+    { type: 'command/done', seq: 3, commandId: 'cmd-0000abcd-1', kind: 'success', text: created },
     { type: 'command/run', seq: 4, commandId: 'cmd-0000abcd-2', name: 'export' },
     { type: 'command/done', seq: 5, commandId: 'cmd-0000abcd-2', kind: 'error', text: 'The Web /export command does not accept a path.' },
     { type: 'command/run', seq: 6, commandId: 'cmd-0000abcd-3', name: 'compact' },
   ])
   const commands = turns.filter((turn) => turn.kind === 'command')
   assert.deepEqual(commands, [
-    { kind: 'command', text: 'Goal set: ship it', commandId: 'cmd-0000abcd-1', name: 'goal', args: 'ship it', state: 'done' },
+    { kind: 'command', text: created, commandId: 'cmd-0000abcd-1', name: 'goal', args: 'ship it', state: 'done' },
     { kind: 'command', text: 'The Web /export command does not accept a path.', commandId: 'cmd-0000abcd-2', name: 'export', state: 'error' },
     { kind: 'command', text: '', commandId: 'cmd-0000abcd-3', name: 'compact', state: 'running' },
   ])

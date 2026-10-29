@@ -445,7 +445,11 @@ test('typing / opens the grouped menu at the caret, a picked command runs on the
         text: document.querySelector('.hc-command[data-state=done] .hc-text').textContent,
       })`),
     )
-    assert.deepEqual(row, { title: '/goal', state: 'Completed', text: 'Goal set: ship the parity table' })
+    // DSH's answer to a create is the goal itself, titled "Goal created" (dsh-command-goal/lib/index.js:59-77, 131-133).
+    const created = 'Goal created\nStatus: active\nObjective: ship the parity table\n'
+    assert.deepEqual({ title: row.title, state: row.state }, { title: '/goal', state: 'Completed' })
+    assert.ok(row.text.startsWith(created), row.text)
+    assert.match(row.text, /\nRounds: 0\/\d+\nActivation: armed\n\nCommands: \/goal edit <objective>, \/goal pause, \/goal clear$/)
     assert.equal(await browser.evaluate(`${FIELD}.value`), '', 'the draft is cleared')
     assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(id)}`)).body.goal?.objective, 'ship the parity table')
     log = await sessionLog(server, cookie, id)
@@ -459,9 +463,10 @@ test('typing / opens the grouped menu at the caret, a picked command runs on the
     await browser.goto(server.url)
     await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
-    await browser.waitFor('[...document.querySelectorAll(".hc-command .hc-text")].some((element) => element.textContent === "Goal set: ship the parity table")', 15_000)
+    const reloaded = `[...document.querySelectorAll(".hc-command")].find((element) => element.querySelector(".hc-text")?.textContent.startsWith(${JSON.stringify(created)}))`
+    await browser.waitFor(`${reloaded} !== undefined`, 15_000)
     assert.equal(
-      await browser.evaluate('[...document.querySelectorAll(".hc-command")].find((element) => element.querySelector(".hc-text")?.textContent === "Goal set: ship the parity table").querySelector(".hc-state").textContent'),
+      await browser.evaluate(`${reloaded}.querySelector(".hc-state").textContent`),
       'Completed',
       'the reloaded row is settled',
     )

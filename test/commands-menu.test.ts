@@ -4,7 +4,7 @@ import { test } from 'node:test'
 
 import { MENU_PATH, menuSource } from '../src/commands/http.ts'
 // @ts-expect-error -- a browser module without declarations; its pure functions are judged here, its DOM in 80-web-ui.
-import { candidates, claims, detectTrigger } from '../src/commands/menu.js'
+import { candidates, claims, commandInputText, detectTrigger } from '../src/commands/menu.js'
 
 /**
  * The slash menu's decisions, judged without a browser: when `/` opens it, which rows it offers, and which submitted
@@ -78,6 +78,14 @@ test('a registered command always belongs to the host; a page entry only bare; a
   assert.equal(claims(catalog, 'see /compact'), false)
   assert.equal(claims(catalog, '/Goal x'), false)
   assert.equal(claims([], '/goal x'), false, 'before the list has loaded, nothing is claimed')
+})
+
+test("a /goal run's Command input bubble shows /name and the recorded remainder, trailing whitespace removed", () => {
+  // DSH's goalCommandText (dsh-client-ui-goal): `/${name}${(args ?? '').trimEnd()}` over the raw remainder.
+  assert.equal(commandInputText('goal', ' ship the release'), '/goal ship the release')
+  assert.equal(commandInputText('goal', '  ship it  \n'), '/goal  ship it', 'the separating whitespace stays')
+  assert.equal(commandInputText('goal', '\tline one\nline two '), '/goal\tline one\nline two')
+  assert.equal(commandInputText('goal', undefined), '/goal', 'a bare /goal records no args')
 })
 
 test('the route serves the menu module the page imports, from the checkout', () => {

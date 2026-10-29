@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use heddle_context::{ContextService, PrepareOptions};
-use heddle_goal::{CreateGoal, EditGoal, GoalRef, GoalService, GoalView};
+use heddle_goal::{GoalRef, GoalService, GoalView};
 use heddle_llm::ModelService;
 use heddle_sandbox::SandboxMode;
 use heddle_session::{
@@ -23,10 +23,10 @@ use heddle_web_files::attachments::{AttachmentInputError, AttachmentPart, read_a
 use serde_json::Value;
 
 use crate::builtins::{
-    AnonymousUser, CompactionHost, CompactionOutcome, GoalHost, GoalLike, GoalRefLike,
-    PermissionHost, compact_command, export_command, feedback_command, goal_command,
-    permission_command,
+    AnonymousUser, CompactionHost, CompactionOutcome, PermissionHost, compact_command,
+    export_command, feedback_command, permission_command,
 };
+use crate::goal::{GoalHost, GoalHostError, goal_command};
 use crate::registry::{CommandError, CommandExecution, CommandLog, CommandRegistry};
 use crate::text;
 
@@ -92,9 +92,14 @@ impl Commands {
         let home = services.heddle_home.clone();
         let anonymous: AnonymousUser = Arc::new(move || anonymous_user(&home));
         let builtins = [
-            goal_command(Arc::new(ServiceGoals {
-                goals: services.goals.clone(),
-            })),
+            // `/goal` is developer-nine's (`goal.rs`). It gets no follow-up sink yet: nothing here can start the
+            // turn that carries a goal objective's attachments (the TODO in `goal.rs`).
+            goal_command(
+                Arc::new(ServiceGoals {
+                    goals: services.goals.clone(),
+                }),
+                None,
+            ),
             compact_command(Arc::new(ServiceCompaction {
                 sessions: Arc::clone(&services.sessions),
                 context: services.context.clone(),
@@ -208,126 +213,47 @@ fn content_part(part: AttachmentPart) -> ContentPart {
     }
 }
 
-impl From<&GoalView> for GoalLike {
-    fn from(view: &GoalView) -> Self {
-        GoalLike {
-            id: view.goal.id.clone(),
-            revision: view.goal.revision,
-            objective: view.goal.objective.clone(),
-            phase: view.goal.phase.as_str().to_owned(),
-            max_goal_rounds: view.goal.max_goal_rounds,
-            rounds_started: Some(view.rounds_started),
-            activation: Some(view.activation.as_str().to_owned()),
-        }
-    }
-}
-
-fn goal_ref(goal: &GoalRefLike) -> GoalRef {
-    GoalRef {
-        id: goal.id.clone(),
-        revision: goal.revision,
-    }
-}
-
-/// The goal service is a goal host as it is: each call names the session by its id.
-impl GoalHost for GoalService {
-    fn get(&self, session: &SessionHandle) -> Result<Option<GoalLike>, String> {
-        GoalService::get(self, &session.id)
-            .map(|view| view.as_ref().map(GoalLike::from))
-            .map_err(|error| error.to_string())
-    }
-
-    fn create(&self, session: &SessionHandle, objective: &str) -> Result<GoalLike, String> {
-        GoalService::create(
-            self,
-            &session.id,
-            CreateGoal {
-                objective: objective.to_owned(),
-                max_goal_rounds: None,
-            },
-        )
-        .map(|view| GoalLike::from(&view))
-        .map_err(|error| error.to_string())
-    }
-
-    fn edit(
-        &self,
-        session: &SessionHandle,
-        goal: &GoalRefLike,
-        objective: &str,
-    ) -> Result<GoalLike, String> {
-        GoalService::edit(
-            self,
-            &session.id,
-            &goal_ref(goal),
-            EditGoal {
-                objective: Some(objective.to_owned()),
-                max_goal_rounds: None,
-            },
-        )
-        .map(|view| GoalLike::from(&view))
-        .map_err(|error| error.to_string())
-    }
-
-    fn pause(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<GoalLike, String> {
-        GoalService::pause(self, &session.id, &goal_ref(goal))
-            .map(|view| GoalLike::from(&view))
-            .map_err(|error| error.to_string())
-    }
-
-    fn resume(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<GoalLike, String> {
-        GoalService::resume(self, &session.id, &goal_ref(goal))
-            .map(|view| GoalLike::from(&view))
-            .map_err(|error| error.to_string())
-    }
-
-    fn clear(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<(), String> {
-        GoalService::clear(self, &session.id, &goal_ref(goal))
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    }
-}
-
 /// The goal service when the profile loads one, or a host whose every call names its absence.
 struct ServiceGoals {
     goals: Option<Arc<GoalService>>,
 }
 
 impl ServiceGoals {
-    fn goals(&self) -> Result<&GoalService, String> {
+    /// The goal service, or a failure that is not the goal domain's: the run's error names the absence.
+    fn goals(&self) -> Result<&GoalService, GoalHostError> {
         self.goals
             .as_deref()
-            .ok_or_else(|| NO_GOAL_SERVICE.to_owned())
+            .ok_or_else(|| GoalHostError::Failed(NO_GOAL_SERVICE.to_owned()))
     }
 }
 
 impl GoalHost for ServiceGoals {
-    fn get(&self, session: &SessionHandle) -> Result<Option<GoalLike>, String> {
+    fn get(&self, session: &SessionHandle) -> Result<Option<GoalView>, GoalHostError> {
         GoalHost::get(self.goals()?, session)
     }
 
-    fn create(&self, session: &SessionHandle, objective: &str) -> Result<GoalLike, String> {
+    fn create(&self, session: &SessionHandle, objective: &str) -> Result<GoalView, GoalHostError> {
         GoalHost::create(self.goals()?, session, objective)
     }
 
     fn edit(
         &self,
         session: &SessionHandle,
-        goal: &GoalRefLike,
+        goal: &GoalRef,
         objective: &str,
-    ) -> Result<GoalLike, String> {
+    ) -> Result<GoalView, GoalHostError> {
         GoalHost::edit(self.goals()?, session, goal, objective)
     }
 
-    fn pause(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<GoalLike, String> {
+    fn pause(&self, session: &SessionHandle, goal: &GoalRef) -> Result<GoalView, GoalHostError> {
         GoalHost::pause(self.goals()?, session, goal)
     }
 
-    fn resume(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<GoalLike, String> {
+    fn resume(&self, session: &SessionHandle, goal: &GoalRef) -> Result<GoalView, GoalHostError> {
         GoalHost::resume(self.goals()?, session, goal)
     }
 
-    fn clear(&self, session: &SessionHandle, goal: &GoalRefLike) -> Result<(), String> {
+    fn clear(&self, session: &SessionHandle, goal: &GoalRef) -> Result<(), GoalHostError> {
         GoalHost::clear(self.goals()?, session, goal)
     }
 }
@@ -586,13 +512,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_built_in_refuses_attachments_and_writes_nothing() {
+    async fn every_built_in_but_goal_refuses_attachments_and_writes_nothing() {
         let fixture = Fixture::new("host-builtins-attachments");
         let commands = Commands::new(services(&fixture));
         let raw = serde_json::json!([fixture.upload("notes.txt", b"hello")]);
         let attachments = commands.read_attachments(Some(&raw)).unwrap();
         let before = fixture.events().len();
-        for name in ["compact", "export", "feedback", "goal", "permission"] {
+        // `/goal` declares that it accepts attachments (DSH's `/goal <objective>` carries them); its own tests say what
+        // it does with them.
+        for name in ["compact", "export", "feedback", "permission"] {
             assert_eq!(
                 commands
                     .execute(&fixture.handle, &format!("/{name} x"), attachments.clone())
@@ -678,7 +606,9 @@ mod tests {
         let commands = Commands::new(services);
         assert_eq!(
             run(&commands, &fixture.handle, "/goal ship the parity table").await,
-            CommandResult::success_text("Goal set: ship the parity table")
+            CommandResult::success_text(
+                "Goal created\nStatus: active\nObjective: ship the parity table\nRounds: 0/100\nActivation: armed\n\nCommands: /goal edit <objective>, /goal pause, /goal clear"
+            )
         );
         assert_eq!(
             goals
@@ -686,6 +616,56 @@ mod tests {
                 .unwrap()
                 .map(|view| view.goal.objective),
             Some("ship the parity table".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_through_the_host_takes_uploaded_files_only_with_an_objective() {
+        let fixture = Fixture::new("host-goal-attachments");
+        let goals = Arc::new(GoalService::new(
+            fixture.store.clone(),
+            heddle_goal::GoalConfig::default(),
+        ));
+        let mut services = services(&fixture);
+        services.goals = Some(Arc::clone(&goals));
+        let commands = Commands::new(services);
+        let raw = serde_json::json!([
+            fixture.upload("2026-10-29T00-00-00-000Z-spec.md", b"# the release\n")
+        ]);
+        let attachments = commands.read_attachments(Some(&raw)).unwrap();
+        let execute = |line: &'static str| {
+            let attachments = attachments.clone();
+            let commands = &commands;
+            let handle = &fixture.handle;
+            async move {
+                commands
+                    .execute(handle, line, attachments)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{line} is a command"))
+                    .result
+            }
+        };
+        assert_eq!(
+            execute("/goal pause").await,
+            CommandResult::error(crate::goal::GOAL_ATTACHMENTS_REFUSED),
+            "the layer runs /goal, which refuses files on a form that sets no objective"
+        );
+        assert_eq!(goals.get(&fixture.handle.id).unwrap(), None);
+        assert!(
+            execute("/goal ship the release")
+                .await
+                .text()
+                .unwrap_or_default()
+                .starts_with("Goal created\nStatus: active\nObjective: ship the release\n"),
+            "a create takes them"
+        );
+        assert_eq!(
+            goals
+                .get(&fixture.handle.id)
+                .unwrap()
+                .map(|view| view.goal.objective),
+            Some("ship the release".to_owned())
         );
     }
 
