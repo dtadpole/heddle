@@ -1,7 +1,7 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.5.0
+version: 1.6.0
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
@@ -54,7 +54,10 @@ target then gets **one minimal real turn per pass**:
 
 **Verdicts.** Staleness against a fresh `origin/main` (`dirty`, `behind`, `ahead`) is recorded,
 not failed. `passVerdict` fails on any failed check and is unjudged on any unjudged one: exit `0`
-pass, `1` fail (a dead address included), `3` unjudged, never pinned as healthy.
+pass, `1` fail (a dead address included), `3` unjudged, never pinned as healthy. The checkout is read
+again at the end of a pass. When its head or built page moved since the start (a redeploy inside the
+pass, as on 2026-10-29 at 11:08Z), the move is recorded in `deploymentMoved` and every failure becomes
+unjudged with the move named (`deploymentMove`, `acrossMove`). The next pass judges the new build in full.
 
 **Privacy.** Paths are written `~`, tokens redacted (`redactRecord`), session ids never pinned.
 
