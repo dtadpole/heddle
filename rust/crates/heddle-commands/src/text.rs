@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn an_href_segment_is_encoded_as_encode_uri_component_does() {
         assert_eq!(
-            encode_uri_component("session-0000aaaa-0000-4000-8000-000000000000"),
-            "session-0000aaaa-0000-4000-8000-000000000000"
+            encode_uri_component("session-00000000-0000-4000-8000-000000000000"),
+            "session-00000000-0000-4000-8000-000000000000"
         );
         assert_eq!(encode_uri_component("a b/c?é"), "a%20b%2Fc%3F%C3%A9");
         assert_eq!(encode_uri_component("!~*'()"), "!~*'()");
