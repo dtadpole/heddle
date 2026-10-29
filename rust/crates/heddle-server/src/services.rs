@@ -268,6 +268,14 @@ pub trait WorkspaceService: Send + Sync {
 
     /// Make sure the folder a turn ran in has an owner, adopting it when none does.
     fn ensure_owner(&self, folder: &Path);
+
+    /// Every workspace with its parent and its sessions — `GET /api/workspaces`, `{workspaces: [...]}`'s
+    /// array (`WorkspaceService.views` in `src/workspace/service.ts`). The default answers no workspace,
+    /// for doubles that do not model the registry.
+    fn views(&self, sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+        let _ = sessions;
+        Ok(Value::Array(Vec::new()))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------

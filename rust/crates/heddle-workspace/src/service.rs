@@ -19,7 +19,7 @@ use heddle_session::SessionMeta;
 use crate::error::WorkspaceError;
 use crate::record::{
     BootstrapReport, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord, WorkspaceRemoval,
-    WorkspaceStoreShape,
+    WorkspaceStoreShape, WorkspaceView,
 };
 use heddle_session::clock::{EPOCH_ISO, iso_now};
 
@@ -381,6 +381,12 @@ impl WorkspaceService {
             .collect()
     }
 
+    /// Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See
+    /// [`workspace_views`].
+    pub fn views(&self, all: &[SessionMeta]) -> Vec<WorkspaceView> {
+        workspace_views(&self.list(), all)
+    }
+
     /// The root that owns a folder, adopting the folder itself (`auto`) when nothing above it does.
     pub fn ensure_owner(&self, path: &str) -> Result<WorkspaceRecord, WorkspaceError> {
         let canonical = canonical_path(Path::new(path))
@@ -413,6 +419,51 @@ impl WorkspaceService {
             created,
         })
     }
+}
+
+/// Every workspace with its parent and its sessions, in the order of `records` — `workspaceViews` in
+/// `src/workspace/service.ts`. `parent` is the nearest other record strictly above a record's path
+/// (segment-wise); a session belongs to its nearest record at or above its canonical `cwd`, and the
+/// order of `all` is kept. Archived and subagent sessions are included; the reader filters.
+pub fn workspace_views(records: &[WorkspaceRecord], all: &[SessionMeta]) -> Vec<WorkspaceView> {
+    let mut owned: IndexMap<String, Vec<String>> = IndexMap::new();
+    for meta in all {
+        let canonical = canonical_path(Path::new(meta.cwd()));
+        if let Some(owner) = WorkspaceService::owner_among(&canonical.to_string_lossy(), records) {
+            owned
+                .entry(owner.id)
+                .or_default()
+                .push(meta.id().to_string());
+        }
+    }
+    records
+        .iter()
+        .map(|record| {
+            let mut parent: Option<(&WorkspaceRecord, usize)> = None;
+            for other in records {
+                if other.id == record.id
+                    || other.path == record.path
+                    || !is_under(Path::new(&other.path), Path::new(&record.path))
+                {
+                    continue;
+                }
+                let depth = depth_of(Path::new(&other.path));
+                if parent.map(|(_, best)| depth > best).unwrap_or(true) {
+                    parent = Some((other, depth));
+                }
+            }
+            WorkspaceView {
+                id: record.id.clone(),
+                path: record.path.clone(),
+                title: record.title.clone(),
+                origin: record.origin,
+                parent: parent.map(|(other, _)| other.id.clone()),
+                created_at: record.created_at.clone(),
+                updated_at: record.updated_at.clone(),
+                session_ids: owned.get(&record.id).cloned().unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -674,5 +725,98 @@ mod tests {
             service.ensure_owner(folder.to_str().unwrap()).unwrap().id,
             record.id
         );
+    }
+
+    #[test]
+    fn a_workspace_view_names_its_nearest_parent_and_the_sessions_whose_nearest_root_it_is() {
+        let (dir, service) = service();
+        let base = dir.path().join("work");
+        let outer = base.join("outer");
+        let middle = outer.join("packages");
+        let inner = middle.join("app");
+        let sibling = base.join("outer-sibling");
+        for path in [&inner, &sibling, &outer.join("docs"), &inner.join("src")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let text = |path: &std::path::Path| path.to_str().unwrap().to_string();
+        let outer_id = service.add(&text(&outer), None).unwrap().record.id;
+        let inner_id = service.add(&text(&inner), None).unwrap().record.id;
+        let middle_id = service.add(&text(&middle), None).unwrap().record.id;
+        let sibling_id = service.add(&text(&sibling), None).unwrap().record.id;
+        let all = vec![
+            meta("session-new-inner", &text(&inner.join("src"))),
+            meta("session-outer", &text(&outer.join("docs"))),
+            meta("session-middle", &text(&middle)),
+            meta("session-old-inner", &text(&inner)),
+            meta("session-sibling", &text(&sibling)),
+            meta("session-nowhere", "/no/root/above/this"),
+        ];
+        let views = service.views(&all);
+        let ids: Vec<String> = views.iter().map(|view| view.id.clone()).collect();
+        let listed: Vec<String> = service.list().into_iter().map(|record| record.id).collect();
+        assert_eq!(ids, listed, "in the record's own order");
+        let view = |id: &str| views.iter().find(|view| view.id == id).unwrap().clone();
+        assert_eq!(
+            view(&outer_id).parent,
+            None,
+            "a top-level root has no parent"
+        );
+        assert_eq!(view(&middle_id).parent.as_deref(), Some(outer_id.as_str()));
+        assert_eq!(
+            view(&inner_id).parent.as_deref(),
+            Some(middle_id.as_str()),
+            "the nearest root above, not the outermost"
+        );
+        assert_eq!(
+            view(&sibling_id).parent,
+            None,
+            "a shared prefix is not a parent"
+        );
+        assert_eq!(
+            view(&inner_id).session_ids,
+            vec!["session-new-inner", "session-old-inner"],
+            "the inner root keeps its own, newest first"
+        );
+        assert_eq!(view(&middle_id).session_ids, vec!["session-middle"]);
+        assert_eq!(view(&outer_id).session_ids, vec!["session-outer"]);
+        assert_eq!(view(&sibling_id).session_ids, vec!["session-sibling"]);
+        let accounted: Vec<String> = views
+            .iter()
+            .flat_map(|view| view.session_ids.clone())
+            .collect();
+        assert!(!accounted.contains(&"session-nowhere".to_string()));
+        let json = serde_json::to_value(view(&outer_id)).unwrap();
+        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "id",
+                "path",
+                "title",
+                "origin",
+                "parent",
+                "createdAt",
+                "updatedAt",
+                "sessionIds"
+            ],
+            "the TypeScript route's keys, in its order"
+        );
+        assert_eq!(json["parent"], Value::Null);
+        assert_eq!(json["origin"], "added");
+    }
+
+    #[test]
+    fn a_workspace_view_keeps_an_adopted_roots_origin() {
+        let records = vec![WorkspaceRecord {
+            id: "w-auto".into(),
+            path: "/tmp/heddle-views/auto".into(),
+            title: "auto".into(),
+            origin: WorkspaceOrigin::Auto,
+            created_at: "a".into(),
+            updated_at: "a".into(),
+        }];
+        let views = workspace_views(&records, &[meta("session-a", "/tmp/heddle-views/auto/x")]);
+        assert_eq!(views[0].origin, WorkspaceOrigin::Auto);
+        assert_eq!(views[0].session_ids, vec!["session-a"]);
     }
 }

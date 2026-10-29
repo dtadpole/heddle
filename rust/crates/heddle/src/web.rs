@@ -797,6 +797,14 @@ impl heddle_server::services::WorkspaceService for Workspaces {
     fn ensure_owner(&self, folder: &std::path::Path) {
         let _ = self.service.ensure_owner(&path_text(folder));
     }
+
+    fn views(
+        &self,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Value, ServiceError> {
+        // The booted store's own records, as `tree` and `remove` read them.
+        serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under

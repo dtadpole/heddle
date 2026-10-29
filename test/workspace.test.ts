@@ -7,7 +7,7 @@ import { after, test } from 'node:test'
 
 import { canonicalPath } from '../src/paths.ts'
 import type { SessionMeta } from '../src/session/store.ts'
-import { WorkspaceService } from '../src/workspace/service.ts'
+import { WorkspaceService, workspaceViews, type WorkspaceRecord } from '../src/workspace/service.ts'
 
 /**
  * A workspace record: how a root came to exist, and what unregistering one does to its sessions.
@@ -122,4 +122,60 @@ test('a record written before the field existed stays where it was being shown',
   )
   const workspaces = new WorkspaceService(new Context(), { file })
   assert.equal(workspaces.list()[0]?.origin, 'added', 'absent means added, so nothing leaves the tree unasked')
+})
+
+/**
+ * The workspace tree's data: `GET /api/workspaces` answers `views()`, DSH's `WorkspaceView` under heddle's rules.
+ *
+ * Two derived facts per workspace, and each has a trap. `parent` must be the **nearest** registered root strictly above
+ * (not the outermost, not itself), compared by segment; `sessionIds` must follow the nearest-root rule, so a session in a
+ * nested root belongs to the inner one only, and the store's order (newest first) must survive.
+ */
+test('a workspace view names its nearest registered parent and the sessions whose nearest root it is', () => {
+  const workspaces = service()
+  const outer = folder('outer')
+  const middle = join(outer, 'packages')
+  const inner = join(middle, 'app')
+  const sibling = `${outer}-sibling`
+  for (const path of [inner, sibling, join(outer, 'docs'), join(inner, 'src')]) mkdirSync(path, { recursive: true })
+  const outerRecord = workspaces.add(outer).record
+  const innerRecord = workspaces.add(inner).record
+  const middleRecord = workspaces.add(middle).record
+  const siblingRecord = workspaces.add(sibling).record
+  const all = [
+    session('session-new-inner', join(inner, 'src')),
+    session('session-outer', join(outer, 'docs')),
+    session('session-middle', middle),
+    session('session-old-inner', inner),
+    session('session-sibling', sibling),
+    session('session-nowhere', '/no/root/above/this'),
+  ]
+  const views = workspaces.views(all)
+  const byId = new Map(views.map((view) => [view.id, view]))
+
+  assert.deepEqual(views.map((view) => view.id), workspaces.list().map((record) => record.id), 'in the record\'s own order')
+  assert.equal(byId.get(outerRecord.id)?.parent, null, 'a top-level root has no parent')
+  assert.equal(byId.get(middleRecord.id)?.parent, outerRecord.id)
+  assert.equal(byId.get(innerRecord.id)?.parent, middleRecord.id, 'the nearest root above, not the outermost')
+  assert.equal(byId.get(siblingRecord.id)?.parent, null, 'a name that shares a prefix is not a parent')
+  assert.deepEqual(byId.get(innerRecord.id)?.sessionIds, ['session-new-inner', 'session-old-inner'], 'the inner root keeps its own, newest first')
+  assert.deepEqual(byId.get(middleRecord.id)?.sessionIds, ['session-middle'])
+  assert.deepEqual(byId.get(outerRecord.id)?.sessionIds, ['session-outer'], 'and the outer root only what no nearer root owns')
+  assert.deepEqual(byId.get(siblingRecord.id)?.sessionIds, ['session-sibling'])
+  const accounted = views.flatMap((view) => view.sessionIds)
+  assert.ok(!accounted.includes('session-nowhere'), 'a session under no root is in no workspace')
+  assert.equal(new Set(accounted).size, accounted.length, 'and no session is counted twice')
+  assert.equal(byId.get(outerRecord.id)?.origin, 'added')
+})
+
+test('a workspace view keeps the origin, so an adopted root can be told from a chosen one', () => {
+  const records: WorkspaceRecord[] = [
+    { id: 'w-auto', path: '/tmp/heddle-views/auto', title: 'auto', origin: 'auto', createdAt: 'a', updatedAt: 'a' },
+    { id: 'w-legacy', path: '/tmp/heddle-views/legacy', title: 'legacy', createdAt: 'b', updatedAt: 'b' },
+  ]
+  const views = workspaceViews(records, [session('session-a', '/tmp/heddle-views/auto/x')])
+  assert.equal(views[0]?.origin, 'auto')
+  assert.deepEqual(views[0]?.sessionIds, ['session-a'])
+  assert.equal(views[1]?.origin, 'added', 'absent means added, as everywhere else')
+  assert.deepEqual(views[1]?.sessionIds, [])
 })

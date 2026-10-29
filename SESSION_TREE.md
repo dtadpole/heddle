@@ -1,7 +1,7 @@
 ---
 title: Heddle Session Tree
 level: L2
-version: 1.1.0
+version: 1.2.0
 description: How a workspace names a target folder, how a session is bound to a folder, and how that becomes a recursive tree in the Web UI's left column.
 status: unverified
 grounded_in:
@@ -9,9 +9,20 @@ grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, that a type folder is the boundary and a session node exists only where the type plus instance pattern matches
   - source: the installed DSH 0.2.0-rc.2 packages, read 2026-10-11 for the sidebar node model, the workspace-tree mode, and the lazy directory tree
   - source: the reflection conventions repository, read 2026-10-11 for the type and instance rules this tree renders
+  - source: owner goal of 2026-10-28 to follow the DSH web GUI's workspace tree, which put the sessions under their workspaces
 ---
 
 # The session tree
+
+> **Superseded in part on 2026-10-28 (owner goal G2): the left column now follows DSH's workspace tree.** Workspaces
+> are groups with **all** their sessions nested under them as rows (child workspaces first, five rows and `Show more`,
+> pinned then last updated, an Ungrouped bucket for sessions no registered workspace owns), fed by `GET
+> /api/workspaces` (each workspace's `parent` and `sessionIds`) and `GET /api/sessions`. The folder tree below is kept
+> **under each workspace's sessions**, behind a `Files` heading, so §3's file rows and the file panel are unchanged; a
+> session is no longer a folder row or a hoisted `_sessions_` row in it, because it is already a session row of its
+> workspace. Membership (§2) and every route in §5 are unchanged. The page's grouping rules are the `workspace-tree`
+> block in `src/server/page.html`, judged by `test/workspace-tree.test.ts` and
+> `_verifiers_/80-web-ui/check-workspace-tree.mjs`.
 
 Heddle has workspaces and sessions. What it does not have is a **navigation**: the Web UI lists
 sessions flat, newest first, and a person looking for the conversation they had about one folder

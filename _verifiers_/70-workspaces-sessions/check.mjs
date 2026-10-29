@@ -1561,7 +1561,14 @@ test('New session here, on an instance row, starts a session and writes its defi
         await wait(800)
       }
       const rows = [...reopened.parentElement.querySelectorAll(':scope > ul[role=group] > li')].map((child) => (child.dataset.kind === 'session' ? 'session' : child.dataset.kind) + ':' + child.querySelector('.label')?.textContent)
-      return JSON.stringify({ rows, branchOpen: reopened.parentElement.dataset.open === 'true', selected: document.querySelector('#tree li[aria-selected="true"] > .row')?.querySelector('.label')?.textContent ?? null })
+      const chosen = document.querySelector('#tree li[aria-selected="true"]')
+      return JSON.stringify({
+        rows,
+        branchOpen: reopened.parentElement.dataset.open === 'true',
+        selectedKind: chosen?.dataset.kind ?? null,
+        selected: chosen?.querySelector(':scope > .row')?.querySelector('.label')?.textContent ?? null,
+        selectedTooltip: chosen?.querySelector(':scope > .row')?.title ?? null,
+      })
     })()`)
     const outcome = JSON.parse(clicked)
     assert.equal(outcome.error, undefined, `the menu opened and the item was there\\nsaw: ${clicked}`)
@@ -1571,15 +1578,22 @@ test('New session here, on an instance row, starts a session and writes its defi
      * was closed, so the new row sat inside a closed folder. Opening the branch and selecting the new row is
      * the fix, and this is what pins it.
      */
-    assert.equal(outcome.branchOpen, true, 'the branch is open when the tree comes back, so the new session is on screen')
-    assert.equal(outcome.rows[0]?.startsWith('session:'), true, `the session appears first in the branch it belongs to\\nsaw: ${outcome.rows.join(', ')}`)
-    const name = String(outcome.rows[0]).slice('session:'.length)
+    assert.equal(outcome.branchOpen, true, 'the branch is open when the tree comes back')
+    /**
+     * Since the left column became DSH's workspace tree (owner goal, 2026-10-28), a session is drawn once, as a session
+     * row of its **workspace**, rather than inside the folder it works in; its definition folder is its tooltip. So the
+     * visible result is the new session's row, selected, named for its definition folder.
+     */
+    assert.equal(outcome.selectedKind, 'session', `the new session is the selected row\nsaw: ${JSON.stringify(outcome)}`)
+    assert.ok(!outcome.rows.includes('session:' + outcome.selected), 'and it is drawn once, under its workspace, not again inside the folder')
+    const name = String(outcome.selected)
     assert.match(name, /^session-\d{8}-\d{4}$/, `named for the clock, as the convention requires\nsaw: ${name}`)
 
     const definition = join(h.work, '_tools_', 'some-tool', '_sessions_', name, 'session.json')
     assert.ok(existsSync(definition), `and its definition is on disk at ${definition}`)
     const fields = JSON.parse(readFileSync(definition, 'utf8'))
     assert.equal(fields.cwd, join(h.work, '_tools_', 'some-tool'), 'the definition names the folder the session is bound to')
+    assert.equal(outcome.selectedTooltip, join(h.work, '_tools_', 'some-tool', '_sessions_', name), 'and the row carries its definition folder as its tooltip')
     /**
      * And the **tree** says which conversation the row is, which is what makes clicking it open that
      * conversation rather than only expand a folder. Before this the node carried `session: null`, so a row
@@ -2526,7 +2540,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.menuChrome.position, 'fixed', `a menu floats in viewport coordinates\nsaw: ${JSON.stringify(reading.menuChrome)}`)
     assert.equal(reading.menuChrome.insideViewport, true, 'and is entirely on screen')
     assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
-    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
+    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
 
     /** **A session's glyph is a conversation**, not a folder: the reference's bubble artwork, distinct from the folder path. */
     const glyphs = JSON.parse(
@@ -2621,7 +2635,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      */
     assert.deepEqual(
       reading.viewItems.filter((item) => item.label !== null).map((item) => item.label),
-      ['Workspace Tree', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
+      /**
+       * The grouping is DSH's three since the workspace tree (owner goal, 2026-10-28; DSH 0.2.1's `SessionGroupBy` is
+       * `workspace-tree | workspace | flat`): `Workspace Tree`, `Workspace` (sibling sections) and `In one list`.
+       */
+      ['Workspace Tree', 'Workspace', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
       `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
     )
     assert.deepEqual(
@@ -2720,6 +2738,14 @@ test('the four session shortcuts act on the selected session, and say so when th
         await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
         await ensureOpen('_tools_')
         await ensureOpen('some-tool')
+        /**
+         * In the workspace tree (owner goal, 2026-10-28) the session the page opens at start is drawn as its workspace's
+         * row and is selected from the first paint, so "nothing is selected" is reached the way a reader reaches it: by
+         * showing a file, which takes the selection.
+         */
+        const fileRow = rows().find((row) => row.closest('li')?.dataset.kind === 'file')
+        fileRow?.click()
+        await until(() => document.querySelector('#tree li[aria-selected="true"]')?.dataset.kind === 'file', 3000)
 
         /** Nothing is selected: the chords that need a session refuse, and say why. */
         const beforeSelect = { note: '', prevented: press('a', { altKey: true, metaKey: true }) }

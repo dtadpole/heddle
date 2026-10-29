@@ -295,6 +295,11 @@ export class WorkspaceService extends Service {
     })
   }
 
+  /** Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See {@link workspaceViews}. */
+  views(all: readonly SessionMeta[]): WorkspaceView[] {
+    return workspaceViews(this.list(), all)
+  }
+
   /**
    * The root that owns a folder, registering the folder itself when nothing above it does.
    *
@@ -325,6 +330,58 @@ export class WorkspaceService extends Service {
     }
     return { workspaces: this.list().length, attached, created }
   }
+}
+
+/**
+ * One workspace as the Web UI's workspace tree reads it — DSH's `WorkspaceView`, derived by heddle's rules.
+ *
+ * `parent` is the nearest registered root **strictly above** this one (DSH's `owningParentFolder`), which is what
+ * nests one workspace under another in the tree; `sessionIds` is the membership DSH's Host supplies with each
+ * workspace, here the sessions whose **nearest** root this is. Neither is stored: both are read from the record and
+ * the store on every call, the same way `owner()` and `sessions()` are.
+ */
+export interface WorkspaceView {
+  readonly id: string
+  readonly path: string
+  readonly title: string
+  readonly origin: 'added' | 'auto'
+  readonly parent: string | null
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly sessionIds: readonly string[]
+}
+
+/**
+ * Every workspace with its parent and its sessions, in the record's order.
+ *
+ * Pure, so it is judged without a store. `records` are already canonical (the record stores canonical paths); a
+ * session's `cwd` is canonicalised here, as `sessions()` does. `all` keeps its order, so `sessionIds` read newest first
+ * when the store's list does. Archived and subagent sessions are included: hiding them is the reader's choice.
+ */
+export function workspaceViews(records: readonly WorkspaceRecord[], all: readonly SessionMeta[]): WorkspaceView[] {
+  const nearestFirst = [...records].sort((left, right) => depthOf(right.path) - depthOf(left.path))
+  const owners = new Map<string, string[]>()
+  for (const meta of all) {
+    const canonical = canonicalPath(meta.cwd)
+    const owner = nearestFirst.find((record) => isUnder(record.path, canonical))
+    if (owner === undefined) continue
+    const list = owners.get(owner.id) ?? []
+    list.push(meta.id)
+    owners.set(owner.id, list)
+  }
+  return records.map((record) => {
+    const parent = nearestFirst.find((other) => other.id !== record.id && other.path !== record.path && isUnder(other.path, record.path))
+    return {
+      id: record.id,
+      path: record.path,
+      title: record.title,
+      origin: record.origin === 'auto' ? 'auto' : 'added',
+      parent: parent === undefined ? null : parent.id,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      sessionIds: owners.get(record.id) ?? [],
+    }
+  })
 }
 
 declare module '@deepseek-ai/cordis' {
