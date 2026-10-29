@@ -342,7 +342,7 @@ async function pluginContext(file: string, autoStart?: boolean) {
   ctx.provide('tools')
   ctx.set('tools', { register: (tool: { spec: { name: string } }) => registered.push(tool.spec.name), describe: () => [] })
   ctx.provide('sandbox')
-  ctx.set('sandbox', { workspaceRoot: sessionRoot, mode: 'danger-full-access', policy: () => ({ mode: 'danger-full-access' }) })
+  ctx.set('sandbox', { workspaceRoot: sessionRoot, mode: 'danger-full-access', policy: () => ({ mode: 'danger-full-access' }), rootFor: (folder?: string) => folder ?? sessionRoot })
   ctx.provide('context')
   ctx.set('context', {
     recordRuntimeContext: () => undefined,
