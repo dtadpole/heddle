@@ -9977,38 +9977,74 @@ settingsDialog.addEventListener('click', (clickEvent) => {
  * The session shortcuts — DSH's own chords, read from its menu on 2026-10-17: `Alt+Meta+G` rename,
  * `Shift+Meta+F` fork, `Alt+Meta+A` archive, and `Alt+Meta+K` to reach the search box.
  *
- * `Meta` is written as "meta or control" because the page runs on a Mac where the chord is ⌥⌘ and a keyboard that
- * only has Control should still reach it. Each entry states its modifiers exactly: a chord with `shift` is not the
- * same gesture as one without, and matching loosely would make `Shift+Alt+Meta+A` archive a session by accident.
+ * Each chord names the **physical key** (`code`), as DSH's `dsh-client-shortcuts` does ("the service accepts physical
+ * `code` values"). The character a key types is the wrong thing to match: Chrome on a Mac applies Option to `key`, so
+ * ⌥⌘A arrives as `å`, ⌥⌘K as `˚`, ⌥⌘G as `©` and ⌥⌘N as a dead key, and a table of letters never fired on the
+ * machine the chords were written for (DSH parity R-developer-seven-7). `key` stays beside each code only for an event
+ * that carries no code at all (a synthetic event, some on-screen keyboards).
+ *
+ * Each entry states its modifiers exactly: a chord with `shift` is not the same gesture as one without, and matching
+ * loosely would make `Shift+Alt+Meta+A` archive a session by accident.
  */
 const SESSION_SHORTCUTS = [
-  { key: 'a', alt: true, action: 'archive' },
-  { key: 'g', alt: true, action: 'rename' },
-  { key: 'k', alt: true, action: 'search' },
-  { key: 'f', shift: true, action: 'fork' },
+  { code: 'KeyA', key: 'a', alt: true, action: 'archive' },
+  { code: 'KeyG', key: 'g', alt: true, action: 'rename' },
+  { code: 'KeyK', key: 'k', alt: true, action: 'search' },
+  { code: 'KeyF', key: 'f', shift: true, action: 'fork' },
   /** DSH's own chord for the same control: `Alt+Meta+B`. */
-  { key: 'b', alt: true, action: 'sidebar' },
+  { code: 'KeyB', key: 'b', alt: true, action: 'sidebar' },
   /** DSH's chord for its primary action; read from its `New session` control on 2026-10-17. */
-  { key: 'n', alt: true, action: 'new-session' },
+  { code: 'KeyN', key: 'n', alt: true, action: 'new-session' },
   /** DSH's chord for Settings, read from its menu in the same session. */
-  { key: ',', alt: true, action: 'settings' },
+  { code: 'Comma', key: ',', alt: true, action: 'settings' },
 ]
+
+/**
+ * Whether this page runs on a Mac, where DSH's abstract `Mod` (`primary`) is Command; everywhere else it is Control.
+ * DSH's own test (`dsh-client-shortcuts` `detectEnvironment`), case-insensitive: `navigator.platform` is `MacIntel` on a
+ * Mac, while `navigator.userAgentData.platform` is `macOS`, which a case-sensitive `/Mac/` misses.
+ */
+const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform || '')
 
 /**
  * Which shortcut an event is, or `null` when it is none of them.
  *
  * A pure reading of the event rather than four `if`s in a handler: the chords are a table, and a table can be read
  * back in a test or a bug report instead of being inferred from control flow.
+ *
+ * The rules are DSH's (`dsh-client-shortcuts` `keydown` and `dispatch`): `Mod` is Command on a Mac and Control
+ * elsewhere, and the other of the two is not part of any chord, so the modifier set must match exactly; nothing fires
+ * while an input method composes, while AltGraph is held, or on the key after a dead key; a dead key itself fires
+ * nothing, except ⌥⌘N on a Mac, which Chrome delivers as a dead key and DSH keeps as its new-session chord.
  */
-function shortcutFor(event) {
-  if (!event.metaKey && !event.ctrlKey) return null
+function shortcutFor(event, options = {}) {
+  const mac = options.mac === undefined ? SHORTCUTS_ON_MAC : options.mac
+  if (event.defaultPrevented || options.afterDeadKey === true) return null
+  if (event.isComposing || event.keyCode === 229) return null
+  if (typeof event.getModifierState === 'function' && event.getModifierState('AltGraph')) return null
+  const primary = mac ? event.metaKey : event.ctrlKey
+  const other = mac ? event.ctrlKey : event.metaKey
+  if (!primary || other) return null
+  const code = typeof event.code === 'string' ? event.code : ''
+  if (event.key === 'Dead' && !(mac && code === 'KeyN' && event.altKey && !event.shiftKey)) return null
   for (const shortcut of SESSION_SHORTCUTS) {
-    if (String(event.key).toLowerCase() !== shortcut.key) continue
+    if (code !== '' ? code !== shortcut.code : String(event.key).toLowerCase() !== shortcut.key) continue
     if (Boolean(shortcut.alt) !== event.altKey) continue
     if (Boolean(shortcut.shift) !== event.shiftKey) continue
     return shortcut.action
   }
   return null
+}
+
+/**
+ * Whether the last key was a dead key that did not fire a chord: the key after it composes a character, so DSH
+ * treats it as composition. A pointer press, a focus change or a finished composition starts over, as DSH's do.
+ */
+let shortcutAfterDeadKey = false
+for (const type of ['compositionstart', 'compositionend', 'focusin', 'pointerdown']) {
+  document.addEventListener(type, () => {
+    shortcutAfterDeadKey = false
+  }, true)
 }
 
 /** The node of the row the panel is showing, which is what a shortcut acts on. */
@@ -10025,9 +10061,12 @@ function selectedNode() {
  * nothing is indistinguishable from a key that is not bound.
  */
 document.addEventListener('keydown', (event) => {
-  const action = shortcutFor(event)
+  const action = shortcutFor(event, { afterDeadKey: shortcutAfterDeadKey })
+  shortcutAfterDeadKey = event.key === 'Dead' && action === null
   if (action === null) return
   event.preventDefault()
+  /** A held chord repeats its keydown; DSH takes the repeat so the browser does not act on it, and runs nothing. */
+  if (event.repeat) return
   if (action === 'sidebar') {
     setSidebarCollapsed(!sidebarCollapsed())
     sidebarToggle.focus()
