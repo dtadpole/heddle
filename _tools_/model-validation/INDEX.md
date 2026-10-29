@@ -34,6 +34,10 @@ node _tools_/model-validation/validate.mjs --json
 Options: `--endpoint NAME`, `--model ID`, `--concurrency N` (default 3), `--timeout-ms N` (default 120000),
 `--out PATH` (default `$HEDDLE_HOME/model-validation.json`), `--json`.
 
+The file it reads is the machine's own endpoint configuration; its shape, a worked example in the three wire
+formats, how a key is referenced and how a second service shares the file are in
+[`machine-config.md`](machine-config.md).
+
 Exit `0` when every configured model passed; `1` when an interaction failed; `3` when nothing could be judged (no
 machine-local configuration, no eligible endpoint, or no built `dist/`). A failure names the endpoint, the model
 and the interaction, because the reader's next act is to fix that pair.
