@@ -483,7 +483,8 @@ impl ServerBuilder {
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let listener = crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
+            let listener =
+                crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
             let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
@@ -3313,15 +3314,23 @@ mod tests {
         assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
         let rest = &text[": heddle stream open\n\n".len()..];
         assert!(rest.starts_with("event: ready\ndata: "), "{text}");
-        let data: Value = serde_json::from_str(
-            rest.lines().nth(1).unwrap().trim_start_matches("data: "),
-        )
-        .unwrap();
+        let data: Value =
+            serde_json::from_str(rest.lines().nth(1).unwrap().trim_start_matches("data: "))
+                .unwrap();
         assert_eq!(data["type"], "ready");
         let client = data["clientId"].as_str().unwrap();
-        assert!(client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()), "{client}");
-        assert_eq!(data["host"]["home"], std::env::var("HOME").unwrap_or_default());
-        assert!(rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(), "{text}");
+        assert!(
+            client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()),
+            "{client}"
+        );
+        assert_eq!(
+            data["host"]["home"],
+            std::env::var("HOME").unwrap_or_default()
+        );
+        assert!(
+            rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(),
+            "{text}"
+        );
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.

@@ -154,7 +154,11 @@ mod tests {
     struct Stuck;
 
     impl AsyncWrite for Stuck {
-        fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
             Poll::Pending
         }
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -169,7 +173,10 @@ mod tests {
     async fn a_write_pending_for_two_intervals_fails_with_timed_out() {
         let mut guarded = StallGuard::new(Stuck, Duration::from_millis(200));
         let started = Instant::now();
-        let error = guarded.write_all(b"event: heartbeat\n\n").await.unwrap_err();
+        let error = guarded
+            .write_all(b"event: heartbeat\n\n")
+            .await
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         // The timer woke the writer at the deadline: no further traffic was needed to judge it.
         let elapsed = started.elapsed();
@@ -184,7 +191,11 @@ mod tests {
     }
 
     impl AsyncWrite for Trickle {
-        fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
             let now = Instant::now();
             match self.ready_at {
                 Some(at) if now < at => {
@@ -221,16 +232,26 @@ mod tests {
             Duration::from_millis(200),
         );
         let started = Instant::now();
-        guarded.write_all(b"alive").await.expect("a link that makes progress is never cut");
-        assert!(started.elapsed() >= Duration::from_millis(400), "the write really was slow");
+        guarded
+            .write_all(b"alive")
+            .await
+            .expect("a link that makes progress is never cut");
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "the write really was slow"
+        );
     }
 
     #[tokio::test]
     async fn the_listener_wraps_every_connection_it_accepts() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut guarded = GuardedListener::new(listener, Duration::from_millis(4000));
-        let _client = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
         let (io, _) = axum::serve::Listener::accept(&mut guarded).await;
         assert_eq!(io.limit, Duration::from_millis(4000));
         assert!(io.get_ref().peer_addr().is_ok());
