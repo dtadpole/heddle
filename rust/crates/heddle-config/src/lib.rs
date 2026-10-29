@@ -59,6 +59,7 @@ mod model_row;
 pub mod paths;
 mod profile;
 mod references;
+mod retry;
 mod schema;
 mod validate;
 mod value;
@@ -82,6 +83,11 @@ pub use profile::{
     list_profiles, profile_argument, resolve_profile,
 };
 pub use references::{parse_scalar, references_in, resolve_env};
+pub use retry::{
+    DEFAULT_INITIAL_DELAY_MS, DEFAULT_JITTER_RATIO, DEFAULT_MAX_DELAY_MS, DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRYABLE_CODES, MAX_TIMER_DELAY_MS, RetryFailure, RetryMode, RetryPlan, RetryPolicy,
+    parse_retry_after, resolve_retry_policy, retry_failure_code,
+};
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
