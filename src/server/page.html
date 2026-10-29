@@ -9548,8 +9548,6 @@ function markSelection() {
     if (WorkspaceTree.containsSession(entry.node.group, current)) entry.li.dataset.containsCurrent = 'true'
     else delete entry.li.dataset.containsCurrent
   }
-  /** DSH shows a blank session's row only while it is the open one (`sessionVisible`); the next redraw drops it. */
-  for (const li of treeList.querySelectorAll('li[data-blank="true"]')) li.hidden = li.dataset.sessionId !== current
   for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
     if (!li.hasAttribute('aria-selected')) continue
     /**
@@ -9929,8 +9927,8 @@ async function startSessionAt(node) {
 
 /**
  * The blank session New session names for reuse in a folder, else null — DSH's `createInWorkspace` (dsh-client-ui-workspace
- * `lib/client.js:1418-1430`): the first listed session with no turn whose folder is this one, not archived, not running
- * and not a subagent's. The server decides whether it is still reusable (`POST /api/sessions` with `session`), so a stale
+ * `lib/client.js:1418-1430`): the first listed New session placeholder of this folder (no turn, untitled, unpinned, not
+ * archived — `WorkspaceTree`'s `placeholder`), not running and not a subagent's. The server decides whether it is still reusable (`POST /api/sessions` with `session`), so a stale
  * list costs a new session, never a reused conversation. Phase A measured four blank sessions in one workspace without it.
  */
 async function blankToReuse(path) {
@@ -9938,7 +9936,16 @@ async function blankToReuse(path) {
     const response = await fetch('/api/sessions')
     const sessions = response.ok ? await response.json() : []
     const blank = (Array.isArray(sessions) ? sessions : []).find(
-      (meta) => meta !== null && typeof meta === 'object' && (meta.turns ?? 0) === 0 && meta.cwd === path && meta.archived !== true && meta.running !== true && meta.origin !== 'subagent',
+      (meta) =>
+        meta !== null &&
+        typeof meta === 'object' &&
+        meta.cwd === path &&
+        (meta.turns ?? 0) === 0 &&
+        !(typeof meta.title === 'string' && meta.title.trim().length > 0) &&
+        meta.pinned !== true &&
+        meta.archived !== true &&
+        meta.running !== true &&
+        meta.origin !== 'subagent',
     )
     return typeof blank?.id === 'string' ? blank.id : null
   } catch (error) {
@@ -10362,17 +10369,10 @@ const WorkspaceTree = (() => {
     return leftId === rightId ? 0 : leftId < rightId ? -1 : 1
   }
 
-  /**
-   * Whether a session is a row under the archive filter: `hide` (the default), `show`, or `only`.
-   *
-   * With `current` given (the open session's id, or null), a blank session — no turn yet — is a row only while it is the
-   * open one: DSH's `sessionVisible` (dsh-client-ui-workspace `lib/client.js:964-966`), where the blank is the
-   * workspace's provisional New session row and every other blank is hidden.
-   */
-  function visible(meta, archived, current) {
+  /** Whether a session is a row under the archive filter: `hide` (the default), `show`, or `only`. */
+  function visible(meta, archived) {
     if (meta === null || typeof meta !== 'object' || typeof meta.id !== 'string') return false
     if (meta.origin === 'subagent') return false
-    if (current !== undefined && (meta.turns ?? 0) === 0 && meta.id !== current) return false
     const isArchived = meta.archived === true
     if (archived === 'only') return isArchived
     if (archived === 'show') return true
@@ -10387,6 +10387,34 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * Whether a session is a **New session placeholder**, DSH's blank row: no turn yet, and as DSH's can only be, untitled,
+   * unpinned and unarchived (DSH's blank rows carry no title and no row actions, `lib/client.js:1801-1803`, `:2317-2350`).
+   * A zero-turn session a person titled, pinned or archived here is one they acted on, and stays a row.
+   */
+  function placeholder(meta) {
+    const titled = typeof meta.title === 'string' && meta.title.trim().length > 0
+    return (meta.turns ?? 0) === 0 && !titled && meta.pinned !== true && meta.archived !== true && meta.origin !== 'subagent'
+  }
+
+  /**
+   * The placeholders that are not rows, given the open session: each folder shows one, the open one, else its newest.
+   * DSH shows only the open blank (`sessionVisible`, `lib/client.js:964-966`); heddle keeps one per folder because
+   * `heddle session new <folder>` makes a blank on purpose (DSH has no such command) and its row must stay findable, while
+   * New session reuses the folder's blank instead of adding another (`POST /api/sessions` with `session`).
+   */
+  function hiddenBlanks(metas, current) {
+    const byFolder = new Map()
+    for (const meta of metas) {
+      if (!placeholder(meta)) continue
+      const folder = String(meta.cwd ?? '')
+      const kept = byFolder.get(folder)
+      if (kept === undefined || (kept.id !== current && (meta.id === current || sessionOrder(meta, kept) < 0))) byFolder.set(folder, meta)
+    }
+    const shown = new Set([...byFolder.values()].map((meta) => meta.id))
+    return new Set(metas.filter((meta) => placeholder(meta) && !shown.has(meta.id)).map((meta) => meta.id))
+  }
+
+  /**
    * The groups to draw, in order: `[{key, workspace, label, path, depth, children, sessions}]`.
    *
    * `workspaces` is `/api/workspaces`'s array (registry order, each with `parent` and `sessionIds`); `sessions` is
@@ -10398,6 +10426,9 @@ const WorkspaceTree = (() => {
     const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
     const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
     const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object') : []
+    /** With `current` given (the open session's id, or null), the extra placeholders are not rows (`hiddenBlanks`). */
+    const hidden = options.current === undefined ? new Set() : hiddenBlanks(metas, options.current)
+    const shown = (meta) => !hidden.has(meta.id) && visible(meta, archived)
     const byId = new Map(list.map((entry) => [entry.id, entry]))
     const registered = (entry) => entry !== undefined && entry.origin !== 'auto'
     /** The nearest registered workspace above one, following `parent`; a cycle in bad data ends the walk. */
@@ -10435,14 +10466,15 @@ const WorkspaceTree = (() => {
         const meta = metaById.get(id)
         if (meta === undefined) continue
         placed.add(id)
-        if (visible(meta, archived, options.current)) target.sessions.push(meta)
+        if (shown(meta)) target.sessions.push(meta)
       }
     }
     for (const meta of metas) {
-      if (!placed.has(meta.id) && visible(meta, archived, options.current)) ungrouped.sessions.push(meta)
+      if (!placed.has(meta.id) && shown(meta)) ungrouped.sessions.push(meta)
     }
-    /** The open blank leads its group, ahead of pins (DSH's `sectionMembers` and `pinCurrentBlank`, `lib/client.js:954-990`). */
-    const blankFirst = (left, right) => Number((right.turns ?? 0) === 0 && right.id === options.current) - Number((left.turns ?? 0) === 0 && left.id === options.current)
+    /** The open placeholder leads its group, ahead of pins (DSH's `sectionMembers` and `pinCurrentBlank`, `lib/client.js:954-990`). */
+    const leads = (meta) => meta.id === options.current && placeholder(meta)
+    const blankFirst = (left, right) => Number(leads(right)) - Number(leads(left))
     for (const group of [...groups.values(), ungrouped]) group.sessions.sort((left, right) => blankFirst(left, right) || sessionOrder(left, right))
 
     let tops = []
@@ -10592,8 +10624,6 @@ function sessionRow(meta, depth) {
   const li = nodeRow(sessionNode(meta), depth)
   li.dataset.sessionId = meta.id
   li.dataset.slot = 'sessions'
-  /** A blank row is drawn only while it is the open session; `markSelection` hides it the moment another one opens. */
-  if ((meta.turns ?? 0) === 0) li.dataset.blank = 'true'
   return li
 }
 

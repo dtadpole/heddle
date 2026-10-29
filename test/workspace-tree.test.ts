@@ -114,18 +114,28 @@ test('a subagent\'s session is hidden, and the archive filter has DSH\'s three s
   assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { archived: 'only' })[0]), ['s-archived'])
 })
 
-test('a blank session is a row only while it is the open one, and then it leads its group (DSH sessionVisible)', () => {
-  const workspaces = [workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned'] })]
+test('one New session placeholder per folder is a row, the open one first, and a titled or pinned zero-turn session stays', () => {
+  const workspaces = [workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned', 's-titled', 's-blank-other', 's-pinned-blank'] })]
   const sessions = [
     session('s-blank-new', 9, { turns: 0 }),
     session('s-talked', 5),
+    session('s-titled', 4, { turns: 0, title: 'named on purpose' }),
     session('s-pinned', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
+    session('s-pinned-blank', 2, { turns: 0, pinned: true, pinnedAt: '2026-10-28T08:00:00.000Z' }),
     session('s-blank-old', 1, { turns: 0 }),
+    session('s-blank-other', 0, { turns: 0, cwd: '/w/other' }),
   ]
-  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { current: null })[0]), ['s-pinned', 's-talked'], 'no blank row when none is open')
-  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { current: 's-talked' })[0]), ['s-pinned', 's-talked'], 'nor when a talked one is open')
-  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { current: 's-blank-old' })[0]), ['s-blank-old', 's-pinned', 's-talked'], 'the open blank leads, ahead of the pin')
-  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 4, 'a caller that names no open session sees every row, as before')
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: 's-talked' })[0]),
+    ['s-pinned', 's-pinned-blank', 's-blank-new', 's-talked', 's-titled', 's-blank-other'],
+    'the newest placeholder of each folder is a row, the older one of /w is not, and the titled and pinned ones stay',
+  )
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: 's-blank-old' })[0]),
+    ['s-blank-old', 's-pinned', 's-pinned-blank', 's-talked', 's-titled', 's-blank-other'],
+    'the open placeholder is the one its folder shows, and it leads, ahead of the pins',
+  )
+  assert.equal(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 7, 'a caller that names no open session sees every row, as before')
 })
 
 test('archived only drops a workspace with nothing archived, and its child rises to the nearest shown level', () => {
