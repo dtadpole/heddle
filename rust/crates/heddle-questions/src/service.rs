@@ -362,10 +362,10 @@ impl QuestionService {
         let waiting = self.waiters.lock().expect("waiters").contains_key(id);
         let late = !waiting;
         self.append(session, "question/answered", json!({ "requestId": id, "answers": answers, "late": late }))?;
-        if let Some(mut waiter) = self.release(id) {
-            if let Some(sender) = waiter.answer.take() {
-                let _ = sender.send(answers.clone());
-            }
+        if let Some(mut waiter) = self.release(id)
+            && let Some(sender) = waiter.answer.take()
+        {
+            let _ = sender.send(answers.clone());
         }
         let view = self.get(session, id)?.unwrap_or_default();
         let message = late.then(|| late_answer_message(request, &answers));
