@@ -2965,8 +2965,8 @@ mod tests {
         // DSH parity C23 (R-developer-eight-26): dsh-api-session-controller refuses a prompt into a subagent's child
         // with `session/agent-busy` (`lib/index.js:128-142`); phase A measured `/api/turn` answering 200 and running it.
         // A teammate is a continuable child and still takes the turn.
-        let child = "session-00000000-0000-0000-0000-0000000000c1";
-        let mate = "session-00000000-0000-0000-0000-0000000000c2";
+        let child = "session-one-shot-child";
+        let mate = "session-continuable-teammate";
         let meta = |id: &str, rest: Value| SessionMeta {
             id: id.into(),
             cwd: Some("/work".into()),
