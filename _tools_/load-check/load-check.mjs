@@ -29,8 +29,10 @@ export const THRESHOLDS = {
   loadStopPerCore: 2.0,
   teamWarnPerCore: 1.0,
   teamStopPerCore: 1.3,
-  swapWarnPct: 75,
-  swapStopPct: 95,
+  // D-051: below 7168M (7 GiB) used, one build or browser gate at a time; at or above it nothing new starts.
+  // The percent of total is printed as detail only.
+  swapWarnMb: 6656,
+  swapStopMb: 7168,
   slots: 3,
 }
 
@@ -48,8 +50,8 @@ export function thresholdsFrom(env = process.env) {
     loadStopPerCore: number('LOAD_CHECK_LOAD_STOP_PER_CORE', THRESHOLDS.loadStopPerCore),
     teamWarnPerCore: number('LOAD_CHECK_TEAM_WARN_PER_CORE', THRESHOLDS.teamWarnPerCore),
     teamStopPerCore: number('LOAD_CHECK_TEAM_STOP_PER_CORE', THRESHOLDS.teamStopPerCore),
-    swapWarnPct: number('LOAD_CHECK_SWAP_WARN_PCT', THRESHOLDS.swapWarnPct),
-    swapStopPct: number('LOAD_CHECK_SWAP_STOP_PCT', THRESHOLDS.swapStopPct),
+    swapWarnMb: number('LOAD_CHECK_SWAP_WARN_MB', THRESHOLDS.swapWarnMb),
+    swapStopMb: number('LOAD_CHECK_SWAP_STOP_MB', THRESHOLDS.swapStopMb),
     slots: number('LOAD_CHECK_SLOTS', THRESHOLDS.slots),
   }
 }
@@ -245,7 +247,11 @@ export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses 
 
   const swapPct = pct(swap.usedMb, swap.totalMb)
   const swapVerdict =
-    swapPct >= thresholds.swapStopPct ? STOP : swapPct >= thresholds.swapWarnPct ? WARN : OK
+    swap.usedMb >= thresholds.swapStopMb ? STOP : swap.usedMb >= thresholds.swapWarnMb ? WARN : OK
+  const swapDetail =
+    swapVerdict === STOP
+      ? `${Math.round(swap.usedMb)}M used >= ${thresholds.swapStopMb}M, nothing new starts (D-051)`
+      : `${Math.round(swap.usedMb)}M used, under ${thresholds.swapStopMb}M: one start at a time (D-051)`
 
   const stale = slots.filter((s) => s.state === 'stale' || s.state === 'unclaimed')
   const slotVerdict = stale.length > 0 ? WARN : OK
@@ -261,7 +267,7 @@ export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses 
   for (const [name, verdict, detail] of [
     ['disk', diskVerdict, `${diskFreeGb.toFixed(1)} GB free`],
     ['load', loadVerdict, `team ${split.teamPerCore.toFixed(2)}/core, system ${systemLoadPerCore.toFixed(2)}/core${topOther}`],
-    ['swap', swapVerdict, `${swapPct}% used`],
+    ['swap', swapVerdict, swapDetail],
     ['slots', slotVerdict, stale.length ? `${stale.length} stale` : `${busy} busy`],
     ['builds', buildVerdict, `${builds.rustc} rustc > ${cap}`],
   ]) {
@@ -314,7 +320,7 @@ export function format({ at, disk, load, ncpu, swap, slots, processes, threshold
   lines.push(`other    ${otherText}`)
   lines.push(
     `swap     ${Math.round(swap.usedMb)}M used of ${Math.round(swap.totalMb)}M = ${a.swapPct}% ${mark(a.swapVerdict)}` +
-      ` (warn >= ${thresholds.swapWarnPct}%, stop >= ${thresholds.swapStopPct}%)`,
+      ` (D-051: warn >= ${thresholds.swapWarnMb}M, stop >= ${thresholds.swapStopMb}M)`,
   )
   const free = slots.filter((s) => s.state === 'free').length
   lines.push(`slots    ${slots.length} of ${thresholds.slots}: ${a.busy} busy, ${a.stale} stale, ${free} free`)

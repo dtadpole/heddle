@@ -1,25 +1,25 @@
-import type { ToolContext, ToolDefinition, ToolResult } from './service.ts'
-import { SubagentError, type SubagentDeps, type SubagentLimits } from '../agent/subagent.ts'
-import { delegateSubagent } from '../agent/subagent.ts'
+import type { ToolDefinition, ToolResult } from './service.ts'
+import { SubagentError, type SubagentService } from '../agent/subagent.ts'
 
 /**
  * The model-facing delegation tool, modelled on DSH's `dsh-tool-subagent`.
  *
- * One call = one child agent: the tool creates the child session (with its parent, origin and depth in the
- * metadata), runs one bounded child turn, and returns the child's **final answer** as the tool result. The
- * parent's own turn then continues with that text, which is how a delegation looks from the parent's side —
- * a tool call and a result, exactly as DSH's subagent run appears in the parent's transcript.
+ * One call = one child agent, started in the background: the tool creates the child session (with its parent,
+ * origin and depth in the metadata), starts the child's turn and returns **at once** with `started subagent <id>`,
+ * DSH's start result word for word. The parent keeps working; when the child settles, the parent receives a
+ * settlement notice carrying the child's closing message (`SubagentService`), steered into its running turn or
+ * starting a new one.
  *
  * Depth and active limits belong to the runtime (`SubagentLimits`), not to the tool's description, so a model
  * cannot be talked past them by a prompt.
  */
-export function subagentTools(deps: SubagentDeps, limits: SubagentLimits = {}): ToolDefinition[] {
+export function subagentTools(service: SubagentService): ToolDefinition[] {
   return [
     {
       spec: {
         name: 'delegate',
         description:
-          'Delegate one task to a child agent that works in its own session and returns its final answer. Use it for a scoped piece of work that benefits from a fresh context; the child sees only the prompt you give it, not this conversation.',
+          'Start one task in a child agent that works in its own session. Returns at once with the child id; the child’s final answer arrives later in this conversation as a notice. Use it for a scoped piece of work that benefits from a fresh context; the child sees only the prompt you give it, not this conversation.',
         parameters: {
           type: 'object',
           properties: {
@@ -32,16 +32,10 @@ export function subagentTools(deps: SubagentDeps, limits: SubagentLimits = {}): 
       run: async (args, context): Promise<ToolResult> => {
         const prompt = String(args.prompt ?? '')
         try {
-          const result = await delegateSubagent(
-            deps,
-            context.session,
-            prompt,
-            limits,
-            { ...(context.signal !== undefined ? { signal: context.signal } : {}), active: activeFor(context, deps) },
-          )
+          const started = service.start(context.session, prompt, context.signal !== undefined ? { signal: context.signal } : {})
           return {
-            output: `child ${result.childSession} (depth ${result.depth}) answered:\n${result.text}`,
-            data: { childSession: result.childSession, depth: result.depth, text: result.text },
+            output: `started subagent ${started.childSession}`,
+            data: { childSession: started.childSession, depth: started.depth, kind: 'activation' },
           }
         } catch (error) {
           if (error instanceof SubagentError) return { output: '', error: { code: error.code, message: error.message } }
@@ -50,14 +44,4 @@ export function subagentTools(deps: SubagentDeps, limits: SubagentLimits = {}): 
       },
     },
   ]
-}
-
-/** One in-flight set per tool instance, keyed by parent id by the delegation itself. */
-const inflight = new WeakMap<SubagentDeps, Set<string>>()
-function activeFor(_context: ToolContext, deps: SubagentDeps): Set<string> {
-  const existing = inflight.get(deps)
-  if (existing !== undefined) return existing
-  const created = new Set<string>()
-  inflight.set(deps, created)
-  return created
 }

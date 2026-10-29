@@ -37,6 +37,7 @@ pub mod definition;
 pub mod error;
 pub mod event;
 pub mod fsio;
+pub mod inbox;
 pub mod layout;
 pub mod message;
 pub mod meta;
