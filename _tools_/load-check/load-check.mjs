@@ -29,10 +29,12 @@ export const THRESHOLDS = {
   loadStopPerCore: 2.0,
   teamWarnPerCore: 1.0,
   teamStopPerCore: 1.3,
-  // D-051: below 7168M (7 GiB) used, one build or browser gate at a time; at or above it nothing new starts.
-  // The percent of total is printed as detail only.
-  swapWarnMb: 6656,
-  swapStopMb: 7168,
+  // D-061: memory_pressure free is the gate (under 25% nothing new starts); macOS swap is sticky, so swap used is
+  // only a backstop at 7680M (7.5 GiB). The percent of total swap is printed as detail only.
+  memWarnPct: 30,
+  memStopPct: 25,
+  swapWarnMb: 7424,
+  swapStopMb: 7680,
   slots: 3,
 }
 
@@ -50,6 +52,8 @@ export function thresholdsFrom(env = process.env) {
     loadStopPerCore: number('LOAD_CHECK_LOAD_STOP_PER_CORE', THRESHOLDS.loadStopPerCore),
     teamWarnPerCore: number('LOAD_CHECK_TEAM_WARN_PER_CORE', THRESHOLDS.teamWarnPerCore),
     teamStopPerCore: number('LOAD_CHECK_TEAM_STOP_PER_CORE', THRESHOLDS.teamStopPerCore),
+    memWarnPct: number('LOAD_CHECK_MEM_WARN_PCT', THRESHOLDS.memWarnPct),
+    memStopPct: number('LOAD_CHECK_MEM_STOP_PCT', THRESHOLDS.memStopPct),
     swapWarnMb: number('LOAD_CHECK_SWAP_WARN_MB', THRESHOLDS.swapWarnMb),
     swapStopMb: number('LOAD_CHECK_SWAP_STOP_MB', THRESHOLDS.swapStopMb),
     slots: number('LOAD_CHECK_SLOTS', THRESHOLDS.slots),
@@ -77,6 +81,12 @@ export function parseLoadavg(text) {
   const numbers = text.match(/-?\d+(?:\.\d+)?/g)
   if (!numbers || numbers.length < 3) throw new Error(`load average not understood: ${JSON.stringify(text)}`)
   return numbers.slice(0, 3).map(Number)
+}
+
+export function parseMemory(text) {
+  const match = /free percentage:\s*(\d+)%/.exec(text)
+  if (!match) throw new Error(`memory_pressure not understood: ${JSON.stringify(text.slice(-200))}`)
+  return { freePct: Number(match[1]) }
 }
 
 export function parseSwap(text) {
@@ -232,7 +242,7 @@ export function splitLoad({ processes = [], allProcesses = [], ncpu = 1, home = 
   return { teamCpu, teamPerCore: teamCpu / 100 / ncpu, teamCount: team.size, other }
 }
 
-export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses = processes, home = homedir(), thresholds = THRESHOLDS }) {
+export function assess({ disk, load, ncpu, swap, memory = null, slots, processes, allProcesses = processes, home = homedir(), thresholds = THRESHOLDS }) {
   const findings = []
   const diskFreeGb = gib(disk.availKb)
   const diskVerdict =
@@ -250,8 +260,15 @@ export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses 
     swap.usedMb >= thresholds.swapStopMb ? STOP : swap.usedMb >= thresholds.swapWarnMb ? WARN : OK
   const swapDetail =
     swapVerdict === STOP
-      ? `${Math.round(swap.usedMb)}M used >= ${thresholds.swapStopMb}M, nothing new starts (D-051)`
-      : `${Math.round(swap.usedMb)}M used, under ${thresholds.swapStopMb}M: one start at a time (D-051)`
+      ? `${Math.round(swap.usedMb)}M used >= ${thresholds.swapStopMb}M, nothing new starts (D-061 backstop)`
+      : `${Math.round(swap.usedMb)}M used, under ${thresholds.swapStopMb}M: one start at a time (D-061)`
+  const memFreePct = memory ? memory.freePct : null
+  const memVerdict =
+    memFreePct === null ? OK : memFreePct < thresholds.memStopPct ? STOP : memFreePct < thresholds.memWarnPct ? WARN : OK
+  const memDetail =
+    memVerdict === STOP
+      ? `${memFreePct}% free < ${thresholds.memStopPct}%, nothing new starts (D-061)`
+      : `${memFreePct}% free, under ${thresholds.memWarnPct}%: one start at a time (D-061)`
 
   const stale = slots.filter((s) => s.state === 'stale' || s.state === 'unclaimed')
   const slotVerdict = stale.length > 0 ? WARN : OK
@@ -267,6 +284,7 @@ export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses 
   for (const [name, verdict, detail] of [
     ['disk', diskVerdict, `${diskFreeGb.toFixed(1)} GB free`],
     ['load', loadVerdict, `team ${split.teamPerCore.toFixed(2)}/core, system ${systemLoadPerCore.toFixed(2)}/core${topOther}`],
+    ['memory', memVerdict, memDetail],
     ['swap', swapVerdict, swapDetail],
     ['slots', slotVerdict, stale.length ? `${stale.length} stale` : `${busy} busy`],
     ['builds', buildVerdict, `${builds.rustc} rustc > ${cap}`],
@@ -274,7 +292,7 @@ export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses 
     if (verdict !== OK) findings.push(`${name}: ${detail}`)
   }
 
-  const verdict = Math.max(diskVerdict, loadVerdict, swapVerdict, slotVerdict, buildVerdict)
+  const verdict = Math.max(diskVerdict, loadVerdict, memVerdict, swapVerdict, slotVerdict, buildVerdict)
   return {
     verdict,
     findings,
@@ -286,6 +304,8 @@ export function assess({ disk, load, ncpu, swap, slots, processes, allProcesses 
     teamCount: split.teamCount,
     other: split.other,
     loadVerdict,
+    memFreePct,
+    memVerdict,
     swapPct,
     swapVerdict,
     busy,
@@ -318,9 +338,11 @@ export function format({ at, disk, load, ncpu, swap, slots, processes, threshold
     ? a.other.map((proc) => `${basename(proc.command ?? '?')} ${Math.round(proc.cpu ?? 0)}%`).join(', ')
     : 'none'
   lines.push(`other    ${otherText}`)
+  if (a.memFreePct !== null)
+    lines.push(`memory   ${a.memFreePct}% free ${mark(a.memVerdict)} (D-061: warn < ${thresholds.memWarnPct}%, stop < ${thresholds.memStopPct}%)`)
   lines.push(
     `swap     ${Math.round(swap.usedMb)}M used of ${Math.round(swap.totalMb)}M = ${a.swapPct}% ${mark(a.swapVerdict)}` +
-      ` (D-051: warn >= ${thresholds.swapWarnMb}M, stop >= ${thresholds.swapStopMb}M)`,
+      ` (D-061 backstop: warn >= ${thresholds.swapWarnMb}M, stop >= ${thresholds.swapStopMb}M)`,
   )
   const free = slots.filter((s) => s.state === 'free').length
   lines.push(`slots    ${slots.length} of ${thresholds.slots}: ${a.busy} busy, ${a.stale} stale, ${free} free`)
@@ -356,6 +378,8 @@ function collect({ home = homedir(), slotRoot = join(home, '.hd-build-slots'), t
   if (ncpu.status !== 0) throw new Error(`sysctl hw.ncpu failed: ${ncpu.stderr}`)
   const swapOut = run('sysctl', ['-n', 'vm.swapusage'])
   if (swapOut.status !== 0) throw new Error(`sysctl vm.swapusage failed: ${swapOut.stderr}`)
+  const memOut = run('memory_pressure', [])
+  if (memOut.status !== 0) throw new Error(`memory_pressure failed: ${memOut.stderr}`)
   const user = run('id', ['-un']).stdout.trim()
   const lsof = run('lsof', ['-a', '-d', 'cwd', '-u', user, '-F', 'pcn'])
   // comm is the executable path with no arguments, spaces preserved: the display name
@@ -372,6 +396,7 @@ function collect({ home = homedir(), slotRoot = join(home, '.hd-build-slots'), t
     load: parseLoadavg(loadavg.stdout),
     ncpu: Number(ncpu.stdout.trim()),
     swap: parseSwap(swapOut.stdout),
+    memory: parseMemory(memOut.stdout),
     slots: readSlots({ root: slotRoot, slots: thresholds.slots }),
     processes,
     allProcesses,

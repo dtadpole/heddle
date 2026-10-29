@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SandboxDenial, type SandboxMode, type SandboxService } from '../sandbox/service.ts'
 import { EscalationRefusal, approveEscalation, validateEscalationArgs } from '../sandbox/escalation.ts'
 import type { ToolSpec } from '../llm/types.ts'
+import { argumentViolations, invalidArguments, openRoot, type ParameterSchema } from './validate.ts'
 import type { ApprovalService } from '../approvals/service.ts'
 
 /** What a tool is given when it runs. */
@@ -156,9 +157,15 @@ export class ToolRegistry extends Service {
     return []
   }
 
-  /** Every tool's description, which is what `--list` prints. */
+  /**
+   * Every tool's description, which is what `--list` prints and what the model is shown.
+   *
+   * Each root is shown open, as DSH's `defineTool` compiles it: an unknown top-level argument is accepted (and
+   * ignored by the tool), so a schema that said `additionalProperties: false` at its root would promise a refusal
+   * that never comes. Nested nodes keep what they declare. R-developer-five-6, coordinator ruling (a).
+   */
   describe(): readonly ToolSpec[] {
-    return [...this.tools.values()].map((tool) => tool.spec)
+    return [...this.tools.values()].map((tool) => ({ ...tool.spec, parameters: openRoot(tool.spec.parameters) }))
   }
 
   /** Every command, for `--list` and for a command line to dispatch to. */
@@ -263,6 +270,21 @@ export class ToolRegistry extends Service {
      * name a wider mode for itself.
      */
     const runContext: ToolRunContext = { ...context, mode }
+
+    /**
+     * The arguments are checked against the tool's declared parameters before it runs, as DSH's `defineTool`
+     * does inside `execute`: a wrong type, a missing required property, a value outside an enum or an undeclared
+     * key under a closed nested node is an `INVALID_ARGS` result in DSH's words, and the tool never sees it. The
+     * root is open, so an unknown top-level key passes. Arguments that were not valid JSON reach here as
+     * `{ __unparsed }` (the loop's `parseArguments`) and are, in DSH's terms, not an object.
+     */
+    const violations = Object.hasOwn(args, '__unparsed')
+      ? argumentViolations({ type: 'object' }, null)
+      : argumentViolations(openRoot(tool.spec.parameters) as ParameterSchema, args)
+    if (violations.length > 0) {
+      context.log(`refused ${name}: ${invalidArguments(violations)}`)
+      return { output: '', error: { code: 'INVALID_ARGS', message: invalidArguments(violations) } }
+    }
 
     try {
       const result = await tool.run(args, runContext)
