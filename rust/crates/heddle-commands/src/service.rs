@@ -5,7 +5,8 @@
 //! services are optional, and a command that needs an absent one answers with a sentence naming it, so a
 //! profile without one still lists every command rather than the whole layer failing to load. The sandbox
 //! default — the mode a session that recorded none runs under — is the binary's to pass, as is the heddle home
-//! the anonymous feedback id lives in.
+//! the anonymous feedback id lives in, and the upload directory a line's attachments are read from (the one a
+//! turn reads its attachments from).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +16,10 @@ use heddle_context::{ContextService, PrepareOptions};
 use heddle_goal::{GoalRef, GoalService, GoalView};
 use heddle_llm::ModelService;
 use heddle_sandbox::SandboxMode;
-use heddle_session::{SessionHandle, SessionService, SessionStore};
+use heddle_session::{
+    ContentPart, FilePart, ImagePart, SessionHandle, SessionService, SessionStore,
+};
+use heddle_web_files::attachments::{AttachmentInputError, AttachmentPart, read_attachments};
 use serde_json::Value;
 
 use crate::builtins::{
@@ -23,7 +27,7 @@ use crate::builtins::{
     export_command, feedback_command, permission_command,
 };
 use crate::goal::{GoalHost, GoalHostError, goal_command};
-use crate::registry::{CommandExecution, CommandLog, CommandRegistry};
+use crate::registry::{CommandError, CommandExecution, CommandLog, CommandRegistry};
 use crate::text;
 
 /// The sentence every `/goal` answers when the profile loads no goal service.
@@ -58,18 +62,24 @@ pub struct CommandServices {
     pub sandbox_default: SandboxMode,
     /// The heddle home, where `/feedback`'s anonymous id is kept.
     pub heddle_home: PathBuf,
+    /// The upload directory (`<heddle home>/uploads`): a line's attachments must be stored files inside it, as a
+    /// turn's must. The binary passes the directory its turn route reads from.
+    pub upload_dir: PathBuf,
 }
 
-/// The commands host the routes read: the registry and the session service its runs write through.
+/// The commands host the routes read: the registry, the session service its runs write through, and the upload
+/// directory a line's attachments are read from.
 pub struct Commands {
     registry: CommandRegistry,
     sessions: Arc<SessionService>,
+    upload_dir: PathBuf,
 }
 
 impl std::fmt::Debug for Commands {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Commands")
             .field("registry", &self.registry)
+            .field("upload_dir", &self.upload_dir)
             .finish_non_exhaustive()
     }
 }
@@ -108,12 +118,20 @@ impl Commands {
                 .register(definition)
                 .expect("a built-in command registers");
         }
-        Self::with_registry(services.sessions, registry)
+        Self::with_registry(services.sessions, registry, services.upload_dir)
     }
 
-    /// A host over a registry the caller filled.
-    pub fn with_registry(sessions: Arc<SessionService>, registry: CommandRegistry) -> Self {
-        Self { registry, sessions }
+    /// A host over a registry the caller filled, reading attachments from `upload_dir`.
+    pub fn with_registry(
+        sessions: Arc<SessionService>,
+        registry: CommandRegistry,
+        upload_dir: PathBuf,
+    ) -> Self {
+        Self {
+            registry,
+            sessions,
+            upload_dir,
+        }
     }
 
     /// The registry.
@@ -126,15 +144,72 @@ impl Commands {
         self.sessions.open(id)
     }
 
-    /// Run a line in a session; `None` when it is not a registered command (and nothing was written).
+    /// The `attachments` a request carries, read as message parts by the reader a turn uses
+    /// (`heddle_web_files::attachments::read_attachments` over the upload directory): absent or `null` is none,
+    /// anything else must be a list of stored paths, and one that cannot be read refuses the whole list.
+    pub fn read_attachments(
+        &self,
+        raw: Option<&Value>,
+    ) -> Result<Vec<ContentPart>, AttachmentInputError> {
+        Ok(read_attachments(&self.upload_dir, raw)?
+            .into_iter()
+            .map(content_part)
+            .collect())
+    }
+
+    /// Run a line in a session with the files sent with it; `None` when it is not a registered command (and
+    /// nothing was written). A command that does not accept attachments refuses them
+    /// ([`CommandError::Input`]), and nothing is written either.
     pub async fn execute(
         &self,
         session: &SessionHandle,
         line: &str,
-    ) -> Result<Option<CommandExecution>, String> {
+        attachments: Vec<ContentPart>,
+    ) -> Result<Option<CommandExecution>, CommandError> {
         self.registry
-            .execute(self.sessions.store().as_ref(), session, line)
+            .execute(self.sessions.store().as_ref(), session, line, attachments)
             .await
+    }
+}
+
+/// An attachment as the user message records it: the part a turn's reader produces, typed as the session
+/// service's `user_content` takes it (the same JSON either way — `heddle-server` reads the turn's parts back with
+/// `serde_json::from_value::<ContentPart>`). The image's bytes stay on disk: `data` is filled only on the copy a
+/// request sends.
+fn content_part(part: AttachmentPart) -> ContentPart {
+    use heddle_llm::ImageMediaType as Media;
+    use heddle_web_files::attachments::ImageMediaType as Upload;
+    match part {
+        AttachmentPart::Image {
+            name,
+            mime_type,
+            path,
+            bytes,
+            sha256,
+        } => ContentPart::Image(ImagePart {
+            name,
+            mime_type: match mime_type {
+                Upload::Png => Media::Png,
+                Upload::Jpeg => Media::Jpeg,
+                Upload::Webp => Media::Webp,
+                Upload::Gif => Media::Gif,
+            },
+            path,
+            bytes,
+            sha256,
+            data: None,
+        }),
+        AttachmentPart::File {
+            name,
+            path,
+            bytes,
+            sha256,
+        } => ContentPart::File(FilePart {
+            name,
+            path,
+            bytes,
+            sha256,
+        }),
     }
 }
 
@@ -339,12 +414,13 @@ mod tests {
             models: None,
             sandbox_default: SandboxMode::WorkspaceWrite,
             heddle_home: fixture.root.join("home"),
+            upload_dir: fixture.upload_dir(),
         }
     }
 
     async fn run(commands: &Commands, session: &SessionHandle, line: &str) -> CommandResult {
         commands
-            .execute(session, line)
+            .execute(session, line, Vec::new())
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{line} is a command"))
@@ -378,6 +454,83 @@ mod tests {
                 raw_input: " x".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn attachments_are_read_from_the_upload_directory_as_the_parts_a_turn_records() {
+        let fixture = Fixture::new("host-attachments");
+        let commands = Commands::new(services(&fixture));
+        let image = fixture.upload("2026-10-29T00-00-00-000Z-shot.png", b"abc");
+        let note = fixture.upload("notes.txt", b"hello");
+        let raw = serde_json::json!([image, note]);
+        let parts = commands.read_attachments(Some(&raw)).unwrap();
+        // The turn route's reader answers the same files as JSON, which `heddle-server` reads back as parts.
+        let turn: Vec<ContentPart> =
+            heddle_web_files::attachments::read_attachments(&fixture.upload_dir(), Some(&raw))
+                .unwrap()
+                .iter()
+                .map(|part| {
+                    serde_json::from_value(serde_json::to_value(part).unwrap())
+                        .expect("an attachment part is a content part")
+                })
+                .collect();
+        assert_eq!(parts, turn, "the parts a turn's user message records");
+        match &parts[0] {
+            ContentPart::Image(image) => {
+                assert_eq!(image.name, "shot.png");
+                assert_eq!(image.mime_type, heddle_llm::ImageMediaType::Png);
+                assert_eq!(image.bytes, 3);
+                assert_eq!(image.data, None, "the bytes stay on disk");
+            }
+            other => panic!("an image part, got {other:?}"),
+        }
+        assert!(matches!(&parts[1], ContentPart::File(file) if file.name == "notes.txt"));
+
+        assert_eq!(commands.read_attachments(None).unwrap(), Vec::new());
+        assert_eq!(
+            commands.read_attachments(Some(&Value::Null)).unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            commands
+                .read_attachments(Some(&serde_json::json!("nope")))
+                .unwrap_err()
+                .to_string(),
+            "attachments must be an array of paths"
+        );
+        let outside = fixture.root.join("outside.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        let outside = outside.display().to_string();
+        assert!(
+            commands
+                .read_attachments(Some(&serde_json::json!([image, outside])))
+                .unwrap_err()
+                .to_string()
+                .starts_with("an attachment must be inside the upload directory"),
+            "a file outside the upload directory refuses the whole list"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_built_in_but_goal_refuses_attachments_and_writes_nothing() {
+        let fixture = Fixture::new("host-builtins-attachments");
+        let commands = Commands::new(services(&fixture));
+        let raw = serde_json::json!([fixture.upload("notes.txt", b"hello")]);
+        let attachments = commands.read_attachments(Some(&raw)).unwrap();
+        let before = fixture.events().len();
+        // `/goal` declares that it accepts attachments (DSH's `/goal <objective>` carries them); its own tests say what
+        // it does with them.
+        for name in ["compact", "export", "feedback", "permission"] {
+            assert_eq!(
+                commands
+                    .execute(&fixture.handle, &format!("/{name} x"), attachments.clone())
+                    .await,
+                Err(CommandError::Input(format!(
+                    "/{name} does not accept attachments; remove them first"
+                )))
+            );
+        }
+        assert_eq!(fixture.events().len(), before);
     }
 
     #[tokio::test]

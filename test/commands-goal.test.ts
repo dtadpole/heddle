@@ -71,7 +71,7 @@ function harness(options: { readonly host?: (goals: GoalService) => GoalHost; re
       commandId: 'cmd-0000abcd-1',
       rawInput: parsed.rawInput,
       args: parsed.rawInput.trim(),
-      ...(attachments !== undefined ? { attachments } : {}),
+      attachments: attachments ?? [],
     }
     return command.handler(context)
   }

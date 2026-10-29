@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 
+import type { ContentPart } from '../llm/types.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 
 /**
@@ -60,6 +61,8 @@ export interface CommandContext {
   readonly rawInput: string
   /** The raw input with surrounding whitespace removed: what most commands read. */
   readonly args: string
+  /** The files sent with the line, already read as message parts; empty unless the command accepts attachments. */
+  readonly attachments: readonly ContentPart[]
 }
 
 /** One command, as a plugin registers it. */
@@ -97,6 +100,12 @@ export interface CommandExecution {
 export interface CommandLog {
   append(handle: SessionHandle, event: { readonly type: string; readonly [field: string]: unknown }): SessionEvent
 }
+
+/**
+ * A line the layer refuses before anything runs or is written: DSH throws these to the composer, which keeps the
+ * draft. The route answers them with `400`.
+ */
+export class CommandInputError extends Error {}
 
 /** A parsed command line, or `undefined` when the line is not one. */
 export function parseCommandLine(line: string): { readonly name: string; readonly rawInput: string } | undefined {
@@ -157,26 +166,35 @@ export class CommandRegistry {
    *
    * `undefined` writes nothing: the line was never a command, and the caller sends it on as a prompt.
    */
-  async execute(log: CommandLog, session: SessionHandle, line: string): Promise<CommandExecution | undefined> {
+  async execute(
+    log: CommandLog,
+    session: SessionHandle,
+    line: string,
+    attachments: readonly ContentPart[] = [],
+  ): Promise<CommandExecution | undefined> {
     const parsed = parseCommandLine(line)
     if (parsed === undefined) return undefined
     const definition = this.commands.get(parsed.name)
     if (definition === undefined) return undefined
+    if (attachments.length > 0 && definition.input?.attachments !== true) {
+      throw new CommandInputError(`/${definition.name} does not accept attachments; remove them first`)
+    }
 
     this.count += 1
     const commandId = `${this.prefix}-${this.count}`
     const args = parsed.rawInput.trim()
+    // DSH records the raw remainder, separating whitespace included; the page draws `/name` + args, trimmed.
     log.append(session, {
       type: COMMAND_RUN_EVENT,
       commandId,
       name: definition.name,
-      ...(definition.recordInput !== false && args.length > 0 ? { args } : {}),
+      ...(definition.recordInput !== false && args.length > 0 ? { args: parsed.rawInput } : {}),
       source: { kind: 'user' },
     })
 
     let result: CommandResult
     try {
-      result = await definition.handler({ session, commandId, rawInput: parsed.rawInput, args })
+      result = await definition.handler({ session, commandId, rawInput: parsed.rawInput, args, attachments })
     } catch (error) {
       result = { kind: 'error', text: error instanceof Error ? error.message : String(error) }
     }

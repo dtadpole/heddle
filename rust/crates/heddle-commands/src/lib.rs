@@ -24,8 +24,9 @@
 //!
 //! # Mounting
 //!
-//! The binary builds [`Commands`] from its booted services ([`CommandServices`]) and merges [`router`] behind
-//! the server's door. [`ROUTES`] lists the three `(method, path)` pairs, which no server route claims.
+//! The binary builds [`Commands`] from its booted services ([`CommandServices`]) — with the upload directory its
+//! turn route reads attachments from — and merges [`router`] behind the server's door. [`ROUTES`] lists the three
+//! `(method, path)` pairs, which no server route claims.
 
 pub mod builtins;
 pub mod goal;
@@ -50,9 +51,10 @@ pub use goal::{
 };
 pub use registry::{
     COMMAND_DONE_EVENT, COMMAND_NAME_RULE, COMMAND_RUN_EVENT, CommandAction, CommandContext,
-    CommandDefinition, CommandDescriptor, CommandExecution, CommandHandler, CommandInput,
-    CommandLog, CommandRegistry, CommandResult, CommandSection, Disposer, HandlerOutcome,
-    ParsedLine, RegistrationError, default_label, is_command_name, parse_command_line,
+    CommandDefinition, CommandDescriptor, CommandError, CommandExecution, CommandHandler,
+    CommandInput, CommandLog, CommandRegistry, CommandResult, CommandSection, Disposer,
+    HandlerOutcome, ParsedLine, RegistrationError, default_label, is_command_name,
+    parse_command_line,
 };
 pub use routes::{MAX_COMMAND_LINE, MENU_PATH, MENU_SOURCE};
 pub use service::{
@@ -107,6 +109,7 @@ mod tests {
             models: None,
             sandbox_default: heddle_sandbox::SandboxMode::WorkspaceWrite,
             heddle_home: fixture.root.join("home"),
+            upload_dir: fixture.upload_dir(),
         });
         // The server's own routes under `/api/sessions/{id}`, named the same way: the merge must not panic.
         let caller = axum::Router::new()

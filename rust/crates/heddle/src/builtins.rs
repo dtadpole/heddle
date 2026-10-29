@@ -59,6 +59,8 @@ pub enum Builtin {
     Turns,
     /// `src/plugins/team.ts`.
     Team,
+    /// `src/plugins/schedule.ts`.
+    Schedule,
     /// `src/plugins/tools.ts`.
     Tools,
     /// `src/commands/service.ts`: the slash-command layer (developer-three).
@@ -238,6 +240,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         Some("team"),
         &["session", "model", "tools", "context", "sandbox"],
         "heddle-team",
+    ),
+    spec(
+        Builtin::Schedule,
+        "plugins/schedule",
+        "schedule",
+        "schedule",
+        Some("schedule"),
+        &["session", "model", "tools", "sandbox", "context"],
+        "heddle-schedule",
     ),
     spec(
         Builtin::Tools,
@@ -438,6 +449,9 @@ impl Catalog for BuiltinCatalog {
                 Some(Box::new(crate::adapters::GoalDriverComponent))
             }
             ComponentRef::Builtin(Builtin::Team) => Some(Box::new(crate::adapters::TeamComponent)),
+            ComponentRef::Builtin(Builtin::Schedule) => Some(Box::new(
+                crate::adapters::ScheduleComponent::new(self.env.clone()),
+            )),
             ComponentRef::Builtin(Builtin::Commands) => {
                 Some(Box::new(crate::adapters::CommandsComponent))
             }

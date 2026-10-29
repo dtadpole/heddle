@@ -321,6 +321,12 @@ fn page_routers(
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
+    // The reminder routes: DSH's remote `schedule` namespace; 503 when the profile has no schedule row.
+    routers.push(heddle_schedule::http::router(
+        boot.services
+            .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+            .map(|schedule| Arc::clone(&schedule.service)),
+    ));
     // Only when the profile loads the `commands` row, as `web.ts` hands over only when `ctx.get('commands')` exists.
     if boot
         .services
@@ -351,6 +357,8 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
                 .map(|sandbox| sandbox.mode())
                 .unwrap_or(heddle_sandbox::SandboxMode::WorkspaceWrite),
             heddle_home: host.home.clone(),
+            // The directory `compose_uploads` gives the turn route: a command line's attachments are read as a turn's.
+            upload_dir: heddle_web_files::uploads::upload_directory(&host.home),
         },
     ))
 }
@@ -635,6 +643,12 @@ impl heddle_web_files::host::FilesHost for PageHost {
             Err(error) => Err(FileReadError::NotText(error.to_string())),
         }
     }
+
+    /// The upload route serves a file only to a session whose log references it, so it reads the log the
+    /// session view draws from.
+    fn session_events(&self, id: &str) -> Option<Vec<Value>> {
+        heddle_web_composer::SessionLookup::session_events(self, id)
+    }
 }
 
 impl heddle_web_composer::SessionLookup for PageHost {
@@ -890,6 +904,23 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         && let Some(note) = heddle_team::command::web_start_note(&team).await
     {
         notes.push(note);
+    }
+    // Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule); a
+    // committed reminder write reaches the page's subscribers as `event: schedule`.
+    if let Some(schedule) = boot
+        .services
+        .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+    {
+        if let Some(hub) = boot.services.get::<heddle_server::EventHub>("event-hub") {
+            schedule.service.on_change(Arc::new(move || {
+                hub.publish(heddle_server::SseFrame::new(
+                    "schedule",
+                    &serde_json::json!({}),
+                ));
+                Ok(())
+            }));
+        }
+        schedule.start_delivery();
     }
     notes
 }
@@ -1211,8 +1242,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            3,
-            "files, trajectory and the composer"
+            4,
+            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }

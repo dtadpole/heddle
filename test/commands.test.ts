@@ -19,6 +19,7 @@ import { handleCommandRequest, type CommandRouteHost } from '../src/commands/htt
 import {
   COMMAND_DONE_EVENT,
   COMMAND_RUN_EVENT,
+  CommandInputError,
   CommandRegistry,
   defaultLabel,
   parseCommandLine,
@@ -125,7 +126,7 @@ test('a run is command/run then command/done in the log, and neither takes a pla
   assert.ok(run !== undefined && done !== undefined)
   assert.equal(run.commandId, execution.commandId)
   assert.equal(run.name, 'echo')
-  assert.equal(run.args, 'hello there')
+  assert.equal(run.args, '  hello there ', 'the raw remainder, as DSH records it')
   assert.deepEqual(run.source, { kind: 'user' })
   assert.ok(run.seq < done.seq, 'run is written before the handler, done after')
   assert.equal(done.kind, 'success')
@@ -136,6 +137,30 @@ test('a run is command/run then command/done in the log, and neither takes a pla
 
   const second = await registry.execute(log, handle, '/echo again')
   assert.match(second?.commandId ?? '', /-2$/, 'ids count up within one registry')
+})
+
+test('attachments reach only a command that accepts them; any other refuses before anything is written', async () => {
+  const { store, handle, log } = session()
+  const registry = new CommandRegistry()
+  const seen: unknown[] = []
+  registry.register({
+    name: 'takes',
+    description: 'accepts files',
+    input: { hint: '<text>', attachments: true },
+    handler: ({ attachments }) => {
+      seen.push(attachments)
+      return { kind: 'success' }
+    },
+  })
+  registry.register({ name: 'plain', description: 'no files', handler: () => assert.fail('must not run') })
+  const file = { type: 'text' as const, text: '[a.txt]' }
+  await registry.execute(log, handle, '/takes look', [file])
+  assert.deepEqual(seen, [[file]])
+  const before = store.read(handle).length
+  await assert.rejects(registry.execute(log, handle, '/plain', [file]), (error: unknown) => error instanceof CommandInputError && error.message === '/plain does not accept attachments; remove them first')
+  assert.equal(store.read(handle).length, before, 'a refused line writes nothing')
+  await registry.execute(log, handle, '/takes')
+  assert.deepEqual(seen[1], [], 'no files is an empty list')
 })
 
 test('a handler that throws is a run that ended in error, recorded as such', async () => {
@@ -378,6 +403,10 @@ test('the routes list commands, run a registered line, and answer matched:false 
     assert.equal((await post(handle.id, 'not json')).status, 400)
     assert.equal((await post(handle.id, JSON.stringify({ line: 7 }))).status, 400)
     assert.equal((await post(handle.id, JSON.stringify(['/export']))).status, 400)
+    const refused400 = await post(handle.id, JSON.stringify({ line: '/export', attachments: ['/no/such/upload.txt'] }))
+    assert.equal(refused400.status, 400, 'an attachment the server cannot read, or a command that takes none, is a 400')
+    assert.equal(typeof ((await refused400.json()) as { error?: unknown }).error, 'string')
+    assert.equal((await post(handle.id, JSON.stringify({ line: '/export', attachments: 'nope' }))).status, 400)
     assert.equal((await post(handle.id, JSON.stringify({ line: `/export ${'x'.repeat(70 * 1024)}` }))).status, 413)
     assert.equal((await fetch(`${base}/api/elsewhere`)).status, 418, 'any other route is left to the server')
     assert.equal((await fetch(`${base}/api/commands`, { method: 'DELETE' })).status, 418)

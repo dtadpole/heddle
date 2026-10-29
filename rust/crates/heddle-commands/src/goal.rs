@@ -529,6 +529,7 @@ mod tests {
                 command_id: "cmd-0000abcd-1".to_owned(),
                 args: text::trim(&parsed.raw_input).to_owned(),
                 raw_input: parsed.raw_input,
+                attachments: Vec::new(),
             };
             execute_goal_command(
                 self.host.as_ref(),
@@ -1371,7 +1372,12 @@ mod tests {
         let registry = CommandRegistry::new();
         registry.register(broken.command.clone()).unwrap();
         let execution = registry
-            .execute(broken.fixture.log(), &broken.fixture.handle, "/goal pause")
+            .execute(
+                broken.fixture.log(),
+                &broken.fixture.handle,
+                "/goal pause",
+                Vec::new(),
+            )
             .await
             .unwrap()
             .expect("/goal is registered");

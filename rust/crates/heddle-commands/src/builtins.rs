@@ -206,7 +206,7 @@ mod tests {
     /// Run one line and answer its result.
     async fn run(registry: &CommandRegistry, fixture: &Fixture, line: &str) -> CommandResult {
         registry
-            .execute(fixture.log(), &fixture.handle, line)
+            .execute(fixture.log(), &fixture.handle, line, Vec::new())
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{line} is a registered command"))
