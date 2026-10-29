@@ -1776,6 +1776,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         reasoning_effort: selection.reasoning_effort.clone(),
     };
     let runner = state.harness().turns.clone();
+    let sessions = state.harness().sessions.clone();
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
@@ -1856,8 +1857,20 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 } else {
                     let _ = sender.send(SseFrame::new(
                         names::ERROR,
-                        &json!({"session": stream_session, "message": error.message}),
+                        &json!({"session": stream_session, "message": error.message.clone()}),
                     ));
+                    // Recorded as well, so the failure reaches every client and every later read
+                    // (R-developer-six-2, DSH's api-session/error); web.ts appends the same `turn/failed`.
+                    if let Err(failure) = sessions.record(
+                        &stream_session,
+                        "turn/failed",
+                        json!({"message": error.message}),
+                    ) {
+                        eprintln!(
+                            "heddle web: the failed turn could not be recorded: {}",
+                            failure.message
+                        );
+                    }
                 }
             }
         }
@@ -1885,6 +1898,8 @@ mod tests {
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
+        /// Every `record` call, as `(session, type, fields)`.
+        recorded: std::sync::Mutex<Vec<(String, String, Value)>>,
     }
 
     impl Sessions {
@@ -1899,11 +1914,19 @@ mod tests {
                     ..SessionMeta::default()
                 }],
                 events: HashMap::new(),
+                recorded: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
 
     impl SessionService for Sessions {
+        fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), kind.to_owned(), fields));
+            Ok(())
+        }
         fn list(&self) -> Vec<SessionMeta> {
             self.metas.clone()
         }
@@ -3481,6 +3504,56 @@ mod tests {
         assert_eq!(
             data,
             json!({"type": "approval/settled", "id": "approval-00000000-0000-0000-0000-000000000000", "outcome": "rejected"})
+        );
+    }
+
+    /// A runner whose turn fails, as a provider's 502 does.
+    struct FailingTurns;
+
+    impl TurnRunner for FailingTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Err(ServiceError::new("upstream answered 502")) })
+        }
+    }
+
+    /// A failed turn tells the client that started it and is recorded as `turn/failed`, so it reaches every
+    /// client and every later read (R-developer-six-2).
+    #[tokio::test]
+    async fn a_failed_turn_is_recorded_for_every_client_as_well_as_streamed_to_its_own() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, _) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(&bytes);
+        assert!(text.contains("event: error\n") && text.contains("upstream answered 502"), "{text}");
+        let recorded = sessions.recorded.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(session.to_owned(), "turn/failed".to_owned(), json!({"message": "upstream answered 502"}))]
         );
     }
 

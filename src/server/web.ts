@@ -2420,6 +2420,18 @@ export function sessionRequestSelection(
        * that are not active at all").
        */
       safeWrite(`event: error\ndata: ${JSON.stringify({ session: handle.id, message: (error as Error).message })}\n\n`)
+      /**
+       * And it is recorded, so it reaches every client and every later read (R-developer-six-2, DSH's
+       * `api-session/error`). The `event: error` above told only the client that started the turn: another page
+       * watching the session, or this one after a reload, could not tell the turn had failed — or even ended. A
+       * `turn/failed` record goes out on `/api/events` like any append, ends the turn for every page, and the
+       * transcript carries it as the answer's stop reason.
+       */
+      try {
+        ctx.session.store.append(handle, { type: 'turn/failed', message: (error as Error).message })
+      } catch (recordError) {
+        ctx.logger.warn('web: the failed turn could not be recorded — %s', (recordError as Error).message)
+      }
     }
   } finally {
     handles.delete(controller)
@@ -2693,6 +2705,16 @@ export function transcriptTurns(
           if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended }
           else turns.push({ kind: 'assistant', text: typeof event.text === 'string' ? event.text : '', ended })
         }
+      }
+      /**
+       * A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the same notice row
+       * a stopped turn uses, so a reload says what the live page said.
+       */
+      if (event.type === 'turn/failed') {
+        const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
+        const last = turns[turns.length - 1]
+        if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
+        else turns.push({ kind: 'assistant', text: '', ended: [reason] })
       }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()

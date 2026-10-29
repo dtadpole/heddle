@@ -25,7 +25,8 @@ grounded_in:
   from another start gets `reset`; the page shows it is reconnecting while the server is down and, once back,
   draws a session made meanwhile without a reload; renames, workspace edits and settled approvals are pushed to
   every stream, numbered, and a page redraws a rename and a new workspace made elsewhere without a reload; an
-  approval answered on one page closes on every page (DSH parity phase B, developer-ten).
+  approval answered on one page closes on every page; a failed turn reaches every client and the log, and the
+  transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,

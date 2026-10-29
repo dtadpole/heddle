@@ -5638,6 +5638,30 @@ const events = (() => {
  * so everything the stream would have told it is read again: the list and its running marks, the tree, the open
  * session's transcript and any waiting question (DSH's owners re-read their baselines on `connection/reset`).
  */
+/* turn-failure:begin */
+/**
+ * A failed turn is drawn once per page, whichever way it arrives first: the turn's own `event: error` (the page
+ * that started it) or the recorded `turn/failed` on the stream (every page). The same session and message within
+ * a few seconds is the same failure.
+ */
+const TurnFailure = {
+  WINDOW_MS: 5000,
+  isRepeat(last, session, message, now) {
+    return last !== null && last.session === session && last.message === message && now - last.at < this.WINDOW_MS
+  },
+  text(message) {
+    return typeof message === 'string' && message.length > 0 ? message : 'the turn failed'
+  },
+}
+/* turn-failure:end */
+let lastTurnFailure = null
+function drawTurnFailure(session, message) {
+  const now = performance.now()
+  const text = TurnFailure.text(message)
+  if (TurnFailure.isRepeat(lastTurnFailure, session, text, now)) return
+  lastTurnFailure = { session, message: text, at: now }
+  add('denied', text)
+}
 /**
  * Changes that never reach a session's log, pushed by the server (phase B item 4): an added, renamed or removed
  * workspace, and a renamed session. The tree is read again on the same debounce the log events use, and a rename of
@@ -5718,6 +5742,22 @@ events.addEventListener('session', (message) => {
       liveRounds += 1
       updateStatusBar()
     }
+  }
+  else if (event.type === 'turn/failed') {
+    /**
+     * A turn that failed, recorded by the server (R-developer-six-2): it ends here for every page, not only the
+     * one that started it, and the panel showing the session says why.
+     */
+    runningSessions.delete(payload.session)
+    runningSince.delete(payload.session)
+    paintRunningMarks()
+    scheduleTreeRefresh()
+    if (current === null || payload.session === current) {
+      drawTurnFailure(payload.session, event.message)
+      settleChat()
+    }
+    if (payload.session === composerKey) void pumpQueue()
+    renderComposerState()
   }
   else if (event.type === 'turn/completed') {
     runningSessions.delete(payload.session)
@@ -6915,7 +6955,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       } else if (name === 'error') {
         stopButton.disabled = false
         hideApproval()
-        add('denied', payload.message)
+        drawTurnFailure(payload.session, payload.message)
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
         if (typeof payload.session === 'string') {
           runningSessions.delete(payload.session)

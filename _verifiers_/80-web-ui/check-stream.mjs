@@ -588,3 +588,36 @@ test('an approval answered on one page closes on every page', async (context) =>
     await server.close()
   }
 })
+
+test('a failed turn reaches every client and the log, not only the client that started it', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  // R-developer-six-2 (S83): the endpoint's step fails as a 502 does.
+  const server = await startServer('failed', [{ error: { status: 502, message: 'upstream answered 502' } }])
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'fails' })
+    const session = created.json.session
+    const watcher = await openStream(server, cookie)
+    await watcher.next((frame) => frame.event === 'ready')
+
+    /** The client that started the turn is told, as before. */
+    const turn = await runTurn(server, cookie, { session, prompt: 'fail, please' })
+    assert.equal(turn.status, 200)
+    assert.match(turn.text, /event: error\n/, 'the starting client gets the error on its own response')
+
+    /** DSH's api-session/error: every other client hears it too, and for them the turn has ended. */
+    const failed = await watcher.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'turn/failed', 10_000)
+    assert.match(String(failed.data.event.message), /502/, 'another client gets the failure with its message')
+
+    /** It is in the log, so a reload can tell the turn failed, and the transcript says so. */
+    const log = await (await fetch(`http://127.0.0.1:${server.port}/api/sessions/${encodeURIComponent(session)}/log`, { headers: { cookie } })).text()
+    assert.ok(log.split('\n').some((line) => line.includes('"type":"turn/failed"')), 'the log records the failed turn')
+    const read = await api(server, cookie, 'GET', `/api/sessions/${encodeURIComponent(session)}`)
+    const ended = (read.json?.turns ?? []).flatMap((entry) => entry.ended ?? [])
+    assert.ok(ended.some((reason) => /the turn failed: .*502/.test(reason)), `the transcript carries it as the stop reason (${JSON.stringify(ended)})`)
+    watcher.close()
+  } finally {
+    await server.close()
+  }
+})
