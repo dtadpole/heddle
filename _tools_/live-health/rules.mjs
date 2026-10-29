@@ -385,13 +385,82 @@ export function deploymentTurnWithConversation(first, conversation) {
   return { ...first, verdict: conversation.verdict, detail: `${first.detail}; ${conversation.detail}`, conversation }
 }
 
-/** A fixture turn on the Rust preview completed: the prompt and an answer appeared, it settled, and it is the fixture's. */
-export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead }) {
+/**
+ * A turn on the Rust preview completed: the prompt and an answer appeared and it settled. A fixture
+ * turn must also carry the fixture's words; a real-model turn (D-052) is judged on completion and
+ * latency only, never on its wording, because a real model words every answer differently.
+ */
+export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, answerHead, mode, selection, settledMs }) {
+  if (mode === 'real' && selection?.ok !== true) return { verdict: 'fail', detail: selection?.reason ?? 'the real model could not be selected' }
   if (userAppeared !== true) return { verdict: 'fail', detail: 'the prompt never appeared in the log' }
   if (assistantAppeared !== true) return { verdict: 'fail', detail: 'no answer appeared' }
   if (settled !== true) return { verdict: 'fail', detail: 'the answer never settled' }
+  if (mode === 'real') return { verdict: 'pass', detail: `a real turn completed (${modelLabel(selection)}, settled at ${settledMs ?? '?'}ms)` }
   if (!String(answerHead ?? '').startsWith(FIXTURE_PREFIX)) return { verdict: 'fail', detail: "the answer is not the fixture's" }
   return { verdict: 'pass', detail: 'a fixture turn completed' }
+}
+
+/**
+ * The model a real-model pass names (the coordinator's D-052 decision, 2026-10-29): one minimal turn
+ * per target per pass, on this endpoint and model at the lowest effort it declares. It is never
+ * swapped for another model: a missing or failing model is the finding.
+ */
+export const REAL_MODEL = { endpoint: 'deepseek-official', model: 'deepseek-flash' }
+
+/** Reasoning levels from least to most effort, for catalogues whose ids follow the common names. */
+const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/**
+ * The lowest reasoning level a model declares: the least of the common names when any is declared,
+ * else the first declared level (catalogues list levels from least to most). Null when it declares
+ * none, which sends no level at all.
+ */
+export function lowestEffort(levels) {
+  const ids = (Array.isArray(levels) ? levels : []).map((level) => level?.id).filter((id) => typeof id === 'string' && id.length > 0)
+  if (ids.length === 0) return null
+  const ranked = ids.filter((id) => EFFORT_ORDER.includes(id))
+  if (ranked.length === 0) return ids[0]
+  return ranked.reduce((least, id) => (EFFORT_ORDER.indexOf(id) < EFFORT_ORDER.indexOf(least) ? id : least))
+}
+
+/**
+ * The selection a real-model turn records, read from a server's `/api/endpoints` body: the wanted
+ * endpoint and model at their lowest effort, or why it cannot be had. Models come from either
+ * catalogue shape the page reads (`models[]`, or a single `model`).
+ */
+export function realModelChoice(catalogue, want = REAL_MODEL) {
+  const endpoints = Array.isArray(catalogue?.endpoints) ? catalogue.endpoints : null
+  if (endpoints === null) return { ok: false, reason: 'the endpoint list could not be read' }
+  const option = endpoints.find((item) => item?.name === want.endpoint)
+  if (option === undefined) return { ok: false, reason: `${want.endpoint} is not configured` }
+  const models = Array.isArray(option.models)
+    ? option.models.filter((entry) => entry !== null && typeof entry?.id === 'string')
+    : typeof option.model === 'string' && option.model.length > 0
+      ? [{ id: option.model }]
+      : []
+  const entry = models.find((item) => item.id === want.model)
+  if (entry === undefined) return { ok: false, reason: `${want.endpoint}/${want.model} is not configured` }
+  const levels = entry.reasoning !== undefined ? entry.reasoning : option.reasoning
+  const effort = lowestEffort(levels?.levels)
+  const level = effort === null ? null : (levels.levels.find((item) => item?.id === effort) ?? null)
+  // The names the page draws (`modelTitle`, the effort row's title), so the menu can be driven by what it shows.
+  return { ok: true, endpoint: want.endpoint, model: want.model, effort, modelTitle: entry.name ?? entry.id, effortName: level === null ? null : (level.name ?? level.id) }
+}
+
+/**
+ * What the page's model seat reads once the selection holds: its accessible name, exactly as
+ * `renderModelSeat` writes it. A selection is proven by this, not by having clicked.
+ */
+export function expectedSeatLabel(choice) {
+  return choice.effortName === null
+    ? `Select model, current ${choice.modelTitle}`
+    : `Select model, current ${choice.modelTitle}, reasoning effort ${choice.effortName}`
+}
+
+/** How a selection reads in a detail line: `endpoint/model` and its effort when one is sent. */
+export function modelLabel(selection) {
+  if (selection?.endpoint === undefined) return 'no model'
+  return `${selection.endpoint}/${selection.model}${selection.effort ? `, effort ${selection.effort}` : ''}`
 }
 
 /**
@@ -401,7 +470,8 @@ export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, a
 export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn, shared, conversation }) {
   const checks = {
     // Counted only once its gate is open; a pending conversation is recorded, never judged.
-    ...(conversation !== undefined && conversation.verdict !== 'pending' ? { conversation: ['pass', 'fail'].includes(conversation.verdict) ? conversation.verdict : 'unjudged' } : {}),
+    // A conversation that is not sent (one real turn per pass, D-052) is recorded, never judged either.
+    ...(conversation !== undefined && !['pending', 'not-sent'].includes(conversation.verdict) ? { conversation: ['pass', 'fail'].includes(conversation.verdict) ? conversation.verdict : 'unjudged' } : {}),
     store: shared === 0 ? 'pass' : typeof shared === 'number' ? 'fail' : 'unjudged',
     token: tokenStatus === 303 ? 'pass' : 'fail',
     endpoints: endpointsStatus === 200 ? 'pass' : 'fail',
@@ -413,7 +483,7 @@ export function previewVerdict({ tokenStatus, endpointsStatus, treeStatus, turn,
   const verdict = failing.length > 0 ? 'fail' : unjudged.length > 0 ? 'unjudged' : 'pass'
   const detail =
     verdict === 'pass'
-      ? 'own session store, token link 303, /api/endpoints 200, /api/tree 200, a fixture turn completed'
+      ? `own session store, token link 303, /api/endpoints 200, /api/tree 200, ${turn?.mode === 'real' ? 'a real turn' : 'a fixture turn'} completed`
       : [failing.length > 0 ? `failing: ${failing.join(', ')}` : null, unjudged.length > 0 ? `unjudged: ${unjudged.join(', ')}` : null].filter(Boolean).join('; ')
   return { verdict, checks, detail }
 }
