@@ -1,9 +1,9 @@
 ---
 title: Browser slot queue
 created: 2026-10-29T13:08:51Z
-modified: 2026-10-29T13:50:08Z
+modified: 2026-10-29T14:10:30Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: How browser-slot shares the team's browser slots fairly. It covers the slot count and the integrator reservation, the queue and tickets, the coordinator's priority turn, the memory gate, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
 status: unverified
 grounded_in:
@@ -36,8 +36,9 @@ right moment, so some seats waited an hour. `browser-slot` serves the seats in t
   It does not hold the slot for a seat that is not asking. It is deleted when that seat takes the slot, and
   ignored once it is 30 minutes old.
 
-**Memory gate (D-060).** No new holder is admitted while `memory_pressure` reports under 25% free, or
-`vm.swapusage` used is at or over 7168M. The seat stays queued, and the exit-75 line says why.
+**Memory gate (D-061).** No new holder is admitted while `memory_pressure` reports under 25% free, the
+primary gate, or `vm.swapusage` used is at or over 7680M, the backstop for sticky macOS swap. The seat stays
+queued, and the exit-75 line says why. `browser-cap` may move the lines (`min-free=25 swap-stop=7680`).
 
 ## Holding and releasing
 
