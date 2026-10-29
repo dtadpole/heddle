@@ -18723,7 +18723,7 @@ function renderQuestion() {
   options.hidden = (question.options ?? []).length === 0
   const skipped = readOnly && answer.selected.length === 0 && !answer.custom
   document.getElementById('question-skipped').hidden = !skipped
-  questionCustom.value = answer.custom ?? ''
+  if (questionCustom.value !== (answer.custom ?? '')) questionCustom.value = answer.custom ?? ''
   questionCustom.disabled = readOnly
   questionCustom.hidden = readOnly && !answer.custom
   const note = document.getElementById('question-note')
@@ -18782,8 +18782,10 @@ function showQuestion(request, options = {}) {
   if (request === null || typeof request !== 'object' || !Array.isArray(request.questions) || request.questions.length === 0) return
   const readOnly = options.readOnly === true
   if (!readOnly && questionShown !== null && !questionShown.readOnly && questionShown.request.id === request.id) {
+    /** The poll repaints only a change of state, hold or deadline, so a focused choice or a caret is not disturbed. */
+    const before = questionShown.request
     questionShown.request = request
-    renderQuestion()
+    if (before.state !== request.state || before.held !== request.held || before.deadline !== request.deadline) renderQuestion()
     return
   }
   questionShown = { request, readOnly, draft: readOnly ? options.draft : questionDraftLoad(request) }
