@@ -234,8 +234,14 @@ test("the stream opens with DSH's ready frame, and a baseline read on it misses 
     const turn = await runTurn(server, cookie, { session, prompt: 'go' })
     assert.equal(turn.status, 200, turn.text)
     await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'turn/completed', 10_000)
-    const appended = (await logEntries(server, cookie, session)) - baseline
     const carried = stream.frames.filter((frame) => frame.event === 'session' && frame.data?.session === session && frame.at >= startedAt).length
+    // The claim is completeness, not write-before-push order: the log is read until it stops growing (up to 2 s),
+    // because the Rust server may push a frame a moment before its line is on disk.
+    let appended = (await logEntries(server, cookie, session)) - baseline
+    for (let tries = 0; tries < 40 && appended < carried; tries += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+      appended = (await logEntries(server, cookie, session)) - baseline
+    }
     assert.ok(appended > 3, `the turn wrote to the log (${appended} entries)`)
     assert.equal(carried, appended, `every entry the turn wrote reached the stream (${carried} of ${appended})`)
     stream.close()
