@@ -215,9 +215,16 @@ mod tests {
             unknown.problems(),
             ["unknown profile template 'web'; heddle ships: default"]
         );
-        let path =
-            reset_profile_from_template("../escape", "default", &checkout, &env).unwrap_err();
-        assert!(path.problems()[0].contains("plain name"));
+        // The binary only turns away a directory argument; every other name rests on this rule.
+        for name in ["../escape", "a/b", "", ".hidden", "..", "-flag"] {
+            let refused =
+                reset_profile_from_template(name, "default", &checkout, &env).unwrap_err();
+            assert!(
+                refused.problems()[0].contains("plain name"),
+                "'{name}' is not a plain name"
+            );
+        }
+        assert!(!root.join("home/profiles/a").exists());
         assert!(!root.join("home/profiles/other").exists());
         assert!(!root.join("home/escape").exists());
         std::fs::remove_dir_all(&root).ok();

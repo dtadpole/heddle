@@ -52,7 +52,11 @@ test('a new name is created, and an unknown template or a path is refused before
     assert.match(error.problems.join(), /unknown profile template 'web'; heddle ships: default/)
     return true
   })
-  assert.throws(() => resetProfileFromTemplate('../escape', 'default', { checkout: s.checkout, env: s.env }), /plain name/)
+  // The CLI only turns away a directory argument; every other name rests on this rule.
+  for (const name of ['../escape', 'a/b', '', '.hidden', '..', '-flag']) {
+    assert.throws(() => resetProfileFromTemplate(name, 'default', { checkout: s.checkout, env: s.env }), /plain name/, `'${name}' is not a plain name`)
+  }
+  assert.equal(existsSync(join(s.env.HEDDLE_HOME, 'profiles', 'a')), false)
   assert.equal(existsSync(join(s.env.HEDDLE_HOME, 'profiles', 'other')), false)
   assert.equal(existsSync(join(s.root, 'escape')), false)
   s.done()
