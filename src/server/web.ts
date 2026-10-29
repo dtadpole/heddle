@@ -14,6 +14,7 @@ import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, uploadDirectory } from './uploads.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
+import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
@@ -1100,6 +1101,37 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * The page's own folder chooser: one directory level (`GET`), and one new child folder (`POST`).
+   *
+   * DSH's browse backend, for the *Add workspace* dialog: a page reached through the gate or the public edge is on
+   * another machine, where the server's native dialog cannot be seen (see `directories.ts`). Directories only; a
+   * refusal is `{error, code}` with DSH's code, `400` for a path that is relative, missing, not a folder or
+   * unreadable, `409` for a child that already exists.
+   */
+  if (url.pathname === '/api/directories' && request.method === 'GET') {
+    try {
+      const listing = listDirectory(url.searchParams.get('path') ?? undefined)
+      respond(response, 200, 'application/json', `${JSON.stringify(listing, null, 2)}\n`)
+    } catch (error) {
+      if (!(error instanceof DirectoryError)) throw error
+      respond(response, error.status, 'application/json', `${JSON.stringify({ error: error.message, code: error.code })}\n`)
+    }
+    return
+  }
+  if (url.pathname === '/api/directories' && request.method === 'POST') {
+    const body = await readJson(request, response)
+    if (body === null) return
+    try {
+      const created = createDirectory(body.parent, body.name)
+      respond(response, 200, 'application/json', `${JSON.stringify(created, null, 2)}\n`)
+    } catch (error) {
+      if (!(error instanceof DirectoryError)) throw error
+      respond(response, error.status, 'application/json', `${JSON.stringify({ error: error.message, code: error.code })}\n`)
+    }
+    return
+  }
+
+  /**
    * Register a folder as a workspace root, or unregister one.
    *
    * These are the two buttons the left column offers, and both go through the same record the CLI
@@ -1109,9 +1141,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * because a session ran in it promotes it into the tree, which is how ad-hoc work becomes a
    * project without moving anything.
    *
-   * `DELETE` refuses when the root still holds sessions that no other root could adopt, and says so:
-   * `bootstrap` re-registers any folder that has sessions and no owner, so removing such a root
-   * would be undone on the next run. A refusal a person can read is better than a button that lies.
+   * `DELETE` removes the registration and nothing else — DSH's *Delete workspace*: the folder, its files and its
+   * sessions stay, and the sessions move to the nearest registered root above it, or to *Ungrouped* when there is
+   * none. It used to refuse that second case, because `bootstrap` re-adopts a folder that has sessions and no owner
+   * and the old folder tree then showed the root again; the workspace tree draws an adopted (`auto`) root as
+   * Ungrouped rather than as a workspace, so the removal now holds where a person looks. The CLI's
+   * `workspace remove` keeps the refusal and its `--force`.
    */
   if (url.pathname === '/api/workspaces' && request.method === 'POST') {
     const workspaces = ctx.workspace
@@ -1162,7 +1197,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const outcome = workspaces.remove(id, { all: ctx.session.list() })
+      const outcome = workspaces.remove(id, { all: ctx.session.list(), force: true })
       respond(response, 200, 'application/json', `${JSON.stringify(outcome, null, 2)}\n`)
     } catch (error) {
       respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
@@ -1175,7 +1210,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    *
    * A `PATCH` on the same path the `DELETE` takes, because the record's identity is the path and only
    * its label changes. An empty name is refused rather than saved: a nameless row in a tree is a row
-   * nobody can find again.
+   * nobody can find again. A name another workspace already carries is refused with `409` and DSH's
+   * `workspace/name-conflict`, because two rows with one label are two rows nobody can tell apart.
    */
   if (url.pathname.startsWith('/api/workspaces/') && request.method === 'PATCH') {
     const workspaces = ctx.workspace
@@ -1198,6 +1234,10 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       }
       respond(response, 200, 'application/json', `${JSON.stringify(record, null, 2)}\n`)
     } catch (error) {
+      if ((error as { code?: unknown }).code === 'workspace/name-conflict') {
+        respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace/name-conflict' })}\n`)
+        return
+      }
       respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
     }
     return

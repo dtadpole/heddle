@@ -780,15 +780,26 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         id: &str,
         _sessions: &[heddle_server::services::SessionMeta],
     ) -> Result<Value, ServiceError> {
+        // `force`: the page's Delete workspace removes the registration even when sessions stay behind
+        // (DSH's rule; they show under the nearest root above, else Ungrouped). The CLI keeps the refusal.
         let removal = self
             .service
-            .remove(id, &self.sessions.list(), false)
+            .remove(id, &self.sessions.list(), true)
             .map_err(refusal)?;
         serde_json::to_value(&removal).map_err(refusal)
     }
 
     fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
-        match self.service.rename(id, title).map_err(refusal)? {
+        let renamed = self
+            .service
+            .rename(id, title)
+            .map_err(|error| match error {
+                heddle_workspace::WorkspaceError::NameConflict(_) => {
+                    ServiceError::with_code(error.to_string(), "workspace/name-conflict")
+                }
+                other => refusal(other),
+            })?;
+        match renamed {
             Some(record) => serde_json::to_value(&record).map(Some).map_err(refusal),
             None => Ok(None),
         }

@@ -33,6 +33,8 @@
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
 //! | `POST /api/workspaces/pick` | `501 {error: reason}` when unavailable · `200` pretty [`PickerOutcome`] (`picked` or `cancelled`) |
+//! | `GET /api/directories?path=` | `200` pretty [`DirectoryListing`] · `400 {error, code}` (see [`crate::directories`]) |
+//! | `POST /api/directories` | body `{"parent", "name"}` · `400 text "the body must be JSON\n"` · `200` pretty `{"path"}` · `409`/`400 {error, code}` |
 //!
 //! `GET /api/html` is **not** here: it belongs to `heddle-server`, which also serves `/vendor/purify.js`, so the
 //! server registers it and this router must not (`Router::merge` rejects an overlapping path with a panic).
@@ -41,6 +43,7 @@
 //! [`Rendered`]: crate::code::Rendered
 //! [`SavedUpload`]: crate::uploads::SavedUpload
 //! [`PickerOutcome`]: crate::picker::PickerOutcome
+//! [`DirectoryListing`]: crate::directories::DirectoryListing
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,6 +70,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/uploads"),
     ("POST", "/api/markdown"),
     ("POST", "/api/workspaces/pick"),
+    ("GET", "/api/directories"),
+    ("POST", "/api/directories"),
 ];
 
 /// The file routes, configured: the host they read from and the folder picker they open.
@@ -105,6 +110,10 @@ impl FilesRoutes {
             .route("/api/uploads", post(store))
             .route("/api/markdown", post(markdown))
             .route("/api/workspaces/pick", post(pick))
+            .route(
+                "/api/directories",
+                get(list_directories).post(create_directory),
+            )
             .with_state(self)
     }
 }
@@ -329,6 +338,67 @@ async fn pick(State(files): State<FilesRoutes>) -> Response {
             ),
         ),
     }
+}
+
+/// `GET /api/directories?path=`: one directory level for the page's own folder chooser.
+async fn list_directories(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let home = crate::directories::home_dir();
+    match crate::directories::list_directory(query.get("path").map(String::as_str), &home) {
+        Ok(listing) => json(
+            StatusCode::OK,
+            &format!(
+                "{}\n",
+                serde_json::to_string_pretty(&listing).unwrap_or_default()
+            ),
+        ),
+        Err(error) => directory_refusal(&error),
+    }
+}
+
+/// `POST /api/directories` `{parent, name}`: one new child folder, non-recursive.
+async fn create_directory(request: Request) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), MAX_MARKDOWN_BYTES + 1).await {
+        Ok(body) => body,
+        Err(_) => return text(StatusCode::PAYLOAD_TOO_LARGE, "request too large\n"),
+    };
+    if body.len() > MAX_MARKDOWN_BYTES {
+        return text(StatusCode::PAYLOAD_TOO_LARGE, "request too large\n");
+    }
+    let value = if body.is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(value) => value,
+            Err(_) => return text(StatusCode::BAD_REQUEST, "the body must be JSON\n"),
+        }
+    };
+    let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
+    let home = crate::directories::home_dir();
+    match crate::directories::create_directory(field("parent"), field("name"), &home) {
+        Ok(path) => json(
+            StatusCode::OK,
+            &format!(
+                "{}\n",
+                serde_json::to_string_pretty(&serde_json::json!({ "path": path }))
+                    .unwrap_or_default()
+            ),
+        ),
+        Err(error) => directory_refusal(&error),
+    }
+}
+
+/// `{"error", "code"}` with the refusal's own status.
+fn directory_refusal(error: &crate::directories::DirectoryError) -> Response {
+    json(
+        StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_REQUEST),
+        &format!(
+            "{{\"error\":{},\"code\":{}}}\n",
+            serde_json::to_string(&error.message).unwrap_or_default(),
+            serde_json::to_string(error.code).unwrap_or_default()
+        ),
+    )
 }
 
 /// Whether `path` is a file inside a registered workspace root.
