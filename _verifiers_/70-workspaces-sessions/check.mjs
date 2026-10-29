@@ -1777,6 +1777,86 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test('first use creates or reuses default-workspace under the heddle home, once, the way DSH initializes its default', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's workspace/initializeDefault (dsh-workspace, dsh-api-workspace-controller): an empty install — no workspace,
+   * no session — gets a workspace over a folder named default-workspace, created when missing and reused when present;
+   * a repeated call answers the same workspace; deleting it turns first use off for good, and the folder stays; any
+   * install that is not empty gets nothing, which is not an error. No session is started. DSH's folder is under
+   * Documents/deepseek-harness; heddle's is under its own home, so HOME is a fixture here and its Documents must stay
+   * absent.
+   */
+  const fresh = harness('first-use')
+  const busy = harness('first-use-busy')
+  const userHome = fixtureDir('first-use-user')
+  const chosen = fixtureDir('first-use-chosen')
+  const live = []
+  try {
+    const serve = async (h) => {
+      const server = await startServer(
+        ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+        { ...h.env, HOME: userHome },
+      )
+      live.push(server)
+      const origin = new URL(server.url).origin
+      const handshake = await fetch(server.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      return async (path, init = {}) => {
+        const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+        const text = await response.text()
+        let body
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+        return { status: response.status, body }
+      }
+    }
+    const call = await serve(fresh)
+    const folder = join(fresh.home, 'default-workspace')
+    const first = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(first.status, 200, `an empty install asks for its default workspace (${JSON.stringify(first.body)})`)
+    assert.ok(first.body.workspace !== null && typeof first.body.workspace === 'object', `and gets one (${JSON.stringify(first.body)})`)
+    assert.ok(existsSync(folder), 'its folder is made under the heddle home')
+    assert.equal(first.body.workspace.path, realpathSync(folder), 'and the workspace is that folder')
+    assert.equal(first.body.workspace.title, 'default-workspace', "titled after the folder, as DSH stores it")
+    assert.equal(first.body.workspace.origin, 'added', 'a workspace the tree draws')
+    assert.equal(existsSync(join(userHome, 'Documents')), false, "nothing is made in the user's Documents")
+    const listed = (await call('/api/workspaces')).body.workspaces ?? []
+    assert.deepEqual(listed.map((view) => view.id), [first.body.workspace.id], 'it is the one workspace')
+    assert.deepEqual((await call('/api/sessions')).body, [], 'and no session was started')
+
+    const again = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(again.body.workspace?.id, first.body.workspace.id, 'a repeated call reuses it')
+    assert.equal(((await call('/api/workspaces')).body.workspaces ?? []).length, 1, 'rather than making a second')
+
+    const deleted = await call(`/api/workspaces/${encodeURIComponent(first.body.workspace.id)}`, { method: 'DELETE' })
+    assert.equal(deleted.status, 200, 'the default workspace can be deleted')
+    const after = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(after.status, 200)
+    assert.equal(after.body.workspace, null, 'and once deleted it is not given back')
+    assert.deepEqual((await call('/api/workspaces')).body.workspaces ?? [], [], 'the list stays empty')
+    assert.ok(existsSync(folder), 'while its folder stays')
+
+    const other = await serve(busy)
+    assert.equal((await other('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: chosen }) })).status, 200)
+    const notFirst = await other('/api/workspaces/default', { method: 'POST' })
+    assert.equal(notFirst.status, 200, 'an install that is not empty is not refused')
+    assert.equal(notFirst.body.workspace, null, 'it gets no default workspace')
+    assert.equal(existsSync(join(busy.home, 'default-workspace')), false, 'and no folder')
+  } finally {
+    for (const server of live) server.kill()
+    for (const h of [fresh, busy]) {
+      removeDir(h.home)
+      removeDir(h.work)
+    }
+    removeDir(userHome)
+    removeDir(chosen)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return

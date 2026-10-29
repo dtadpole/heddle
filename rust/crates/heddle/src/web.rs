@@ -828,6 +828,22 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         // The booted store's own records, as `tree` and `remove` read them.
         serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
     }
+
+    fn initialize_default(
+        &self,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Option<Value>, ServiceError> {
+        // First use (DSH's `workspace/initializeDefault`): every session the store holds, archived ones included,
+        // decides whether this install is empty; the folder is `$HEDDLE_HOME/default-workspace`.
+        match self
+            .service
+            .initialize_default(&self.sessions.list())
+            .map_err(refusal)?
+        {
+            Some(record) => serde_json::to_value(&record).map(Some).map_err(refusal),
+            None => Ok(None),
+        }
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under
