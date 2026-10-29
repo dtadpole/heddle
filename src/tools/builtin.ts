@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
@@ -87,6 +88,8 @@ export function builtinTools(
   }
 
   const readFile: ToolDefinition = {
+    /** Reads only, so two reads of one step run together (DSH's fs read tools are concurrency-safe). */
+    concurrencySafe: true,
     spec: {
       name: 'read_file',
       description: 'Read a text file and return its contents. Refused for a path outside the sandbox in confined modes.',
@@ -101,12 +104,14 @@ export function builtinTools(
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
-      const text = readFileSync(target, 'utf8')
+      // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
+      const text = await readFileText(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
     },
   }
 
   const listDir: ToolDefinition = {
+    concurrencySafe: true,
     spec: {
       name: 'list_dir',
       description: 'List the entries of a directory inside the workspace, one per line, directories marked with a trailing slash.',
@@ -118,12 +123,14 @@ export function builtinTools(
     },
     run: async (args, context): Promise<ToolResult> => {
       const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode, context.cwd)
-      const entries = readdirSync(target, { withFileTypes: true })
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map((entry) => {
-          const stats = statSync(join(target, entry.name))
+      // Listed without blocking the event loop, as read_file reads, so a parallel group's calls run together.
+      const dirents = (await readdir(target, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))
+      const entries = await Promise.all(
+        dirents.map(async (entry) => {
+          const stats = await stat(join(target, entry.name))
           return `${entry.isDirectory() ? `${entry.name}/` : entry.name}${entry.isDirectory() ? '' : ` (${stats.size}B)`}`
-        })
+        }),
+      )
       return { output: entries.join('\n'), data: { path: target, entries: entries.length } }
     },
   }
