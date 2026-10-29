@@ -59,6 +59,11 @@ pub use heddle_config::{
     EndpointConfig, EndpointKind, ModelEntry, ModelOption, ReasoningLevel, ReasoningLevels,
     ReasoningValue,
 };
+/// The provider retry policy and decision (DSH's `dsh-llm` retry policy), for the loop that executes it.
+pub use heddle_config::{
+    RetryFailure, RetryMode, RetryPlan, RetryPolicy, parse_retry_after, resolve_retry_policy,
+    retry_failure_code,
+};
 pub use model_info::InputModality;
 pub use printer::{StreamPrinter, StreamPrinterOptions, StreamSummary};
 pub use service::{Generated, ModelHooks, ModelService, ProbeOptions, ProbeResult, RefreshSource};
