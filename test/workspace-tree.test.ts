@@ -114,6 +114,20 @@ test('a subagent\'s session is hidden, and the archive filter has DSH\'s three s
   assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { archived: 'only' })[0]), ['s-archived'])
 })
 
+test('a blank session is a row only while it is the open one, and then it leads its group (DSH sessionVisible)', () => {
+  const workspaces = [workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned'] })]
+  const sessions = [
+    session('s-blank-new', 9, { turns: 0 }),
+    session('s-talked', 5),
+    session('s-pinned', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
+    session('s-blank-old', 1, { turns: 0 }),
+  ]
+  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { current: null })[0]), ['s-pinned', 's-talked'], 'no blank row when none is open')
+  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { current: 's-talked' })[0]), ['s-pinned', 's-talked'], 'nor when a talked one is open')
+  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { current: 's-blank-old' })[0]), ['s-blank-old', 's-pinned', 's-talked'], 'the open blank leads, ahead of the pin')
+  assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 4, 'a caller that names no open session sees every row, as before')
+})
+
 test('archived only drops a workspace with nothing archived, and its child rises to the nearest shown level', () => {
   const workspaces = [workspace('w-child', '/r/c', { parent: 'w-root', sessionIds: ['s-old'] }), workspace('w-root', '/r', { sessionIds: ['s-live'] })]
   const sessions = [session('s-old', 1, { archived: true }), session('s-live', 2)]
