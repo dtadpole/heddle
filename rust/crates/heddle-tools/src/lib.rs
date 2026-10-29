@@ -55,3 +55,53 @@ pub use validate::{argument_violations, invalid_arguments, open_root};
 
 /// The cancellation token every call carries for a Stop — the TypeScript build's `AbortSignal`.
 pub use tokio_util::sync::CancellationToken;
+
+/// Test support shared by the crate's test modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// A scratch folder under the system temp folder that is removed when it is dropped, so a test that fails or
+    /// panics still cleans up after itself (helpers that only cleared the folder before creating it left one
+    /// behind per run: tool-developer's TMPDIR count, 2026-10-29). The name is unique per process and call; it
+    /// reads as a `Path` wherever one is expected.
+    pub(crate) struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        pub(crate) fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("heddle-{label}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for ScratchDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::ffi::OsStr> for ScratchDir {
+        fn as_ref(&self) -> &std::ffi::OsStr {
+            self.0.as_os_str()
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
