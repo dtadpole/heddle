@@ -123,6 +123,16 @@ impl SandboxGate for Sandbox {
         self.service.workspace_root()
     }
 
+    fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        self.service.root_for(folder)
+    }
+
+    fn rooted_at(&self, root: &Path) -> Option<Arc<dyn SandboxGate>> {
+        Some(Arc::new(Sandbox::new(Arc::new(
+            self.service.rooted_at(root),
+        ))))
+    }
+
     fn default_mode(&self) -> SandboxMode {
         self.service.mode()
     }
@@ -422,6 +432,58 @@ mod tests {
             )
             .await;
         assert_eq!(outside.error.unwrap().code, crate::codes::SANDBOX);
+    }
+
+    /// R-developer-eight-10: with no root named, a call's relative paths resolved against the directory the
+    /// process was launched in, not the call's folder (the session's workspace, as the loop resolves it). DSH
+    /// resolves them against the session's directory, which is also its `workspace-write` boundary.
+    #[tokio::test]
+    async fn a_call_acts_in_its_own_folder_when_no_root_was_named() {
+        let launch = scratch("unnamed-launch");
+        let folder = scratch("unnamed-folder");
+        let config = SandboxConfig {
+            mode: SandboxMode::WorkspaceWrite,
+            workspace_root: None,
+            backend: BackendChoice::Disabled,
+            ..SandboxConfig::default()
+        };
+        let host = SandboxHost {
+            cwd: launch.clone(),
+            harness_home: launch.join(".heddle"),
+            platform: Platform::current(),
+        };
+        let gates = gates_over(
+            Arc::new(SandboxService::with_backend(&config, &host, None)),
+            Arc::new(ApprovalService::new(ApprovalsConfig::default())),
+            sessions_at(&launch.join("sessions")),
+        );
+        let registry =
+            crate::ToolRegistry::from_config(gates, &crate::config::ToolsConfig::default());
+        let args = |value: serde_json::Value| value.as_object().cloned().unwrap();
+        let wrote = registry
+            .call(
+                "write_file",
+                args(json!({ "path": "note.txt", "content": "in the folder" })),
+                crate::ToolContext::new(&folder),
+            )
+            .await;
+        assert_eq!(wrote.error, None, "{wrote:?}");
+        assert!(
+            folder.join("note.txt").exists(),
+            "the write landed in the call's folder"
+        );
+        assert!(
+            !launch.join("note.txt").exists(),
+            "and not in the launch directory"
+        );
+        let listed = registry
+            .call(
+                "list_dir",
+                args(json!({})),
+                crate::ToolContext::new(&folder),
+            )
+            .await;
+        assert!(listed.output.contains("note.txt"), "{listed:?}");
     }
 
     #[tokio::test]

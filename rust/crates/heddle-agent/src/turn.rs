@@ -336,12 +336,17 @@ async fn run_turn_body(
         RoundLimit::Rounds(rounds) => rounds,
         RoundLimit::Unbounded => u32::MAX,
     };
-    // Instructions belong to the conversation; tools retain the configured sandbox root.
-    let workspace_root = runtime.tools.sandbox().workspace_root().to_path_buf();
-    let instruction_cwd = runtime
-        .session
-        .folder(session)
-        .unwrap_or_else(|| workspace_root.clone());
+    let sandbox = runtime.tools.sandbox();
+    let folder = runtime.session.folder(session);
+    // The session's folder is where its tools run: the shell's directory, the base of a relative path and the
+    // `workspace-write` boundary (DSH's rule), so a turn in workspace B acts in B and not in the directory the
+    // server was launched from. A root the operator named still applies to every session (`root_for`).
+    let cwd = sandbox.root_for(folder.as_deref());
+    let rooted = sandbox
+        .rooted_at(&cwd)
+        .unwrap_or_else(|| Arc::clone(sandbox));
+    // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
+    let instruction_cwd = folder.unwrap_or_else(|| sandbox.workspace_root().to_path_buf());
 
     let tools = runtime.tools.describe();
     let mut denials: Vec<Denial> = Vec::new();
@@ -368,7 +373,7 @@ async fn run_turn_body(
         let mode = runtime.tools.effective_mode(Some(session));
         let sections = [RuntimeContextSection {
             name: "sandbox:policy".to_owned(),
-            text: runtime.tools.sandbox().policy_statement(mode),
+            text: rooted.policy_statement(mode),
         }];
         runtime.context.record_runtime_context(session, &sections)?;
 
@@ -572,7 +577,7 @@ async fn run_turn_body(
                 )
             } else {
                 let context = ToolContext {
-                    cwd: workspace_root.clone(),
+                    cwd: cwd.clone(),
                     session: Some(session.clone()),
                     cancel: cancel.clone(),
                     log: turn_log(),
@@ -910,6 +915,8 @@ pub(crate) mod tests {
         state: Mutex<SessionState>,
         sources: Mutex<Vec<Option<serde_json::Value>>>,
         fail_user_content: AtomicBool,
+        /// The folder the session was opened in, `None` for a record with none.
+        folder: Mutex<Option<PathBuf>>,
     }
 
     impl RecordingSession {
@@ -917,6 +924,7 @@ pub(crate) mod tests {
             Arc::new(Self {
                 sources: Mutex::new(Vec::new()),
                 fail_user_content: AtomicBool::new(false),
+                folder: Mutex::new(None),
                 state: Mutex::new(SessionState {
                     events: Vec::new(),
                     messages: Vec::new(),
@@ -955,6 +963,10 @@ pub(crate) mod tests {
 
         fn sources(&self) -> Vec<Option<serde_json::Value>> {
             self.sources.lock().unwrap().clone()
+        }
+
+        fn open_in(&self, folder: &str) {
+            *self.folder.lock().unwrap() = Some(PathBuf::from(folder));
         }
 
         fn fail_user_content(&self, fail: bool) {
@@ -1031,7 +1043,7 @@ pub(crate) mod tests {
         }
 
         fn folder(&self, _: &SessionHandle) -> Option<PathBuf> {
-            None
+            self.folder.lock().unwrap().clone()
         }
 
         fn model_request(
@@ -1383,6 +1395,58 @@ pub(crate) mod tests {
             finish_reason: finish_reason.into(),
             usage: None,
         }
+    }
+
+    /// R-developer-eight-10: a turn handed its tools the sandbox's root — the directory the server was launched
+    /// in — as their folder, so a session of workspace B ran its shell elsewhere. DSH runs a session's tools in
+    /// the session's own directory.
+    #[tokio::test]
+    async fn a_turns_tools_run_in_the_sessions_folder() {
+        let session = RecordingSession::new();
+        session.open_in("/workspaces/b");
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "where", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let seen: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&seen);
+        let probe = tool_fn(
+            ToolSpec {
+                name: "where".into(),
+                description: "the folder a call runs in".into(),
+                parameters: serde_json::json!({}),
+            },
+            move |_args, context| {
+                *record.lock().unwrap() = Some(context.cwd.clone());
+                Box::pin(async move { Ok(ToolResult::ok("noted")) })
+            },
+        );
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![probe]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "where am I"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(PathBuf::from("/workspaces/b")),
+            "the tool ran in the session's folder, not the sandbox's root (/w)"
+        );
     }
 
     #[tokio::test]

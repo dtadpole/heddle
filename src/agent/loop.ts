@@ -213,9 +213,15 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
   const maximumTokens = options.maxOutputTokens
-  const cwd = ctx.sandbox.workspaceRoot
-  // Instructions belong to the conversation; tools retain the configured sandbox root.
-  const instructionCwd = ctx.session.folder(options.session) ?? cwd
+  const folder = ctx.session.folder(options.session)
+  /**
+   * The session's folder is where its tools run: the shell's directory, the base of a relative path and the
+   * `workspace-write` boundary — DSH's rule, so a turn in workspace B acts in B and not in the directory the
+   * server was launched from. A root the operator named still applies to every session (`rootFor`).
+   */
+  const cwd = ctx.sandbox.rootFor(folder)
+  // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
+  const instructionCwd = folder ?? ctx.sandbox.workspaceRoot
 
   if (options.answerPending !== true) {
     ctx.session.userContent(
@@ -271,7 +277,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     ctx.context.recordRuntimeContext(options.session, [
       {
         name: 'sandbox:policy',
-        text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode))),
+        text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode), cwd)),
       },
     ])
 
