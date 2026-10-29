@@ -874,7 +874,10 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
     {
         if let Some(hub) = boot.services.get::<heddle_server::EventHub>("event-hub") {
             schedule.service.on_change(Arc::new(move || {
-                hub.publish(heddle_server::SseFrame::new("schedule", &serde_json::json!({})));
+                hub.publish(heddle_server::SseFrame::new(
+                    "schedule",
+                    &serde_json::json!({}),
+                ));
                 Ok(())
             }));
         }
@@ -1200,8 +1203,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            3,
-            "files, trajectory and the composer"
+            4,
+            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }
