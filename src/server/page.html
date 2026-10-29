@@ -5513,9 +5513,14 @@ async function refreshSessions() {
    * The list itself is drawn from the tree — this walk only needs to know which session is newest, and it
    * deliberately asks for **every** session rather than only the ad-hoc ones: a page that started with no
    * selection because all its sessions happened to be registered would be the same bug again.
+   *
+   * Every session a person can see, that is: a subagent's session (`origin: 'subagent'`, a delegate child or a
+   * teammate) is hidden from the tree, as DSH hides it, and is always newer than the parent that started it. Counted
+   * here, every reload after a delegation opened the hidden child — its conversation on screen, no row selected —
+   * and a prompt sent from there went to the child.
    */
   if (current !== null) return
-  const select = sessions[0]?.id ?? null
+  const select = sessions.find((meta) => meta.origin !== 'subagent')?.id ?? null
   if (select !== null) {
     current = select
     await showSession(select)
