@@ -18,6 +18,9 @@ grounded_in:
 - [`check-team-view.mjs`](check-team-view.mjs) — a Lead's team as the Web UI shows it: the roster with live status,
   the shared board with its revisions and the mailbox ledger, read from the same `/api/team` projection the
   tools use; and no panel at all for a session with no team.
+- [`check-session-landing.mjs`](check-session-landing.mjs) — the session a page opens with nothing selected: the
+  newest one a person can see, never a newer hidden subagent child (`origin: 'subagent'`), with its row selected
+  and its conversation on screen.
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
