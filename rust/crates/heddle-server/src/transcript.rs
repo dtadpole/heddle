@@ -111,6 +111,10 @@ pub struct ChatTurn {
     /// An assistant turn's markdown rendered as a document; set by the session route, never by the fold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    /// A user message the harness wrote rather than a person - a goal round's `source` (`{kind: "goal", goalId,
+    /// revision, round}`) or another trigger's - so the page draws it as DSH's bordered notice, not a bubble.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Value>,
 }
 
 impl ChatTurn {
@@ -131,8 +135,16 @@ impl ChatTurn {
             result: None,
             state: None,
             html: None,
+            trigger: None,
         }
     }
+}
+
+/// A message's `source` when it names a trigger kind: the harness, not a person, wrote that message.
+fn trigger_of(source: Option<&Value>) -> Option<Value> {
+    source
+        .filter(|source| source.get("kind").and_then(Value::as_str).is_some_and(|kind| !kind.is_empty()))
+        .cloned()
 }
 
 /// `encodeURIComponent`, for the leaf of an upload's route: the unreserved marks it keeps are
@@ -407,6 +419,7 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     if let Some(at) = event.get("at").and_then(Value::as_str) {
                         turn.time = Some(at.to_owned());
                     }
+                    turn.trigger = trigger_of(message.get("source"));
                     turns.push(turn);
                 }
                 "assistant" => turns.push(ChatTurn::new(TurnKind::Assistant, text)),
@@ -679,6 +692,23 @@ mod tests {
         assert_eq!(turns[0].text, "hi");
         assert_eq!(turns[0].time.as_deref(), Some("2026-10-22T00:00:00.000Z"));
         assert_eq!(turns[1].text, "hello");
+    }
+
+    #[test]
+    fn a_goal_round_carries_its_trigger_and_a_persons_message_none() {
+        let source = json!({"kind": "goal", "goalId": "goal-1", "revision": 1, "round": 2});
+        let events = vec![
+            json!({"type": "message", "at": "2026-10-29T00:00:00.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "set a goal"}]}}),
+            json!({"type": "message", "at": "2026-10-29T00:00:01.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "Continue working toward the goal."}], "source": source}}),
+            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "x"}], "source": {"note": "no kind"}}}),
+        ];
+        let turns = transcript_turns(&events);
+        assert_eq!(turns[0].trigger, None, "a person's message is not a trigger");
+        assert_eq!(turns[1].trigger.as_ref(), Some(&source), "the round keeps its whole source");
+        assert_eq!(turns[2].trigger, None, "a source without a kind names no trigger");
+        let wire = serde_json::to_value(&turns[1]).unwrap();
+        assert_eq!(wire["trigger"]["round"], 2);
+        assert!(serde_json::to_value(&turns[0]).unwrap().get("trigger").is_none(), "absent, not null");
     }
 
     #[test]
