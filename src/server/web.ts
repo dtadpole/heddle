@@ -561,16 +561,23 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
+      /**
+       * The bytes are read **before** the answer starts, so a file that cannot be read still gets its 404. The head
+       * used to go out first: a file without read permission threw EACCES after writeHead(200), the catch's 404 then
+       * threw ERR_HTTP_HEADERS_SENT, and the response was never ended, so the request hung for good (live issue
+       * developer-two-13). The length is what was read, so it cannot disagree with the body if the file changed.
+       */
+      const bytes = readFileSync(wanted)
       const contentType = inlineContentType(wanted)
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
-        'content-length': String(stats.size),
+        'content-length': String(bytes.length),
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
         'content-disposition': contentType === null ? attachmentDisposition(basename(wanted)) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
-      response.end(readFileSync(wanted))
+      response.end(bytes)
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
@@ -615,15 +622,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
+      /** Read before the head, as the raw route does, so an unreadable upload still gets its 404. */
+      const bytes = readFileSync(wanted)
       const contentType = inlineContentType(wanted)
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
-        'content-length': String(stats.size),
+        'content-length': String(bytes.length),
         'content-disposition': contentType === null ? attachmentDisposition(leaf) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
-      response.end(readFileSync(wanted))
+      response.end(bytes)
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
