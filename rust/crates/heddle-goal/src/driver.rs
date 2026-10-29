@@ -919,6 +919,100 @@ mod tests {
         assert_eq!(outcome.stopped, "goal-moved");
     }
 
+    /// R-developer-two-31: an edit during a round must not let the goal run past its cap. DSH's fold counts rounds
+    /// across revisions, so a cap of three allows three rounds in total. Measured before the fix on both builds: an
+    /// edit during round 2 gave five rounds, labelled 1/3, 2/3, 3/3, 3/3, 3/3.
+    #[tokio::test]
+    async fn an_edit_during_a_round_does_not_let_the_goal_run_past_its_cap() {
+        let (log, goals) = setup();
+        create(&goals, 3.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let edit_goals = goals.clone();
+        let hook: Hook = Arc::new(move |session: &str, round: u64| {
+            if round != 2 {
+                return;
+            }
+            // The person edits the objective while round 2 runs, as in the parity measurement.
+            let current = edit_goals.get(session).unwrap().unwrap();
+            edit_goals
+                .edit(
+                    session,
+                    &current.goal.goal_ref(),
+                    crate::service::EditGoal {
+                        objective: Some("three rounds at most, sharper".into()),
+                        max_goal_rounds: None,
+                    },
+                )
+                .unwrap();
+        });
+        let mut runner = runner(&log, &calls);
+        runner.hook = Some(hook);
+        let driver = GoalDriver::new(goals, Arc::new(runner));
+
+        // The edit stops the first chain; the next trigger starts another, as a turn/completed would.
+        assert_eq!(driver.advance("s1").await.stopped, "goal-moved");
+        assert_eq!(driver.advance("s1").await.stopped, "round-limit");
+
+        let calls = calls.lock().unwrap();
+        let rounds: Vec<u64> = calls.iter().map(|(round, _)| *round).collect();
+        assert_eq!(rounds, [1, 2, 3], "three rounds in total, each number once");
+        let labels: Vec<&str> = calls
+            .iter()
+            .map(|(_, prompt)| prompt.lines().nth(1).unwrap_or(""))
+            .collect();
+        assert_eq!(labels, ["Round: 1/3", "Round: 2/3", "Round: 3/3"]);
+        let folded = fold_goal(&log.events("s1")).unwrap();
+        assert_eq!(folded.rounds_started, 3);
+        let goal = folded.goal.unwrap();
+        assert_eq!(goal.phase, GoalPhase::Blocked);
+        assert_eq!(goal.revision, 3, "create, edit, then the round-limit block");
+    }
+
+    #[test]
+    fn a_log_written_before_the_fix_still_folds_and_its_repeated_round_numbers_count_once() {
+        let (log, goals) = setup();
+        let created = create(&goals, 3.0);
+        let say = |revision: u64, round: u64| {
+            log.append_raw(
+                "s1",
+                json!({
+                    "type": "message",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": format!("Round: {round}/3")}],
+                        "source": {"kind": "goal", "goalId": created.goal.id.as_str(), "revision": revision, "round": round}
+                    }
+                }),
+            );
+        };
+        say(1, 1);
+        say(1, 2);
+        goals
+            .edit(
+                "s1",
+                &created.goal.goal_ref(),
+                crate::service::EditGoal {
+                    objective: Some("old log, edited".into()),
+                    max_goal_rounds: None,
+                },
+            )
+            .unwrap();
+        // What the old driver wrote after an edit: round 3 three times under the new revision.
+        say(2, 3);
+        say(2, 3);
+        say(2, 3);
+        let folded = fold_goal(&log.events("s1")).unwrap();
+        assert_eq!(
+            folded.rounds_started, 3,
+            "the duplicates are not extra rounds, and replay does not fail"
+        );
+        let view = goals.get("s1").unwrap().unwrap();
+        assert!(matches!(
+            decide_goal_round(Some(&view)),
+            RoundDecision::Block { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn a_goal_completed_during_its_round_stops_the_chain() {
         let (log, goals) = setup();
