@@ -1991,6 +1991,56 @@ test('a reader who scrolled back finds the same place after visiting another ses
   }
 })
 
+test('a code block names its language and is coloured the same whichever server drew it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * C60 in the parity inventory: DSH labels a fenced block with its language, and one highlighter colours it. heddle's
+   * two servers highlight on their own and were measured disagreeing on the same tokens (`x` was hljs-attr from the
+   * TypeScript server and hljs-variable from the Rust one), so the page re-highlights a fence with the highlight.js
+   * both servers serve. The expected markup is highlight.js's own for this line - the TypeScript server's colours -
+   * and it must come out the same, live and after a reload, on either build.
+   */
+  const answer = 'Here:\n\n```ts\nconst x: number = 1 // one\n```\n\nand plain:\n\n```\nno language\n```'
+  const expected = '<span class="hljs-keyword">const</span> <span class="hljs-attr">x</span>: <span class="hljs-built_in">number</span> = <span class="hljs-number">1</span> <span class="hljs-comment">// one</span>'
+  const server = await startServer('code-blocks', () => [{ text: answer }])
+  const browser = await openBrowser({ width: 1100, height: 800 })
+  const read = () =>
+    browser.evaluate(`JSON.stringify((() => {
+      const row = [...document.querySelectorAll('#log .turn.assistant')].at(-1)
+      const blocks = [...row.querySelectorAll('pre')]
+      return {
+        labels: blocks.map((pre) => pre.dataset.lang ?? null),
+        drawn: blocks.map((pre) => getComputedStyle(pre, '::before').content),
+        highlighted: blocks.map((pre) => pre.querySelector('code').dataset.highlighted ?? null),
+        first: blocks[0].querySelector('code').innerHTML.trim(),
+        copy: row.dataset.copyText ?? '',
+      }
+    })())`).then(JSON.parse)
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'show me code')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant pre code[data-highlighted]") !== null', 20_000), 'the settled fence is coloured by the page')
+    const live = await read()
+    assert.deepEqual(live.labels, ['ts', null], 'the fence names its language, a bare fence names none')
+    assert.equal(live.drawn[0], '"ts"', 'and the label is drawn')
+    assert.deepEqual(live.highlighted, ['typescript', null], 'the alias resolves as the server resolves it, and a bare fence is left as drawn')
+    assert.equal(live.first, expected, 'coloured exactly as highlight.js colours it')
+    assert.ok(!/^ts\b/m.test(live.copy) && live.copy.includes('const x: number = 1 // one'), 'the label is not part of what Copy yields')
+
+    // A reload reopens the session the page remembers, and draws the answer from the transcript.
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant pre code[data-highlighted]") !== null', 15_000), 'a reload colours it again')
+    const reloaded = await read()
+    assert.deepEqual([reloaded.labels, reloaded.first], [live.labels, live.first], 'the same label and the same colours after a reload')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a turn this page did not start still says Weaving', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
