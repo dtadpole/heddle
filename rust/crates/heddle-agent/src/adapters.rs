@@ -229,6 +229,24 @@ impl SessionPort for Sessions {
             .map(drop)
             .map_err(port_error)
     }
+
+    fn claim_pending_input(&self, session: &SessionHandle) -> Result<usize, PortError> {
+        heddle_session::inbox::claim_next_step(self.service.store(), session, |content, source| {
+            self.service.user_content(session, content, source)
+        })
+        .map(|claimed| claimed.len())
+        .map_err(port_error)
+    }
+
+    fn has_pending_input(&self, session: &SessionHandle) -> bool {
+        match heddle_session::inbox::has_pending_step(self.service.store(), session) {
+            Ok(pending) => pending,
+            Err(error) => {
+                read_failed(session, "reading the inbox", error);
+                false
+            }
+        }
+    }
 }
 
 /// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,
@@ -296,6 +314,28 @@ impl SubagentStore for SessionSubagents {
     ) -> Result<Option<SandboxMode>, PortError> {
         heddle_session::inherit_recorded_mode::<SandboxMode>(self.service.store(), parent, child)
             .map_err(port_error)
+    }
+
+    fn user_message(
+        &self,
+        session: &SessionHandle,
+        content: Vec<ContentPart>,
+        source: Option<serde_json::Value>,
+    ) -> Result<u64, PortError> {
+        let event = self
+            .service
+            .store()
+            .message(
+                session,
+                Message {
+                    role: Role::User,
+                    tool_call_id: None,
+                    content,
+                    source,
+                },
+            )
+            .map_err(port_error)?;
+        Ok(event.seq)
     }
 }
 

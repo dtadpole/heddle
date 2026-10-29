@@ -381,6 +381,10 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         .services
         .get::<std::sync::Arc<heddle_goal::GoalDriver>>("goalDriver")
         .map(|driver| GoalJoin { driver });
+    // Background delegation, when the profile has the subagent row: the turn waits for the session's children.
+    let subagents = boot
+        .services
+        .get::<std::sync::Arc<heddle_agent::SubagentService>>("subagents");
     let turn_args = heddle_agent::command::Args {
         turn: args.turn.clone(),
         endpoint: args.endpoint.clone(),
@@ -405,6 +409,7 @@ fn turn_on(args: &Args, invocation: &Invocation, boot: &Boot, out: &mut Output<'
         goal: goal_advance
             .as_ref()
             .map(|advance| advance as &dyn heddle_agent::command::GoalAdvance),
+        subagents: subagents.as_deref(),
     };
     let (stdout, stderr) = out.writers();
     let code = crate::runtime::tokio().block_on(heddle_agent::command::run(
