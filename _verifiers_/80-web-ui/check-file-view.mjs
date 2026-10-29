@@ -21,10 +21,10 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, steps = [{ text: 'an answer' }]) {
   const home = isolatedHome(`file-view-${label}`)
   const work = fixtureDir(`file-view-${label}-work`)
-  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const { config } = scriptedConfig({ home, steps })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config } },
@@ -578,6 +578,69 @@ test('an HTML preview applies its relative stylesheet and does not run its scrip
       return { frameRan: frame.contentWindow.__ran === true, frameTitle: frame.contentDocument.title, pageRan: window.__ran === true }
     })()`)
     assert.deepEqual(inert, { frameRan: false, frameTitle: '', pageRan: false }, 'and the page\'s script does not run')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * C62 in the parity inventory: a file link in a chat answer opens the file rather than leaving the page. DSH opens it
+ * in its right sidebar; heddle's one preview surface is the panel (the owner's rule above), so the link opens there.
+ * Measured before this test: the answer's `README.md` link navigated the page to the server's `not found`. A remote
+ * link keeps its own tab, which is what DSH does without its in-app browser.
+ */
+test('a file link in a chat answer opens the file in the preview, and does not leave the page', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const answer = 'See [the readme](README.md), [the guide](docs/guide.md#install) and [the site](https://example.com/).'
+  const server = await startServer('chat-links', [{ text: answer }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'README.md'), '# Heddle readme\n\nA line to read.\n')
+    mkdirSync(join(server.work, 'docs'), { recursive: true })
+    writeFileSync(join(server.work, 'docs', 'guide.md'), '# Guide\n\nIntro.\n\n## Install\n\nRun it.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where is the readme', folder: server.work, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]") !== null', 10_000), 'the answer carries the file link')
+    const before = await browser.evaluate('location.href')
+    await browser.evaluate('document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]").click()')
+    assert.ok(await browser.waitFor('document.getElementById("file-body").innerText.includes("A line to read.")', 10_000), 'the file opens in the preview')
+    assert.equal(await browser.evaluate('location.href'), before, 'and the page did not navigate away')
+    assert.match(await browser.evaluate('document.getElementById("file-head").textContent'), /README\.md/, 'the preview names the file')
+
+    // Back to the chat, then the link with a fragment: the file opens at the heading it names.
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    await browser.waitFor('document.querySelector("#log .turn.assistant a[href=\\"docs/guide.md#install\\"]") !== null', 10_000)
+    await browser.evaluate('document.querySelector("#log .turn.assistant a[href=\\"docs/guide.md#install\\"]").click()')
+    assert.ok(await browser.waitFor('document.getElementById("file-body").innerText.includes("Run it.")', 10_000), 'a nested path resolves against the session folder')
+    assert.equal(await browser.evaluate('location.href'), before)
+
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    await browser.waitFor('document.querySelector("#log .turn.assistant a[href^=\\"https:\\"]") !== null', 10_000)
+    const remote = await browser.evaluate(`(() => {
+      const link = document.querySelector('#log .turn.assistant a[href^="https:"]')
+      let prevented = null
+      const probe = (event) => { prevented = event.defaultPrevented; event.preventDefault() }
+      window.addEventListener('click', probe, { once: true })
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }))
+      return JSON.stringify({ prevented, target: link.getAttribute('target') })
+    })()`).then(JSON.parse)
+    assert.equal(remote.prevented, false, 'a remote link is left to the browser')
+    assert.equal(remote.target, '_blank', 'which opens it in its own tab')
   } finally {
     browser.close()
     await server.close()
