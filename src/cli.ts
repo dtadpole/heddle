@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { createApp } from './app.ts'
 import { boot, failedEntries, settle } from './boot.ts'
@@ -13,7 +14,8 @@ import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
-import { heddleHome } from './config/schema.ts'
+import { resetProfileFromTemplate } from './config/profile-template.ts'
+import { ConfigError, heddleHome } from './config/schema.ts'
 
 /**
  * `FiberState` is a `const enum`, so it has no runtime object to read names from.
@@ -28,6 +30,8 @@ interface Args {
   help: boolean
   config?: string
   profile?: string
+  /** `--from-default-profile <template>`: replace the `--profile` with a fresh copy of a shipped template first. */
+  fromDefaultProfile?: string
   patch: string[]
   turn?: string
   resume?: string
@@ -67,6 +71,8 @@ usage: heddle [options] [command]
 options:
   -c, --config <path>        boot from this configuration layer instead of the default profile
       --profile <name>       boot a named profile from $HEDDLE_HOME/profiles
+      --from-default-profile <template>
+                             replace that profile with a fresh copy of a shipped template (default), then boot it
       --patch <path>         apply an extra layer after it (repeatable)
       --dry-run              report what a run would do and stop before doing it
       --sandbox-root <path>  confine file effects to this directory instead of the working one
@@ -147,6 +153,9 @@ function parseArgs(argv: readonly string[]): Args {
         args.profile = looksLikePath ? resolve(value) : value
         break
       }
+      case '--from-default-profile':
+        args.fromDefaultProfile = next() ?? ''
+        break
       case '--patch':
         args.patch.push(next() ?? '')
         break
@@ -954,6 +963,27 @@ async function main(): Promise<void> {
   if (args.help) {
     process.stdout.write(USAGE)
     return
+  }
+
+  /**
+   * DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of a
+   * shipped template, then the command boots it as usual. A profile named by a directory is not a profile this can
+   * replace, so the flag needs a plain name.
+   */
+  if (args.fromDefaultProfile !== undefined) {
+    if (args.profile === undefined || args.profile.startsWith('/')) {
+      process.stderr.write('heddle: --from-default-profile needs --profile <name>, a profile under $HEDDLE_HOME/profiles\n')
+      process.exitCode = 1
+      return
+    }
+    try {
+      resetProfileFromTemplate(args.profile, args.fromDefaultProfile, { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return
+    }
+    process.stderr.write(`heddle: profile '${args.profile}' replaced by a fresh copy of the '${args.fromDefaultProfile}' template\n`)
   }
 
   if (args.command === 'web') {
