@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::clock::iso_now;
 use crate::definition::{
-    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+    CreatedDefinition, DefinitionOptions, SessionDefinition, existing_session_names,
+    find_session_definition, update_session_definition, write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -66,6 +67,86 @@ pub struct CreateAtOptions {
     pub endpoint: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+}
+
+/// What New session does with the blank session it names: DSH's `session.create` rule
+/// (dsh-api-session-controller `lib/index.js:416-465`, placement `:755-770`), as `blankReuse` in
+/// `src/session/service.ts` decides it. Refusals are checked first, in DSH's order; the writer lock is
+/// the caller's last check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlankReuse {
+    /// No turn has started (`turns` is 0), in this folder, not archived, not running.
+    Reuse,
+    /// Unknown, archived, or started: left as it is, and a new session is made instead.
+    Create(NotReusable),
+    /// A subagent's session (`session/agent-busy`) or one bound to another folder (`session/conflict`),
+    /// with DSH's sentence.
+    Refuse { code: &'static str, message: String },
+}
+
+/// Why a named session is not reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotReusable {
+    Unknown,
+    Archived,
+    Started,
+}
+
+/// What `create_or_reuse_at` came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewSession {
+    /// A new session, or the named blank one when `reused`.
+    Started {
+        created: CreatedDefinition,
+        reused: bool,
+    },
+    /// DSH's refusal of the named session, answered `409` with `code`.
+    Refused { code: &'static str, message: String },
+}
+
+/// Decide what New session does with the named session `meta` at `branch`; `running` says a turn is
+/// running in it now. Pure, so the rule is judged without a store.
+pub fn blank_reuse(meta: Option<&SessionMeta>, branch: &str, running: bool) -> BlankReuse {
+    let Some(meta) = meta else {
+        return BlankReuse::Create(NotReusable::Unknown);
+    };
+    if meta.origin() == Some(crate::meta::SessionOrigin::Subagent) {
+        return BlankReuse::Refuse {
+            code: "session/agent-busy",
+            message: format!("session \"{}\" is owned by subagent routing", meta.id()),
+        };
+    }
+    let wanted = canonical_path(Path::new(branch))
+        .to_string_lossy()
+        .into_owned();
+    if meta.cwd().trim().is_empty() {
+        return BlankReuse::Refuse {
+            code: "session/conflict",
+            message: format!(
+                "session \"{}\" records no cwd and cannot be adopted for \"{wanted}\"",
+                meta.id()
+            ),
+        };
+    }
+    let recorded = canonical_path(Path::new(meta.cwd()))
+        .to_string_lossy()
+        .into_owned();
+    if recorded != wanted {
+        return BlankReuse::Refuse {
+            code: "session/conflict",
+            message: format!(
+                "session \"{}\" belongs to \"{recorded}\", not \"{wanted}\"",
+                meta.id()
+            ),
+        };
+    }
+    if meta.archived() {
+        return BlankReuse::Create(NotReusable::Archived);
+    }
+    if meta.turns() > 0 || running {
+        return BlankReuse::Create(NotReusable::Started);
+    }
+    BlankReuse::Reuse
 }
 
 /// What a fork came to.
@@ -282,6 +363,97 @@ impl SessionService {
             },
         )?;
         Ok(CreatedDefinition { handle, definition })
+    }
+
+    /// New session at `branch`, **reusing** the blank session `reuse` names instead of making another
+    /// (DSH's `session.create`; see [`blank_reuse`]). Without `reuse`, or when the named one cannot be
+    /// reused, this is [`SessionService::create_at`]. `running` says a turn is running in the named one.
+    pub fn create_or_reuse_at(
+        &self,
+        branch: &str,
+        reuse: Option<&str>,
+        running: bool,
+        options: CreateAtOptions,
+    ) -> Result<NewSession, SessionError> {
+        let canonical = canonical_path(Path::new(branch))
+            .to_string_lossy()
+            .into_owned();
+        if let Some(id) = reuse {
+            match blank_reuse(self.meta(id).as_ref(), &canonical, running) {
+                BlankReuse::Refuse { code, message } => {
+                    return Ok(NewSession::Refused { code, message });
+                }
+                BlankReuse::Reuse => {
+                    if let Some(created) =
+                        self.reuse_blank(id, &canonical, options.title.as_deref())?
+                    {
+                        return Ok(NewSession::Started {
+                            created,
+                            reused: true,
+                        });
+                    }
+                }
+                BlankReuse::Create(_) => {}
+            }
+        }
+        Ok(NewSession::Started {
+            created: self.create_at(&canonical, options)?,
+            reused: false,
+        })
+    }
+
+    /// Take a blank session back for New session, or `None` when it cannot be taken after all: DSH
+    /// resumes a persisted blank "while retaining its writer lock" and re-checks blankness under it
+    /// (`reuseSetup`, `lib/index.js:483-491`). A session another process is writing is not reused.
+    fn reuse_blank(
+        &self,
+        id: &str,
+        branch: &str,
+        title: Option<&str>,
+    ) -> Result<Option<CreatedDefinition>, SessionError> {
+        let Some(handle) = self.store.open(id) else {
+            return Ok(None);
+        };
+        match self.store.claim(&handle) {
+            Ok(()) => {}
+            Err(SessionError::AlreadyOwned { .. }) => return Ok(None),
+            Err(other) => return Err(other),
+        }
+        let Some(fresh) = self.meta(id) else {
+            return Ok(None);
+        };
+        if blank_reuse(Some(&fresh), branch, false) != BlankReuse::Reuse {
+            return Ok(None);
+        }
+        let named = title.filter(|title| !title.trim().is_empty());
+        if let Some(named) = named {
+            self.store.rename(id, named)?;
+        }
+        if let Some(found) = find_session_definition(branch, id) {
+            if let Some(named) = named {
+                update_session_definition(&found.dir, Some(named))?;
+            }
+            let definition = SessionDefinition {
+                log: handle.transcript.clone(),
+                ..found
+            };
+            return Ok(Some(CreatedDefinition { handle, definition }));
+        }
+        let definition = write_session_definition(
+            &handle,
+            branch,
+            &DefinitionOptions {
+                created_at: fresh.created().to_string(),
+                title: named
+                    .map(str::to_string)
+                    .or_else(|| fresh.title().map(str::to_string)),
+                endpoint: fresh.endpoint().map(str::to_string),
+                model: fresh.model().map(str::to_string),
+                reasoning_effort: fresh.reasoning_effort().map(str::to_string),
+                taken: existing_session_names(branch),
+            },
+        )?;
+        Ok(Some(CreatedDefinition { handle, definition }))
     }
 
     /// Fork a session: a child that continues from its last completed turn, recording `parentSession`,
@@ -800,6 +972,269 @@ mod tests {
         );
         // The session is in the store too, so a resume finds it.
         assert_eq!(service.list().len(), 1);
+    }
+
+    fn started(outcome: NewSession) -> (CreatedDefinition, bool) {
+        match outcome {
+            NewSession::Started { created, reused } => (created, reused),
+            NewSession::Refused { code, message } => panic!("refused {code}: {message}"),
+        }
+    }
+
+    fn definition_names(branch: &str) -> Vec<String> {
+        existing_session_names(branch)
+    }
+
+    #[test]
+    fn new_session_twice_without_a_prompt_reuses_the_named_blank_and_its_definition() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let path = canonical_path(folder.path()).to_string_lossy().into_owned();
+        let (first, reused) = started(
+            service
+                .create_or_reuse_at(&path, None, false, CreateAtOptions::default())
+                .unwrap(),
+        );
+        assert!(!reused);
+        let (second, reused) = started(
+            service
+                .create_or_reuse_at(
+                    &path,
+                    Some(&first.handle.id),
+                    false,
+                    CreateAtOptions::default(),
+                )
+                .unwrap(),
+        );
+        assert!(reused, "the named blank session is reused");
+        assert_eq!(second.handle.id, first.handle.id);
+        assert_eq!(second.definition.file, first.definition.file);
+        assert_eq!(second.definition.log, first.handle.transcript);
+        assert_eq!(service.list().len(), 1, "the store holds one session");
+        assert_eq!(definition_names(&path), vec![first.definition.name.clone()]);
+        // Without a name nothing is reused.
+        let (third, reused) = started(
+            service
+                .create_or_reuse_at(&path, None, false, CreateAtOptions::default())
+                .unwrap(),
+        );
+        assert!(!reused);
+        assert_ne!(third.handle.id, first.handle.id);
+    }
+
+    #[test]
+    fn a_started_archived_running_or_unknown_session_is_left_and_a_new_one_is_made() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let path = canonical_path(folder.path()).to_string_lossy().into_owned();
+        let new = |reuse: Option<&str>, running: bool| {
+            started(
+                service
+                    .create_or_reuse_at(&path, reuse, running, CreateAtOptions::default())
+                    .unwrap(),
+            )
+        };
+        let (talked, _) = new(None, false);
+        service.user(&talked.handle, "hello", None).unwrap();
+        let (after_turn, reused) = new(Some(&talked.handle.id), false);
+        assert!(!reused);
+        assert_ne!(after_turn.handle.id, talked.handle.id);
+
+        service
+            .flags(
+                &after_turn.handle.id,
+                FlagPatch {
+                    archived: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (after_archive, reused) = new(Some(&after_turn.handle.id), false);
+        assert!(!reused);
+        assert_ne!(after_archive.handle.id, after_turn.handle.id);
+
+        let (running, reused) = new(Some(&after_archive.handle.id), true);
+        assert!(!reused);
+        assert_ne!(running.handle.id, after_archive.handle.id);
+
+        let (_, reused) = new(Some("session-never-created"), false);
+        assert!(!reused);
+    }
+
+    #[test]
+    fn another_folder_or_a_subagent_child_is_refused_with_the_dsh_code_and_sentence() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let other = branch();
+        let path = canonical_path(folder.path()).to_string_lossy().into_owned();
+        let other_path = canonical_path(other.path()).to_string_lossy().into_owned();
+        let (elsewhere, _) = started(
+            service
+                .create_or_reuse_at(&other_path, None, false, CreateAtOptions::default())
+                .unwrap(),
+        );
+        assert_eq!(
+            service
+                .create_or_reuse_at(
+                    &path,
+                    Some(&elsewhere.handle.id),
+                    false,
+                    CreateAtOptions::default()
+                )
+                .unwrap(),
+            NewSession::Refused {
+                code: "session/conflict",
+                message: format!(
+                    "session \"{}\" belongs to \"{other_path}\", not \"{path}\"",
+                    elsewhere.handle.id
+                ),
+            }
+        );
+        let child = service
+            .store()
+            .create(CreateOptions {
+                cwd: Some(path.clone()),
+                origin: Some(crate::meta::SessionOrigin::Subagent),
+                parent_session: Some(elsewhere.handle.id.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            service
+                .create_or_reuse_at(&path, Some(&child.id), false, CreateAtOptions::default())
+                .unwrap(),
+            NewSession::Refused {
+                code: "session/agent-busy",
+                ..
+            }
+        ));
+        assert_eq!(
+            service.list().len(),
+            2,
+            "and neither refusal created anything"
+        );
+    }
+
+    #[test]
+    fn a_blank_another_process_is_writing_is_not_reused() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let path = canonical_path(folder.path()).to_string_lossy().into_owned();
+        let (blank, _) = started(
+            service
+                .create_or_reuse_at(&path, None, false, CreateAtOptions::default())
+                .unwrap(),
+        );
+        service.store().release(&blank.handle);
+        let mut holder = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a second process");
+        std::fs::write(
+            crate::store::lock_path(&blank.handle),
+            format!("{}\n", holder.id()),
+        )
+        .unwrap();
+        let (next, reused) = started(
+            service
+                .create_or_reuse_at(
+                    &path,
+                    Some(&blank.handle.id),
+                    false,
+                    CreateAtOptions::default(),
+                )
+                .unwrap(),
+        );
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(!reused);
+        assert_ne!(next.handle.id, blank.handle.id);
+    }
+
+    #[test]
+    fn a_reused_blank_without_a_definition_gets_one_and_a_requested_title() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let path = canonical_path(folder.path()).to_string_lossy().into_owned();
+        let bare = service
+            .open_at(
+                &path,
+                OpenAtOptions {
+                    fresh: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(definition_names(&path).is_empty());
+        let (reused, was_reused) = started(
+            service
+                .create_or_reuse_at(
+                    &path,
+                    Some(&bare.id),
+                    false,
+                    CreateAtOptions {
+                        title: Some("Planning".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+        assert!(was_reused);
+        assert_eq!(reused.handle.id, bare.id);
+        assert_eq!(
+            definition_names(&path),
+            vec![reused.definition.name.clone()]
+        );
+        assert_eq!(service.meta(&bare.id).unwrap().title(), Some("Planning"));
+    }
+
+    #[test]
+    fn the_blank_reuse_rule_matches_the_typescript_order() {
+        let folder = branch();
+        let path = canonical_path(folder.path()).to_string_lossy().into_owned();
+        let meta = |extra: serde_json::Value| {
+            let mut value =
+                json!({"id": "session-x", "created": "2026-10-29T00:00:00.000Z", "turns": 0});
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            SessionMeta::from_value(value).unwrap()
+        };
+        assert_eq!(
+            blank_reuse(None, &path, false),
+            BlankReuse::Create(NotReusable::Unknown)
+        );
+        assert_eq!(
+            blank_reuse(
+                Some(&meta(json!({"cwd": "/elsewhere", "origin": "subagent"}))),
+                &path,
+                false
+            ),
+            BlankReuse::Refuse {
+                code: "session/agent-busy",
+                message: "session \"session-x\" is owned by subagent routing".to_string(),
+            }
+        );
+        assert_eq!(
+            blank_reuse(
+                Some(&meta(json!({"cwd": path, "archived": true}))),
+                &path,
+                false
+            ),
+            BlankReuse::Create(NotReusable::Archived)
+        );
+        assert_eq!(
+            blank_reuse(Some(&meta(json!({"cwd": path, "turns": 1}))), &path, false),
+            BlankReuse::Create(NotReusable::Started)
+        );
+        assert_eq!(
+            blank_reuse(Some(&meta(json!({"cwd": path}))), &path, true),
+            BlankReuse::Create(NotReusable::Started)
+        );
+        assert_eq!(
+            blank_reuse(Some(&meta(json!({"cwd": path}))), &path, false),
+            BlankReuse::Reuse
+        );
     }
 
     #[test]

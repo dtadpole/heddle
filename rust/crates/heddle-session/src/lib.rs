@@ -50,7 +50,8 @@ pub mod transcript;
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,
-    read_session_definition, session_name, update_session_definition, write_session_definition,
+    find_session_definition, read_session_definition, session_name, update_session_definition,
+    write_session_definition,
 };
 pub use error::{SessionError, SessionFlagError};
 pub use event::{
@@ -66,8 +67,8 @@ pub use meta::{
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
 pub use service::{
-    CreateAtOptions, ForkOutcome, ModeChange, OpenAtOptions, SessionConfig, SessionService,
-    StartOptions, fork_title, title_from,
+    BlankReuse, CreateAtOptions, ForkOutcome, ModeChange, NewSession, NotReusable, OpenAtOptions,
+    SessionConfig, SessionService, StartOptions, blank_reuse, fork_title, title_from,
 };
 pub use store::{
     EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, SessionStore,

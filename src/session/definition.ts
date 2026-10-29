@@ -180,6 +180,23 @@ export function readSessionDefinition(dir: string): SessionDefinitionFields | nu
 }
 
 /**
+ * The definition a branch already holds for one session, or `null` when none of its `_sessions_` folders names it.
+ *
+ * New session reuses a blank session (DSH's `session.create`), and the reused one must answer with the definition it
+ * was given when it was made rather than gain a second folder. The folders are read in name order, which is creation
+ * order, so a duplicate left by hand resolves to the oldest.
+ */
+export function findSessionDefinition(branch: string, id: string): SessionDefinition | null {
+  const sessions = join(canonicalPath(branch), SESSIONS_FOLDER)
+  for (const name of existingSessionNames(branch).sort()) {
+    const dir = join(sessions, name)
+    const fields = readSessionDefinition(dir)
+    if (fields?.id === id) return { name, dir, file: join(dir, DEFINITION_FILE), log: typeof fields.log === 'string' ? fields.log : '' }
+  }
+  return null
+}
+
+/**
  * Retitle a definition, so the tracked record and the label a person reads do not disagree.
  *
  * A session's title is a label rather than a fact about the run, which is why the log is never touched; the
