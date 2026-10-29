@@ -69,12 +69,12 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     run: async (args, context): Promise<ToolResult> => {
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'write_file needs a path' } }
-      const target = sandbox.assertWritable(path, context.mode)
+      const target = sandbox.assertWritable(path, context.mode, context.cwd)
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
       context.log(`wrote ${target} (${content.length} bytes)`)
-      return { output: `wrote ${content.length} bytes to ${relative(sandbox.workspaceRoot, target) || target}`, data: { path: target, bytes: content.length } }
+      return { output: `wrote ${content.length} bytes to ${relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target) || target}`, data: { path: target, bytes: content.length } }
     },
   }
 
@@ -92,7 +92,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     run: async (args, context): Promise<ToolResult> => {
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
-      const target = sandbox.assertReadable(path, context.mode)
+      const target = sandbox.assertReadable(path, context.mode, context.cwd)
       const text = readFileSync(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
     },
@@ -109,7 +109,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
       },
     },
     run: async (args, context): Promise<ToolResult> => {
-      const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode)
+      const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode, context.cwd)
       const entries = readdirSync(target, { withFileTypes: true })
         .sort((left, right) => left.name.localeCompare(right.name))
         .map((entry) => {
@@ -150,7 +150,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
        */
       let confined: ConfinedArgv | null = null
       try {
-        if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode)
+        if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode, context.cwd)
       } catch (error) {
         if (error instanceof SandboxUnavailableError) {
           context.log(`refused a '${mode}' shell: ${error.message}`)
@@ -163,9 +163,10 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         throw error
       }
       const argv = confined?.argv ?? ['/bin/sh', '-c', command]
-      // The working directory is the workspace. The confinement, when there is one, is the wrapped argv's: the
+      // The working directory is the call's folder — the session's workspace, resolved by the loop — not the
+      // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
-      const cwd = sandbox.workspaceRoot
+      const cwd = context.cwd
       const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
         const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
