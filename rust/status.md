@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-29T12:52:00Z
+modified: 2026-10-29T13:14:00Z
 level: L3
-version: 1.8.3
+version: 1.9.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,8 +17,8 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `e6b4d55` (file-route answers sandboxed; the model row's
-source), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
+**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `26006ea` (the machine configuration applies without a restart),
+with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -27,9 +27,8 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**124 checks: 123 pass, 0 fail, 1 unjudged.** Part 50's subagent check is restated as two claims: the delegation
-returns at once, and the child's closing message reaches the parent by notice. They succeed the claim that the
-child's answer came back as the parent's tool result, which DSH parity retires; nothing else stopped passing.
+**125 checks: 124 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 1
+gained `check-live-config.mjs`: an edit to the machine file applies to the next request without a restart.
 
 **Failing:** none in the backend lane. Part 98 reads the machine's recorded validation, so it judges the configuration:
 every configured model now passes it. For the Claude models that means several text deltas, not arrival as they are
@@ -43,7 +42,7 @@ list.
 | Part | Verifier, in `_verifiers_/` | On the binary |
 |---|---|---|
 | 0 configuration | `05-config-system` | **passes** — 10 of 10 |
-| 1 LLM backends | `10-llm-backends` | 9 pass, 1 unjudged (publisher route, live) |
+| 1 LLM backends | `10-llm-backends` | 10 pass, 1 unjudged (publisher route, live) |
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 9 of 9 |
 | 4 tools | `40-pluggable-tools` | **passes** — 6 of 6 |
