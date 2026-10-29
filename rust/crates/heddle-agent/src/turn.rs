@@ -115,6 +115,10 @@ pub struct RunTurnOptions {
     pub purpose: Option<String>,
     /// The caller's Stop.
     pub cancel: Option<CancellationToken>,
+    /// Answer input already in the log instead of writing `prompt` as a new message: a background child's
+    /// settlement notice that reached a turn which ended before it saw it is in the log once, and the turn that
+    /// answers it must not write it again (`answerPending` in the TypeScript build).
+    pub answer_pending: bool,
 }
 
 impl RunTurnOptions {
@@ -138,6 +142,7 @@ impl RunTurnOptions {
             max_overflow_retries: DEFAULT_MAX_OVERFLOW_RETRIES,
             purpose: None,
             cancel: None,
+            answer_pending: false,
         }
     }
 }
@@ -285,11 +290,14 @@ pub fn begin_turn(runtime: &AgentRuntime, options: RunTurnOptions) -> Result<Beg
     let started = runtime.session.count(&options.session);
     let mut content = vec![ContentPart::text(options.prompt.clone())];
     content.extend(options.attachments.iter().cloned());
-    if let Err(error) =
+    let written = if options.answer_pending {
+        Ok(())
+    } else {
         runtime
             .session
             .user_content(&options.session, content, options.source.clone())
-    {
+    };
+    if let Err(error) = written {
         if let Some(live) = &live {
             live.settle();
         }
@@ -1975,8 +1983,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// Records each settlement notice instead of handing it to a parent turn.
+    #[derive(Default)]
+    struct RecordedNotices {
+        seen: Mutex<Vec<(String, crate::SettlementNotice)>>,
+    }
+
+    impl crate::SubagentDeliver for RecordedNotices {
+        fn deliver<'a>(
+            &'a self,
+            parent: &'a SessionHandle,
+            notice: crate::SettlementNotice,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                self.seen.lock().unwrap().push((parent.id.clone(), notice));
+                Ok(())
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn a_delegate_call_in_a_turn_returns_the_child_answer_and_the_turn_continues() {
+    async fn a_delegate_call_in_a_turn_returns_the_start_line_at_once_and_the_child_reports_by_notice()
+     {
         let session = RecordingSession::new();
         let model = ScriptedModel::new(vec![
             Step::Chunks(vec![
@@ -2001,7 +2029,13 @@ pub(crate) mod tests {
                 store: Arc::clone(&store),
             }),
         };
-        let tools = registry_with(subagent_tools(deps, SubagentLimits::default()));
+        let notices = Arc::new(RecordedNotices::default());
+        let service = crate::SubagentService::new(
+            deps,
+            Arc::clone(&notices) as Arc<dyn crate::SubagentDeliver>,
+            SubagentLimits::default(),
+        );
+        let tools = registry_with(subagent_tools(Arc::clone(&service)));
         let runtime = runtime(
             Arc::clone(&model),
             Arc::clone(&session),
@@ -2017,23 +2051,11 @@ pub(crate) mod tests {
         assert_eq!(result.text, "parent done");
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "delegate");
-        let output = &result.tool_calls[0].result.output;
-        assert!(
-            output.contains("child child (depth 1) answered:"),
-            "{output}"
-        );
-        assert!(output.contains("child answer to child task"), "{output}");
         assert_eq!(
-            model.requests().len(),
-            2,
-            "the parent continued with the child's answer"
+            result.tool_calls[0].result.output, "started subagent child",
+            "the result is DSH's start line, not the child's answer"
         );
-        let last = model.requests().pop().unwrap();
-        assert!(last.messages.iter().any(|message| {
-            message.content.iter().any(
-                |part| matches!(part, ContentPart::Text { text } if text.contains("child answer")),
-            )
-        }));
+        assert_eq!(model.requests().len(), 2, "the parent continued at once");
         // The delegation is one tool message in the parent's own log, and the child's log stays its own.
         let tool_messages = session
             .messages()
@@ -2041,6 +2063,20 @@ pub(crate) mod tests {
             .filter(|message| message.role == Role::Tool)
             .count();
         assert_eq!(tool_messages, 1);
+
+        assert_eq!(service.settle(&session_handle().id).await, 1);
+        let seen = notices.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "the child reported back once");
+        assert_eq!(seen[0].0, session_handle().id, "to its parent");
+        assert_eq!(
+            seen[0].1.texts,
+            vec![
+                "Background subagent child finished. It cannot receive follow-up messages."
+                    .to_owned(),
+                "Its closing message:".to_owned(),
+                "child answer to child task".to_owned(),
+            ]
+        );
     }
 
     #[tokio::test]
