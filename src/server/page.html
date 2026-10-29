@@ -645,6 +645,19 @@
   }
   .turn.user .actions { height: 28px; align-items: center; gap: 8px; margin: 0; }
   /**
+   * A non-human turn trigger (a goal round, a scheduled task): DSH keeps it an independent, bordered notice on a
+   * contrasting neutral background, the full width of the column, never a person's right-aligned bubble. The label
+   * says what started the turn; the prompt the harness wrote opens under it.
+   */
+  .turn.user[data-trigger] { align-self: stretch; align-items: stretch; }
+  .turn.user .trigger-notice { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text-2); font-size: 13px; line-height: 20px; }
+  .turn.user .trigger-notice summary { display: flex; align-items: center; gap: .5rem; padding: 8px 12px; cursor: pointer; list-style: none; }
+  .turn.user .trigger-notice summary::-webkit-details-marker { display: none; }
+  .turn.user .trigger-notice .trigger-label { flex: none; font-weight: 600; color: var(--text); }
+  .turn.user .trigger-notice .trigger-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+  .turn.user .trigger-notice[open] .trigger-first { display: none; }
+  .turn.user .trigger-notice .trigger-text { padding: 0 12px 10px; white-space: pre-wrap; }
+  /**
    * The turn's **Edited files** card, DSH's `ChangedFiles` (its `hz8-rW_*` module CSS, read 2026-10-17): a bordered
    * card at the 16px radius whose header is 60px tall with a 40×40 tile at a 10px radius, a 13px/20px 500 title, a
    * 10px/16px stat line in the code font, rows at least 24px tall with a 12px path, and a 44px expand toggle. DSH
@@ -3830,6 +3843,34 @@ function scheduleTodoRefresh() {
   }, 120)
 }
 
+/**
+ * A non-human turn trigger as DSH draws it: an independent, bordered notice. The label names what started the turn - a
+ * goal round with its number, a scheduled task - and the prompt the harness wrote opens beneath it, closed by default
+ * with its first line as the hint, so a run of rounds reads as rounds rather than as a person repeating themselves.
+ */
+function triggerLabel(trigger) {
+  if (trigger.kind === 'goal') return Number.isInteger(trigger.round) ? `Goal round ${trigger.round}` : 'Goal round'
+  if (trigger.kind === 'schedule') return 'Scheduled task'
+  return trigger.kind.charAt(0).toUpperCase() + trigger.kind.slice(1)
+}
+function triggerNotice(trigger, text) {
+  const notice = document.createElement('details')
+  notice.className = 'trigger-notice'
+  const head = document.createElement('summary')
+  const label = document.createElement('span')
+  label.className = 'trigger-label'
+  label.textContent = triggerLabel(trigger)
+  const first = document.createElement('span')
+  first.className = 'trigger-first'
+  first.textContent = (text.split('\n').find((line) => line.trim() !== '') ?? '').trim()
+  head.append(label, first)
+  const body = document.createElement('div')
+  body.className = 'trigger-text'
+  body.textContent = text
+  notice.append(head, body)
+  return notice
+}
+
 function add(kind, text, merge = true, label, tool) {
   /**
    * An empty answer is normally nothing to draw — except when it carries something a reader must see: the stop
@@ -3905,21 +3946,29 @@ function add(kind, text, merge = true, label, tool) {
      * A person's message is a **row**: the bubble, then the actions beneath it. History carries the event's own
      * `time`; a message typed here has no event yet, so it is stamped as it is drawn.
      */
-    if (tool !== undefined && Array.isArray(tool.attachments) && tool.attachments.length > 0) {
-      node.append(messageAttachments(tool.attachments))
+    const trigger = tool !== undefined && tool.trigger !== null && typeof tool.trigger === 'object' && typeof tool.trigger.kind === 'string' ? tool.trigger : null
+    if (trigger !== null) {
+      /** The harness wrote this message, so it is a notice that says what started the turn, not a person's bubble. */
+      node.dataset.trigger = trigger.kind
+      node.append(triggerNotice(trigger, text))
+      node.dataset.copyText = text
+    } else {
+      if (tool !== undefined && Array.isArray(tool.attachments) && tool.attachments.length > 0) {
+        node.append(messageAttachments(tool.attachments))
+      }
+      if (text !== '') {
+        const bubble = document.createElement('div')
+        bubble.className = 'bubble'
+        /** A late answer to a question arrives as DSH's JSON record; it is drawn as the questions and their answers. */
+        const answered = questionAnswerText(text)
+        if (answered !== null) bubble.classList.add('question-answer')
+        bubble.textContent = answered ?? text
+        node.append(bubble)
+      }
+      node.dataset.copyText = text
+      const sentAt = tool !== undefined && typeof tool.time === 'string' ? tool.time : new Date().toISOString()
+      node.append(userActions(node, sentAt))
     }
-    if (text !== '') {
-      const bubble = document.createElement('div')
-      bubble.className = 'bubble'
-      /** A late answer to a question arrives as DSH's JSON record; it is drawn as the questions and their answers. */
-      const answered = questionAnswerText(text)
-      if (answered !== null) bubble.classList.add('question-answer')
-      bubble.textContent = answered ?? text
-      node.append(bubble)
-    }
-    node.dataset.copyText = text
-    const sentAt = tool !== undefined && typeof tool.time === 'string' ? tool.time : new Date().toISOString()
-    node.append(userActions(node, sentAt))
   } else {
     node.textContent = text
   }
@@ -6948,6 +6997,8 @@ events.addEventListener('session', (message) => {
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
       attachments: contentAttachments(event.message.content, payload.session),
+      /** A goal round arrives live with its `source`, so it is drawn as the same notice a reload draws. */
+      ...(event.message.source && typeof event.message.source.kind === 'string' ? { trigger: event.message.source } : {}),
     })
   }
   else if (event.type === 'message' && event.message.role === 'tool') {

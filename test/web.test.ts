@@ -47,6 +47,23 @@ test('a person\'s message carries the logged event time, which is the clock its 
   assert.equal(answered.kind, 'assistant')
 })
 
+test('a goal round is a user turn that names its trigger, and a person\'s message names none', () => {
+  /**
+   * DSH draws a non-human turn trigger as a bordered notice, so the page has to be told which user messages the
+   * harness wrote. A goal round records `source = { kind: 'goal', goalId, revision, round }` on its message; the
+   * fold carries that whole source as `trigger`, and a source without a kind is no trigger.
+   */
+  const source = { kind: 'goal', goalId: 'goal-1', revision: 1, round: 2 }
+  const turns = transcriptTurns([
+    { type: 'message', at: '2026-10-29T00:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'set a goal' }] } },
+    { type: 'message', at: '2026-10-29T00:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'Continue working toward the goal.' }], source } },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'x' }], source: { note: 'no kind' } } },
+  ])
+  assert.equal(turns[0]?.trigger, undefined, 'a person\'s message is not a trigger')
+  assert.deepEqual(turns[1]?.trigger, source, 'the round keeps its whole source')
+  assert.equal('trigger' in (turns[2] ?? {}), false, 'a source without a kind names no trigger')
+})
+
 test('the answer carries the files its exchange wrote, with the lines each one now has', () => {
   /**
    * The Edited-files panel's data. DSH derives it from a host-side before/after comparison; heddle states the fact

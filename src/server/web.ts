@@ -3583,6 +3583,7 @@ export function transcriptTurns(
             role?: string
             content?: readonly { type?: string; text?: string; name?: string; path?: string; mimeType?: string; bytes?: number }[]
             toolCallId?: string
+            source?: unknown
           }
         | undefined
       if (message === undefined) continue
@@ -3590,11 +3591,15 @@ export function transcriptTurns(
       if (message.role === 'user') {
         sectionStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
+        /** A message the harness wrote names its trigger in `source`; a person's message has none. */
+        const source = message.source as { kind?: unknown } | undefined
+        const trigger = typeof source === 'object' && source !== null && typeof source.kind === 'string' && source.kind !== '' ? (source as ChatTurn['trigger']) : undefined
         turns.push({
           kind: 'user',
           text,
           ...(attachments.length > 0 ? { attachments } : {}),
           ...(typeof event.at === 'string' ? { time: event.at } : {}),
+          ...(trigger !== undefined ? { trigger } : {}),
         })
       }
       else if (message.role === 'assistant') turns.push({ kind: 'assistant', text })
@@ -3738,6 +3743,12 @@ export interface ChatTurn {
    * re-derives a size or a media type from a path.
    */
   readonly attachments?: readonly TurnAttachment[]
+  /**
+   * A user message the harness wrote rather than a person: a goal round's `source` (`{ kind: 'goal', goalId,
+   * revision, round }`) or another trigger's. DSH draws a non-human turn trigger as an independent, bordered notice
+   * on a neutral background, so the page needs to tell it apart from a person's bubble.
+   */
+  readonly trigger?: { readonly kind: string; readonly [key: string]: unknown }
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */
