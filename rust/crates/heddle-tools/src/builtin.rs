@@ -21,17 +21,21 @@ use crate::upstream::{SandboxMode, SandboxOutcome, ToolSpec};
 pub struct BuiltinOptions {
     /// Default wall time of a `bash` call, in milliseconds; a call may name its own `timeoutMs`.
     pub bash_timeout_ms: u64,
+    /// Characters of a `bash` call's combined output kept for the model ([`BASH_OUTPUT_LIMIT`] by default).
+    pub bash_output_limit: usize,
 }
 
 impl Default for BuiltinOptions {
     fn default() -> Self {
         Self {
             bash_timeout_ms: 30_000,
+            bash_output_limit: BASH_OUTPUT_LIMIT,
         }
     }
 }
 
-/// The most combined output a `bash` result carries before it is cut, in characters.
+/// The default for `bashOutputLimit`: the most combined output a `bash` result carries before it is cut, in
+/// characters.
 pub const BASH_OUTPUT_LIMIT: usize = 20_000;
 
 /// Build the four standard tools around one sandbox, in the order `heddle tools` lists them:
@@ -44,9 +48,15 @@ pub fn builtin_tools(sandbox: Arc<dyn SandboxGate>, options: BuiltinOptions) -> 
     let escalation = escalation_fields(sandbox.as_ref());
     vec![
         write_file_tool(Arc::clone(&sandbox)),
-        read_file_tool(Arc::clone(&sandbox)),
-        list_dir_tool(Arc::clone(&sandbox)),
-        bash_tool(sandbox, options.bash_timeout_ms, escalation),
+        // Reads only, so two reads of one step run together (DSH's fs read tools are concurrency-safe).
+        crate::tool::parallel_safe(read_file_tool(Arc::clone(&sandbox))),
+        crate::tool::parallel_safe(list_dir_tool(Arc::clone(&sandbox))),
+        bash_tool(
+            sandbox,
+            options.bash_timeout_ms,
+            options.bash_output_limit,
+            escalation,
+        ),
     ]
 }
 
@@ -86,10 +96,15 @@ pub fn escalation_fields(sandbox: &dyn SandboxGate) -> serde_json::Map<String, s
 /// The TypeScript build counts UTF-16 code units; this counts `char`s, so a cut never splits a character.
 /// The two agree on every ASCII output, which is what the verifiers produce.
 pub fn truncate_output(combined: &str) -> String {
-    if combined.chars().count() <= BASH_OUTPUT_LIMIT {
+    truncate_output_at(combined, BASH_OUTPUT_LIMIT)
+}
+
+/// [`truncate_output`] at `limit` characters, the row's `bashOutputLimit`.
+pub fn truncate_output_at(combined: &str, limit: usize) -> String {
+    if combined.chars().count() <= limit {
         return combined.to_owned();
     }
-    let mut cut: String = combined.chars().take(BASH_OUTPUT_LIMIT).collect();
+    let mut cut: String = combined.chars().take(limit).collect();
     cut.push_str("\n… truncated");
     cut
 }
@@ -306,6 +321,7 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
 fn bash_tool(
     sandbox: Arc<dyn SandboxGate>,
     default_timeout_ms: u64,
+    output_limit: usize,
     escalation: serde_json::Map<String, serde_json::Value>,
 ) -> Arc<dyn Tool> {
     let parameters = {
@@ -387,6 +403,7 @@ fn bash_tool(
                     mode,
                     confined.as_ref(),
                     limit,
+                    output_limit,
                     &context,
                 )
                 .await
@@ -406,6 +423,7 @@ async fn run_command(
     mode: SandboxMode,
     confined: Option<&crate::upstream::ConfinedArgv>,
     limit_ms: u64,
+    output_limit: usize,
     context: &ToolRunContext,
 ) -> Result<ToolResult, ToolFailure> {
     let mut process = tokio::process::Command::new(&argv[0]);
@@ -467,7 +485,7 @@ async fn run_command(
         Some(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let trimmed = truncate_output(&format!("{stdout}{stderr}"));
+            let trimmed = truncate_output_at(&format!("{stdout}{stderr}"), output_limit);
             let code = output.status.code().unwrap_or(1);
             let outcome = match confined {
                 None => SandboxOutcome::Exited,
@@ -886,6 +904,23 @@ mod tests {
             BASH_OUTPUT_LIMIT + "\n… truncated".chars().count()
         );
         assert!(cut.ends_with("\n… truncated"));
+    }
+
+    #[test]
+    fn a_configured_output_limit_cuts_there() {
+        assert_eq!(
+            truncate_output_at(&"a".repeat(500), 50),
+            format!("{}\n… truncated", "a".repeat(50))
+        );
+        assert_eq!(
+            truncate_output_at(&"b".repeat(500), 500),
+            "b".repeat(500),
+            "no cut at the limit"
+        );
+        assert_eq!(
+            BuiltinOptions::default().bash_output_limit,
+            BASH_OUTPUT_LIMIT
+        );
     }
 
     #[test]

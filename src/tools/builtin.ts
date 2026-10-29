@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
@@ -45,9 +46,17 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
   }
 }
 
+/** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
+export const BASH_OUTPUT_LIMIT = 20_000
+
 /** Build the standard tools around one sandbox. */
-export function builtinTools(sandbox: SandboxService, options: { readonly bashTimeoutMs?: number } = {}): readonly ToolDefinition[] {
+export function builtinTools(
+  sandbox: SandboxService,
+  options: { readonly bashTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
+): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
+  const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)
 
   const writeFile: ToolDefinition = {
@@ -79,6 +88,8 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
   }
 
   const readFile: ToolDefinition = {
+    /** Reads only, so two reads of one step run together (DSH's fs read tools are concurrency-safe). */
+    concurrencySafe: true,
     spec: {
       name: 'read_file',
       description: 'Read a text file and return its contents. Refused for a path outside the sandbox in confined modes.',
@@ -93,12 +104,14 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
-      const text = readFileSync(target, 'utf8')
+      // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
+      const text = await readFileText(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
     },
   }
 
   const listDir: ToolDefinition = {
+    concurrencySafe: true,
     spec: {
       name: 'list_dir',
       description: 'List the entries of a directory inside the workspace, one per line, directories marked with a trailing slash.',
@@ -110,12 +123,14 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     },
     run: async (args, context): Promise<ToolResult> => {
       const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode, context.cwd)
-      const entries = readdirSync(target, { withFileTypes: true })
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map((entry) => {
-          const stats = statSync(join(target, entry.name))
+      // Listed without blocking the event loop, as read_file reads, so a parallel group's calls run together.
+      const dirents = (await readdir(target, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))
+      const entries = await Promise.all(
+        dirents.map(async (entry) => {
+          const stats = await stat(join(target, entry.name))
           return `${entry.isDirectory() ? `${entry.name}/` : entry.name}${entry.isDirectory() ? '' : ` (${stats.size}B)`}`
-        })
+        }),
+      )
       return { output: entries.join('\n'), data: { path: target, entries: entries.length } }
     },
   }
@@ -191,7 +206,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         child.on('close', (code) => {
           clearTimeout(timer)
           const combined = stdout + stderr
-          const trimmed = combined.length > 20_000 ? `${combined.slice(0, 20_000)}\n… truncated` : combined
+          const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
           if (timedOut) {

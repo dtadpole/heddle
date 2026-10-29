@@ -783,6 +783,20 @@ export class SessionStore {
     for (const seq of foldSurface(events).nodes) {
       const message = deriveMessage(bySeq, seq)
       if (message === null || message.role === 'system') continue
+      const node = bySeq.get(seq)
+      if (node?.type === 'context/note') {
+        /**
+         * A note the harness wrote stays a **note**: DSH's fork seeds the child with the source's own events
+         * (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), so a runtime-context snapshot or an instruction baseline
+         * arrives as what it was. Re-appending it as a `message` made the child's chat draw the snapshot as a user bubble
+         * and count one turn too many (R-developer-eight-15). Its origin and identity come along, so the child's next
+         * round sees the same retained snapshot and does not write another; the source's surface positions do not,
+         * because they name seqs of a log the child does not have.
+         */
+        const { seq: _seq, at: _at, surfaceOp: _surfaceOp, sourceEventSeqs: _sourceEventSeqs, ...note } = node
+        this.append(handle, note)
+        continue
+      }
       this.message(handle, message)
     }
     return handle

@@ -18,7 +18,7 @@ import { createDirectory, DirectoryError, listDirectory } from './directories.ts
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
-import { PREVIEW_CSP, rewriteResources } from './html.ts'
+import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
@@ -28,6 +28,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -40,6 +41,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
+import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
 
 /**
  * The Web UI.
@@ -172,6 +174,11 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     }
   })
 
+  // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
+  ctx.on('schedule/changed', () => {
+    for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
+  })
+
   /**
    * A running turn's **next** model call is answered by the session's current record.
    *
@@ -271,6 +278,26 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     socket.on('close', () => sockets.delete(socket))
   })
 
+  /**
+   * The heartbeat: every interval each stream gets a `heartbeat` frame, and every connection that took no bytes for
+   * two intervals while it still had some to send is destroyed (DSH's dead-peer rule, see `stream.ts`). One timer
+   * for the server, unref'd so it never keeps a process alive on its own.
+   */
+  const heartbeatMs = heartbeatInterval()
+  const stalls = new StallWatch(heartbeatMs)
+  const heartbeat = setInterval(() => {
+    const frame = heartbeatFrame()
+    for (const client of subscribers) {
+      try {
+        client.write(frame)
+      } catch {
+        // a client that is already gone leaves through its close listener
+      }
+    }
+    stalls.sweep(sockets, Date.now())
+  }, heartbeatMs)
+  heartbeat.unref()
+
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => resolvePromise())
@@ -297,6 +324,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
+        clearInterval(heartbeat)
         detachApprovals?.()
         for (const client of subscribers) {
           try {
@@ -640,6 +668,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: 'that path is not under any workspace root' })}\n`)
       return
     }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or not, is refused.
+    if (!isHtmlDocument(wanted)) {
+      respond(response, 415, 'application/json', `${JSON.stringify({ error: NOT_AN_HTML_DOCUMENT })}\n`)
+      return
+    }
     try {
       const stats = statSync(wanted)
       if (!stats.isFile()) {
@@ -855,6 +888,9 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Errors carry the goal service's own stable code next to the sentence, so a client can distinguish "the
    * goal moved while you were looking" (409) from "no goal is current" (404) without parsing prose.
    */
+  // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
+  if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
     if (goals === undefined) {
@@ -1774,8 +1810,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/events' && request.method === 'GET') {
     respondSse(response)
+    /**
+     * Subscribed **before** `ready` is written, so every frame published after a client reads `ready` reaches it:
+     * a baseline read that starts on `ready` cannot race an increment (DSH's opening rule, see `stream.ts`).
+     */
     state.subscribers.add(response)
     request.on('close', () => state.subscribers.delete(response))
+    response.write(readyFrame(newClientId()))
     return
   }
 
@@ -2063,6 +2104,34 @@ export function abortSession(controllers: Map<string, Set<AbortController>>, id:
   return stopped
 }
 
+/**
+ * The refusal a turn into a one-shot subagent's session gets, or `null` when the session takes turns.
+ *
+ * DSH's generic session route leaves a subagent's child to subagent routing and answers a prompt into it with
+ * `session/agent-busy`, `session "<id>" is owned by subagent routing`, reason `use subagent delivery for this child
+ * session` (dsh-api-session-controller `lib/index.js:128-142`, reached from `prompt` at `:925-926` through
+ * `resolveAgent` `:221-246`). A one-shot child has no delivery at all: heddle's `delegate` runs it for one task and
+ * settles it. Phase A measured `POST /api/turn` into one answering `200` and growing its log from one turn to two
+ * (R-developer-eight-26). The answer is `409`, the status this server gives the steer refusal DSH words the same way,
+ * with DSH's code, sentence and reason in the body.
+ *
+ * A teammate (`teamId`) is a continuable child — DSH's teammates are — and this route is the delivery heddle's page
+ * uses for it, so it is not refused here.
+ */
+export function subagentTurnRefusal(
+  meta: Pick<SessionMeta, 'id' | 'origin' | 'teamId'> | undefined,
+): { readonly status: 409; readonly body: { readonly error: string; readonly code: 'session/agent-busy'; readonly reason: string } } | null {
+  if (meta?.origin !== 'subagent' || (typeof meta.teamId === 'string' && meta.teamId.length > 0)) return null
+  return {
+    status: 409,
+    body: {
+      error: `session "${meta.id}" is owned by subagent routing`,
+      code: 'session/agent-busy',
+      reason: 'use subagent delivery for this child session',
+    },
+  }
+}
+
 export function resolveTurnEndpoint(sources: {
   readonly requested?: string
   readonly recorded?: string
@@ -2210,12 +2279,22 @@ export function unknownTurnSession(
   }
   /**
    * A turn for a session that does not exist is the client's mistake: `404` with DSH's `session/not-found`
-   * ([`unknownTurnSession`]), before anything is opened or written.
+   * ([`unknownTurnSession`]), before anything is opened or written. A one-shot subagent's session takes no turn from
+   * here (`subagentTurnRefusal`), and that refusal also comes before the session is opened, so a refused request writes
+   * nothing into the child's log. The existence check goes first: a subagent refusal is about a session that is there.
    */
   const unknown = unknownTurnSession(body.session, (id) => ctx.session.store.open(id))
   if (unknown !== null) {
     respond(response, 404, 'application/json', `${JSON.stringify(unknown)}\n`)
     return
+  }
+  if (typeof body.session === 'string' && body.session.length > 0) {
+    const resumeId = body.session
+    const refusal = subagentTurnRefusal(ctx.session.list().find((entry) => entry.id === resumeId))
+    if (refusal !== null) {
+      respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
+      return
+    }
   }
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
@@ -2443,7 +2522,7 @@ function respondSse(response: ServerResponse): void {
     connection: 'keep-alive',
     'x-accel-buffering': 'no',
   })
-  response.write(': heddle stream open\n\n')
+  response.write(STREAM_OPEN)
 }
 
 /**

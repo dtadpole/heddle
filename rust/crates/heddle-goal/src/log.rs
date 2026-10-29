@@ -22,6 +22,14 @@ pub trait SessionLog: Send + Sync {
     /// Append one event body — `type` and its fields, in order; the log adds `seq` and `at` in front — and
     /// return the event as written.
     fn append(&self, session: &str, event: Map<String, Value>) -> Result<Value, LogError>;
+    /// The session's metadata record as written (`{"id":…, …, "delegationDepth"?:…}`) — the TypeScript store's
+    /// `list()` entry for it. The goal tools read `delegationDepth` from it: a delegated session is never a direct
+    /// human turn. `None` when the log keeps no record, which reads as a top-level session, as a record the
+    /// TypeScript store cannot find does; a log over a store that writes delegated sessions should answer it.
+    fn meta(&self, session: &str) -> Option<Value> {
+        let _ = session;
+        None
+    }
 }
 
 /// Where a change's timestamps come from; injected so a test can fix them.

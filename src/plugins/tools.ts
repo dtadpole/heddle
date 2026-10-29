@@ -36,16 +36,33 @@ export default class ToolsPlugin extends ToolRegistry {
     includeBuiltins: Schema.boolean().default(true),
     /** Wall time a `bash` call may take before it is killed. */
     bashTimeoutMs: Schema.number().default(30_000),
+    /** Characters of a `bash` call's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
+    bashOutputLimit: Schema.natural().min(1).default(20_000),
+    /** Parallel-safe tool calls one model step runs at once; 1 runs every call alone (DSH's `maxParallelToolCalls`). */
+    maxParallelToolCalls: Schema.natural().min(1).default(10),
   })
 
   static readonly inject = ['approvals', 'sandbox', 'session']
 
-  constructor(ctx: import('@deepseek-ai/cordis').Context, config: { allow?: readonly string[]; includeBuiltins?: boolean; bashTimeoutMs?: number } = {}) {
+  constructor(ctx: import('@deepseek-ai/cordis').Context, config: {
+      allow?: readonly string[]
+      includeBuiltins?: boolean
+      bashTimeoutMs?: number
+      bashOutputLimit?: number
+      maxParallelToolCalls?: number
+    } = {},
+  ) {
     super(ctx, ctx.approvals, ctx.sandbox, ctx.session)
+    if (config.maxParallelToolCalls !== undefined) this.maxParallelToolCalls = config.maxParallelToolCalls
     /** Tools the configuration named and nothing registered, reported once the tree is loaded. */
     const cfgProblems: string[] = []
 
-    const definitions = config.includeBuiltins === false ? [] : [...builtinTools(ctx.sandbox, { ...(config.bashTimeoutMs !== undefined ? { bashTimeoutMs: config.bashTimeoutMs } : {}) })]
+    const definitions = config.includeBuiltins === false ? [] : [
+            ...builtinTools(ctx.sandbox, {
+              ...(config.bashTimeoutMs !== undefined ? { bashTimeoutMs: config.bashTimeoutMs } : {}),
+              ...(config.bashOutputLimit !== undefined ? { bashOutputLimit: config.bashOutputLimit } : {}),
+            }),
+          ]
     const allow = config.allow ?? []
     /**
      * The built-ins are registered whether or not the allow list names them, and the list is enforced

@@ -65,6 +65,7 @@ pub struct ToolRegistry {
     commands: RwLock<Vec<Arc<dyn Command>>>,
     gates: ToolGates,
     allow: Vec<String>,
+    max_parallel_tool_calls: usize,
 }
 
 impl ToolRegistry {
@@ -80,6 +81,7 @@ impl ToolRegistry {
             commands: RwLock::new(Vec::new()),
             gates,
             allow,
+            max_parallel_tool_calls: crate::config::DEFAULT_MAX_PARALLEL_TOOL_CALLS,
         }
     }
 
@@ -91,10 +93,12 @@ impl ToolRegistry {
     /// [`Self::filter_to`] with [`Self::allow_list`] once the whole tree has loaded and fails the run on
     /// [`Self::missing`].
     pub fn from_config(gates: ToolGates, config: &ToolsConfig) -> Self {
-        let registry = Self::with_allow_list(gates, config.allow.clone());
+        let mut registry = Self::with_allow_list(gates, config.allow.clone());
+        registry.max_parallel_tool_calls = config.max_parallel_tool_calls.max(1);
         if config.include_builtins {
             let options = BuiltinOptions {
                 bash_timeout_ms: config.bash_timeout_ms,
+                bash_output_limit: config.bash_output_limit,
             };
             for tool in builtin_tools(Arc::clone(&registry.gates.sandbox), options) {
                 registry
@@ -181,10 +185,20 @@ impl ToolRegistry {
     }
 
     /// Every tool's spec, which is what `heddle tools` prints and what the model is told.
+    ///
+    /// Each root is shown open, as DSH's `defineTool` compiles it ([`open_root`](crate::open_root)): an unknown
+    /// top-level argument is accepted, so a root that said `additionalProperties: false` would promise a refusal
+    /// that never comes. Nested nodes keep what they declare. R-developer-five-6, coordinator ruling (a).
     pub fn describe(&self) -> Vec<ToolSpec> {
         self.read_tools()
             .iter()
-            .map(|tool| tool.spec().clone())
+            .map(|tool| {
+                let spec = tool.spec();
+                ToolSpec {
+                    parameters: crate::open_root(&spec.parameters),
+                    ..spec.clone()
+                }
+            })
             .collect()
     }
 
@@ -201,6 +215,19 @@ impl ToolRegistry {
                 description: command.description().to_owned(),
             })
             .collect()
+    }
+
+    /// Whether a call to `name` may share a step's parallel group ([`Tool::concurrency_safe`]); an unknown tool
+    /// is exclusive, so it fails alone.
+    pub fn is_concurrency_safe(&self, name: &str) -> bool {
+        self.read_tools()
+            .iter()
+            .any(|tool| tool.spec().name == name && tool.concurrency_safe())
+    }
+
+    /// Parallel-safe calls one step may run at once (`tools.maxParallelToolCalls`); 1 runs every call alone.
+    pub fn max_parallel_tool_calls(&self) -> usize {
+        self.max_parallel_tool_calls
     }
 
     /// Whether a tool exists, so a caller can tell unknown from refused.
@@ -318,6 +345,29 @@ impl ToolRegistry {
                     );
                 }
             }
+        }
+
+        // The arguments are checked against the tool's declared parameters before it runs, as DSH's `defineTool`
+        // does inside `execute`: a violation is `INVALID_ARGS` in DSH's words and the tool never sees the call. The
+        // root is open, so an unknown top-level key passes; arguments that were not valid JSON arrive as
+        // `{"__unparsed": ...}` and are, in DSH's terms, not an object (`src/tools/service.ts`).
+        let violations = if args.contains_key("__unparsed") {
+            crate::argument_violations(
+                &serde_json::json!({ "type": "object" }),
+                &serde_json::Value::Null,
+                "",
+            )
+        } else {
+            crate::argument_violations(
+                &crate::open_root(&tool.spec().parameters),
+                &serde_json::Value::Object(args.clone()),
+                "",
+            )
+        };
+        if !violations.is_empty() {
+            let message = crate::invalid_arguments(&violations);
+            context.log(&format!("refused {name}: {message}"));
+            return Ok(ToolResult::refused(codes::INVALID_ARGS, message));
         }
 
         let result = match tool
@@ -528,6 +578,24 @@ pub(crate) mod tests {
         })
     }
 
+    #[test]
+    fn the_read_only_built_ins_are_parallel_safe_and_the_cap_is_configured() {
+        let config = ToolsConfig {
+            max_parallel_tool_calls: 3,
+            ..ToolsConfig::default()
+        };
+        let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
+        assert_eq!(
+            ["read_file", "list_dir", "write_file", "bash", "unknown"]
+                .map(|name| registry.is_concurrency_safe(name)),
+            [true, true, false, false, false]
+        );
+        assert_eq!(registry.max_parallel_tool_calls(), 3);
+        assert_eq!(
+            ToolRegistry::new(gates(SandboxMode::WorkspaceWrite)).max_parallel_tool_calls(),
+            10
+        );
+    }
     #[test]
     fn a_tool_without_a_name_is_refused_at_registration() {
         let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
@@ -801,6 +869,95 @@ pub(crate) mod tests {
         let mut gates = gates(SandboxMode::WorkspaceWrite);
         gates.hooks = hooks;
         gates
+    }
+
+    /// A tool with a declared schema that records whether it ran (R-developer-five-6).
+    fn probe(ran: Arc<std::sync::atomic::AtomicBool>) -> Arc<dyn Tool> {
+        let spec = ToolSpec {
+            name: "probe".into(),
+            description: "records whether it ran".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false,
+            }),
+        };
+        tool_fn(spec, move |_args, _ctx: ToolRunContext| {
+            let ran = Arc::clone(&ran);
+            Box::pin(async move {
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolResult::ok("ran"))
+            })
+        })
+    }
+
+    fn args_of(value: serde_json::Value) -> ToolArgs {
+        value.as_object().cloned().unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_call_that_breaks_its_schema_is_refused_before_the_tool_runs() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
+        registry.register(probe(Arc::clone(&ran))).unwrap();
+        let wrong = registry
+            .call(
+                "probe",
+                args_of(serde_json::json!({ "path": 7 })),
+                ToolContext::new("/w"),
+            )
+            .await;
+        let error = wrong.error.unwrap();
+        assert_eq!(error.code, codes::INVALID_ARGS);
+        assert_eq!(
+            error.message,
+            "invalid arguments: \"path\" must be a string"
+        );
+        let missing = registry
+            .call("probe", ToolArgs::new(), ToolContext::new("/w"))
+            .await;
+        assert_eq!(
+            missing.error.unwrap().message,
+            "invalid arguments: missing required property \"path\""
+        );
+        let unparsed = registry
+            .call(
+                "probe",
+                args_of(serde_json::json!({ "__unparsed": "{\"path\":" })),
+                ToolContext::new("/w"),
+            )
+            .await;
+        assert_eq!(
+            unparsed.error.unwrap().message,
+            "invalid arguments: \"arguments\" must be an object",
+            "malformed JSON is not an object"
+        );
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the tool never ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_top_level_argument_reaches_the_tool_and_roots_are_shown_open() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
+        registry.register(probe(Arc::clone(&ran))).unwrap();
+        let result = registry
+            .call(
+                "probe",
+                args_of(serde_json::json!({ "path": "a", "run_in_background": true })),
+                ToolContext::new("/w"),
+            )
+            .await;
+        assert_eq!(result.error, None);
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        let shown = registry.describe();
+        assert!(
+            shown[0].parameters.get("additionalProperties").is_none(),
+            "the model is shown an open root"
+        );
     }
 
     #[tokio::test]
@@ -1125,6 +1282,8 @@ pub(crate) mod tests {
             allow: vec!["read_file".into(), "absent".into()],
             include_builtins: true,
             bash_timeout_ms: 5,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
+            max_parallel_tool_calls: 10,
         };
         let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
         assert_eq!(
@@ -1147,6 +1306,8 @@ pub(crate) mod tests {
             allow: Vec::new(),
             include_builtins: false,
             bash_timeout_ms: 0,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
+            max_parallel_tool_calls: 10,
         };
         let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
         assert!(registry.names().is_empty());
