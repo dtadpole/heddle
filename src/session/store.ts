@@ -1,7 +1,20 @@
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, truncateSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  truncateSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
@@ -43,6 +56,13 @@ import { decodeTranscript, encodeFrame } from './transcript.ts'
  * A session id is the directory's name; `meta.json` records what the session is for, so a listing
  * does not need to parse any transcript; and the transcript is found by name, preferring the
  * versioned one so a reader knows the format before it decodes.
+ *
+ * **One process writes a session at a time.** The first append takes a writer lock beside the log
+ * (`<id>.lock`, or `session.lock` inside an old-layout session directory) and the process keeps it
+ * until it lets go or exits; another process that tries to append is refused with DSH's sentence,
+ * `session "<id>" is already owned by an active write handle`. Without it, a `heddle web` server and a
+ * `heddle --resume <id> --turn` each appended from their own in-memory seq counter and the log got the
+ * same seqs twice (R-developer-eight-27). See {@link SessionOwnedError} and `acquireWriterLock`.
  */
 
 /** Identifies one session; the directory name under the store root. */
@@ -416,6 +436,151 @@ export class SessionFlagError extends Error {
   }
 }
 
+/**
+ * A write refused because another process holds the session's writer lock.
+ *
+ * The sentence is DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and the
+ * code is the one its session controller answers a resume with (`session/writer-held`); the holder's pid is added in
+ * brackets because a person who is refused needs to know which process to stop. Read-only access is never refused.
+ */
+export class SessionOwnedError extends Error {
+  readonly code = 'session/writer-held'
+  readonly id: string
+  /** The process named in the lock, when the lock named one. */
+  readonly pid: number | undefined
+
+  constructor(id: string, pid?: number) {
+    super(`session "${id}" is already owned by an active write handle${pid !== undefined ? ` (process ${pid})` : ''}`)
+    this.name = 'SessionAlreadyOwnedError'
+    this.id = id
+    this.pid = pid
+  }
+}
+
+/**
+ * Where a session's writer lock is: `<id>.lock` beside its log, or `session.lock` inside an old-layout session
+ * directory — DSH's `session.lock`, named the way this layout names everything else of one session.
+ *
+ * The Rust store uses the same path and the same contents (the holder's pid and a newline), so either build refuses
+ * a writer the other one holds.
+ */
+export function lockPath(handle: SessionHandle): string {
+  return basename(handle.meta) === 'meta.json' ? join(handle.dir, 'session.lock') : join(handle.dir, `${handle.id}.lock`)
+}
+
+/**
+ * How long a lock file with no pid in it is taken to be one being written, rather than one left half-written.
+ *
+ * The holder creates the file and writes its pid in the next call, so an empty lock older than this is debris.
+ */
+const UNWRITTEN_LOCK_GRACE_MS = 5_000
+
+/** The lock files this process holds, and how many stores in it hold each — the last one to let go removes it. */
+const heldByProcess = new Map<string, number>()
+let exitHookInstalled = false
+
+/** Whether a process with this pid exists. A process this user may not signal (`EPERM`) exists. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** The pid a lock file names, or undefined when it names none. */
+function lockHolder(text: string): number | undefined {
+  const trimmed = text.trim()
+  if (!/^\d+$/.test(trimmed)) return undefined
+  const pid = Number(trimmed)
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+}
+
+/** Remove a lock file only if it still names this process, so letting go never removes somebody else's lock. */
+function removeOwnLock(path: string): void {
+  try {
+    if (lockHolder(readFileSync(path, 'utf8')) === process.pid) unlinkSync(path)
+  } catch {
+    // Already gone, or unreadable: there is nothing of ours left to remove.
+  }
+}
+
+/**
+ * Take a session's writer lock for this process, or throw {@link SessionOwnedError}.
+ *
+ * DSH arbitrates with a kernel `flock(2)` on `session.lock`, which Node cannot take without a native addon; a lock
+ * file created with `O_EXCL` and naming its holder's pid is the portable equivalent both builds can share. What
+ * flock gives for free is supplied by hand: a holder that died without letting go (a crash, `SIGKILL`) leaves a
+ * file naming a pid that no longer exists, and that lock is removed and taken rather than blocking the session
+ * forever. A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled writer's
+ * resumed appends tear the log.
+ */
+function acquireWriterLock(path: string, id: string): void {
+  const count = heldByProcess.get(path)
+  if (count !== undefined) {
+    heldByProcess.set(path, count + 1)
+    return
+  }
+  const take = (): void => {
+    heldByProcess.set(path, 1)
+    if (!exitHookInstalled) {
+      exitHookInstalled = true
+      process.once('exit', () => {
+        for (const held of heldByProcess.keys()) removeOwnLock(held)
+      })
+    }
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const fd = openSync(path, 'wx')
+      try {
+        writeSync(fd, `${process.pid}\n`)
+      } finally {
+        closeSync(fd)
+      }
+      take()
+      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    let text: string
+    let modified: number
+    try {
+      text = readFileSync(path, 'utf8')
+      modified = statSync(path).mtimeMs
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    const holder = lockHolder(text)
+    if (holder === process.pid) {
+      take()
+      return
+    }
+    if (holder !== undefined && processAlive(holder)) throw new SessionOwnedError(id, holder)
+    if (holder === undefined && Date.now() - modified < UNWRITTEN_LOCK_GRACE_MS) throw new SessionOwnedError(id)
+    try {
+      unlinkSync(path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+  throw new SessionOwnedError(id)
+}
+
+/** Let go of one store's hold on a lock; the last hold in this process removes the file. */
+function releaseWriterLock(path: string): void {
+  const count = heldByProcess.get(path)
+  if (count === undefined) return
+  if (count > 1) {
+    heldByProcess.set(path, count - 1)
+    return
+  }
+  heldByProcess.delete(path)
+  removeOwnLock(path)
+}
+
 export class SessionStore {
   readonly root: string
   private readonly onEvent: ((handle: SessionHandle, event: SessionEvent) => void) | undefined
@@ -430,11 +595,16 @@ export class SessionStore {
    * makes compressed storage affordable: decompression happens once per session per process rather
    * than once per read.
    *
-   * The trade is stated rather than hidden: a second process appending to the same session while
-   * this one holds it open would not be seen. heddle runs one process per session, and the file is
-   * still the truth for anyone who opens it fresh.
+   * The trade is stated rather than hidden: the fold is only as fresh as the last time this process
+   * read the file. That is safe for writing because only the holder of the session's writer lock
+   * appends, and taking the lock drops the fold so the first write re-reads what another process
+   * may have appended before it let go. A process that only reads may show an older history until
+   * it opens the session again.
    */
   private readonly loaded = new Map<string, { readonly events: SessionEvent[]; readonly framed: boolean }>()
+
+  /** The sessions this store holds the writer lock for, and where each lock is. */
+  private readonly held = new Map<string, string>()
 
   /**
    * Folded surfaces, keyed by session and the log length they were folded at.
@@ -754,6 +924,8 @@ export class SessionStore {
     event: Omit<SessionEvent, 'seq' | 'at'> & { readonly type: string },
     options: { readonly surfaceOp?: SurfaceOp; readonly sourceEventSeqs?: readonly number[] } = {},
   ): SessionEvent {
+    /** Before anything is read for the write: taking the lock is what makes the seq below the file's next one. */
+    this.claim(handle)
     if (isReplacementOp(options.surfaceOp)) this.assertReplacement(handle, event, options.surfaceOp)
     const seq = this.count(handle)
     const record: SessionEvent = {
@@ -789,6 +961,64 @@ export class SessionStore {
   }
 
   /**
+   * Take this session's writer lock, or throw {@link SessionOwnedError} while another process holds it.
+   *
+   * `append` calls it, so a caller only needs it to be refused **before** doing anything else — a route that
+   * wants to answer `409` rather than start a turn it cannot record. Taking the lock drops this store's fold of
+   * the session: what was read before may be behind the file, because the previous holder could have appended
+   * and let go since, and a write counted from a stale fold is exactly the duplicate seq this lock exists to
+   * prevent. Holding it again is free.
+   */
+  claim(handle: SessionHandle): void {
+    if (this.held.has(handle.id)) return
+    const path = lockPath(handle)
+    acquireWriterLock(path, handle.id)
+    this.held.set(handle.id, path)
+    this.loaded.delete(handle.id)
+    this.surfaceCache.delete(handle.id)
+  }
+
+  /** Whether this store holds the session's writer lock. */
+  holds(handle: SessionHandle): boolean {
+    return this.held.has(handle.id)
+  }
+
+  /**
+   * Let go of the session's writer lock, so another process may write it.
+   *
+   * Nothing has to call this: the process lets go of every lock it holds when it exits, and a lock whose holder
+   * died is taken over by the next writer. A later append takes the lock again.
+   */
+  release(handle: SessionHandle): void {
+    const path = this.held.get(handle.id)
+    if (path === undefined) return
+    this.held.delete(handle.id)
+    releaseWriterLock(path)
+  }
+
+  /** Take the writer lock if no other process holds it; false when one does. */
+  private tryClaim(handle: SessionHandle): boolean {
+    try {
+      this.claim(handle)
+      return true
+    } catch (error) {
+      if (error instanceof SessionOwnedError) return false
+      throw error
+    }
+  }
+
+  /** The transcript's bytes and their decoding; a file not written yet is an empty session, not an error. */
+  private readLog(handle: SessionHandle): { bytes: Buffer; decoded: ReturnType<typeof decodeTranscript> } {
+    let bytes = Buffer.alloc(0)
+    try {
+      bytes = readFileSync(handle.transcript)
+    } catch {
+      // a session whose file has not been written yet is an empty session, not an error
+    }
+    return { bytes, decoded: decodeTranscript(bytes) }
+  }
+
+  /**
    * The session's events, read once and kept in memory.
    *
    * A transcript is compressed per frame, and a process that holds a session should pay for that
@@ -800,13 +1030,8 @@ export class SessionStore {
     const cached = this.loaded.get(handle.id)
     if (cached !== undefined) return cached as { events: SessionEvent[]; framed: boolean }
 
-    let bytes = Buffer.alloc(0)
-    try {
-      bytes = readFileSync(handle.transcript)
-    } catch {
-      // a session whose file has not been written yet is an empty session, not an error
-    }
-    const decoded = decodeTranscript(bytes)
+    let { bytes, decoded } = this.readLog(handle)
+    const torn = bytes.length - decoded.readableBytes > 0
 
     /**
      * A torn tail is cut off before anything is appended.
@@ -817,13 +1042,22 @@ export class SessionStore {
      * event rather than two, with the new event silently gone. What is dropped is a frame that was
      * never written whole, so no event that existed as an event is lost, and the repair is recorded
      * on the session rather than done silently.
+     *
+     * Only the session's writer cuts. A half frame at the end of a session another process holds may
+     * be that process's append in progress, so a reader that cannot take the lock reads the whole
+     * frames and leaves the file alone; one that can re-reads under the lock before it cuts, because
+     * the frame may have been finished by the holder it just replaced.
      */
-    const dropped = bytes.length - decoded.readableBytes
-    if (dropped > 0) {
-      try {
-        truncateSync(handle.transcript, decoded.readableBytes)
-      } catch {
-        // a transcript that cannot be truncated still reads; the next append simply lands after the tear
+    let dropped = 0
+    if (torn && this.tryClaim(handle)) {
+      ;({ bytes, decoded } = this.readLog(handle))
+      dropped = bytes.length - decoded.readableBytes
+      if (dropped > 0) {
+        try {
+          truncateSync(handle.transcript, decoded.readableBytes)
+        } catch {
+          // a transcript that cannot be truncated still reads; the next append simply lands after the tear
+        }
       }
     }
 
@@ -835,7 +1069,7 @@ export class SessionStore {
         throw new Error(`${handle.transcript}:${index + 1} is not valid JSON — ${(error as Error).message}`)
       }
     }
-    const framed = decoded.format === 'zstd-frames' || ((dropped > 0 || decoded.lines.length === 0) && isFramed(handle.transcript))
+    const framed = decoded.format === 'zstd-frames' || ((torn || decoded.lines.length === 0) && isFramed(handle.transcript))
     const entry = { events, framed }
     this.loaded.set(handle.id, entry)
     if (dropped > 0) this.append(handle, { type: 'transcript/repaired', droppedBytes: dropped })
