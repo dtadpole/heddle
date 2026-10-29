@@ -2842,7 +2842,7 @@
         message, not as a file plus some text.
       -->
       <div id="attach-cards" aria-label="Pending files" hidden></div>
-      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
+      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands" autofocus></textarea>
       <!--
         The control row, inside the card and in DSH's order: `+` and the access mode on the left, the model
         seat on the right, then the one action button. The button is Send when nothing runs and Stop while a
@@ -5424,7 +5424,7 @@ async function showSession(id) {
       /** A command's row is held in place now and drawn by the menu module once it has loaded. */
       if (turn.kind === 'command') {
         const holder = document.createElement('div')
-        holder.className = 'turn hc-command'
+        holder.className = 'turn command hc-command'
         holder.dataset.kind = 'command'
         holder.dataset.commandId = String(turn.commandId)
         log.append(holder)
@@ -5953,6 +5953,22 @@ const field = composer.elements.prompt
  * The slash-command menu (src/commands/menu.js, developer-three, D-057), imported after the page so the composer never
  * waits for it. Until it has loaded nothing is claimed, so a line typed in that instant is an ordinary message.
  */
+/**
+ * What the composer lends a feature module (agreed with developer-twelve, 2026-10-29): a row appended through the
+ * page's own path, so tail-following and session switches treat it like any other row, and the three controls a
+ * command opens instead of typing — the model seat, the file picker and the access chip.
+ */
+window.heddleComposer = {
+  addRow(kind, node) {
+    node.classList.add('turn', kind)
+    node.dataset.kind = kind
+    log.append(node)
+    followChatTail()
+  },
+  openModelMenu: () => document.getElementById('model-trigger').click(),
+  openFilePicker: () => document.getElementById('attach-file').click(),
+  openAccessMenu: () => document.getElementById('access').click(),
+}
 let slashCommands = null
 const slashReady = import('/commands/menu.js')
   .then((module) => {
@@ -5965,13 +5981,11 @@ const slashReady = import('/commands/menu.js')
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
       sendAsPrompt: (text) => (anyRunning() ? enqueue(text, 'queue', []) : void sendNow(text, [])),
-      addRow: (node) => {
-        log.append(node)
-        followChatTail()
-      },
+      addRow: (node) => window.heddleComposer.addRow('command', node),
       notice: (text) => add('denied', text),
-      openModelMenu: () => openModelMenu(),
-      openFilePicker: () => document.getElementById('attach-file').click(),
+      openModelMenu: window.heddleComposer.openModelMenu,
+      openFilePicker: window.heddleComposer.openFilePicker,
+      openAccessMenu: window.heddleComposer.openAccessMenu,
     })
     return slashCommands
   })
@@ -6919,7 +6933,7 @@ function renderComposerState() {
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
   field.placeholder = canSteerQueue
     ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : 'Message or run a task, / commands, @ files or sessions'
+    : 'Message or run a task, / commands'
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
