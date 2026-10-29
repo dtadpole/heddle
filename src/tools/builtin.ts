@@ -45,9 +45,17 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
   }
 }
 
+/** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
+export const BASH_OUTPUT_LIMIT = 20_000
+
 /** Build the standard tools around one sandbox. */
-export function builtinTools(sandbox: SandboxService, options: { readonly bashTimeoutMs?: number } = {}): readonly ToolDefinition[] {
+export function builtinTools(
+  sandbox: SandboxService,
+  options: { readonly bashTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
+): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
+  const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)
 
   const writeFile: ToolDefinition = {
@@ -191,7 +199,7 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
         child.on('close', (code) => {
           clearTimeout(timer)
           const combined = stdout + stderr
-          const trimmed = combined.length > 20_000 ? `${combined.slice(0, 20_000)}\n… truncated` : combined
+          const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
           if (timedOut) {
