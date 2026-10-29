@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-29T15:59:00Z
+modified: 2026-10-29T16:38:00Z
 level: L3
-version: 1.14.1
+version: 1.15.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `681810d` (c5eb5e7's code, with heddle-server's formatting fixed; a fork keeps runtime-context notes as notes; the rename dialog and the stream's
+**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `dd492c4` (a profile reset from a shipped template; the bash output cap as a setting; the rename dialog and the stream's
 ready frame and heartbeat; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
@@ -27,8 +27,8 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**146 checks: 145 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 70
-gained two checks: a fork keeps the harness's notes as notes, and a session title opens DSH's Rename dialog.
+**149 checks: 148 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 0
+gained `check-profile-reset.mjs` and part 40 `check-output-limit.mjs`.
 
 **Failing:** none in the backend lane. Part 98 reads the machine's recorded validation, so it judges the configuration:
 every configured model now passes it. For the Claude models that means several text deltas, not arrival as they are
@@ -41,11 +41,11 @@ list.
 
 | Part | Verifier, in `_verifiers_/` | On the binary |
 |---|---|---|
-| 0 configuration | `05-config-system` | **passes** — 13 of 13 |
+| 0 configuration | `05-config-system` | **passes** — 14 of 14 |
 | 1 LLM backends | `10-llm-backends` | 10 pass, 1 unjudged (publisher route, live) |
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 9 of 9 |
-| 4 tools | `40-pluggable-tools` | **passes** — 8 of 8 |
+| 4 tools | `40-pluggable-tools` | **passes** — 10 of 10 |
 | 5 agentic loop | `50-agentic-loop` | **passes** — 25 of 25 |
 | 6 hooks | `60-hooks` | **passes** — 6 of 6 |
 | 7 workspaces and sessions | `70-workspaces-sessions` | **passes** — 50 of 50 |
