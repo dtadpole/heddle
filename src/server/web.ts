@@ -520,17 +520,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     const workspaces = ctx.workspace
     const wanted = url.searchParams.get('path')
     if (wanted === null || wanted.length === 0) {
-      respond(response, 400, 'text/plain', 'a path is required\n')
+      respond(response, 400, 'text/plain', 'a path is required\n', FILE_ANSWER_HEADERS)
       return
     }
     if (workspaces === undefined || workspaces.owner(wanted) === undefined) {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
       return
     }
     try {
       const stats = statSync(wanted)
       if (!stats.isFile()) {
-        respond(response, 404, 'text/plain', 'no such asset\n')
+        respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
       const contentType = inlineContentType(wanted)
@@ -540,10 +540,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
         'content-disposition': contentType === null ? `attachment; filename="${basename(wanted).replace(/"/g, '')}"` : 'inline',
         'cache-control': 'no-store',
+        ...FILE_ANSWER_HEADERS,
       })
       response.end(readFileSync(wanted))
     } catch {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
     return
   }
@@ -560,19 +561,19 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname.startsWith('/api/uploads/') && request.method === 'GET') {
     const leaf = decodeURIComponent(url.pathname.slice('/api/uploads/'.length))
     if (leaf.length === 0 || leaf.includes('/') || leaf.includes('\\') || leaf === '..' || leaf === '.') {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
       return
     }
     try {
       const directory = uploadDirectory()
       const wanted = join(directory, leaf)
       if (!isUnder(canonicalPath(directory), canonicalPath(wanted))) {
-        respond(response, 404, 'text/plain', 'no such asset\n')
+        respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
       const stats = statSync(wanted)
       if (!stats.isFile()) {
-        respond(response, 404, 'text/plain', 'no such asset\n')
+        respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
       const contentType = inlineContentType(wanted)
@@ -581,10 +582,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         'content-length': String(stats.size),
         'content-disposition': contentType === null ? `attachment; filename="${leaf.replace(/"/g, '')}"` : 'inline',
         'cache-control': 'no-store',
+        ...FILE_ANSWER_HEADERS,
       })
       response.end(readFileSync(wanted))
     } catch {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
     return
   }
@@ -2411,6 +2413,22 @@ function respondSse(response: ServerResponse): void {
  * or a `<video>` needs, and a file outside it is still served — as a download, so a person can have it without the
  * page executing it.
  */
+/**
+ * The headers **every answer of a file route** carries, success or failure.
+ *
+ * `/api/raw` and `/api/uploads` serve a workspace's or a person's own bytes on the page's origin, with the session
+ * cookie in scope, so whatever a browser can run from such an answer runs as the user. Measured 2026-10-29 (DSH
+ * parity R-developer-twelve-16): a workspace SVG served inline and opened directly ran its script, and its
+ * `fetch('/api/sessions')` answered 200. DSH answers its own file route with exactly these two headers on every
+ * response, because "HTML and SVG files may be opened directly on the authenticated API origin": `sandbox` runs
+ * such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps a
+ * download from being read as a page. A policy on an image or a stylesheet does not affect the page that embeds it.
+ */
+export const FILE_ANSWER_HEADERS: Readonly<Record<string, string>> = {
+  'content-security-policy': "sandbox; default-src 'none'",
+  'x-content-type-options': 'nosniff',
+}
+
 function inlineContentType(path: string): string | null {
   const extension = extname(path).toLowerCase()
   const known: Readonly<Record<string, string>> = {
@@ -2423,8 +2441,14 @@ function inlineContentType(path: string): string | null {
   return known[extension] ?? null
 }
 
-function respond(response: ServerResponse, status: number, contentType: string, body: string): void {
-  response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store' })
+function respond(
+  response: ServerResponse,
+  status: number,
+  contentType: string,
+  body: string,
+  extra: Readonly<Record<string, string>> = {},
+): void {
+  response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', ...extra })
   response.end(body)
 }
 
