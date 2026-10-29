@@ -2984,8 +2984,8 @@ mod tests {
         // A teammate is a continuable child and still takes the turn.
         // Well-formed session ids: /api/turn answers an id that is not one with `session/not-found` before it
         // looks for a subagent (R-developer-seven-2), so the refusal under test needs ids a store could hold.
-        let child = "session-0e5e0000-0000-4000-8000-00000000c41d";
-        let mate = "session-7ea70000-0000-4000-8000-0000000a7e11";
+        let child = "session-33333333-3333-3333-3333-333333333333";
+        let mate = "session-44444444-4444-4444-4444-444444444444";
         let meta = |id: &str, rest: Value| SessionMeta {
             id: id.into(),
             cwd: Some("/work".into()),
