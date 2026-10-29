@@ -539,6 +539,8 @@ async function runWeb(args: Args): Promise<void> {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
       }
     }
+    /** Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule). */
+    if (app.ctx.get('schedule') !== undefined) app.ctx.schedule.startDelivery()
     process.stdout.write(`heddle web: ${server.url}\n`)
     process.stdout.write(`heddle web: serving on ${server.host}:${server.port}; pass --port to change it\n`)
     if (args.json) process.stdout.write(`${JSON.stringify({ url: server.url, host: server.host, port: server.port, token: server.token })}\n`)

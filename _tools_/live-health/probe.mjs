@@ -653,6 +653,12 @@ async function ownHealthSession(pageId, scope, choice) {
     state = JSON.parse(readFileSync(HEALTH_STATE, 'utf8'))
   } catch {}
   const kept = HEALTH_SESSION_PER === 'day' && state?.[scope]?.date === today && typeof state[scope].id === 'string' ? state[scope].id : null
+  /**
+   * The id this replaces, archived once the new one exists (the coordinator, 2026-10-29: "archive
+   * yesterday's session when you rotate"). Only an id from this state file - one the monitor created -
+   * is ever archived; archiving hides it from the tree and deletes nothing.
+   */
+  const previous = kept === null && typeof state?.[scope]?.id === 'string' && state[scope].date !== today ? state[scope].id : null
   const selection = { endpoint: choice.endpoint, model: choice.model, ...(choice.effort !== null ? { reasoningEffort: choice.effort } : {}) }
   const got = (await callTool(
     'evaluate_script',
@@ -683,7 +689,13 @@ async function ownHealthSession(pageId, scope, choice) {
         }
         const model = await post('/api/sessions/' + encodeURIComponent(id) + '/model', ${JSON.stringify(selection)})
         if (model.status !== 200) return { ok: false, id, created, reason: 'the model could not be recorded on the health session (' + said(model) + ')' }
-        return { ok: true, id, created }
+        const previous = ${JSON.stringify(previous)}
+        let archived = null
+        if (created && previous !== null && previous !== id) {
+          const flagged = await post('/api/sessions/' + encodeURIComponent(previous) + '/flags', { archived: true })
+          archived = flagged.status === 200 ? 'archived' : 'not archived (' + said(flagged) + ')'
+        }
+        return { ok: true, id, created, archived }
       })`,
     },
     25_000,
@@ -889,7 +901,13 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true, ownSes
       reused = 'selection'
     }
     if (reused !== 'new') await new Promise((done) => setTimeout(done, 400))
-    const sessionNote = { reused: ['tree', 'selection', 'api-kept'].includes(reused), via: reused, title: healthSession?.title ?? null, ...(retired !== null ? { retired } : {}) }
+    const sessionNote = {
+      reused: ['tree', 'selection', 'api-kept'].includes(reused),
+      via: reused,
+      title: healthSession?.title ?? null,
+      ...(retired !== null ? { retired } : {}),
+      ...(typeof own?.archived === 'string' ? { previous: own.archived } : {}),
+    }
     let selection = null
     if (mode === 'real') {
       /**

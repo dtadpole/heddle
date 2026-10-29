@@ -981,6 +981,8 @@ async fn session_view_route(
     let meta = sessions.meta(id.as_str());
     let mode = sessions.effective_mode(id.as_str(), &state.harness().sandbox.default_mode());
     let mut turns = crate::transcript::transcript_turns(&events);
+    // Each card names this session: the upload route serves a file only to a session whose log references it.
+    crate::transcript::scope_attachment_urls(&mut turns, id.as_str());
     if let Some(markdown) = state.harness().markdown.as_ref() {
         for turn in &mut turns {
             if turn.kind == crate::transcript::TurnKind::Assistant {

@@ -317,6 +317,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A log written before the inbox existed keeps its bad order on disk, and every request built from it is
+    /// repaired. R-developer-two-5 measured the shape on both builds: the prompt, the assistant's `bash` call,
+    /// the steer written at once, the call's result, then the stop. Logs are append-only, so nothing rewrites
+    /// such a session; `prepare` derives the messages and runs them through `repair_tool_pairing`, which
+    /// moves the result back beside its call and keeps the steer after it.
+    #[test]
+    fn an_old_log_with_a_steer_between_a_call_and_its_result_reaches_the_model_repaired() {
+        let (store, handle, root) = session();
+        append_message(&store, &handle, text_message(Role::User, "run long"));
+        for chunk in [
+            json!({"type": "tool-call", "id": "call-bash", "name": "bash", "arguments": "{\"command\":\"sleep 30\"}"}),
+            json!({"type": "done", "finishReason": "tool_calls"}),
+        ] {
+            ContextStore::append(
+                &store,
+                &handle,
+                json!({"type": "assistant/chunk", "chunk": chunk}),
+                AppendOptions::default(),
+            )
+            .expect("a chunk appends");
+        }
+        append_message(&store, &handle, text_message(Role::User, "queued steer"));
+        let mut result = text_message(Role::Tool, "error (EXIT): the command exited null");
+        result.tool_call_id = Some("call-bash".to_string());
+        append_message(&store, &handle, result);
+        ContextStore::append(
+            &store,
+            &handle,
+            json!({"type": "assistant/completed", "text": "", "ended": ["stopped by the caller"]}),
+            AppendOptions::default(),
+        )
+        .expect("the completion appends");
+
+        let shape = |messages: &[Message]| -> Vec<String> {
+            messages
+                .iter()
+                .map(|message| {
+                    let body: String = message
+                        .content
+                        .iter()
+                        .map(|part| match part {
+                            ContentPart::Text { text } => text.clone(),
+                            ContentPart::ToolCall(call) => format!("call({})", call.id),
+                            _ => String::new(),
+                        })
+                        .collect();
+                    format!("{:?}:{body}", message.role)
+                })
+                .collect()
+        };
+        let stored =
+            shape(&ContextStore::derive_messages(&store, &handle).expect("the messages derive"));
+        assert_eq!(
+            stored,
+            [
+                "User:run long",
+                "Assistant:call(call-bash)",
+                "User:queued steer",
+                "Tool:error (EXIT): the command exited null"
+            ],
+            "the log keeps the bad order"
+        );
+
+        let store = Arc::new(store);
+        let service = service(store.clone(), 100_000, None, &root);
+        let report = block_on(service.prepare(
+            &handle,
+            &PrepareOptions {
+                cwd: &root,
+                endpoint: "local",
+                model: None,
+                tools: &[],
+                system: None,
+                summarizer: None,
+                force: false,
+            },
+        ))
+        .expect("the preparation succeeds");
+        let sent = shape(&report.messages);
+        assert_eq!(
+            sent[sent.len() - 4..],
+            [
+                "User:run long",
+                "Assistant:call(call-bash)",
+                "Tool:error (EXIT): the command exited null",
+                "User:queued steer"
+            ],
+            "the request carries the call, its result, then the steer"
+        );
+        assert_eq!(
+            shape(
+                &ContextStore::derive_messages(store.as_ref(), &handle)
+                    .expect("the messages derive")
+            ),
+            stored,
+            "the repair is the request's, not a rewrite of the log"
+        );
+    }
+
     #[test]
     fn the_service_compacts_a_real_store_session_and_the_log_keeps_the_span() {
         let (store, handle, root) = session();

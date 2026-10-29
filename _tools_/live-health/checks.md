@@ -1,7 +1,7 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.8.0
+version: 1.8.1
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
@@ -69,6 +69,10 @@ target then gets **one minimal real turn per pass**:
   - The day's id is kept in `~/.heddle-live-monitor/state.json` and used again only while it is the
     same UTC day and the server still lists it (`--health-session=pass` makes one every pass).
   - Nothing on 8082 is chosen by title, so no session someone else made can be adopted.
+  - When the day rolls over, the previous day's id from the state file is archived once the new
+    session exists (`POST /api/sessions/<id>/flags {archived: true}`, recorded as
+    `session.previous`). Archiving hides it from the tree and deletes nothing. Only an id the monitor
+    created is ever archived.
 
 **Verdicts.** Staleness against a fresh `origin/main` (`dirty`, `behind`, `ahead`) is recorded,
 not failed. `passVerdict` fails on any failed check and is unjudged on any unjudged one: exit `0`

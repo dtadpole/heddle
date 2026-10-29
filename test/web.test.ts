@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentsOf, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentsOf, FILE_ANSWER_HEADERS, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -85,6 +85,17 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   assert.equal(answers.length, 2, 'one answer per exchange')
   assert.deepEqual(answers[0]?.files, [{ path: 'a.txt', added: 1 }])
   assert.equal(answers[1]?.files, undefined, 'the next exchange does not inherit the previous one\'s files')
+})
+
+test('a file route answers with the sandbox and nosniff headers DSH puts on its own file route', () => {
+  /**
+   * DSH parity R-developer-twelve-16, measured 2026-10-29: a workspace SVG served inline by `/api/raw` and opened
+   * directly ran its script with the session's access. DSH's file route sends exactly these on every answer.
+   */
+  assert.deepEqual(FILE_ANSWER_HEADERS, {
+    'content-security-policy': "sandbox; default-src 'none'",
+    'x-content-type-options': 'nosniff',
+  })
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {
@@ -421,4 +432,21 @@ test('a stream artifact of blank lines between tokens is not prose', () => {
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '第二段。' } },
   ])
   assert.equal(legit.find((turn) => turn.kind === 'assistant')?.text, '第一段。\n\n第二段。')
+})
+
+test('a transcript names its session in every attachment address, and leaves other turns alone', () => {
+  const session = 'session-00000000-0000-4000-8000-000000000001'
+  const turns = scopeAttachmentUrls(
+    [
+      { kind: 'user', text: 'look', attachments: attachmentsOf([{ type: 'image', path: '/h/uploads/a b.png', name: 'a b.png', bytes: 3 }]) },
+      { kind: 'assistant', text: 'seen' },
+      { kind: 'user', text: 'plain', attachments: [] },
+    ],
+    session,
+  )
+  const [first, second, third] = turns
+  assert.ok(first !== undefined && second !== undefined && third !== undefined, 'every turn comes back')
+  assert.equal(first.attachments?.[0]?.url, `/api/uploads/a%20b.png?session=${session}`, 'the card is read for this session')
+  assert.equal('attachments' in second, false, 'a turn without attachments is unchanged')
+  assert.deepEqual(third.attachments, [], 'and an empty list stays empty')
 })

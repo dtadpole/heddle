@@ -56,6 +56,12 @@ fn turn_hooks(services: &Services, context: &Arc<Context>) -> Arc<dyn heddle_age
     hooks.push(Arc::new(
         heddle_agent::adapters::ContextRecovery::over_session_handles(Arc::clone(context)),
     ));
+    // The clock reading reminders depend on (DSH's time context), recorded after each round's snapshot.
+    if let Some(sessions) = services.get::<Arc<heddle_session::SessionService>>("session") {
+        hooks.push(Arc::new(crate::adapters::TimeContextHook::new(Arc::clone(
+            sessions.store(),
+        ))));
+    }
     Arc::new(heddle_agent::ChainedTurnHooks::new(hooks))
 }
 

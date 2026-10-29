@@ -104,6 +104,25 @@ impl Component for ModelComponent {
             composed.nominated.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The machine's file applies to the next request without a restart, as `plugins/model.ts` keeps it: the
+        // service asks before every read and call, and an edit that cannot be read keeps the previous endpoints.
+        if config.read_local_config {
+            let source = heddle_config::ModelRowSource::new(
+                config.endpoints.clone(),
+                config.default.clone(),
+                true,
+                self.env.clone(),
+            );
+            service.set_refresh(Arc::new(move || match source.changed()? {
+                Ok(composed) => Some((composed.endpoints, composed.nominated)),
+                Err(error) => {
+                    eprintln!(
+                        "model: the machine configuration changed but could not be read ({error}); the previous endpoints stay"
+                    );
+                    None
+                }
+            }));
+        }
         let service = Arc::new(service);
         // `model/request` reaches the bus, where a hook may rewrite the request.
         if let Some(hooks) = bus_hooks(services) {
@@ -1471,6 +1490,92 @@ impl Component for TeamComponent {
         })?;
         services.provide("team", Arc::clone(&plugin.service));
         Ok(())
+    }
+}
+
+/// `src/plugins/schedule.ts`: reminders — the service, the four tools and delivery, which `heddle web` starts.
+pub struct ScheduleComponent {
+    env: Env,
+}
+
+impl ScheduleComponent {
+    /// The adapter for a run whose environment is this one.
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+}
+
+impl Component for ScheduleComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "schedule")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-schedule composes its own row: the store, the tools in the runtime's registry, and the driver.
+        let plugin = heddle_schedule::start_row(heddle_schedule::ScheduleRow {
+            config,
+            sessions,
+            runtime,
+            heddle_home: heddle_home(&self.env),
+            home: self.env.home_dir(),
+            async_runtime: Some(crate::runtime::tokio().handle().clone()),
+            warn: None,
+        })?;
+        // Without a live-turn registry, the session's own turn events say which sessions are busy.
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("schedule");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    let session = payload.get("session").and_then(Value::as_str);
+                    let kind = payload
+                        .get("event")
+                        .and_then(|event| event.get("type"))
+                        .and_then(Value::as_str);
+                    if let (Some(session), Some(kind)) = (session, kind) {
+                        forward.on_session_event(session, kind);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("schedule-listener", Arc::new((scope, listener)));
+        }
+        services.provide("schedule", plugin);
+        Ok(())
+    }
+}
+
+/// `src/agent/loop.ts`'s `recordTimeContext`: the clock reading DSH's time context gives the model, recorded right
+/// after each round's runtime-context snapshot.
+pub struct TimeContextHook {
+    store: Arc<heddle_session::SessionStore>,
+}
+
+impl TimeContextHook {
+    /// The hook over the run's session store.
+    pub fn new(store: Arc<heddle_session::SessionStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl heddle_agent::TurnHooks for TimeContextHook {
+    fn record_step_context(
+        &self,
+        session: &heddle_session::SessionHandle,
+        step: u32,
+    ) -> Result<(), heddle_agent::PortError> {
+        heddle_schedule::time_context::record_time_context(&self.store, session, step, None, None)
+            .map(|_| ())
+            .map_err(heddle_agent::PortError)
     }
 }
 
