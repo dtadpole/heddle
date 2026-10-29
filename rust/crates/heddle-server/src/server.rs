@@ -65,7 +65,7 @@ use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
     ServiceError, SessionMeta, StartSession,
 };
-use crate::stream::{EventHub, SseFrame, names, sse_response};
+use crate::stream::{self, EventHub, SseFrame, names, sse_response};
 use crate::token::{
     self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
 };
@@ -466,9 +466,25 @@ impl ServerBuilder {
                     }
                 })
             });
+        // The heartbeat: every interval each `/api/events` subscriber gets a `heartbeat` frame, and a connection
+        // whose writes stay pending for two intervals is closed (DSH's dead-peer rule, `stall.rs`).
+        let interval = stream::heartbeat_interval();
+        let heartbeat = {
+            let hub = state.events().clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    hub.publish(SseFrame::heartbeat());
+                }
+            })
+        };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(without_nagle(listener), router)
+            let listener = crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
+            let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
@@ -485,6 +501,7 @@ impl ServerBuilder {
             task: Some(task),
             detach_approvals,
             approval_relay,
+            heartbeat: Some(heartbeat),
         })
     }
 }
@@ -502,6 +519,8 @@ pub struct WebServer {
     detach_approvals: Option<Box<dyn FnOnce() + Send>>,
     /// The task relaying the approval service's published questions into the hub.
     approval_relay: Option<tokio::task::JoinHandle<()>>,
+    /// The task writing a heartbeat to every stream once per interval.
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WebServer {
@@ -560,6 +579,9 @@ impl WebServer {
         }
         if let Some(relay) = self.approval_relay.take() {
             relay.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
         }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {
@@ -839,7 +861,13 @@ async fn page_route() -> Response {
 }
 
 async fn events_route(State(state): State<AppState>) -> Response {
-    sse_response(state.events().subscribe())
+    // Subscribed before the body starts, so `ready` is followed by every frame published after it.
+    let subscription = state.events().subscribe();
+    sse_response(stream::events_frames(
+        subscription,
+        &stream::new_client_id(),
+        &stream::host_home(),
+    ))
 }
 
 /// One session's meta as a listing entry: the store's record plus this server's run state.
@@ -1558,6 +1586,14 @@ async fn html_preview(
         return respond::error(
             StatusCode::NOT_FOUND,
             "that path is not under any workspace root",
+        );
+    }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or
+    // not, is refused, as web.ts does.
+    if !preview::is_html_document(&path) {
+        return respond::error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            preview::NOT_AN_HTML_DOCUMENT,
         );
     }
     let metadata = match std::fs::metadata(&path) {
@@ -2416,6 +2452,53 @@ mod tests {
             Some(1),
             "the route hands the registry the store's sessions: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_html_route_previews_only_an_html_document() {
+        let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<h1>page</h1>").unwrap();
+        // A real Word document is a zip; a text file is valid UTF-8. Neither is a page.
+        std::fs::write(
+            dir.join("report.docx"),
+            b"PK\x03\x04\x14\x00\x00\x00\x08\x00binary",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain words").unwrap();
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("html-only")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = |leaf: &str| {
+            format!(
+                "/api/html?path={}",
+                dir.join(leaf).to_string_lossy().replace('/', "%2F")
+            )
+        };
+        let (status, _, bytes) = call(&router, Method::GET, &uri("page.html"), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("page"), "{}", body_text(&bytes));
+        for leaf in ["report.docx", "notes.txt"] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri(leaf), Some(&cookie)).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{leaf}");
+            assert_eq!(
+                body_text(&bytes),
+                format!("{{\"error\":\"{}\"}}\n", preview::NOT_AN_HTML_DOCUMENT),
+                "{leaf}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -3319,6 +3402,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_text(&bytes), "not found\n");
+    }
+
+    /// `/api/events` opens with its comment and then DSH's `ready` frame, and a frame published after the
+    /// subscription was registered (before any byte was read) arrives after `ready`, not lost.
+    #[tokio::test]
+    async fn the_event_stream_opens_with_ready_and_then_carries_what_is_published() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-ready");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/events")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"type": "message"}));
+        let mut text = String::new();
+        while !text.contains("event: session\n") {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                .await
+                .expect("a frame in time")
+                .expect("the stream stays open")
+                .expect("a body frame");
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+        assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
+        let rest = &text[": heddle stream open\n\n".len()..];
+        assert!(rest.starts_with("event: ready\ndata: "), "{text}");
+        let data: Value = serde_json::from_str(
+            rest.lines().nth(1).unwrap().trim_start_matches("data: "),
+        )
+        .unwrap();
+        assert_eq!(data["type"], "ready");
+        let client = data["clientId"].as_str().unwrap();
+        assert!(client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()), "{client}");
+        assert_eq!(data["host"]["home"], std::env::var("HOME").unwrap_or_default());
+        assert!(rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(), "{text}");
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.

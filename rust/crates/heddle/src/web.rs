@@ -336,6 +336,12 @@ fn page_routers(
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
+    // The reminder routes: DSH's remote `schedule` namespace; 503 when the profile has no schedule row.
+    routers.push(heddle_schedule::http::router(
+        boot.services
+            .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+            .map(|schedule| Arc::clone(&schedule.service)),
+    ));
     routers
 }
 
@@ -881,6 +887,23 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
     {
         notes.push(note);
     }
+    // Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule); a
+    // committed reminder write reaches the page's subscribers as `event: schedule`.
+    if let Some(schedule) = boot
+        .services
+        .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+    {
+        if let Some(hub) = boot.services.get::<heddle_server::EventHub>("event-hub") {
+            schedule.service.on_change(Arc::new(move || {
+                hub.publish(heddle_server::SseFrame::new(
+                    "schedule",
+                    &serde_json::json!({}),
+                ));
+                Ok(())
+            }));
+        }
+        schedule.start_delivery();
+    }
     notes
 }
 
@@ -1201,8 +1224,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            3,
-            "files, trajectory and the composer"
+            4,
+            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }

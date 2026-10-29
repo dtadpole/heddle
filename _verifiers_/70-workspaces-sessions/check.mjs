@@ -2079,13 +2079,20 @@ test('a session is renamed from its own menu, and the row and its definition fol
         if (menu === undefined) return { error: 'the session row carries no menu', label }
         menu.click(); await wait(250)
         const items = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].map((button) => button.textContent)
-        /** The prompt is stubbed, so the whole handler runs — the fetch, the redraw and the label — without a dialog. */
-        window.prompt = () => 'a session with a name'
         const item = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].find((button) => button.textContent === 'Rename')
         if (item === undefined) return { error: 'no rename item', items }
-        item.click(); await wait(1800)
+        /** DSH's Rename session dialog, filled the way a person types: the field, its input event, then Rename. */
+        item.click(); await wait(250)
+        const dialog = document.getElementById('session-rename')
+        const input = document.getElementById('session-rename-input')
+        const confirm = document.getElementById('session-rename-confirm')
+        if (dialog === null || !dialog.open) return { error: 'Rename opened no dialog', items }
+        const draft = { value: input.value, confirm: confirm.disabled ? 'disabled' : 'enabled' }
+        input.value = 'a session with a name'
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        confirm.click(); await wait(1800)
         const after = rows().find((entry) => entry.parentElement.dataset.kind === 'session')
-        return { label, items, renamed: after.querySelector('.label').textContent, folder: after.title }
+        return { label, items, draft, closed: !dialog.open, renamed: after.querySelector('.label').textContent, folder: after.title }
       })().then((value) => JSON.stringify(value))`, 30_000),
     )
 
@@ -2100,6 +2107,9 @@ test('a session is renamed from its own menu, and the row and its definition fol
       `the menu reads what DSH's reads\nsaw: ${reading.items.join(', ')}`,
     )
     assert.match(reading.label, /^session-\d{8}-\d{4}$/, 'the row starts with the folder name, because nothing has named it yet')
+    /** DSH: an unnamed session's dialog starts with an empty draft, and Rename waits for a name. */
+    assert.deepEqual(reading.draft, { value: '', confirm: 'disabled' }, `an unnamed session's dialog starts empty and asks for a name\nsaw: ${JSON.stringify(reading.draft)}`)
+    assert.equal(reading.closed, true, 'Rename closes the dialog once the server accepted the name')
     assert.equal(reading.renamed, 'a session with a name', 'after the rename the row shows the name it was given')
     assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', reading.label), 'while the folder stays reachable as the tooltip, because it is the identity')
 
@@ -2108,6 +2118,143 @@ test('a session is renamed from its own menu, and the row and its definition fol
     assert.equal(listed.find((meta) => meta.id === made.session)?.title, 'a session with a name', 'the store holds the title')
     const definition = JSON.parse(readFileSync(join(String(made.definition).replace('/session.json', ''), 'session.json'), 'utf8'))
     assert.equal(definition.title, 'a session with a name', 'and so does the definition, so the tracked record does not disagree')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a double-click on a session's title opens DSH's Rename session dialog, prefilled, where an unchanged title pins and a blank one is refused", async (context) => {
+  /**
+   * DSH (`dsh-client-ui-workspace`, `RenameSession.js` and the session row's `onDoubleClick`): a double-click on a row's
+   * title raises the same rename request as the menu and the chord. The dialog is `Rename session`, its field `Session
+   * name` starts with the stored title and is selected, `Rename` waits only for a non-blank draft — an unchanged title is
+   * NOT refused, and confirming it records the automatic title as the person's own — Enter confirms, Cancel writes nothing.
+   * The press is trusted pointer input, two clicks with `clickCount` 1 then 2, because that is the gesture a person makes.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const h = harness('session-rename-dialog')
+  let live
+  let browser
+  try {
+    await conventionsFixture(h)
+    const created = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
+    assert.equal(created.code, 0, `the session was created\n${created.stdout}${created.stderr}`)
+    const made = parseJson(created.stdout)
+    /** The first prompt names the session automatically; the definition carries no title until a person gives one. */
+    const turn = await runCli(adminArgs(h, ['--turn', 'name me from my first prompt']), { env: h.env, cwd: join(h.work, '_tools_', 'some-tool') })
+    assert.equal(turn.code, 0, turn.stderr)
+    const auto = (await sessionsOf(h)).find((meta) => meta.id === made.session)?.title
+    assert.equal(auto, 'name me from my first prompt', 'the first prompt is the automatic title')
+    const definitionFile = join(String(made.definition).replace('/session.json', ''), 'session.json')
+    assert.equal(JSON.parse(readFileSync(definitionFile, 'utf8')).title, undefined, 'and the definition has no title yet')
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+
+    const opened = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const rowFor = (label) => rows().find((entry) => entry.querySelector('.label')?.textContent === label)
+        const ensureOpen = async (label) => {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const row = rowFor(label)
+            if (row === undefined) { await wait(150); continue }
+            const li = row.closest('li')
+            if (li.dataset.open !== 'true') row.click()
+            await wait(200)
+            if (li.dataset.open === 'true') return true
+          }
+          return false
+        }
+        await ensureOpen(rows()[0]?.querySelector('.label')?.textContent ?? '')
+        await ensureOpen('_tools_')
+        await ensureOpen('some-tool')
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          if (document.querySelector('#tree li[data-kind="session"] > .row > .label') !== null) break
+          await wait(150)
+        }
+        return JSON.stringify({ sessions: [...document.querySelectorAll('#tree li[data-kind="session"] > .row > .label')].map((label) => label.textContent) })
+      })()`, 30_000),
+    )
+    assert.ok(opened.sessions.includes(auto), `the session row reads its automatic title\nsaw: ${JSON.stringify(opened)}`)
+
+    /** Two trusted presses on the title, the second with `clickCount: 2`, which is what makes the browser fire `dblclick`. */
+    const doubleClickTitle = async () => {
+      const at = JSON.parse(
+        await browser.evaluate(`(() => {
+          const label = [...document.querySelectorAll('#tree li[data-kind="session"] > .row > .label')].find((entry) => entry.closest('li').dataset.rowKey === ${JSON.stringify('session:' + made.session)})
+          if (label === undefined) return JSON.stringify({ error: 'no title' })
+          const rect = label.getBoundingClientRect()
+          return JSON.stringify({ x: Math.round(rect.left + Math.min(24, rect.width / 2)), y: Math.round(rect.top + rect.height / 2) })
+        })()`),
+      )
+      assert.equal(at.error, undefined, `the session row has a title to press\nsaw: ${JSON.stringify(at)}`)
+      await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y })
+      for (const clickCount of [1, 2]) {
+        await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', buttons: 1, clickCount })
+        await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', buttons: 0, clickCount })
+      }
+      await browser.waitFor(`document.getElementById('session-rename')?.open === true`, 5_000)
+    }
+    const dialogState = `JSON.stringify((() => {
+      const dialog = document.getElementById('session-rename')
+      const input = document.getElementById('session-rename-input')
+      return {
+        open: dialog.open,
+        heading: document.getElementById(dialog.getAttribute('aria-labelledby'))?.textContent,
+        field: input.getAttribute('aria-label'),
+        value: input.value,
+        focused: document.activeElement === input,
+        selected: input.selectionStart === 0 && input.selectionEnd === input.value.length,
+        confirm: document.getElementById('session-rename-confirm').disabled ? 'disabled' : 'enabled',
+      }
+    })())`
+    const type = (value) => browser.evaluate(`(() => { const input = document.getElementById('session-rename-input'); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+
+    await doubleClickTitle()
+    const first = JSON.parse(await browser.evaluate(dialogState))
+    assert.deepEqual(
+      first,
+      { open: true, heading: 'Rename session', field: 'Session name', value: auto, focused: true, selected: true, confirm: 'enabled' },
+      "the double-click opens DSH's dialog, the field holding the stored title, selected, and Rename ready for it unchanged",
+    )
+    await type('   ')
+    assert.equal(JSON.parse(await browser.evaluate(dialogState)).confirm, 'disabled', 'a blank name cannot be confirmed')
+    await type(auto)
+    assert.equal(JSON.parse(await browser.evaluate(dialogState)).confirm, 'enabled', 'the unchanged name can')
+    await browser.evaluate(`document.getElementById('session-rename-confirm').click()`)
+    await browser.waitFor(`document.getElementById('session-rename').open === false`, 10_000)
+    assert.equal((await sessionsOf(h)).find((meta) => meta.id === made.session)?.title, auto, 'confirming it unchanged keeps the title')
+    assert.equal(JSON.parse(readFileSync(definitionFile, 'utf8')).title, auto, 'and records it in the definition as a name a person chose')
+
+    /** Cancel writes nothing. */
+    await doubleClickTitle()
+    await type('a name nobody confirmed')
+    await browser.evaluate(`[...document.querySelectorAll('#session-rename [data-ws-close]')].find((button) => button.textContent === 'Cancel').click()`)
+    await browser.waitFor(`document.getElementById('session-rename').open === false`, 5_000)
+    assert.equal((await sessionsOf(h)).find((meta) => meta.id === made.session)?.title, auto, 'Cancel leaves the title alone')
+
+    /** Enter confirms a new name, and the row follows. */
+    await doubleClickTitle()
+    await type('  renamed by a double-click  ')
+    await browser.evaluate(`document.getElementById('session-rename-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`)
+    await browser.waitFor(
+      `document.getElementById('session-rename').open === false && [...document.querySelectorAll('#tree li[data-kind="session"] > .row > .label')].some((label) => label.textContent === 'renamed by a double-click')`,
+      10_000,
+    )
+    assert.equal((await sessionsOf(h)).find((meta) => meta.id === made.session)?.title, 'renamed by a double-click', 'Enter renames, trimmed as DSH sends it')
+    assert.equal(JSON.parse(readFileSync(definitionFile, 'utf8')).title, 'renamed by a double-click', 'and the definition follows')
   } finally {
     browser?.close()
     live?.kill()
@@ -2968,8 +3115,15 @@ test('the four session shortcuts act on the selected session, and say so when th
         const sessionRow = [...document.querySelectorAll('#tree li[data-kind="session"]')][0]
         sessionRow.querySelector(':scope > .row').click()
         await wait(1200)
-        window.prompt = () => 'a name from a chord'
+        /** The chord opens DSH's Rename session dialog; it is answered the way a person answers it. */
         press('g', { altKey: true, metaKey: true })
+        await until(() => document.getElementById('session-rename')?.open === true, 3000)
+        const renameInput = document.getElementById('session-rename-input')
+        if (renameInput !== null) {
+          renameInput.value = 'a name from a chord'
+          renameInput.dispatchEvent(new Event('input', { bubbles: true }))
+          document.getElementById('session-rename-confirm').click()
+        }
         await until(() => sessions().includes('a name from a chord'), 8000)
         const renamed = sessions()
 

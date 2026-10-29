@@ -213,8 +213,12 @@ impl ModelService {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        if let Some((endpoints, nominated)) = source.and_then(|source| source()) {
-            let _ = self.reconfigure(endpoints, nominated.as_deref());
+        if let Some((endpoints, nominated)) = source.and_then(|source| source())
+            && let Err(error) = self.reconfigure(endpoints, nominated.as_deref())
+        {
+            tracing::warn!(
+                "model: the changed configuration cannot be used ({error}); the previous endpoints stay"
+            );
         }
     }
 

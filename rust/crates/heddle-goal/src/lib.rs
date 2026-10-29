@@ -4,7 +4,9 @@
 //! Ported from the TypeScript build: `src/goal/service.ts`, `src/goal/tool.ts`, `src/goal/driver.ts`,
 //! `src/plugins/goal-tool.ts`, `src/plugins/goal-driver.ts`, the `/api/goal` branches of `src/server/web.ts`
 //! and the `heddle goal` command of `src/cli.ts`. Judged through the `heddle` binary (`HEDDLE_BIN`) by
-//! `_verifiers_/80-web-ui` (`check-goal`); the unit tests port `test/goal.test.ts` and `test/goal-driver.test.ts`.
+//! `_verifiers_/80-web-ui` (`check-goal`) and `_verifiers_/50-agentic-loop` (`check-goal-tool`,
+//! `check-goal-rounds`); the unit tests port `test/goal.test.ts`, `test/goal-tool.test.ts` and
+//! `test/goal-driver.test.ts`.
 //!
 //! # The one idea
 //!
@@ -25,7 +27,8 @@
 //! - [`DriverTrigger`] turns the session's own events (`session/event` on the bus) into driver requests; the
 //!   boot forwards each event's session id and type to it.
 //! - [`tool`] and [`http`] are the model's and the person's verbs, as functions the tool registry and the
-//!   server mount; [`cli`] renders `heddle goal`.
+//!   server mount; [`cli`] renders `heddle goal`. The tools judge who is asking from the session's log and
+//!   its metadata record ([`SessionLog::meta`]): DSH's direct human turn, or the goal's current round.
 
 #![warn(missing_docs)]
 

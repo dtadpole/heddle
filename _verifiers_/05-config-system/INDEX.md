@@ -29,6 +29,15 @@ files so the check states exactly what a tree is. It covers composition and orde
 winning, includes, include cycles, both environment reference shapes, a missing reference, a bad value,
 a patch against a missing row, provenance, and an unknown profile.
 
+`check-cli-catalog.mjs` judges the **shipped** profile (the repository's own `cordis.yml` and `heddle.patch.yml`,
+booted from the repository root) through its command line: that `goal <session> --json`, `tools --json` and
+`--turn … --json` print their JSON document alone on stdout, parsed whole rather than by `parseJson`'s upward scan;
+that `tools --json` lists `create_goal`, `get_goal`, `update_goal` and `todo_write`, the verbs a web turn offers; and
+that a scripted `--turn` calling `get_goal` gets the tool's answer rather than `UNKNOWN_TOOL`. It belongs here
+because it judges what the shipped tree composes to and what the command line that boots it prints: the tools row's
+allow list, which the command line applies and `heddle web` does not, had not been given the goal and todo tools,
+and the plugins' boot lines reached `--json` stdout ahead of the document.
+
 ## Running it
 
 ```bash
