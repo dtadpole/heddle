@@ -401,6 +401,207 @@ pub fn commit_settings_write(planned: &PlannedWrite) -> Result<(), SettingsError
     })
 }
 
+/// One run's settings surface: the layers it booted, its target, and the revisions it has handed out.
+/// Writes are serialised, as DSH serialises them with other profile changes.
+pub struct SettingsService {
+    layers: Vec<NamedLayer>,
+    target: Option<SettingsTarget>,
+    env: Env,
+    catalog: Box<dyn ComponentCatalog + Send + Sync>,
+    revisions: SettingsRevisions,
+    writing: Mutex<()>,
+}
+
+impl SettingsService {
+    /// The surface for a run booted with `options` and the in-memory `overrides` the flags appended.
+    pub fn new(
+        options: &LayerOptions,
+        overrides: &[NamedLayer],
+        env: Env,
+        catalog: Box<dyn ComponentCatalog + Send + Sync>,
+    ) -> Result<Self, ConfigError> {
+        let mut layers = crate::profile::default_layers(options, &env)?;
+        layers.extend(overrides.iter().cloned());
+        let target = settings_target(options, &layers, &env);
+        Ok(Self {
+            layers,
+            target,
+            env,
+            catalog,
+            revisions: SettingsRevisions::default(),
+            writing: Mutex::new(()),
+        })
+    }
+
+    /// Every entry's form, the target re-read.
+    pub fn describe(&self) -> Result<SettingsView, ConfigError> {
+        describe_settings(
+            &self.layers,
+            self.target.as_ref(),
+            &self.env,
+            self.catalog.as_ref(),
+            &self.revisions,
+        )
+    }
+
+    /// Check, write and re-read entry `ns`; the answer is its new form.
+    pub fn write(
+        &self,
+        ns: &str,
+        write: &SettingsWrite,
+        expected_revision: Option<u64>,
+    ) -> Result<SettingsNamespace, SettingsError> {
+        let _serial = self
+            .writing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let planned = plan_settings_write(
+            &self.layers,
+            self.target.as_ref(),
+            &self.env,
+            self.catalog.as_ref(),
+            &self.revisions,
+            ns,
+            write,
+            expected_revision,
+        )?;
+        commit_settings_write(&planned)?;
+        let view = self.describe().map_err(rejected)?;
+        view.namespaces
+            .into_iter()
+            .find(|entry| entry.ns == ns)
+            .ok_or_else(|| {
+                SettingsError::Rejected(format!("entry '{ns}' vanished after the write"))
+            })
+    }
+}
+
+/// An answer to a settings route: the HTTP status and the JSON body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsResponse {
+    /// 200, 400, 404, 405, 409 or 422.
+    pub status: u16,
+    /// The view, the entry, or `{ code, error, … }`.
+    pub body: Value,
+}
+
+/// Answer `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`; `None` for any
+/// other path. A POST body is `{ "update" | "replace": { … } }` or `{ "ops": [ … ] }`, with an optional
+/// `expectedRevision` — DSH's `settings.update`, `.replace` and `.mutate`.
+pub fn handle_settings_request(
+    service: &SettingsService,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Option<SettingsResponse> {
+    let path = path.split('?').next().unwrap_or(path);
+    let rest = path.strip_prefix("/api/settings")?;
+    let ns = match rest {
+        "" | "/" => None,
+        other => Some(decode_segment(other.strip_prefix('/')?)?),
+    };
+    let fail = |status: u16, code: &str, error: String| SettingsResponse {
+        status,
+        body: serde_json::json!({ "code": code, "error": error }),
+    };
+    let ok = |value: Value| SettingsResponse {
+        status: 200,
+        body: value,
+    };
+    Some(match (method, ns) {
+        ("GET", None) => match service.describe() {
+            Ok(view) => ok(serde_json::to_value(view).unwrap_or(Value::Null)),
+            Err(error) => fail(422, "settings-rejected", error.problems().join("; ")),
+        },
+        ("GET", Some(ns)) => match service.describe() {
+            Ok(view) => match view.namespaces.into_iter().find(|entry| entry.ns == ns) {
+                Some(entry) => ok(serde_json::to_value(entry).unwrap_or(Value::Null)),
+                None => fail(404, "settings-rejected", format!("no entry '{ns}'")),
+            },
+            Err(error) => fail(422, "settings-rejected", error.problems().join("; ")),
+        },
+        ("POST", Some(ns)) => {
+            let Ok(request @ Value::Object(_)) = serde_json::from_slice::<Value>(body) else {
+                return Some(fail(
+                    400,
+                    "bad-request",
+                    "the body must be a JSON object".into(),
+                ));
+            };
+            let expected = match request.get("expectedRevision") {
+                None | Some(Value::Null) => None,
+                Some(value) => match value.as_u64() {
+                    Some(revision) => Some(revision),
+                    None => {
+                        return Some(fail(
+                            400,
+                            "bad-request",
+                            "expectedRevision must be a whole number".into(),
+                        ));
+                    }
+                },
+            };
+            let fields = |key: &str| request.get(key).and_then(Value::as_object).cloned();
+            let write = match (fields("update"), fields("replace"), request.get("ops")) {
+                (Some(patch), None, None) => SettingsWrite::Update(patch),
+                (None, Some(section), None) => SettingsWrite::Replace(section),
+                (None, None, Some(ops)) => {
+                    match serde_json::from_value::<Vec<SettingsPathOp>>(ops.clone()) {
+                        Ok(ops) => SettingsWrite::Mutate(ops),
+                        Err(error) => {
+                            return Some(fail(400, "bad-request", format!("ops: {error}")));
+                        }
+                    }
+                }
+                _ => {
+                    return Some(fail(
+                        400,
+                        "bad-request",
+                        "send exactly one of update or replace (an object) or ops (a list)".into(),
+                    ));
+                }
+            };
+            match service.write(&ns, &write, expected) {
+                Ok(entry) => ok(serde_json::to_value(entry).unwrap_or(Value::Null)),
+                Err(error @ SettingsError::Conflict { expected, actual }) => SettingsResponse {
+                    status: 409,
+                    body: serde_json::json!({
+                        "code": error.code(),
+                        "error": error.message(),
+                        "expected": expected,
+                        "actual": actual,
+                    }),
+                },
+                Err(error) => fail(422, error.code(), error.message()),
+            }
+        }
+        _ => fail(
+            405,
+            "bad-request",
+            format!("{method} is not a settings method here"),
+        ),
+    })
+}
+
+/// A path segment with `%XX` escapes decoded; `None` when an escape is malformed or the result is not
+/// UTF-8.
+fn decode_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 fn rejected(error: ConfigError) -> SettingsError {
     SettingsError::Rejected(error.problems().join("; "))
 }
@@ -1609,5 +1810,87 @@ mod tests {
         );
         let parsed = parse_block(&text, Path::new("/tmp/x.yml"), &Env::default()).unwrap();
         assert_eq!(parsed, vec![("r".to_string(), value)]);
+    }
+
+    #[test]
+    fn the_routes_answer_as_dsh_settings_calls_do() {
+        let fixture = Fixture::new("routes");
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap();
+        let call = |method: &str, path: &str, body: Value| {
+            handle_settings_request(&service, method, path, body.to_string().as_bytes()).unwrap()
+        };
+
+        let view = call("GET", "/api/settings", Value::Null);
+        assert_eq!(view.status, 200);
+        assert_eq!(view.body["writable"], true);
+        let revision = view.body["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["ns"] == "tools")
+            .unwrap()["revision"]
+            .as_u64()
+            .unwrap();
+
+        let written = call(
+            "POST",
+            "/api/settings/tools",
+            json!({ "update": { "label": "routed" }, "expectedRevision": revision }),
+        );
+        assert_eq!(written.status, 200, "{}", written.body);
+        assert_eq!(written.body["value"]["label"], "routed");
+        assert_eq!(written.body["revision"], revision + 1);
+
+        let stale = call(
+            "POST",
+            "/api/settings/tools",
+            json!({ "update": { "label": "late" }, "expectedRevision": revision }),
+        );
+        assert_eq!(stale.status, 409);
+        assert_eq!(stale.body["code"], "settings-conflict");
+        assert_eq!(stale.body["expected"], revision);
+        assert_eq!(stale.body["actual"], revision + 1);
+
+        let invalid = call(
+            "POST",
+            "/api/settings/tools",
+            json!({ "update": { "bashTimeoutMs": [] } }),
+        );
+        assert_eq!(invalid.status, 422);
+        assert_eq!(invalid.body["code"], "settings-rejected");
+
+        let ops = call(
+            "POST",
+            "/api/settings/tools",
+            json!({ "ops": [{ "op": "unset", "path": ["label"] }] }),
+        );
+        assert_eq!(ops.status, 200, "{}", ops.body);
+        assert_eq!(ops.body["value"]["label"], "plain");
+
+        let both = call(
+            "POST",
+            "/api/settings/tools",
+            json!({ "update": {}, "replace": {} }),
+        );
+        assert_eq!(both.status, 400);
+        assert_eq!(both.body["code"], "bad-request");
+        let one = call("GET", "/api/settings/keys", Value::Null);
+        assert_eq!(one.status, 200);
+        assert_eq!(one.body["ns"], "keys");
+        assert_eq!(
+            call("GET", "/api/settings/nowhere", Value::Null).status,
+            404
+        );
+        assert_eq!(
+            call("DELETE", "/api/settings/tools", Value::Null).status,
+            405
+        );
+        assert!(handle_settings_request(&service, "GET", "/api/status", b"").is_none());
     }
 }

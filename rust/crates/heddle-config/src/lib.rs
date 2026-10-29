@@ -86,8 +86,9 @@ pub use references::{parse_scalar, references_in, resolve_env};
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
 pub use settings::{
     PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsError, SettingsNamespace,
-    SettingsPathOp, SettingsRevisions, SettingsTarget, SettingsView, SettingsWrite,
-    commit_settings_write, describe_settings, is_secret_key, plan_settings_write, settings_target,
+    SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService, SettingsTarget,
+    SettingsView, SettingsWrite, commit_settings_write, describe_settings, handle_settings_request,
+    is_secret_key, plan_settings_write, settings_target,
 };
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
