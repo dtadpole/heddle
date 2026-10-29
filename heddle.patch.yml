@@ -130,6 +130,21 @@
       name: ./src/plugins/jobs.ts
       inject: [session, model, tools, sandbox, context]
 
+    # Questions the model asks a person (DSH's userQuestions seam): requests and answers live in the session log,
+    # so a question survives a restart and a reload. `legacy` waits for the answer, as DSH's shipped presets do;
+    # `timed` releases the model at `timeout` seconds while the question stays answerable.
+    - id: questions
+      name: ./src/questions/service.ts
+      inject: [session]
+      config:
+        mode: legacy
+        timeout: 120
+
+    # The model-facing ask_user_question tool, its own row as goal-tool and todo-tool are.
+    - id: questions-tool
+      name: ./src/plugins/questions-tool.ts
+      inject: [questions, tools]
+
     # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
     # the loop checks for it — so a minimal profile can run turns without interruption.
     - id: turns
