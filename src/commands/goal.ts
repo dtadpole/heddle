@@ -1,7 +1,7 @@
 import { GoalError, type GoalRef, type GoalView } from '../goal/service.ts'
 import type { ContentPart } from '../llm/types.ts'
 import type { SessionHandle } from '../session/store.ts'
-import type { CommandContext, CommandDefinition, CommandResult } from './registry.ts'
+import type { CommandAction, CommandContext, CommandDefinition, CommandResult } from './registry.ts'
 
 /**
  * `/goal` — set, show, edit, pause, resume or clear the session's goal, as DSH's `dsh-command-goal` does.
@@ -176,19 +176,16 @@ function executeGoalCommand(goals: GoalHost, followup: GoalFollowupSink | undefi
           }
         }
         const created = goals.create(session, { objective: command.objective })
-        submitObjectiveAttachments(followup, session, attachments)
-        return { kind: 'success', text: renderGoal('Goal created', created) }
+        return withFollowup({ kind: 'success', text: renderGoal('Goal created', created) }, submitObjectiveAttachments(followup, session, attachments))
       }
       case 'edit': {
         if (current === undefined) return missingGoal('edit')
         if (current.phase === 'complete') {
           const replaced = goals.create(session, { objective: command.objective })
-          submitObjectiveAttachments(followup, session, attachments)
-          return { kind: 'success', text: renderGoal('Goal created', replaced) }
+          return withFollowup({ kind: 'success', text: renderGoal('Goal created', replaced) }, submitObjectiveAttachments(followup, session, attachments))
         }
         const edited = goals.edit(session, goalRef(current), { objective: command.objective })
-        submitObjectiveAttachments(followup, session, attachments)
-        return { kind: 'success', text: renderGoal('Goal updated', edited) }
+        return withFollowup({ kind: 'success', text: renderGoal('Goal updated', edited) }, submitObjectiveAttachments(followup, session, attachments))
       }
       case 'pause':
         if (current === undefined) return missingGoal('pause')
@@ -215,15 +212,26 @@ function executeGoalCommand(goals: GoalHost, followup: GoalFollowupSink | undefi
  * DSH queues the message on the agent, so the next turn reads the attachments from ordinary history and the goal
  * itself stores no attachment state.
  */
-function submitObjectiveAttachments(followup: GoalFollowupSink | undefined, session: SessionHandle, attachments: readonly ContentPart[]): void {
+function submitObjectiveAttachments(
+  followup: GoalFollowupSink | undefined,
+  session: SessionHandle,
+  attachments: readonly ContentPart[],
+): CommandAction | undefined {
   const message = goalAttachmentFollowup(attachments)
-  if (message === undefined) return
-  // TODO(developer-three, D-057): the command layer has no way yet to start the follow-up turn DSH's
-  // `agent.followup` starts. The attachments now reach this handler (`context.attachments`, d98176c9), but nothing a
-  // command can reach queues a turn — `CommandAction` is only a download and the service holds no turn starter. Until
-  // the command service passes a `followup` sink to `goalCommand`, a create's or an edit's attachments are accepted
-  // and the goal changes, but the message is not delivered.
-  followup?.(session, message)
+  if (message === undefined) return undefined
+  if (followup !== undefined) {
+    followup(session, message)
+    return undefined
+  }
+  // With no sink — the command service passes none — the page delivers it (developer-three): a `prompt` action, which
+  // the slash menu sends as the next ordinary message together with the files it took for the line, so the model
+  // reads the attachments, then this text, as DSH's `agent.followup` puts them.
+  return { kind: 'prompt', text: GOAL_ATTACHMENTS_TEXT }
+}
+
+/** A success with the follow-up's action, when there is one. */
+function withFollowup(result: CommandResult, action: CommandAction | undefined): CommandResult {
+  return action === undefined || result.kind !== 'success' ? result : { ...result, action }
 }
 
 /** The refusal of an action that needs a current goal (:86-91). A space, not a newline, precedes the usage. */

@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import {
+  GOAL_ATTACHMENTS_TEXT,
   goalCommand,
   parseGoalCommand,
   type GoalFollowup,
@@ -549,8 +550,12 @@ test('no follow-up without attachments, or when the create or edit itself is ref
 
 test('without a follow-up sink a create with attachments still sets the goal (the layer delivers nothing yet)', () => {
   const { run, goals, handle } = harness({ sink: false })
-  assert.match(textOf(run('/goal ship it', [file])), /^Goal created\n/)
+  const created = run('/goal ship it', [file])
+  assert.match(textOf(created), /^Goal created\n/)
   assert.equal(goals.get(handle)?.objective, 'ship it')
+  // With no sink the page delivers the follow-up: the result asks it to send DSH's text with the files it took.
+  assert.deepEqual((created as { action?: unknown }).action, { kind: 'prompt', text: GOAL_ATTACHMENTS_TEXT })
+  assert.equal((run('/goal') as { action?: unknown }).action, undefined, 'only a create or an edit with files carries it on')
 })
 
 // ---- attachments through the layer's own context ----

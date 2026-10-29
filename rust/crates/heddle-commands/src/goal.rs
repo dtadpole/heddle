@@ -33,7 +33,8 @@ use heddle_session::SessionHandle;
 use serde_json::json;
 
 use crate::registry::{
-    CommandContext, CommandDefinition, CommandInput, CommandResult, CommandSection, HandlerOutcome,
+    CommandAction, CommandContext, CommandDefinition, CommandInput, CommandResult, CommandSection,
+    HandlerOutcome,
 };
 use crate::text;
 
@@ -361,8 +362,10 @@ fn run(
                 )));
             }
             let created = goals.create(session, &objective)?;
-            submit_objective_attachments(followup, session, attachments);
-            CommandResult::success_text(card("Goal created", &created)?)
+            with_followup(
+                CommandResult::success_text(card("Goal created", &created)?),
+                submit_objective_attachments(followup, session, attachments),
+            )
         }
         GoalCommand::Edit { objective } => {
             let Some(current) = &current else {
@@ -370,15 +373,16 @@ fn run(
             };
             if current.goal.phase == GoalPhase::Complete {
                 let replaced = goals.create(session, &objective)?;
-                submit_objective_attachments(followup, session, attachments);
-                return Ok(CommandResult::success_text(card(
-                    "Goal created",
-                    &replaced,
-                )?));
+                return Ok(with_followup(
+                    CommandResult::success_text(card("Goal created", &replaced)?),
+                    submit_objective_attachments(followup, session, attachments),
+                ));
             }
             let edited = goals.edit(session, &current.goal.goal_ref(), &objective)?;
-            submit_objective_attachments(followup, session, attachments);
-            CommandResult::success_text(card("Goal updated", &edited)?)
+            with_followup(
+                CommandResult::success_text(card("Goal updated", &edited)?),
+                submit_objective_attachments(followup, session, attachments),
+            )
         }
         GoalCommand::Pause => {
             let Some(current) = &current else {
@@ -417,17 +421,25 @@ fn submit_objective_attachments(
     followup: Option<&GoalFollowupSink>,
     session: &SessionHandle,
     attachments: &[ContentPart],
-) {
-    let Some(message) = goal_attachment_followup(attachments) else {
-        return;
-    };
-    // TODO(developer-three, D-057): the command layer has no way yet to start the follow-up turn DSH's
-    // `agent.followup` starts. The attachments now reach this handler (`CommandContext::attachments`, 89df38c3),
-    // but nothing a command can reach queues a turn — `CommandAction` is only a download and `CommandServices`
-    // holds no turn starter. Until `Commands::new` passes a follow-up sink to `goal_command`, a create's or an
-    // edit's attachments are accepted and the goal changes, but the message is not delivered.
+) -> Option<CommandAction> {
+    let message = goal_attachment_followup(attachments)?;
     if let Some(sink) = followup {
         sink(session, message);
+        return None;
+    }
+    // With no sink — the commands host passes none — the page delivers it (developer-three): a `prompt` action, which
+    // the slash menu sends as the next ordinary message together with the files it took for the line, so the model
+    // reads the attachments, then this text, as DSH's `agent.followup` puts them.
+    Some(CommandAction::Prompt {
+        text: GOAL_ATTACHMENTS_TEXT.to_owned(),
+    })
+}
+
+/// A success with the follow-up's action, when there is one.
+fn with_followup(result: CommandResult, action: Option<CommandAction>) -> CommandResult {
+    match action {
+        Some(action) if result.kind() == "success" => result.with_action(action),
+        _ => result,
     }
 }
 
@@ -1584,6 +1596,19 @@ mod tests {
         );
         assert_eq!(harness.current().unwrap().goal.objective, "ship it");
         assert!(harness.followups().is_empty());
+        // With no sink the page delivers the follow-up: the result asks it to send DSH's text with the files.
+        let edited = harness.run_with("/goal edit ship it twice", &[file()]);
+        assert_eq!(
+            edited.action(),
+            Some(&CommandAction::Prompt {
+                text: GOAL_ATTACHMENTS_TEXT.to_owned()
+            })
+        );
+        assert_eq!(
+            harness.run("/goal").action(),
+            None,
+            "only a create or an edit with files carries it on"
+        );
     }
 
     #[test]
