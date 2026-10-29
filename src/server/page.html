@@ -5638,6 +5638,24 @@ const events = (() => {
  * so everything the stream would have told it is read again: the list and its running marks, the tree, the open
  * session's transcript and any waiting question (DSH's owners re-read their baselines on `connection/reset`).
  */
+/**
+ * Changes that never reach a session's log, pushed by the server (phase B item 4): an added, renamed or removed
+ * workspace, and a renamed session. The tree is read again on the same debounce the log events use, and a rename of
+ * the open session retitles its header, so a second page follows the first without reading the list on its own.
+ */
+events.addEventListener('workspace', () => scheduleTreeRefresh())
+events.addEventListener('sessions', (message) => {
+  scheduleTreeRefresh()
+  try {
+    const data = JSON.parse(message.data)
+    if (data.type === 'session/renamed' && data.session === current && typeof data.title === 'string' && data.title.length > 0) {
+      const titleCell = document.getElementById('session-title')
+      if (titleCell !== null) titleCell.textContent = data.title
+    }
+  } catch {
+    // a frame that is not JSON changes nothing but the tree
+  }
+})
 events.addEventListener('reset', () => {
   void (async () => {
     await refreshSessions()

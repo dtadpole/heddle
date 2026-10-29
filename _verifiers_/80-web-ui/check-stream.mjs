@@ -256,8 +256,14 @@ test("the stream opens with DSH's ready frame, and a baseline read on it misses 
     const turn = await runTurn(server, cookie, { session, prompt: 'go' })
     assert.equal(turn.status, 200, turn.text)
     await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'turn/completed', 10_000)
-    const appended = (await logEntries(server, cookie, session)) - baseline
     const carried = stream.frames.filter((frame) => frame.event === 'session' && frame.data?.session === session && frame.at >= startedAt).length
+    // The claim is completeness, not write-before-push order: the log is read until it stops growing (up to 2 s),
+    // because the Rust server may push a frame a moment before its line is on disk.
+    let appended = (await logEntries(server, cookie, session)) - baseline
+    for (let tries = 0; tries < 40 && appended < carried; tries += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+      appended = (await logEntries(server, cookie, session)) - baseline
+    }
     assert.ok(appended > 3, `the turn wrote to the log (${appended} entries)`)
     assert.equal(carried, appended, `every entry the turn wrote reached the stream (${carried} of ${appended})`)
     stream.close()
@@ -436,6 +442,111 @@ test('the page shows it is reconnecting while the server is down, and a session 
     )
   } finally {
     browser.close()
+    await server.close()
+  }
+})
+
+/** A turn whose first call is denied under workspace-write and whose retry asks to widen: an approval question. */
+const escalationSteps = (outsidePath) => [
+  { toolCall: { name: 'bash', arguments: { command: `echo outside > ${JSON.stringify(outsidePath)}` } } },
+  {
+    toolCall: {
+      name: 'bash',
+      arguments: {
+        command: `echo outside > ${JSON.stringify(outsidePath)}`,
+        sandbox_permissions: 'danger-full-access',
+        justification: 'the write target is outside the workspace and the task requires it',
+      },
+    },
+  },
+  { text: 'done' },
+]
+
+test('renames, workspace edits and settled approvals are pushed to every stream, numbered like every frame', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const outsideDir = fixtureDir('stream-push-outside')
+  const extra = fixtureDir('stream-push-extra')
+  const server = await startServer('push', escalationSteps(join(outsideDir, 'outside.txt')))
+  try {
+    const cookie = await cookieFor(server)
+    const pages = [await openStream(server, cookie), await openStream(server, cookie)]
+    for (const page of pages) await page.next((frame) => frame.event === 'ready')
+    /** Every page hears the change, as a frame with an id (so a page that was away is given it on reconnect). */
+    const heard = async (event, match, label) => {
+      const frames = await Promise.all(pages.map((page) => page.next((frame) => frame.event === event && match(frame.data), 10_000)))
+      for (const frame of frames) assert.match(frame.id ?? '', /^[0-9a-f]+-\d+$/, `${label}: numbered`)
+      return frames[0]
+    }
+
+    /** DSH pushes workspace increments: an added, renamed and removed root reach every page. */
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const added = await api(server, cookie, 'POST', '/api/workspaces', { path: extra })
+    assert.equal(added.status, 200, added.text)
+    const addedFrame = await heard('workspace', (data) => data?.type === 'workspace/added' && String(data.workspace?.path ?? '').includes('stream-push-extra'), 'an added workspace')
+    const workspaceId = addedFrame.data.workspace.id
+    const renamed = await api(server, cookie, 'PATCH', `/api/workspaces/${encodeURIComponent(workspaceId)}`, { title: 'pushed-root' })
+    assert.equal(renamed.status, 200, renamed.text)
+    await heard('workspace', (data) => data?.type === 'workspace/renamed' && data.workspace?.id === workspaceId, 'a renamed workspace')
+
+    /** DSH pushes api-session changes: a renamed session reaches every page with its new title. */
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'before' })
+    const session = created.json.session
+    const titled = await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title: 'pushed title' })
+    assert.equal(titled.status, 200, titled.text)
+    await heard('sessions', (data) => data?.type === 'session/renamed' && data.session === session && data.title === 'pushed title', 'a renamed session')
+
+    const removed = await api(server, cookie, 'DELETE', `/api/workspaces/${encodeURIComponent(workspaceId)}`)
+    assert.equal(removed.status, 200, removed.text)
+    await heard('workspace', (data) => data?.type === 'workspace/removed' && data.id === workspaceId, 'a removed workspace')
+
+    /** An approval answered anywhere is announced as settled to every page, with its outcome. */
+    const turn = runTurn(server, cookie, { session, prompt: 'write outside' })
+    const asked = await pages[0].next((frame) => frame.event === 'approval', 20_000)
+    const answered = await api(server, cookie, 'POST', `/api/approvals/${encodeURIComponent(asked.data.id)}`, { outcome: 'rejected' })
+    assert.equal(answered.status, 200, answered.text)
+    await heard('approval-settled', (data) => data?.type === 'approval/settled' && data.id === asked.data.id && data.outcome === 'rejected', 'a settled approval')
+    assert.equal((await turn).status, 200, 'the turn ended once its question was answered')
+    for (const page of pages) page.close()
+  } finally {
+    removeDir(outsideDir)
+    removeDir(extra)
+    await server.close()
+  }
+})
+
+test('a page redraws a rename and a new workspace made elsewhere, without a reload', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const extra = fixtureDir('stream-page-push-extra')
+  const server = await startServer('page-push')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'old title' })
+    const session = created.json.session
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor(`document.querySelector('#tree li[data-session-id="${session}"]') !== null`, 10_000), 'the session is in the tree')
+    await browser.evaluate('window.__heddleNoReload = true')
+
+    /** Another page renames the session: this one redraws the row, with no reload in between. */
+    await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title: 'renamed elsewhere' })
+    assert.ok(
+      await browser.waitFor(`(document.querySelector('#tree li[data-session-id="${session}"]')?.textContent ?? '').includes('renamed elsewhere')`, 8000),
+      'the renamed session shows its new title',
+    )
+
+    /** Another page adds a workspace: it appears in this tree too. */
+    await api(server, cookie, 'POST', '/api/workspaces', { path: extra })
+    assert.ok(
+      await browser.waitFor(`document.getElementById('tree').textContent.includes('stream-page-push-extra')`, 8000),
+      'the added workspace appears in the tree',
+    )
+    assert.equal(await browser.evaluate('window.__heddleNoReload === true'), true, 'and the page was never reloaded')
+  } finally {
+    browser.close()
+    removeDir(extra)
     await server.close()
   }
 })

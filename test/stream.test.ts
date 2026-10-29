@@ -18,6 +18,7 @@ import {
   STREAM_OPEN,
   type WatchedSocket,
 } from '../src/server/stream.ts'
+import { push } from '../src/server/web.ts'
 
 /** Parse one SSE frame block into its event name and JSON data. */
 function parseFrame(block: string): { event: string; data: unknown } {
@@ -194,4 +195,25 @@ test('the log is bounded by bytes as well as by count, and always keeps the newe
   assert.equal(log.since('e1-1')?.length, 1)
   log.record('session', 'z'.repeat(500))
   assert.equal(log.since('e1-2')?.length, 1, 'a frame larger than the bound is still kept on its own')
+})
+
+test('a pushed change is numbered by the log, written to every subscriber, and kept for a reconnect', () => {
+  const log = new EventLog({ epoch: 'e1' })
+  const written: string[][] = [[], []]
+  const subscribers = new Set(written.map((sink) => ({ write: (text: string) => sink.push(text) })))
+  push({ log, subscribers: subscribers as never }, 'workspace', { type: 'workspace/renamed', workspace: { id: 'w-1', title: 'docs' } })
+  const expected = 'id: e1-1\nevent: workspace\ndata: {"type":"workspace/renamed","workspace":{"id":"w-1","title":"docs"}}\n\n'
+  assert.deepEqual(written, [[expected], [expected]], 'every page hears it, with the same id')
+  assert.deepEqual(log.since('e1-0'), [expected], 'and a page that was away is given it on reconnect')
+})
+
+test('a subscriber that throws on write does not stop the push reaching the others', () => {
+  const log = new EventLog({ epoch: 'e1' })
+  const reached: string[] = []
+  const subscribers = new Set([
+    { write: () => { throw new Error('gone') } },
+    { write: (text: string) => reached.push(text) },
+  ])
+  push({ log, subscribers: subscribers as never }, 'sessions', { type: 'session/renamed', session: 's', title: 't' })
+  assert.equal(reached.length, 1)
 })

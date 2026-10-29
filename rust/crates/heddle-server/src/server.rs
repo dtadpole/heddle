@@ -1160,6 +1160,10 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
+            state.events().push(
+                "sessions",
+                &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
+            );
             respond::json(StatusCode::OK, &meta)
         }
     }
@@ -1324,10 +1328,17 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
         }
     }
     match workspaces.add(&path, name) {
-        Ok((record, created)) => respond::json(
-            StatusCode::OK,
-            &json!({"record": record, "created": created}),
-        ),
+        Ok((record, created)) => {
+            if created {
+                state
+                    .events()
+                    .push("workspace", &json!({"type": "workspace/added", "workspace": record}));
+            }
+            respond::json(
+                StatusCode::OK,
+                &json!({"record": record, "created": created}),
+            )
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }
@@ -1344,7 +1355,12 @@ async fn rename_workspace(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     match workspaces.rename(&id, title) {
-        Ok(Some(record)) => respond::json(StatusCode::OK, &record),
+        Ok(Some(record)) => {
+            state
+                .events()
+                .push("workspace", &json!({"type": "workspace/renamed", "workspace": record}));
+            respond::json(StatusCode::OK, &record)
+        }
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
         Err(error) if error.code.as_deref() == Some("workspace/name-conflict") => {
             service_refusal(error, StatusCode::CONFLICT)
@@ -1365,7 +1381,12 @@ async fn remove_workspace(
     }
     let sessions = state.harness().sessions.list();
     match workspaces.remove(&id, &sessions) {
-        Ok(outcome) => respond::json(StatusCode::OK, &outcome),
+        Ok(outcome) => {
+            state
+                .events()
+                .push("workspace", &json!({"type": "workspace/removed", "id": id}));
+            respond::json(StatusCode::OK, &outcome)
+        }
         Err(error) => service_refusal(error, StatusCode::CONFLICT),
     }
 }
@@ -1421,6 +1442,10 @@ async fn answer_approval(
         return approval_not_waiting();
     };
     if service.answer(&id, outcome) {
+        state.events().push(
+            "approval-settled",
+            &json!({"type": "approval/settled", "id": id, "outcome": outcome}),
+        );
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
     } else {
         approval_not_waiting()
@@ -3325,6 +3350,138 @@ mod tests {
         assert!(text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(), "{text}");
         let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
         assert!(text.contains("\"resumed\":false"), "{text}");
+    }
+
+    /// An approval double whose questions are always waiting, so an answer settles one.
+    struct AnsweringApprovals;
+
+    impl ApprovalService for AnsweringApprovals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            true
+        }
+    }
+
+    /// A workspace double whose add creates, whose rename finds and whose remove succeeds.
+    struct EditableWorkspaces;
+
+    impl crate::services::WorkspaceService for EditableWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({"id": "w-2", "path": path, "title": "added"}), true))
+        }
+        fn find(&self, _id: &str) -> bool {
+            true
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({"removed": true}))
+        }
+        fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(json!({"id": id, "title": title})))
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// The next frame a subscription holds, as `(event, data)`, within a second.
+    async fn next_pushed(subscription: &mut crate::stream::Subscription) -> (String, Value, Option<String>) {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
+            .await
+            .expect("a frame in time")
+            .expect("the hub is open");
+        (frame.event, serde_json::from_str(&frame.data).unwrap(), frame.id)
+    }
+
+    /// The changes that never reach a session's log are pushed to the stream, numbered like every frame:
+    /// a renamed session, an added, renamed and removed workspace, and a settled approval (phase B item 4).
+    #[tokio::test]
+    async fn renames_workspace_edits_and_settled_approvals_are_pushed() {
+        let mut with_services = harness();
+        with_services.workspaces = Some(Arc::new(EditableWorkspaces));
+        with_services.approvals = Some(Arc::new(AnsweringApprovals));
+        let (router, state) = ServerBuilder::new(
+            with_services,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("pushes")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+
+        let (status, _) = post_json(&router, &format!("/api/sessions/{session}/title"), &cookie, r#"{"title":"renamed"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "sessions");
+        assert_eq!(data, json!({"type": "session/renamed", "session": session, "title": "renamed"}));
+        assert!(id.is_some(), "a push is numbered, so it is replayed to a reconnecting client");
+
+        let folder = std::env::temp_dir();
+        let body = json!({"path": folder}).to_string();
+        let (status, _) = post_json(&router, "/api/workspaces", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!((event.as_str(), data["type"].as_str()), ("workspace", Some("workspace/added")));
+
+        for (method, expected) in [(Method::PATCH, "workspace/renamed"), (Method::DELETE, "workspace/removed")] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/api/workspaces/w-2")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"title":"retitled"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            assert_eq!((event.as_str(), data["type"].as_str()), ("workspace", Some(expected)));
+        }
+
+        let (status, _) = post_json(
+            &router,
+            "/api/approvals/approval-00000000-0000-0000-0000-000000000000",
+            &cookie,
+            r#"{"outcome":"rejected"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "approval-settled");
+        assert_eq!(
+            data,
+            json!({"type": "approval/settled", "id": "approval-00000000-0000-0000-0000-000000000000", "outcome": "rejected"})
+        );
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.

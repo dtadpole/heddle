@@ -398,6 +398,13 @@ impl EventHub {
         self.publish(SseFrame::session(session, event));
     }
 
+    /// Push a change that never reaches a session's log — a renamed session (`sessions`), a workspace edit
+    /// (`workspace`), a settled approval (`approval-settled`) — as `web.ts`'s `push` does. It is published like any
+    /// other frame, so it carries an id and is replayed to a client that reconnects.
+    pub fn push(&self, event: &str, data: &Value) {
+        self.publish(SseFrame::new(event, data));
+    }
+
     /// Publish the bus's `approval/request` payload.
     pub fn publish_approval_request(&self, request: &Value) {
         self.publish(SseFrame::approval(request));

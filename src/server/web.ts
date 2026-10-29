@@ -1217,6 +1217,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const { record, created } = workspaces.add(path, name)
+    if (created) push(state, 'workspace', { type: 'workspace/added', workspace: record })
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
   }
@@ -1233,6 +1234,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     try {
       const outcome = workspaces.remove(id, { all: ctx.session.list(), force: true })
+      push(state, 'workspace', { type: 'workspace/removed', id })
       respond(response, 200, 'application/json', `${JSON.stringify(outcome, null, 2)}\n`)
     } catch (error) {
       respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
@@ -1267,6 +1269,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'application/json', `${JSON.stringify({ error: `no workspace ${id}` })}\n`)
         return
       }
+      push(state, 'workspace', { type: 'workspace/renamed', workspace: record })
       respond(response, 200, 'application/json', `${JSON.stringify(record, null, 2)}\n`)
     } catch (error) {
       if ((error as { code?: unknown }).code === 'workspace/name-conflict') {
@@ -1459,6 +1462,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
     if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
+    push(state, 'sessions', { type: 'session/renamed', session: id, title: meta.title ?? body.title })
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -1857,6 +1861,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 409, 'application/json', `${JSON.stringify({ answered: false, error: 'that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it' })}\n`)
       return
     }
+    push(state, 'approval-settled', { type: 'approval/settled', id, outcome })
     respond(response, 200, 'application/json', `${JSON.stringify({ answered: true })}\n`)
     return
   }
@@ -2443,6 +2448,26 @@ function subscribeSessionEvent(ctx: Context, forward: (payload: { session: strin
   const dispose = ctx.on('session/event', forward)
   return () => {
     if (typeof dispose === 'function') dispose()
+  }
+}
+
+/**
+ * Push one frame to every `/api/events` subscriber, through the stream's log so it has an id and is replayed to a
+ * client that reconnects (phase B item 4).
+ *
+ * The log-backed `session` and `approval` frames come from the bus; these are the changes that never reach a
+ * session's log — a renamed session, an added, renamed or removed workspace, a settled approval — which DSH pushes
+ * as its api-session and workspace increments and as the end of an approval waterfall. Without them a second page
+ * only learned of a change when it next read the list itself.
+ */
+export function push(state: Pick<RequestState, 'log' | 'subscribers'>, event: string, data: unknown): void {
+  const line = state.log.record(event, JSON.stringify(data))
+  for (const client of state.subscribers) {
+    try {
+      client.write(line)
+    } catch {
+      // a client that is already gone leaves through its close listener
+    }
   }
 }
 
