@@ -5981,7 +5981,9 @@ const slashReady = import('/commands/menu.js')
         await startNewSession()
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
-      sendAsPrompt: (text) => (anyRunning() ? enqueue(text, 'queue', []) : void sendNow(text, [])),
+      sendAsPrompt: (text, attachments = []) => (anyRunning() ? enqueue(text, 'queue', attachments) : void sendNow(text, attachments)),
+      pendingAttachments: () => pendingAttachments.length,
+      takeAttachments: () => takeAttachments(),
       addRow: (node) => window.heddlePage.addRow('command', node),
       notice: (text) => add('denied', text),
       openModelMenu: window.heddlePage.openModelMenu,
