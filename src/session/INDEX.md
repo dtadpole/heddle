@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.2.0
+version: 1.3.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -27,6 +27,11 @@ fourth is where a log is **filed**: [`layout.ts`](layout.ts) turns a working dir
 folder a session's log lives under — `~/.heddle/sessions/<workspace>/<session-id>.v2.jsonl.zstd`, the
 owner's ruling of 2026-10-11 — and the store reads that layout and the one before it, writing only the new
 one, because a session keeps the shape it was born with.
+
+The log also carries the session's **inbox** ([`inbox.ts`](inbox.ts)): what a person steered into a running
+turn that the turn has not taken yet. It is DSH's agent inbox, recorded with DSH's `agent/inbox/spliced` event.
+A steer is queued in the next-step list, the loop writes it at its next step boundary (after any tool result
+still due), a stop keeps it, and the next turn writes it before its own prompt (R-developer-two-5).
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is

@@ -229,6 +229,24 @@ impl SessionPort for Sessions {
             .map(drop)
             .map_err(port_error)
     }
+
+    fn claim_pending_input(&self, session: &SessionHandle) -> Result<usize, PortError> {
+        heddle_session::inbox::claim_next_step(self.service.store(), session, |content, source| {
+            self.service.user_content(session, content, source)
+        })
+        .map(|claimed| claimed.len())
+        .map_err(port_error)
+    }
+
+    fn has_pending_input(&self, session: &SessionHandle) -> bool {
+        match heddle_session::inbox::has_pending_step(self.service.store(), session) {
+            Ok(pending) => pending,
+            Err(error) => {
+                read_failed(session, "reading the inbox", error);
+                false
+            }
+        }
+    }
 }
 
 /// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,
@@ -296,6 +314,28 @@ impl SubagentStore for SessionSubagents {
     ) -> Result<Option<SandboxMode>, PortError> {
         heddle_session::inherit_recorded_mode::<SandboxMode>(self.service.store(), parent, child)
             .map_err(port_error)
+    }
+
+    fn user_message(
+        &self,
+        session: &SessionHandle,
+        content: Vec<ContentPart>,
+        source: Option<serde_json::Value>,
+    ) -> Result<u64, PortError> {
+        let event = self
+            .service
+            .store()
+            .message(
+                session,
+                Message {
+                    role: Role::User,
+                    tool_call_id: None,
+                    content,
+                    source,
+                },
+            )
+            .map_err(port_error)?;
+        Ok(event.seq)
     }
 }
 
@@ -462,18 +502,42 @@ pub(crate) mod tests {
     use crate::upstream::ContextBreakdown;
     use crate::upstream::{ContentPart, Message, Role, ToolCall};
 
-    /// A scratch folder holding one scripted endpoint's step file.
-    pub(crate) fn scripted_service(label: &str, steps: serde_json::Value) -> Arc<ModelService> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir: PathBuf = std::env::temp_dir().join(format!(
-            "heddle-agent-scripted-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("script.json");
+    /// A scratch folder under the system temp folder that is removed when it is dropped, so a test that fails or
+    /// panics still cleans up after itself (a helper that only cleared the folder before creating it left one
+    /// behind per run: tool-developer's TMPDIR count, 2026-10-29). The name is unique per process and call.
+    pub(crate) struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        pub(crate) fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir()
+                .join(format!("heddle-agent-{label}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        pub(crate) fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A scripted endpoint over one step file, and the scratch folder holding it: keep the guard alive for as
+    /// long as the service is used.
+    pub(crate) fn scripted_service(
+        label: &str,
+        steps: serde_json::Value,
+    ) -> (Arc<ModelService>, ScratchDir) {
+        let dir = ScratchDir::new(&format!("scripted-{label}"));
+        let script = dir.path().join("script.json");
         std::fs::write(&script, json!({ "steps": steps }).to_string()).unwrap();
         let endpoint: EndpointConfig = serde_json::from_value(json!({
             "name": "scripted",
@@ -482,7 +546,9 @@ pub(crate) mod tests {
             "model": "scripted",
         }))
         .unwrap();
-        Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap())
+        let service =
+            Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap());
+        (service, dir)
     }
 
     fn request(round: u32) -> GenerateRequest {
@@ -500,13 +566,14 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_scripted_round_streams_its_tool_call_and_finishes_for_tools() {
-        let port = LlmModel::new(scripted_service(
+        let (models, _scratch) = scripted_service(
             "call",
             json!([
                 { "toolCall": { "name": "read_file", "arguments": { "path": "a.txt" } } },
                 { "text": "done" }
             ]),
-        ));
+        );
+        let port = LlmModel::new(models);
         let chunks: Vec<Chunk> = collect(&port, request(0))
             .await
             .into_iter()
@@ -537,7 +604,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_unknown_endpoint_fails_as_one_coded_error_item() {
-        let port = LlmModel::new(scripted_service("unknown", json!([])));
+        let (models, _scratch) = scripted_service("unknown", json!([]));
+        let port = LlmModel::new(models);
         let mut asked = request(0);
         asked.endpoint = "nowhere".into();
         let items = collect(&port, asked).await;
@@ -548,10 +616,11 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_scripted_failure_keeps_its_code_for_the_retry_rule() {
-        let port = LlmModel::new(scripted_service(
+        let (models, _scratch) = scripted_service(
             "overflow",
             json!([{ "error": { "code": "CONTEXT_WINDOW_EXCEEDED", "message": "too long" } }]),
-        ));
+        );
+        let port = LlmModel::new(models);
         let error = collect(&port, request(0))
             .await
             .into_iter()
@@ -563,7 +632,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_stopped_call_yields_nothing() {
-        let port = LlmModel::new(scripted_service("stop", json!([{ "text": "never seen" }])));
+        let (models, _scratch) = scripted_service("stop", json!([{ "text": "never seen" }]));
+        let port = LlmModel::new(models);
         let token = CancellationToken::new();
         token.cancel();
         let items: Vec<_> = port.stream(request(0), Some(token)).collect().await;
@@ -572,35 +642,30 @@ pub(crate) mod tests {
 
     #[test]
     fn the_default_endpoint_is_the_nominated_one() {
-        let port = LlmModel::new(scripted_service("default", json!([])));
+        let (models, _scratch) = scripted_service("default", json!([]));
+        let port = LlmModel::new(models);
         assert_eq!(port.default_endpoint().as_deref(), Some("scripted"));
     }
 
     // ---- The session and context adapters, against the real services. ----
 
-    pub(crate) fn sessions_at(label: &str) -> Arc<SessionService> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "heddle-agent-sessions-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+    /// A session store in its own scratch folder, and the guard that removes it.
+    pub(crate) fn sessions_at(label: &str) -> (Arc<SessionService>, ScratchDir) {
+        let root = ScratchDir::new(&format!("sessions-{label}"));
         let config = heddle_session::SessionConfig {
-            root: Some(root.to_str().unwrap().to_owned()),
+            root: Some(root.path().to_str().unwrap().to_owned()),
         };
-        Arc::new(SessionService::new(
+        let service = Arc::new(SessionService::new(
             &config,
             &heddle_config::Env::default(),
             None,
-        ))
+        ));
+        (service, root)
     }
 
     #[test]
     fn the_session_port_records_the_prompt_and_reads_it_back_as_input() {
-        let sessions = sessions_at("port");
+        let (sessions, _sessions_dir) = sessions_at("port");
         let handle = sessions.store().create(CreateOptions::default()).unwrap();
         let port = Sessions::new(Arc::clone(&sessions));
         assert_eq!(port.count(&handle), 1, "session/created is seq 0");
@@ -631,7 +696,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_session_port_writes_model_request_in_the_typescript_field_order() {
-        let sessions = sessions_at("request");
+        let (sessions, _sessions_dir) = sessions_at("request");
         let handle = sessions.store().create(CreateOptions::default()).unwrap();
         let port = Sessions::new(Arc::clone(&sessions));
         port.model_request(
@@ -678,7 +743,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_child_session_carries_its_parent_origin_depth_and_the_parents_mode() {
-        let sessions = sessions_at("child");
+        let (sessions, _sessions_dir) = sessions_at("child");
         let parent = sessions
             .store()
             .create(CreateOptions {
@@ -726,7 +791,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_unknown_origin_is_refused_rather_than_written() {
-        let sessions = sessions_at("origin");
+        let (sessions, _sessions_dir) = sessions_at("origin");
         let store = SessionSubagents::new(sessions);
         let error = store
             .create(CreateSession {
@@ -867,7 +932,7 @@ pub(crate) mod tests {
     async fn the_context_port_over_the_real_session_store_prepares_what_the_session_recorded() {
         // The production binding: heddle-context's `impl ContextStore for SessionStore`, whose handle is the
         // session's own, so `over_session_handles` needs no map.
-        let sessions = sessions_at("context-real");
+        let (sessions, _sessions_dir) = sessions_at("context-real");
         let handle = sessions.store().create(CreateOptions::default()).unwrap();
         sessions
             .user_content(&handle, vec![ContentPart::text("remember a word")], None)

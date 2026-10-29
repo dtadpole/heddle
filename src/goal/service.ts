@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
-import type { SessionEvent, SessionHandle, SessionStore } from '../session/store.ts'
+import type { SessionEvent, SessionHandle, SessionMeta, SessionStore } from '../session/store.ts'
 
 /**
  * Goal management, modelled on DSH's `dsh-goal` — read as
@@ -225,37 +225,52 @@ function positiveIntegerOrZero(value: unknown, name: string): number {
   return value
 }
 
-/** Count the continuation rounds the log proves were **admitted** for one exact goal revision. */
-function admittedRounds(events: readonly SessionEvent[], goal: GoalSnapshot): number {
-  let count = 0
-  for (const event of events) {
-    if (event.type !== 'message') continue
-    const message = event.message as { role?: string; source?: { kind?: string; goalId?: string; revision?: number; round?: number } } | undefined
-    const source = message?.source
-    if (message?.role !== 'user' || source?.kind !== 'goal') continue
-    if (source.goalId !== goal.id || source.revision !== goal.revision) continue
-    if (typeof source.round !== 'number' || source.round < 1) continue
-    count += 1
-  }
-  return count
+/** The goal round a goal-attributed user message announces, or undefined for any other event. */
+function goalRoundOf(event: SessionEvent): { readonly goalId: string; readonly revision: number; readonly round: number } | undefined {
+  if (event.type !== 'message') return undefined
+  const message = event.message as { role?: string; source?: { kind?: string; goalId?: string; revision?: number; round?: number } } | undefined
+  const source = message?.source
+  if (message?.role !== 'user' || source?.kind !== 'goal') return undefined
+  if (typeof source.goalId !== 'string' || typeof source.revision !== 'number') return undefined
+  if (typeof source.round !== 'number' || source.round < 1) return undefined
+  return { goalId: source.goalId, revision: source.revision, round: source.round }
 }
 
 /**
  * Fold a session's events into its current goal.
  *
  * Strict by design: a malformed mutation, a revision that does not advance by one, a reused goal id, a
- * non-`edit` operation that changes the definition, or a `roundsStarted` that goes backwards fails
+ * non-`edit` operation that changes the definition, or a recorded `roundsStarted` that goes backwards fails
  * replay rather than producing a plausible-looking wrong state.
+ *
+ * **Rounds are counted in log order, across revisions**, as DSH's `dsh-goal` fold does: a goal change carries the
+ * count forward, and a goal-sourced user message for the goal's revision at that point in the log raises the count to
+ * its round. So a cap is a cap for the goal, not for one revision. The earlier fold counted only the final revision's
+ * messages after the loop and took the larger of that and the recorded count, so after an edit the recorded count was
+ * a floor instead of a base and the goal ran past its cap (R-developer-two-31: five rounds under a cap of three).
+ *
+ * Two leniencies keep logs written before that fix replayable where DSH would refuse them: a round number that does
+ * not exceed the count (the old driver repeated `3/3` after an edit) is not counted again, and a recorded count lower
+ * than the in-order count does not lower it.
  */
 export function foldGoal(events: readonly SessionEvent[]): FoldedGoal {
   let goal: GoalSnapshot | undefined
   let roundsStarted = 0
+  /** The count the last mutation of the current goal recorded; recorded counts may not go backwards. */
+  let recorded = 0
   let createdAt: string | undefined
   let updatedAt: string | undefined
   let lastRef: GoalRef | undefined
   const seen = new Set<GoalId>()
 
   for (const event of events) {
+    const round = goalRoundOf(event)
+    if (round !== undefined) {
+      if (goal !== undefined && round.goalId === goal.id && round.revision === goal.revision && round.round > roundsStarted) {
+        roundsStarted = round.round
+      }
+      continue
+    }
     const change = decodeGoalChange(event)
     if (change === undefined) continue
 
@@ -265,6 +280,7 @@ export function foldGoal(events: readonly SessionEvent[]): FoldedGoal {
       if (change.cleared.revision !== goal.revision + 1) fail('a clear tombstone revision must be one past the cleared goal')
       goal = undefined
       roundsStarted = 0
+      recorded = 0
       createdAt = undefined
       updatedAt = undefined
       lastRef = change.cleared
@@ -290,17 +306,16 @@ export function foldGoal(events: readonly SessionEvent[]): FoldedGoal {
       }
       if (goal.phase === 'complete' && change.operation !== 'clear') fail('a complete goal is not mutated; clear it and create a new one')
     }
-    if (change.roundsStarted < roundsStarted && next.id === lastRef?.id) fail('roundsStarted cannot go backwards')
+    const sameGoal = next.id === lastRef?.id
+    if (change.roundsStarted < recorded && sameGoal) fail('roundsStarted cannot go backwards')
     goal = next
-    roundsStarted = change.roundsStarted
+    roundsStarted = sameGoal ? Math.max(roundsStarted, change.roundsStarted) : change.roundsStarted
+    recorded = change.roundsStarted
     createdAt = change.createdAt
     updatedAt = change.updatedAt
     lastRef = { id: next.id, revision: next.revision }
   }
 
-  if (goal !== undefined) {
-    roundsStarted = Math.max(roundsStarted, admittedRounds(events, goal))
-  }
   return {
     ...(goal !== undefined ? { goal } : {}),
     roundsStarted,
@@ -333,6 +348,23 @@ export class GoalService extends Service {
     return this.view(handle, foldGoal(this.store.read(handle)))
   }
 
+  /**
+   * The session's log, as the goal tools read it to decide **who is asking**.
+   *
+   * Authority is judged on the same log the fold reads, and through the same store: a direct human turn is a
+   * person's message in the open turn, and a goal round is the driver's sourced message for the goal's current
+   * revision and round. Reading it here keeps the tools on the service they already hold rather than on a second
+   * handle to the store.
+   */
+  sessionEvents(handle: SessionHandle): readonly SessionEvent[] {
+    return this.store.read(handle)
+  }
+
+  /** The session's metadata record, which says whether it is a delegated (subagent or teammate) session. */
+  sessionMeta(handle: SessionHandle): SessionMeta | undefined {
+    return this.store.list().find((meta) => meta.id === handle.id)
+  }
+
   /** Remove process-local continuation authority without changing phase or revision. */
   disarm(handle: SessionHandle): GoalView | undefined {
     const folded = foldGoal(this.store.read(handle))
@@ -361,7 +393,8 @@ export class GoalService extends Service {
     const folded = foldGoal(this.store.read(handle))
     const current = this.expectCurrent(folded, ref)
     if (request.objective === undefined && request.maxGoalRounds === undefined) {
-      throw new GoalError('an edit needs an objective and/or maxGoalRounds', 'GOAL_INVALID_EDIT')
+      /** DSH's sentence (dsh-goal `edit`), which the model reads back through `update_goal`. */
+      throw new GoalError('goal edit requires objective and/or maxGoalRounds', 'GOAL_INVALID_EDIT')
     }
     const goal: GoalSnapshot = {
       ...current,
