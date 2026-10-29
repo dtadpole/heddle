@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -183,6 +183,39 @@ test('a workspace view names its nearest registered parent and the sessions whos
   assert.ok(!accounted.includes('session-nowhere'), 'a session under no root is in no workspace')
   assert.equal(new Set(accounted).size, accounted.length, 'and no session is counted twice')
   assert.equal(byId.get(outerRecord.id)?.origin, 'added')
+})
+
+/**
+ * One folder is one workspace, however it is spelled — DSH's "one record per canonical path" (`dsh-workspace/README.md:93`).
+ *
+ * Two spellings reach one folder on macOS: a letter-case variant on a case-insensitive volume, and a symlink. DSH
+ * canonicalises both away with the native `realpath`, so registering either returns the existing record and a session
+ * started there is filed under it. The case variant is the half heddle's TypeScript build got wrong; the symlink half is
+ * pinned because the parity audit first read the opposite into DSH.
+ */
+test('a letter-case variant or a symlink of a registered folder is that workspace, not a second one', (context) => {
+  const workspaces = service()
+  const proj = folder('proj')
+  const variant = join(scratch, `folder-${counter}-PROJ`)
+  const link = join(scratch, `folder-${counter}-proj-link`)
+  symlinkSync(proj, link)
+  const first = workspaces.add(proj)
+  assert.equal(first.created, true)
+
+  const viaLink = workspaces.add(link)
+  assert.equal(viaLink.created, false, 'a symlink to a registered folder reports the workspace already there')
+  assert.equal(viaLink.record.id, first.record.id)
+
+  if (!existsSync(variant)) {
+    context.skip('this volume is case-sensitive, so the two spellings are two folders')
+    return
+  }
+  const viaCase = workspaces.add(variant)
+  assert.equal(viaCase.created, false, 'a letter-case variant reports the workspace already there')
+  assert.equal(viaCase.record.id, first.record.id, 'the same record')
+  assert.equal(workspaces.list().length, 1, 'one folder, one workspace')
+  const views = workspaces.views([session('session-upper', variant), session('session-link', link)])
+  assert.deepEqual(views[0]?.sessionIds, ['session-upper', 'session-link'], 'and sessions started at either spelling list under it')
 })
 
 test('a workspace view keeps the origin, so an adopted root can be told from a chosen one', () => {
