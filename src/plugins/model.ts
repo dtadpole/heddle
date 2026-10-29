@@ -1,8 +1,10 @@
+import { statSync } from 'node:fs'
+
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
 import { describeEndpoint, resolveEndpoints } from '../endpoints.ts'
-import { readLocalConfig } from '../local-config.ts'
+import { localConfigCandidates, readLocalConfig } from '../local-config.ts'
 import { ModelService } from '../llm/service.ts'
 import type { EndpointConfig } from '../llm/types.ts'
 
@@ -71,16 +73,44 @@ export interface Config {
  * That separation is the point of the plugin being this small.
  */
 export default function model(ctx: Context, config: Config = {}): void {
-  const local = config.readLocalConfig === false ? null : readLocalConfig()
-  const localEndpoints = (local?.config.endpoints ?? []) as readonly Partial<EndpointConfig>[]
-  const excluded = Array.isArray(local?.config.exclude) ? local.config.exclude : []
-  const endpoints = resolveEndpoints(config.endpoints ?? [], localEndpoints, process.env, excluded)
+  /** The row's composition: the layers' endpoints, then the machine's file, its exclusions, and the default. */
+  const compose = () => {
+    const local = config.readLocalConfig === false ? null : readLocalConfig()
+    const localEndpoints = (local?.config.endpoints ?? []) as readonly Partial<EndpointConfig>[]
+    const excluded = Array.isArray(local?.config.exclude) ? local.config.exclude : []
+    const endpoints = resolveEndpoints(config.endpoints ?? [], localEndpoints, process.env, excluded)
+    const nominated = config.default ?? local?.config.default
+    return { local, endpoints, nominated: typeof nominated === 'string' ? nominated : undefined }
+  }
+  const { local, endpoints, nominated } = compose()
 
   const service = new ModelService(ctx, endpoints)
   // The configuration's nominated default is recorded on the service, so a caller that does not name an
   // endpoint gets the one a person chose rather than the first one in the list.
-  const nominated = config.default ?? local?.config.default
-  if (typeof nominated === 'string' && service.endpoint(nominated) !== undefined) service.nominateDefault(nominated)
+  if (nominated !== undefined && service.endpoint(nominated) !== undefined) service.nominateDefault(nominated)
+  /**
+   * The machine's file applies to the next request without a restart, as DSH's provider settings do: before every
+   * read and every call the service asks whether any candidate file changed (its path, modification time and size),
+   * and recomposes when one did. A call already streaming keeps its endpoint. An edit that cannot be read (a
+   * trailing comma, a patch naming nothing) keeps the previous endpoints and says why, rather than failing turns.
+   */
+  if (config.readLocalConfig !== false) {
+    const candidates = localConfigCandidates()
+    let stamp = stampOf(candidates)
+    service.setRefresh(() => {
+      const now = stampOf(candidates)
+      if (now === stamp) return undefined
+      stamp = now
+      try {
+        const next = compose()
+        ctx.logger.info('model: the machine configuration changed; %d endpoint(s) — %s', next.endpoints.length, next.endpoints.map((entry) => entry.name).join(', '))
+        return { endpoints: next.endpoints, ...(next.nominated !== undefined ? { nominated: next.nominated } : {}) }
+      } catch (error) {
+        ctx.logger.warn('model: the machine configuration changed but could not be read (%s); the previous endpoints stay', (error as Error).message)
+        return undefined
+      }
+    })
+  }
   ctx.set('model', service)
 
   ctx.logger.info(
@@ -94,4 +124,18 @@ export default function model(ctx: Context, config: Config = {}): void {
   ctx.logger.debug('model: local configuration %s', local === null ? 'absent, using defaults' : `read from ${local.path}`)
   const fallback = config.default ?? local?.config.default
   if (typeof fallback === 'string') ctx.logger.debug('model: default endpoint is %s', fallback)
+}
+
+/** What identifies the candidate files' current contents without reading them: path, modification time and size. */
+function stampOf(candidates: readonly string[]): string {
+  return candidates
+    .map((path) => {
+      try {
+        const stat = statSync(path)
+        return `${path}:${stat.mtimeMs}:${stat.size}`
+      } catch {
+        return `${path}:absent`
+      }
+    })
+    .join('\n')
 }
