@@ -60,6 +60,7 @@ pub mod paths;
 mod profile;
 mod references;
 mod schema;
+mod settings;
 mod validate;
 mod value;
 
@@ -75,7 +76,7 @@ pub use error::ConfigError;
 pub use home::{expand_home, heddle_home, profiles_dir};
 pub use layer::{INLINE_FILE, Layer, NamedLayer, anchor_dir, read_layer};
 pub use local::{LocalConfig, LocalConfigLocation, local_config_candidates, read_local_config};
-pub use model_row::{ModelRowEndpoints, model_row_endpoints, nominated_default};
+pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
 pub use paths::{canonical_path, depth_of, is_under};
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,
@@ -83,6 +84,12 @@ pub use profile::{
 };
 pub use references::{parse_scalar, references_in, resolve_env};
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
+pub use settings::{
+    PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsError, SettingsNamespace,
+    SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService, SettingsTarget,
+    SettingsView, SettingsWrite, commit_settings_write, describe_settings, handle_settings_request,
+    is_secret_key, plan_settings_write, settings_target,
+};
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
     ValidationResult, read_component_manifest, validate_rows,

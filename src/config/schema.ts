@@ -175,7 +175,21 @@ export function readLayer(file: string, options: { readonly stack?: readonly str
   } catch (error) {
     throw new ConfigError([`could not read the layer ${absolute}: ${(error as Error).message}`])
   }
+  return readLayerText(text, absolute, { stack, env })
+}
 
+/**
+ * The layers in `text`, read as if it were the file `absolute`: problems name that file and an `include`
+ * resolves against its directory. `readLayer` reads the file and lands here; the settings writer parses a
+ * candidate patch it has not written yet.
+ */
+export function readLayerText(
+  text: string,
+  absolute: string,
+  options: { readonly stack?: readonly string[]; readonly env?: NodeJS.ProcessEnv } = {},
+): readonly Layer[] {
+  const env = options.env ?? process.env
+  const stack = options.stack ?? []
   const schema = includeSchema()
   let parsed: unknown
   try {
