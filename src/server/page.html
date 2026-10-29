@@ -2184,7 +2184,7 @@
   #question-options .q-option[aria-pressed='true'] { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, var(--surface)); }
   #question-options .q-option:disabled { cursor: default; opacity: .8; }
   #question-options .q-option .desc { font-size: 12px; color: var(--text-3); }
-  #question-custom { width: 100%; box-sizing: border-box; min-height: 34px; padding: .35rem .5rem; font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; resize: vertical; }
+  #question-custom { width: 100%; box-sizing: border-box; height: 34px; padding: .35rem .5rem; font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
   #question-skipped { margin: 0 0 .5rem; font-size: 12px; color: var(--text-3); }
   #question-note { margin: .35rem 0 0; font-size: 12px; color: var(--text-3); }
   #question-card .actions { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; margin-top: .5rem; }
@@ -3427,7 +3427,9 @@
     <p id="question-text"></p>
     <div id="question-options" role="group" aria-label="Choices"></div>
     <p id="question-skipped" hidden>Skipped</p>
-    <textarea id="question-custom" rows="1" placeholder="Type another answer" aria-label="Your own answer"></textarea>
+    <!-- A single-line field, not a textarea: the page's composer is the document's first textarea, and checks and tools
+         that find it that way must keep finding the composer while a question is open. -->
+    <input type="text" id="question-custom" placeholder="Type another answer" aria-label="Your own answer" autocomplete="off">
     <p id="question-note" hidden></p>
     <div class="actions">
       <span id="question-countdown" hidden></span>
