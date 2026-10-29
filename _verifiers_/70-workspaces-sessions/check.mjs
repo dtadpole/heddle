@@ -4249,3 +4249,81 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
     removeDir(h.work)
   }
 })
+
+/**
+ * The text of every tool result a turn's stream carried, in order: the server's SSE body is one JSON event per data
+ * line, and a tool result is a message whose role is tool.
+ */
+function toolResultsInStream(body) {
+  return body
+    .split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => {
+      try {
+        return JSON.parse(line.slice('data: '.length))
+      } catch {
+        return null
+      }
+    })
+    .map((data) => data?.event)
+    .filter((event) => event?.type === 'message' && event.message?.role === 'tool')
+    .map((event) => (event.message.content ?? []).map((part) => part.text ?? '').join(''))
+}
+
+test("a session's turn runs its tools in the session's own folder, through the server and through the command line", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * R-developer-eight-10 (DSH parity C3), measured on both builds: a turn sent to a session of workspace B ran bash in
+   * the directory the server was launched in, so the model's pwd printed that directory and its relative paths
+   * landed there. DSH runs a session's tools in the session's own directory. The turn here is one scripted bash pwd,
+   * and every process that runs it is launched somewhere else: the server in the repository, the command line in a
+   * sibling folder A. Neither names a sandbox root, so the only thing that can put the shell in B is the session.
+   */
+  const h = harness('tool-cwd')
+  scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'bash', arguments: { command: 'pwd' } } }, { text: 'printed the folder' }] })
+  const folderA = join(h.work, 'ws-a')
+  const folderB = join(h.work, 'ws-b')
+  mkdirSync(folderA, { recursive: true })
+  mkdirSync(folderB, { recursive: true })
+  /** The shell reports its physical directory, so the expectation is the folder's real path. */
+  const expected = `${realpathSync(folderB)}\n`
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', folderB, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created in B\n${made.stdout}${made.stderr}`)
+    const created = parseJson(made.stdout)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const turn = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: created.session, prompt: 'where am I' }),
+    })
+    const stream = await turn.text()
+    assert.equal(turn.status, 200, `the turn ran through the server\n${stream}`)
+    const served = toolResultsInStream(stream)
+    assert.equal(served.length, 1, `the turn made its one tool call\n${stream}`)
+    assert.equal(served[0], expected, `bash ran in the session's folder, not the server's launch directory (${repoRoot})`)
+    live.kill()
+    live = undefined
+
+    /** The same session resumed by a command line launched in A, which is the directory its sandbox falls back to. */
+    const resumed = await runCli(adminArgs(h, ['--resume', created.session, '--turn', 'and where am I now']), { env: h.env, cwd: folderA })
+    assert.equal(resumed.code, 0, `the resumed turn ran\n${resumed.stdout}${resumed.stderr}`)
+    const results = readTranscript(join(h.home, 'sessions', created.session))
+      .filter((event) => event.type === 'message' && event.message?.role === 'tool')
+      .map((event) => (event.message.content ?? []).map((part) => part.text ?? '').join(''))
+    assert.equal(results.length, 2, `both turns' tool results are in the session\nsaw: ${JSON.stringify(results)}`)
+    assert.equal(results[1], expected, `the resumed turn's bash ran in the session's folder, not in A (${folderA})`)
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
