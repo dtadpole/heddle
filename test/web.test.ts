@@ -422,18 +422,3 @@ test('a stream artifact of blank lines between tokens is not prose', () => {
   ])
   assert.equal(legit.find((turn) => turn.kind === 'assistant')?.text, '第一段。\n\n第二段。')
 })
-
-test('a failed turn is the answer\'s stop reason, so a reload says what the live page said', () => {
-  const at = '2026-10-29T00:00:00.000Z'
-  const turns = transcriptTurns([
-    { seq: 0, at, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } },
-    { seq: 1, at, type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'partial' } },
-    { seq: 2, at, type: 'turn/failed', message: 'upstream answered 502' },
-  ] as never)
-  const last = turns.at(-1)
-  assert.equal(last?.kind, 'assistant')
-  assert.deepEqual(last?.ended, ['the turn failed: upstream answered 502'])
-  const alone = transcriptTurns([{ seq: 0, at, type: 'turn/failed', message: '' }] as never)
-  assert.equal(alone.length, 1, 'a failure with no answer gets a row of its own')
-  assert.deepEqual(alone[0]?.ended, ['the turn failed: unknown error'])
-})

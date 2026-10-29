@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
+import { transcriptTurns } from '../src/server/web.ts'
+
 /** The page's rule for drawing a failed turn once (R-developer-six-2), read out of the page the browser runs. */
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
 const begin = page.indexOf('/* turn-failure:begin */')
@@ -37,4 +39,19 @@ test('a failure without a message still says the turn failed', () => {
   assert.equal(rule.text(''), 'the turn failed')
   assert.equal(rule.text(undefined), 'the turn failed')
   assert.equal(rule.text('upstream answered 502'), 'upstream answered 502')
+})
+
+test('a failed turn is the answer\'s stop reason, so a reload says what the live page said', () => {
+  const at = '2026-10-29T00:00:00.000Z'
+  const turns = transcriptTurns([
+    { seq: 0, at, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } },
+    { seq: 1, at, type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'partial' } },
+    { seq: 2, at, type: 'turn/failed', message: 'upstream answered 502' },
+  ] as never)
+  const last = turns.at(-1)
+  assert.equal(last?.kind, 'assistant')
+  assert.deepEqual(last?.ended, ['the turn failed: upstream answered 502'])
+  const alone = transcriptTurns([{ seq: 0, at, type: 'turn/failed', message: '' }] as never)
+  assert.equal(alone.length, 1, 'a failure with no answer gets a row of its own')
+  assert.deepEqual(alone[0]?.ended, ['the turn failed: unknown error'])
 })
