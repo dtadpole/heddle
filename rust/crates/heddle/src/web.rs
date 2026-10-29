@@ -1283,20 +1283,9 @@ impl heddle_server::services::QuestionService for Questions {
         (answer.status, answer.body)
     }
 
-    fn post(
-        &self,
-        id: &str,
-        hold: bool,
-        body: &Value,
-        running: &dyn Fn(&str) -> bool,
-    ) -> (u16, String, Option<(String, String)>) {
-        let (answer, steer) =
-            heddle_questions::post_question(Some(&self.service), id, hold, body, running);
-        (
-            answer.status,
-            answer.body,
-            steer.map(|steer| (steer.session, steer.text)),
-        )
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String) {
+        let answer = heddle_questions::post_question(Some(&self.service), id, hold, body);
+        (answer.status, answer.body)
     }
 }
 

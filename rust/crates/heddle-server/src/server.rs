@@ -1831,8 +1831,7 @@ async fn get_questions(
     respond::raw_json(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), body)
 }
 
-/// `POST /api/questions/<id>`: one answer batch. A late answer to a session whose turn is running is appended as
-/// the user message, as a steer is; otherwise the body hands it back for the page to send as a turn.
+/// `POST /api/questions/<id>`: one answer batch. A late answer comes back in the body for the page to deliver.
 async fn answer_question(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1854,15 +1853,7 @@ fn question_post(state: &AppState, id: &str, hold: bool, body: JsonBody) -> Resp
     let Some(questions) = state.harness().questions.as_ref() else {
         return respond::plugin_missing("questions");
     };
-    let runs = state.runs();
-    let running = |session: &str| runs.is_running(session);
-    let (status, text, steer) = questions.post(id, hold, &Value::Object(body.0), &running);
-    if let Some((session, message)) = steer {
-        let _ = state
-            .harness()
-            .sessions
-            .user_content(&session, vec![json!({"type": "text", "text": message})]);
-    }
+    let (status, text) = questions.post(id, hold, &Value::Object(body.0));
     respond::raw_json(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), text)
 }
 

@@ -2225,8 +2225,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * `GET /api/questions?session=<id>` lists the session's answerable requests (`all=1` adds settled ones);
    * `POST /api/questions/<id>` answers one batch; `POST /api/questions/<id>/hold` is Take time. Requests live in the
    * session log, so a reload or a restart reads them back. A late answer - no turn waiting, because a timed wait ran
-   * out or the process that asked is gone - is delivered as the user message DSH sends: steered into a running turn,
-   * or handed back as `message` for the caller to send as a new turn.
+   * out or the process that asked is gone - comes back as `message`, the user message DSH sends, for the caller to
+   * deliver as a turn (or queue behind a running one).
    */
   if (url.pathname === '/api/questions' || url.pathname.startsWith('/api/questions/')) {
     const service = ctx.get('questions') as import('../questions/service.ts').QuestionService | undefined
@@ -2276,14 +2276,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 200, 'application/json', `${JSON.stringify({ answered: true, late: false, request: outcome.view }, null, 2)}\n`)
         return
       }
-      /** A turn that is running takes the late answer between its rounds, as a steer would; otherwise the caller sends it. */
-      const running = (state.running.get(handle.id) ?? 0) > 0
-      if (running) ctx.session.userContent(handle, [{ type: 'text', text: outcome.message as string }])
+      /**
+       * The caller delivers a late answer, as a turn or queued behind the running one. The server does not steer it in:
+       * a turn on its last step ends without another model call, so a steered answer was measured to go unanswered.
+       */
       respond(
         response,
         200,
         'application/json',
-        `${JSON.stringify({ answered: true, late: true, delivered: running ? 'steer' : 'none', ...(running ? {} : { message: outcome.message }), request: outcome.view }, null, 2)}\n`,
+        `${JSON.stringify({ answered: true, late: true, delivered: 'none', message: outcome.message, request: outcome.view }, null, 2)}\n`,
       )
     } catch (error) {
       refuse(error)

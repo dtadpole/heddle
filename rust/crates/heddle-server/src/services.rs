@@ -586,13 +586,12 @@ pub struct ActivityItem {
 /// The questions a model asks a person (`ask_user_question`), as the three routes see them.
 ///
 /// The binary adapts `heddle-questions`, whose answers are already the TypeScript route's exact status and body;
-/// the server only matches the path and, for a late answer to a session with a running turn, appends the returned
-/// text as the user message, as a steer would.
+/// the server only matches the path. A late answer comes back in the body for the page to deliver.
 pub trait QuestionService: Send + Sync {
     /// `GET /api/questions?session=<id>[&all=1]`: the status and the body.
     fn get(&self, session: Option<&str>, all: bool) -> (u16, String);
-    /// `POST /api/questions/<id>` (or its `/hold`): the status, the body, and the user message to steer in.
-    fn post(&self, id: &str, hold: bool, body: &Value, running: &dyn Fn(&str) -> bool) -> (u16, String, Option<(String, String)>);
+    /// `POST /api/questions/<id>` (or its `/hold`): the status and the body.
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String);
 }
 
 /// One Lead session's team as the view shows it — the same state the tools see.

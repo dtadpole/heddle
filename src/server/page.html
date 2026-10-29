@@ -18828,8 +18828,16 @@ async function questionSubmit() {
     }
     questionDraftDrop(shown.request.id)
     hideQuestion()
-    /** An answer the turn no longer waits for is the user message DSH sends; the composer sends it as a turn. */
-    if (body.late === true && body.delivered === 'none' && typeof body.message === 'string') void sendNow(body.message)
+    /**
+     * An answer the turn no longer waits for is the user message DSH sends. The composer delivers it: as a turn when
+     * nothing runs, and queued behind a turn that is still running - which is how a timed question's turn usually
+     * looks for a moment after its deadline. Steering it in was measured to lose it: a turn on its last step ends
+     * without another model call, so the answer sat in the log unanswered.
+     */
+    if (body.late === true && typeof body.message === 'string') {
+      if (anyRunning()) enqueue(body.message, 'queue')
+      else void sendNow(body.message)
+    }
   } catch (error) {
     note.textContent = `could not send the answer: ${(error && error.message) || error}`
     note.dataset.kind = 'error'
