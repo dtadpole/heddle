@@ -550,3 +550,41 @@ test('a page redraws a rename and a new workspace made elsewhere, without a relo
     await server.close()
   }
 })
+
+test('an approval answered on one page closes on every page', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const outsideDir = fixtureDir('stream-approve-outside')
+  const server = await startServer('approve', escalationSteps(join(outsideDir, 'outside.txt')))
+  const pages = [await openBrowser({ width: 1280, height: 900 }), await openBrowser({ width: 1280, height: 900 })]
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'two pages' })
+    const session = created.json.session
+    for (const page of pages) {
+      await page.goto(server.url)
+      await page.waitFor('document.body.dataset.ready === "true"', 25_000)
+      await page.waitFor(`document.querySelector('#tree li[data-session-id="${session}"]') !== null`, 10_000)
+      await page.evaluate(`(document.querySelector('li[data-session-id="${session}"] .row') || document.querySelector('li[data-session-id="${session}"]')).click()`)
+      assert.ok(await page.waitFor(`document.getElementById('session-title').textContent.includes('two pages')`, 10_000), 'each page has the session open')
+    }
+
+    /** One question, shown on both pages. */
+    const turn = runTurn(server, cookie, { session, prompt: 'write outside' })
+    for (const page of pages) {
+      assert.ok(await page.waitFor('document.getElementById("approval-card").hidden === false', 20_000), 'both pages show the question')
+    }
+
+    /** DSH ends the waterfall for every client once one answers: the other page's card goes without being pressed. */
+    await pages[0].evaluate('document.getElementById("approval-reject").click()')
+    assert.ok(await pages[0].waitFor('document.getElementById("approval-card").hidden === true', 10_000), 'the answering page closes its card')
+    assert.ok(await pages[1].waitFor('document.getElementById("approval-card").hidden === true', 5000), 'and the other page closes the same card on its own')
+    assert.equal(await pages[1].evaluate('document.getElementById("approval-note").hidden'), true, 'with no refusal note: nobody pressed a stale card')
+    assert.equal((await turn).status, 200, 'the turn ended once its question was answered')
+  } finally {
+    for (const page of pages) page.close()
+    removeDir(outsideDir)
+    await server.close()
+  }
+})

@@ -11808,10 +11808,34 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
  */
 const approvalCard = document.getElementById('approval-card')
 let approvalPending = null
+/* approval-settle:begin */
+/**
+ * When the approval card closes without being pressed (phase B item 5), as plain rules so they are tested on their own
+ * (test/approval-settle.test.ts).
+ */
+const ApprovalSettle = {
+  /** A settled frame closes the card when it names the question the card shows. */
+  closesOn(pendingId, settled) {
+    return typeof pendingId === 'string' && pendingId.length > 0 && settled !== null && typeof settled === 'object' && settled.id === pendingId
+  },
+  /**
+   * A pending list closes the card when it no longer holds the card's question — but only a list asked for after the
+   * card was shown, so a push that raced the read is not undone.
+   */
+  staleAfterPoll(pendingId, shownAt, askedAt, requests) {
+    if (typeof pendingId !== 'string' || pendingId.length === 0) return false
+    if (!(askedAt > shownAt)) return false
+    return !(Array.isArray(requests) ? requests : []).some((entry) => entry !== null && typeof entry === 'object' && entry.id === pendingId)
+  },
+}
+/* approval-settle:end */
+/** When the card was last shown: a pending list read before that cannot speak for the question it shows. */
+let approvalShownAt = 0
 function showApproval(request) {
   if (request === null || typeof request !== 'object') return
   if (request.session !== undefined && current !== null && request.session !== current) return
   approvalPending = request
+  approvalShownAt = performance.now()
   approvalCard.dataset.id = typeof request.id === 'string' ? request.id : ''
   document.getElementById('approval-reason').textContent = request.displayReason ?? request.reason ?? ''
   approvalCard.hidden = false
@@ -11868,12 +11892,35 @@ events.addEventListener('approval', (message) => {
     // a frame that is not a question is not this card's business
   }
 })
+/**
+ * A question answered anywhere closes here too (phase B item 5).
+ *
+ * DSH ends an approval waterfall for every client once one answers; this page used to keep its card until it was
+ * pressed, and pressing it then got a 409. The server announces every accepted answer as `approval-settled`, and the
+ * card for that question goes. A question settled without an answer (a timeout, a Stop) is caught by the poll below.
+ */
+events.addEventListener('approval-settled', (message) => {
+  try {
+    const settled = JSON.parse(message.data)
+    if (ApprovalSettle.closesOn(approvalPending?.id, settled)) hideApproval()
+  } catch {
+    // a frame that is not JSON settles nothing
+  }
+})
 async function refreshApprovals() {
   try {
+    const askedAt = performance.now()
     const response = await fetch('/api/approvals')
     if (!response.ok) return
     const body = await response.json()
-    const request = (body.requests ?? []).find((entry) => entry.session === undefined || entry.session === current)
+    const requests = Array.isArray(body.requests) ? body.requests : []
+    /**
+     * The pending list is the authority on what is still waiting: a card whose question is no longer in it was
+     * settled elsewhere — answered on another page, timed out, or withdrawn by a Stop — and goes. Only a list read
+     * after the card was shown may close it, so a push that raced this read is not undone.
+     */
+    if (ApprovalSettle.staleAfterPoll(approvalPending?.id, approvalShownAt, askedAt, requests)) hideApproval()
+    const request = requests.find((entry) => entry.session === undefined || entry.session === current)
     if (request !== undefined) showApproval(request)
   } catch {
     // a page that cannot read pending questions still answers the next one it is shown
