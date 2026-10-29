@@ -64,6 +64,12 @@ export interface WorkspaceStoreShape {
   /** Workspace ids in the collection's own order. */
   readonly workspaceIds: readonly string[]
   readonly workspaces: Record<string, WorkspaceRecord>
+  /**
+   * The workspace first use created (see {@link WorkspaceService.initializeDefault}), kept after its registration is
+   * deleted — DSH's `defaultWorkspaceId`, which is what stops an emptied registry from being given it back. Absent
+   * until a first use happens, so a record that never had one is written exactly as before.
+   */
+  readonly defaultWorkspaceId?: string
 }
 
 /**
@@ -89,6 +95,25 @@ export interface WorkspaceAddition {
 export function defaultWorkspaceFile(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.HEDDLE_HOME ?? join(homedir(), '.heddle')
   return join(home, 'workspaces.json')
+}
+
+/**
+ * The first-use folder's own name: DSH's `DEFAULT_WORKSPACE_DIRECTORY` (dsh-api-workspace-controller
+ * lib/types/default-workspace.js). Fixed and language-neutral, so one install keeps one path; the workspace's first
+ * title is this same name, which the page labels *Default workspace*.
+ */
+export const DEFAULT_WORKSPACE_DIRECTORY = 'default-workspace'
+
+/**
+ * Where first use puts its workspace: `$HEDDLE_HOME/default-workspace`, else `~/.heddle/default-workspace`.
+ *
+ * DSH uses `<Documents>/deepseek-harness/default-workspace` (lib/index.js:609-640). Heddle's counterpart of that
+ * product folder is its own home, so first use never reaches into the user's Documents — a protected folder whose
+ * every access the OS asks about.
+ */
+export function defaultWorkspaceDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HEDDLE_HOME ?? join(homedir(), '.heddle')
+  return join(home, DEFAULT_WORKSPACE_DIRECTORY)
 }
 
 export const Config = Schema.object({
@@ -138,6 +163,7 @@ export class WorkspaceService extends Service {
         version?: number
         workspaceIds?: string[]
         workspaces?: Record<string, Partial<WorkspaceRecord> & { sessionIds?: unknown }>
+        defaultWorkspaceId?: unknown
       }
       const workspaces: Record<string, WorkspaceRecord> = {}
       for (const [id, record] of Object.entries(parsed.workspaces ?? {})) {
@@ -155,7 +181,12 @@ export class WorkspaceService extends Service {
           updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
         }
       }
-      return { version: 3, workspaceIds: parsed.workspaceIds ?? [], workspaces }
+      return {
+        version: 3,
+        workspaceIds: parsed.workspaceIds ?? [],
+        workspaces,
+        ...(typeof parsed.defaultWorkspaceId === 'string' ? { defaultWorkspaceId: parsed.defaultWorkspaceId } : {}),
+      }
     } catch {
       return { version: 3, workspaceIds: [], workspaces: {} }
     }
@@ -214,6 +245,39 @@ export class WorkspaceService extends Service {
     const before = this.find(path)
     const record = this.ensure(path, title, { origin: 'added' })
     return { record, created: before === undefined }
+  }
+
+  /**
+   * First use: create or reuse the default workspace — DSH's `workspace/initializeDefault`.
+   *
+   * DSH's rules (dsh-workspace lib/index.js:425-440), kept as they are:
+   *
+   * - once a first use has happened, the answer is **that** workspace, or nothing when its registration was deleted:
+   *   deleting it turns first use off for good, so an emptied list is not handed the folder back;
+   * - otherwise it applies only to an **empty install** — no workspace record of any kind and no session at all — and
+   *   anything else answers nothing, which is not an error;
+   * - the folder is made when missing and reused when present, and the workspace is titled after the folder's own name;
+   * - no session is started and nothing is sent. The page shows the workspace and aims the composer at it, as *Add
+   *   workspace* does (D-056: a heddle session writes a definition into its folder, so none is started unasked).
+   *
+   * `all` is every session the store holds, archived and subagent ones included.
+   */
+  initializeDefault(all: readonly SessionMeta[], directory: string = defaultWorkspaceDirectory()): WorkspaceRecord | undefined {
+    const shape = this.read()
+    if (shape.defaultWorkspaceId !== undefined) return shape.workspaces[shape.defaultWorkspaceId]
+    if (shape.workspaceIds.length > 0 || Object.keys(shape.workspaces).length > 0 || all.length > 0) return undefined
+    mkdirSync(directory, { recursive: true })
+    const now = new Date().toISOString()
+    const record: WorkspaceRecord = {
+      id: randomUUID(),
+      path: canonicalPath(directory),
+      title: DEFAULT_WORKSPACE_DIRECTORY,
+      origin: 'added',
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.write({ version: 3, workspaceIds: [record.id], workspaces: { [record.id]: record }, defaultWorkspaceId: record.id })
+    return record
   }
 
   /**
