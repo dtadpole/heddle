@@ -2220,6 +2220,78 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * The model's questions to a person (`ask_user_question`), and their answers - DSH's user-questions seam.
+   *
+   * `GET /api/questions?session=<id>` lists the session's answerable requests (`all=1` adds settled ones);
+   * `POST /api/questions/<id>` answers one batch; `POST /api/questions/<id>/hold` is Take time. Requests live in the
+   * session log, so a reload or a restart reads them back. A late answer - no turn waiting, because a timed wait ran
+   * out or the process that asked is gone - is delivered as the user message DSH sends: steered into a running turn,
+   * or handed back as `message` for the caller to send as a new turn.
+   */
+  if (url.pathname === '/api/questions' || url.pathname.startsWith('/api/questions/')) {
+    const service = ctx.get('questions') as import('../questions/service.ts').QuestionService | undefined
+    if (service === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the questions plugin' })}\n`)
+      return
+    }
+    const sessionOf = (id: unknown) => {
+      if (typeof id !== 'string' || !/^session-[0-9a-f-]{36}$/i.test(id)) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a session id is required' })}\n`)
+        return null
+      }
+      const handle = ctx.session.store.open(id)
+      if (handle === null) respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return handle
+    }
+    const refuse = (error: unknown) => {
+      const code = (error as { code?: unknown }).code
+      const status = code === 'NOT_FOUND' ? 404 : code === 'SETTLED' ? 409 : code === 'INVALID_ANSWERS' ? 400 : 500
+      if (status === 500) throw error
+      respond(response, status, 'application/json', `${JSON.stringify({ error: (error as Error).message, code })}\n`)
+    }
+    if (url.pathname === '/api/questions' && request.method === 'GET') {
+      const handle = sessionOf(url.searchParams.get('session'))
+      if (handle === null) return
+      const all = url.searchParams.get('all') === '1'
+      respond(response, 200, 'application/json', `${JSON.stringify({ session: handle.id, requests: service.list(handle, all ? {} : { open: true }) }, null, 2)}\n`)
+      return
+    }
+    const match = /^\/api\/questions\/(question-[0-9a-f-]{36})(\/hold)?$/i.exec(url.pathname)
+    if (match === null || request.method !== 'POST') {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a question route' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    const handle = sessionOf(body.session)
+    if (handle === null) return
+    const id = match[1] as string
+    try {
+      if (match[2] !== undefined) {
+        respond(response, 200, 'application/json', `${JSON.stringify({ request: service.hold(handle, id) }, null, 2)}\n`)
+        return
+      }
+      const outcome = service.answer(handle, id, body.answers)
+      if (!outcome.late) {
+        respond(response, 200, 'application/json', `${JSON.stringify({ answered: true, late: false, request: outcome.view }, null, 2)}\n`)
+        return
+      }
+      /** A turn that is running takes the late answer between its rounds, as a steer would; otherwise the caller sends it. */
+      const running = (state.running.get(handle.id) ?? 0) > 0
+      if (running) ctx.session.userContent(handle, [{ type: 'text', text: outcome.message as string }])
+      respond(
+        response,
+        200,
+        'application/json',
+        `${JSON.stringify({ answered: true, late: true, delivered: running ? 'steer' : 'none', ...(running ? {} : { message: outcome.message }), request: outcome.view }, null, 2)}\n`,
+      )
+    } catch (error) {
+      refuse(error)
+    }
+    return
+  }
+
+  /**
    * Draw text as a document.
    *
    * The page's answer arrives as deltas and is plain text until the turn ends; at that point it is the same
