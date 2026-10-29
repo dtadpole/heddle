@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, rmSync, statSync, chmodSync, writeFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, chmodSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 import { compose, ConfigError, defaultLayers, expandHome, readLayerText, referencesIn, resolveEnv, resolveProfile, type ComposedRow, type Layer, type NamedLayer } from './schema.ts'
@@ -75,6 +76,28 @@ export interface SettingsNamespace {
   readonly revision: number
   readonly editable: boolean
   readonly reason?: string
+}
+
+/**
+ * Hand the profile patch at `path` to the host's native text editor. DSH's `settings/openSettingsDocument` opens it
+ * with `open -t` on macOS (bypassing a browser file association) and the desktop association elsewhere.
+ */
+export type DocumentOpener = (path: string) => Promise<void>
+
+/** The host's opener: `HEDDLE_OPEN_COMMAND` (an executable given the path) when set, else the platform's own. */
+export function defaultOpener(env: NodeJS.ProcessEnv = process.env): DocumentOpener {
+  const [command, args] =
+    env.HEDDLE_OPEN_COMMAND !== undefined && env.HEDDLE_OPEN_COMMAND !== ''
+      ? [env.HEDDLE_OPEN_COMMAND, [] as string[]]
+      : process.platform === 'darwin'
+        ? ['open', ['-t']]
+        : process.platform === 'win32'
+          ? ['cmd', ['/c', 'start', '']]
+          : ['xdg-open', []]
+  return (path) =>
+    new Promise((resolvePromise, reject) => {
+      execFile(command, [...args, path], { timeout: 15_000 }, (error) => (error ? reject(new Error(`${command} could not open it: ${error.message}`)) : resolvePromise()))
+    })
 }
 
 export interface SettingsView {
@@ -173,6 +196,7 @@ export class SettingsService {
   private readonly validate: Validator
   private readonly schemaOf: SchemaReader
   private serial: Promise<unknown> = Promise.resolve()
+  private opener: DocumentOpener | undefined
 
   // Fields are assigned explicitly: Node runs this file by stripping types, which parameter properties defeat.
   constructor(
@@ -217,6 +241,31 @@ export class SettingsService {
       const entry = view.namespaces.find((candidate) => candidate.ns === ns)
       if (entry === undefined) throw rejected(`entry '${ns}' vanished after the write`)
       return entry
+    })
+    this.serial = run.catch(() => undefined)
+    return run
+  }
+
+  /** Open documents with `open` instead of the host's opener (tests, and a host with its own editor). */
+  useOpener(open: DocumentOpener): this {
+    this.opener = open
+    return this
+  }
+
+  /**
+   * Open the profile patch in the host's text editor, as DSH's `settings/openSettingsDocument` does: the path is the
+   * service's own, never the caller's, and an absent patch is created first (an empty layer) so there is a document to
+   * edit. Runs in turn with writes.
+   */
+  openDocument(): Promise<void> {
+    const run = this.serial.then(async () => {
+      const target = this.target
+      if (target === undefined) throw rejected('this run has no profile patch to open; boot a profile or a base layer with a project patch')
+      if (!existsSync(target.path)) {
+        mkdirSync(dirname(target.path), { recursive: true })
+        writeFileSync(target.path, '[]\n')
+      }
+      await (this.opener ?? defaultOpener(this.env))(target.path)
     })
     this.serial = run.catch(() => undefined)
     return run
@@ -280,6 +329,23 @@ export async function handleSettingsRequest(
     if (ns === undefined) return { status: 200, body: view }
     const entry = view.namespaces.find((candidate) => candidate.ns === ns)
     return entry === undefined ? fail(404, 'settings-rejected', `no entry '${ns}'`) : { status: 200, body: entry }
+  }
+  if (method === 'POST' && ns === undefined) {
+    // An action on the collection, so it can never collide with an entry's id: DSH's pathless
+    // `settings/openSettingsDocument`, which a loopback page offers as "Open configuration file".
+    let action: unknown
+    try {
+      action = (JSON.parse(body) as { action?: unknown } | null)?.action
+    } catch {
+      return fail(400, 'bad-request', 'the body must be a JSON object')
+    }
+    if (action !== 'open-document') return fail(400, 'bad-request', "the settings collection takes { \"action\": \"open-document\" }")
+    try {
+      await service.openDocument()
+    } catch (error) {
+      return fail(422, 'settings-rejected', problems(error))
+    }
+    return { status: 200, body: { opened: true } }
   }
   if (method !== 'POST' || ns === undefined) return fail(405, 'bad-request', `${method} is not a settings method here`)
 

@@ -410,6 +410,33 @@ pub struct SettingsService {
     catalog: Box<dyn ComponentCatalog + Send + Sync>,
     revisions: SettingsRevisions,
     writing: Mutex<()>,
+    opener: Option<SettingsOpener>,
+}
+
+/// Hand the profile patch at a path to the host's native text editor; an error is the sentence a page shows. DSH's
+/// `settings/openSettingsDocument` opens it with `open -t` on macOS (bypassing a browser file association) and the
+/// desktop association elsewhere.
+pub type SettingsOpener = Box<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
+
+/// The host's opener: `HEDDLE_OPEN_COMMAND` (an executable given the path) when set, else the platform's own.
+pub fn default_opener(env: &Env) -> SettingsOpener {
+    let (command, args): (String, Vec<&'static str>) = match env.get("HEDDLE_OPEN_COMMAND") {
+        Some(command) if !command.is_empty() => (command.to_owned(), Vec::new()),
+        _ if cfg!(target_os = "macos") => ("open".to_owned(), vec!["-t"]),
+        _ if cfg!(windows) => ("cmd".to_owned(), vec!["/c", "start", ""]),
+        _ => ("xdg-open".to_owned(), Vec::new()),
+    };
+    Box::new(move |path| {
+        match std::process::Command::new(&command)
+            .args(&args)
+            .arg(path)
+            .status()
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("{command} could not open it: {status}")),
+            Err(error) => Err(format!("{command} could not open it: {error}")),
+        }
+    })
 }
 
 impl SettingsService {
@@ -430,7 +457,52 @@ impl SettingsService {
             catalog,
             revisions: SettingsRevisions::default(),
             writing: Mutex::new(()),
+            opener: None,
         })
+    }
+
+    /// Open documents with `open` instead of the host's opener (tests, and a host with its own editor).
+    #[must_use]
+    pub fn with_opener(mut self, open: SettingsOpener) -> Self {
+        self.opener = Some(open);
+        self
+    }
+
+    /// Open the profile patch in the host's text editor, as DSH's `settings/openSettingsDocument` does: the path is
+    /// the service's own, never the caller's, and an absent patch is created first (an empty layer) so there is a
+    /// document to edit. Runs in turn with writes.
+    ///
+    /// # Errors
+    ///
+    /// A run with no profile patch, a patch that cannot be created, or an opener that fails, as `Rejected`.
+    pub fn open_document(&self) -> Result<(), SettingsError> {
+        let _serial = self
+            .writing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(target) = &self.target else {
+            return Err(SettingsError::Rejected(
+                "this run has no profile patch to open; boot a profile or a base layer with a project patch".into(),
+            ));
+        };
+        if !target.path.exists() {
+            let created = target
+                .path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&target.path, "[]\n"));
+            if let Err(error) = created {
+                return Err(SettingsError::Rejected(format!(
+                    "could not create {}: {error}",
+                    target.path.display()
+                )));
+            }
+        }
+        let result = match &self.opener {
+            Some(open) => open(&target.path),
+            None => default_opener(&self.env)(&target.path),
+        };
+        result.map_err(SettingsError::Rejected)
     }
 
     /// Every entry's form, the target re-read.
@@ -520,6 +592,29 @@ pub fn handle_settings_request(
             },
             Err(error) => fail(422, "settings-rejected", error.problems().join("; ")),
         },
+        // An action on the collection, so it can never collide with an entry's id: DSH's pathless
+        // `settings/openSettingsDocument`, which a loopback page offers as "Open configuration file".
+        ("POST", None) => {
+            let Ok(request @ Value::Object(_)) = serde_json::from_slice::<Value>(body) else {
+                return Some(fail(
+                    400,
+                    "bad-request",
+                    "the body must be a JSON object".into(),
+                ));
+            };
+            if request.get("action").and_then(Value::as_str) != Some("open-document") {
+                return Some(fail(
+                    400,
+                    "bad-request",
+                    "the settings collection takes { \"action\": \"open-document\" }".into(),
+                ));
+            }
+            match service.open_document() {
+                Ok(()) => ok(serde_json::json!({ "opened": true })),
+                Err(SettingsError::Rejected(error)) => fail(422, "settings-rejected", error),
+                Err(other) => fail(422, "settings-rejected", other.to_string()),
+            }
+        }
         ("POST", Some(ns)) => {
             let Ok(request @ Value::Object(_)) = serde_json::from_slice::<Value>(body) else {
                 return Some(fail(
@@ -1810,6 +1905,119 @@ mod tests {
         );
         let parsed = parse_block(&text, Path::new("/tmp/x.yml"), &Env::default()).unwrap();
         assert_eq!(parsed, vec![("r".to_string(), value)]);
+    }
+
+    #[test]
+    fn opening_the_configuration_file_creates_an_absent_patch_and_hands_its_path_to_the_opener() {
+        let fixture = Fixture::new("open-document");
+        let opened: std::sync::Arc<Mutex<Vec<PathBuf>>> = std::sync::Arc::default();
+        let seen = std::sync::Arc::clone(&opened);
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap()
+        .with_opener(Box::new(move |path| {
+            seen.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }));
+        assert!(!fixture.patch_file().exists());
+        let answer = handle_settings_request(
+            &service,
+            "POST",
+            "/api/settings",
+            json!({ "action": "open-document" }).to_string().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body, json!({ "opened": true }));
+        assert_eq!(
+            opened.lock().unwrap().clone(),
+            vec![fixture.patch_file()],
+            "the service's own path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.patch_file()).unwrap(),
+            "[]\n",
+            "an empty layer"
+        );
+        assert!(service.describe().is_ok(), "the profile still composes");
+        std::fs::write(
+            fixture.patch_file(),
+            "- patch:\n    - id: tools\n      config: {bashTimeoutMs: 5}\n",
+        )
+        .unwrap();
+        service.open_document().unwrap();
+        assert!(
+            std::fs::read_to_string(fixture.patch_file())
+                .unwrap()
+                .contains("bashTimeoutMs: 5"),
+            "an existing patch is opened as it is"
+        );
+        std::fs::remove_dir_all(&fixture.root).ok();
+    }
+
+    #[test]
+    fn a_run_with_no_profile_patch_an_unknown_action_and_a_failing_opener_are_refused() {
+        let fixture = Fixture::new("open-refused");
+        // A base-layer run without its project patch has no write target, as `settings_target` rules.
+        let project = fixture.root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("cordis.yml"), "[]\n").unwrap();
+        let base_only = LayerOptions {
+            profile: None,
+            base: Some(project.join("cordis.yml")),
+            patches: Vec::new(),
+            include_project_patch: false,
+        };
+        let none = SettingsService::new(
+            &base_only,
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap()
+        .with_opener(Box::new(|_| Ok(())));
+        let call = |service: &SettingsService, body: Value| {
+            handle_settings_request(
+                service,
+                "POST",
+                "/api/settings",
+                body.to_string().as_bytes(),
+            )
+            .unwrap()
+        };
+        let refused = call(&none, json!({ "action": "open-document" }));
+        assert_eq!(refused.status, 422);
+        assert!(
+            refused.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("no profile patch to open")
+        );
+        assert_eq!(
+            call(&none, json!({ "action": "delete-everything" })).status,
+            400
+        );
+        let failing = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap()
+        .with_opener(Box::new(|_| {
+            Err("open could not open it: no editor".to_string())
+        }));
+        let failed = call(&failing, json!({ "action": "open-document" }));
+        assert_eq!(failed.status, 422);
+        assert_eq!(
+            failed.body,
+            json!({ "code": "settings-rejected", "error": "open could not open it: no editor" })
+        );
+        std::fs::remove_dir_all(&fixture.root).ok();
     }
 
     #[test]

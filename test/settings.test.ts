@@ -238,3 +238,38 @@ test('the routes answer as DSH settings calls do', async () => {
   assert.equal(await handleSettingsRequest(service, 'GET', '/api/status', ''), undefined)
   f.done()
 })
+
+test('opening the configuration file creates an absent profile patch and hands its path to the opener', async () => {
+  const f = fixture('open-document')
+  const opened: string[] = []
+  const service = f.service().useOpener(async (path) => {
+    opened.push(path)
+  })
+  assert.equal(existsSync(f.patchFile), false)
+  const answer = await handleSettingsRequest(service, 'POST', '/api/settings', JSON.stringify({ action: 'open-document' }))
+  assert.deepEqual(answer, { status: 200, body: { opened: true } })
+  assert.deepEqual(opened, [f.patchFile], 'the path is the service’s own, never the caller’s')
+  assert.equal(readFileSync(f.patchFile, 'utf8'), '[]\n', 'an empty layer, so the profile still composes')
+  assert.equal(compose(defaultLayers({ profile: 'dev', env: f.env }), f.env).length > 0, true)
+  writeFileSync(f.patchFile, '- patch:\n    - id: tools\n      config: {bashTimeoutMs: 5}\n')
+  await service.openDocument()
+  assert.match(readFileSync(f.patchFile, 'utf8'), /bashTimeoutMs: 5/, 'an existing patch is opened as it is')
+  f.done()
+})
+
+test('a run with no profile patch, an unknown action and a failing opener are refused', async () => {
+  const f = fixture('open-refused')
+  const layers = defaultLayers({ profile: 'dev', env: f.env })
+  const none = new SettingsService(layers, undefined, f.env, validate, schemaOf).useOpener(async () => {})
+  const refused = await handleSettingsRequest(none, 'POST', '/api/settings', JSON.stringify({ action: 'open-document' }))
+  assert.equal(refused?.status, 422)
+  assert.match(String((refused?.body as { error: string }).error), /no profile patch to open/)
+  const unknown = await handleSettingsRequest(none, 'POST', '/api/settings', JSON.stringify({ action: 'delete-everything' }))
+  assert.equal(unknown?.status, 400)
+  const failing = f.service().useOpener(async () => {
+    throw new Error('open could not open it: no editor')
+  })
+  const failed = await handleSettingsRequest(failing, 'POST', '/api/settings', JSON.stringify({ action: 'open-document' }))
+  assert.deepEqual(failed, { status: 422, body: { code: 'settings-rejected', error: 'open could not open it: no editor' } })
+  f.done()
+})
