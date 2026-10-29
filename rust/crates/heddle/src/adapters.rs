@@ -800,6 +800,74 @@ impl heddle_goal::SessionLog for StoreLog {
     }
 }
 
+impl heddle_questions::QuestionLog for StoreLog {
+    fn open(&self, id: &str) -> Option<String> {
+        StoreLog::open(self, id)
+    }
+
+    fn read(&self, session: &str) -> Result<Vec<Value>, heddle_questions::LogError> {
+        StoreLog::read(self, session).map_err(heddle_questions::LogError)
+    }
+
+    fn append(
+        &self,
+        session: &str,
+        event: serde_json::Map<String, Value>,
+    ) -> Result<Value, heddle_questions::LogError> {
+        StoreLog::append(self, session, event).map_err(heddle_questions::LogError)
+    }
+}
+
+/// `src/questions/service.ts`: the questions a model asks a person, folded from the session log.
+pub struct QuestionsComponent;
+
+impl Component for QuestionsComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let log = StoreLog {
+            sessions: session_service(services, "questions")?,
+        };
+        let config = heddle_questions::QuestionConfig::from_value(Some(config));
+        services.provide(
+            "questions",
+            Arc::new(heddle_questions::QuestionService::new(Arc::new(log), config)),
+        );
+        Ok(())
+    }
+}
+
+/// `src/plugins/questions-tool.ts`: `ask_user_question` in the registry.
+pub struct QuestionsToolComponent;
+
+impl Component for QuestionsToolComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["questions".to_owned(), "tools".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let questions = services
+            .get::<Arc<heddle_questions::QuestionService>>("questions")
+            .ok_or_else(|| "questions-tool: the question service is not provided".to_owned())?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "questions-tool: the tool registry is not provided".to_owned())?;
+        registry
+            .register(Arc::new(heddle_questions::AskUserTool::new(questions)))
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// The session service a row injects, or the sentence naming it.
 fn session_service(
     services: &Services,
