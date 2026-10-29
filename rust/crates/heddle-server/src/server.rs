@@ -1063,18 +1063,44 @@ async fn flags_session(
     if pinned.is_none() && archived.is_none() {
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
-    if archived == Some(true) && state.runs().is_running(id.as_str()) {
-        if body.bool("stop") != Some(true) {
-            return respond::json(
-                StatusCode::CONFLICT,
-                &json!({
-                    "error": format!("session {id} is running; pass stop: true to stop it and archive"),
-                    "code": "active",
-                    "running": state.runs().running(id.as_str()),
-                }),
-            );
+    // The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace`
+    // `archiveSession`, `details.activity`): the turn in progress and the running subagent descendants, which
+    // the page's stop-and-archive dialog lists. A turn is running when this server started it or the agent
+    // runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
+    if archived == Some(true) {
+        let runs = state.runs();
+        let runner = state.harness().turns.clone();
+        let is_running = |session: &str| runs.is_running(session) || runner.is_live(session);
+        let metas: Vec<heddle_session::LineageMeta> = state
+            .harness()
+            .sessions
+            .list()
+            .iter()
+            .filter_map(|meta| serde_json::to_value(meta).ok())
+            .filter_map(|value| {
+                value
+                    .as_object()
+                    .and_then(heddle_session::LineageMeta::from_map)
+            })
+            .collect();
+        let activity = heddle_session::session_activity(id.as_str(), &metas, is_running);
+        if !activity.is_empty() {
+            if body.bool("stop") != Some(true) {
+                return respond::json(
+                    StatusCode::CONFLICT,
+                    &json!({
+                        "error": format!("session {id} is running; pass stop: true to stop it and archive"),
+                        "code": "active",
+                        "running": runs.running(id.as_str()),
+                        "activity": activity,
+                    }),
+                );
+            }
+            for session in heddle_session::activity_sessions(id.as_str(), &activity) {
+                runs.abort(&session);
+                runner.interrupt(&session);
+            }
         }
-        state.runs().abort(id.as_str());
     }
     match state
         .harness()
@@ -2905,6 +2931,110 @@ mod tests {
         assert!(text.contains(id), "{text}");
         assert!(guard.is_cancelled(), "the turn's token is cancelled");
         drop(guard);
+    }
+
+    /// DSH's `workspace/session-active` refusal names the running work (`details.activity`); the page's
+    /// stop-and-archive dialog lists it, and `{stop: true}` stops it and archives (R-developer-eight-13).
+    #[tokio::test]
+    async fn archiving_a_running_session_is_refused_with_its_activity_until_stop_is_said() {
+        let (router, state) = app("archive-activity");
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let guard = state.runs().begin(id);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let uri = format!("/api/sessions/{id}/flags");
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "active");
+        assert_eq!(body["activity"], json!([{ "kind": "turn" }]), "{body}");
+        assert!(!guard.is_cancelled(), "a refusal stops nothing");
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(guard.is_cancelled(), "stop: true cancels the turn");
+        drop(guard);
+    }
+
+    /// A runner whose agent runtime holds turns the server did not start, and records what it was asked to stop.
+    struct LiveTurns {
+        live: Vec<String>,
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TurnRunner for LiveTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Ok(TurnOutcome::default()) })
+        }
+        fn is_live(&self, session: &str) -> bool {
+            self.live.iter().any(|id| id == session)
+        }
+        fn interrupt(&self, session: &str) -> bool {
+            self.interrupted.lock().unwrap().push(session.to_owned());
+            self.is_live(session)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_with_a_running_subagent_is_refused_and_the_stop_reaches_the_child() {
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        let mut sessions = Sessions::with_one();
+        let mut rest = Map::new();
+        rest.insert("parentSession".into(), Value::String(parent.into()));
+        rest.insert("origin".into(), Value::String("subagent".into()));
+        sessions.metas.push(SessionMeta {
+            id: child.into(),
+            title: Some("look things up".into()),
+            rest,
+            ..SessionMeta::default()
+        });
+        let runner = Arc::new(LiveTurns {
+            live: vec![child.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner.clone(),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-subagent")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let uri = format!("/api/sessions/{parent}/flags");
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["activity"],
+            json!([{ "kind": "subagent", "items": [{ "id": child, "label": "look things up" }] }]),
+            "{body}"
+        );
+        assert!(runner.interrupted.lock().unwrap().is_empty());
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *runner.interrupted.lock().unwrap(),
+            vec![parent.to_owned(), child.to_owned()]
+        );
     }
 
     /// One raw HTTP/1.1 exchange, because the verifiers speak over a socket rather than through

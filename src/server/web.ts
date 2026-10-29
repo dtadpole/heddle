@@ -28,6 +28,8 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { activitySessions, sessionActivity } from '../session/activity.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -1340,23 +1342,38 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Archiving a session with a turn in flight is refused unless the caller says to stop it, which is DSH's
+     * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
      * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     *
+     * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
+     * `details.activity`): the turn in progress and the running subagent descendants, which the page's stop-and-archive
+     * dialog lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn,
+     * a teammate's, a notice's), because a session the page did not start can still be working.
      */
     if (archived === true) {
-      const running = state.running.get(id) ?? 0
-      if (running > 0) {
+      const turns = ctx.get('turns') as TurnRegistry | undefined
+      const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
+      const activity = sessionActivity(id, ctx.session.list(), isRunning)
+      if (activity.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
-            `${JSON.stringify({ error: `session ${id} is running; pass stop: true to stop it and archive`, code: 'active', running })}\n`,
+            `${JSON.stringify({
+              error: `session ${id} is running; pass stop: true to stop it and archive`,
+              code: 'active',
+              running: state.running.get(id) ?? 0,
+              activity,
+            })}\n`,
           )
           return
         }
-        abortSession(state.controllers, id)
+        for (const sessionId of activitySessions(id, activity)) {
+          abortSession(state.controllers, sessionId)
+          turns?.abort(sessionId, 'session archived')
+        }
       }
     }
     let meta

@@ -343,6 +343,20 @@ pub trait TurnRunner: Send + Sync {
         &self,
         request: TurnRequest,
     ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>>;
+
+    /// Whether the agent runtime has a turn in flight for `session` that this server did not start — a
+    /// subagent's, a teammate's, a settlement notice's (the TypeScript build's `ctx.get('turns').isRunning`).
+    /// The archive route asks it so a session doing work the page never started is still refused. A runner
+    /// without a live-turn registry knows of none.
+    fn is_live(&self, _session: &str) -> bool {
+        false
+    }
+
+    /// Stop every such turn of `session`; whether there was one (`turns.abort`). The stop-and-archive path
+    /// calls it for the session and each running subagent descendant.
+    fn interrupt(&self, _session: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
