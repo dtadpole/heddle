@@ -6,7 +6,7 @@
 //! parent's transcript sees only the `delegate` call and its result; depth and active limits belong to the
 //! runtime, not to the tool's description, so a prompt cannot talk a model past them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
 use futures::future::BoxFuture;
@@ -17,7 +17,9 @@ use heddle_tools::{Tool, ToolArgs, ToolResult, ToolRunContext, ToolSpec, tool_fn
 
 use crate::ports::PortError;
 use crate::turn::{AgentRuntime, RunTurnOptions, run_turn};
-use crate::upstream::{CreateSession, SandboxMode, SessionEvent, SessionHandle, SessionMeta};
+use crate::upstream::{
+    ContentPart, CreateSession, SandboxMode, SessionEvent, SessionHandle, SessionMeta,
+};
 
 /// The stable refusal codes, so a caller (and a model) branches on the code rather than the sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +140,17 @@ pub trait SubagentStore: Send + Sync {
         parent: &SessionHandle,
         child: &SessionHandle,
     ) -> Result<Option<SandboxMode>, PortError>;
+    /// Write a user message into `session` and return its `seq`: a settlement notice written into a parent's
+    /// running turn. The default refuses, for a store that only creates and reads children.
+    fn user_message(
+        &self,
+        session: &SessionHandle,
+        content: Vec<ContentPart>,
+        source: Option<serde_json::Value>,
+    ) -> Result<u64, PortError> {
+        let _ = (session, content, source);
+        Err(PortError("this store cannot write a message".to_owned()))
+    }
 }
 
 /// Run one child turn. Production uses [`subagent_runner`]; a test passes a recorder.
@@ -237,23 +250,27 @@ pub fn final_assistant_text(events: &[SessionEvent]) -> String {
     text.trim().to_owned()
 }
 
-/// Delegate one prompt to a child agent and wait for its answer.
+/// A child created and admitted: what both delegation paths start from.
+struct OpenedChild {
+    parent: SessionHandle,
+    child: SessionHandle,
+    prompt: String,
+    depth: u32,
+}
+
+/// The checks and the child session every delegation starts with, blocking or in the background.
 ///
-/// Refused, in this order: no parent session, a blank prompt, a chain beyond `max_depth`, or `active`
-/// already holding `max_active` parents. The child is created in the parent's folder (the process's
-/// current directory when unrecorded) with the parent's endpoint, model and reasoning level, inherits the
-/// parent's recorded mode, and runs with the parent's `cancel`, so a stopped parent leaves no child behind.
-///
-/// `active` is the tool instance's set of parents with a child in flight; the limit counts its entries,
-/// which is the TypeScript build's rule.
-pub async fn delegate_subagent(
-    deps: &SubagentDeps,
+/// Refused, in this order: no parent session, a blank prompt, a chain beyond `max_depth`, or `in_flight`
+/// children already at `max_active`. The child is created in the parent's folder (the process's current
+/// directory when unrecorded) with the parent's endpoint, model and reasoning level, and inherits the parent's
+/// recorded mode. One function, so the two paths cannot drift apart in what they refuse (`openChild`).
+fn open_child(
+    store: &dyn SubagentStore,
     parent: Option<&SessionHandle>,
     prompt: &str,
     limits: SubagentLimits,
-    cancel: Option<CancellationToken>,
-    active: &Mutex<HashSet<String>>,
-) -> Result<SubagentResult, SubagentError> {
+    in_flight: usize,
+) -> Result<OpenedChild, SubagentError> {
     let Some(parent) = parent else {
         return Err(SubagentError::new(
             SubagentErrorCode::SubagentNoSession,
@@ -268,7 +285,7 @@ pub async fn delegate_subagent(
         ));
     }
 
-    let parent_meta = deps.store.meta(&parent.id);
+    let parent_meta = store.meta(&parent.id);
     let facts = parent_facts(parent_meta.as_ref());
     let child_depth = facts.depth + 1;
     let max_depth = limits.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
@@ -278,14 +295,12 @@ pub async fn delegate_subagent(
             format!("subagent depth {child_depth} exceeds maxDepth {max_depth}"),
         ));
     }
-    // The limit is on children in flight for this tool instance, so a future parallel executor cannot
-    // bypass it by running several calls at once.
+    // The limit is on children in flight, enforced here rather than in the tool so no caller bypasses it.
     let max_active = limits.max_active.unwrap_or(DEFAULT_MAX_ACTIVE);
-    let inflight = active.lock().unwrap().len();
-    if inflight >= max_active {
+    if in_flight >= max_active {
         return Err(SubagentError::new(
             SubagentErrorCode::SubagentBusy,
-            format!("already running {inflight} subagent(s); maxActive is {max_active}"),
+            format!("already running {in_flight} subagent(s); maxActive is {max_active}"),
         ));
     }
 
@@ -293,8 +308,7 @@ pub async fn delegate_subagent(
         .as_ref()
         .and_then(|meta| meta.cwd.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let child = deps
-        .store
+    let child = store
         .create(CreateSession {
             cwd: Some(cwd),
             endpoint: facts.endpoint.clone(),
@@ -309,18 +323,43 @@ pub async fn delegate_subagent(
             SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
         })?;
     // Delegation inherits the parent's mode, so a narrowed session cannot widen itself by spawning a child.
-    deps.store
+    store
         .inherit_recorded_mode(parent, &child)
         .map_err(|error| {
             SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
         })?;
+    Ok(OpenedChild {
+        parent: parent.clone(),
+        child,
+        prompt: prompt.to_owned(),
+        depth: child_depth,
+    })
+}
 
-    // Counted as in flight while the child runs, and released however the delegation ends — the TypeScript
-    // `active.add(parent.id)` with its `finally`.
-    let _in_flight = ActiveGuard::enter(active, &parent.id);
-    deps.run.run(&child, prompt.to_owned(), cancel).await?;
+/// Delegate one prompt to a child agent and **wait** for its answer.
+///
+/// The blocking primitive: the model-facing tool no longer uses it (a delegation starts a background child,
+/// see [`SubagentService`]), but a caller that needs the answer in hand can still drive one child to
+/// completion. The refusals are [`open_child`]'s; the child runs with the caller's `cancel`.
+///
+/// `active` is the caller's set of parents with a child in flight; the limit counts its entries.
+pub async fn delegate_subagent(
+    deps: &SubagentDeps,
+    parent: Option<&SessionHandle>,
+    prompt: &str,
+    limits: SubagentLimits,
+    cancel: Option<CancellationToken>,
+    active: &Mutex<HashSet<String>>,
+) -> Result<SubagentResult, SubagentError> {
+    let in_flight = active.lock().unwrap().len();
+    let opened = open_child(deps.store.as_ref(), parent, prompt, limits, in_flight)?;
+    // Counted as in flight while the child runs, and released however the delegation ends.
+    let _in_flight = ActiveGuard::enter(active, &opened.parent.id);
+    deps.run
+        .run(&opened.child, opened.prompt.clone(), cancel)
+        .await?;
 
-    let answer = final_assistant_text(&deps.store.read(&child));
+    let answer = final_assistant_text(&deps.store.read(&opened.child));
     if answer.is_empty() {
         return Err(SubagentError::new(
             SubagentErrorCode::SubagentFailed,
@@ -328,9 +367,9 @@ pub async fn delegate_subagent(
         ));
     }
     Ok(SubagentResult {
-        child_session: child.id,
+        child_session: opened.child.id,
         text: answer,
-        depth: child_depth,
+        depth: opened.depth,
     })
 }
 
@@ -396,6 +435,8 @@ impl SubagentRun for RuntimeRunner {
             })?;
             let mut options = RunTurnOptions::new(child.clone(), endpoint, prompt);
             options.cancel = cancel;
+            // A child's turn is tagged, so a scripted check can give the child a script of its own.
+            options.purpose = Some("subagent".to_owned());
             run_turn(&runtime, options).await.map_err(|error| {
                 SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
             })?;
@@ -450,8 +491,9 @@ impl SubagentRun for LateSubagentRunner {
     }
 }
 
-/// The whole `subagent-tool` row: its configuration read, and its `delegate` tool registered into `registry` over
-/// the session store, running children through `runner` (bind it to the runtime after boot).
+/// The whole `subagent-tool` row: its configuration read, and its `delegate` tool registered into `registry`
+/// over a [`SubagentService`] built from the session store, `runner` (bind it to the runtime after boot) and
+/// `deliver`. Returns the service, which a one-shot host settles before it prints its answer.
 ///
 /// Fails, naming the reason, when the configuration has an unknown key or a tool of the same name cannot be
 /// registered.
@@ -460,27 +502,431 @@ pub fn register_subagent_row(
     config: &serde_json::Value,
     store: Arc<dyn SubagentStore>,
     runner: Arc<LateSubagentRunner>,
-) -> Result<(), String> {
+    deliver: Arc<dyn SubagentDeliver>,
+) -> Result<Arc<SubagentService>, String> {
     let config =
         SubagentConfig::from_row(config).map_err(|error| format!("subagent-tool: {error}"))?;
     let deps = SubagentDeps { store, run: runner };
-    for tool in subagent_tools(deps, config.into()) {
+    let service = SubagentService::new(deps, deliver, config.into());
+    for tool in subagent_tools(Arc::clone(&service)) {
         registry
             .register(tool)
             .map_err(|error| format!("subagent-tool: {error}"))?;
     }
-    Ok(())
+    Ok(service)
 }
 
-/// The model-facing `delegate` tool: one call, one child agent, its final answer as the result
-/// (`child <id> (depth <n>) answered:\n<text>`, with `data: { childSession, depth, text }`); a refusal is a
-/// result with the [`SubagentErrorCode`] as its code.
-pub fn subagent_tools(deps: SubagentDeps, limits: SubagentLimits) -> Vec<Arc<dyn Tool>> {
-    // One in-flight set per tool instance, shared by every call it makes.
-    let active = Arc::new(Mutex::new(HashSet::new()));
+/// How a background child's run ended, in DSH's settlement vocabulary (`dsh-subagent` stop reasons).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStopReason {
+    /// The child's turn ended normally.
+    Completed,
+    /// The child was stopped.
+    Aborted,
+    /// The child's turn failed.
+    Error,
+}
+
+/// The opening line of a settlement notice, DSH's `settlementSummary` word for word.
+///
+/// A delegate child is one-shot: it takes no follow-up message (heddle's continuable child is the teammate), so
+/// a completed child is worded as DSH words a child that cannot receive more.
+pub fn settlement_summary(child_id: &str, stop: SubagentStopReason) -> String {
+    let subject = format!("Background subagent {child_id}");
+    match stop {
+        SubagentStopReason::Completed => {
+            format!("{subject} finished. It cannot receive follow-up messages.")
+        }
+        SubagentStopReason::Aborted => format!("{subject} was stopped before it finished."),
+        SubagentStopReason::Error => format!("{subject} failed before it finished."),
+    }
+}
+
+/// A settled child's report to its parent: the user-role message DSH's runtime delivers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementNotice {
+    /// The message's text blocks, in order.
+    pub texts: Vec<String>,
+    /// The summary line, also carried in the source.
+    pub summary: String,
+    /// The child that settled.
+    pub sender_session_id: String,
+}
+
+impl SettlementNotice {
+    /// The message's `source`: `{ kind: 'subagent-settled', form: 'notice', summary, senderSessionId }`.
+    pub fn source(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "subagent-settled",
+            "form": "notice",
+            "summary": self.summary,
+            "senderSessionId": self.sender_session_id,
+        })
+    }
+
+    /// The text blocks as content parts.
+    pub fn parts(&self) -> Vec<ContentPart> {
+        self.texts.iter().cloned().map(ContentPart::text).collect()
+    }
+}
+
+/// The settlement notice, shaped as DSH's `createSettlementMessage`: the summary line, then
+/// `Its closing message:` and the child's closing text, or `It left no closing message.` when it has none, then
+/// any diagnostic.
+pub fn settlement_notice(
+    child_id: &str,
+    stop: SubagentStopReason,
+    closing_text: &str,
+    diagnostic: Option<&str>,
+) -> SettlementNotice {
+    let summary = settlement_summary(child_id, stop);
+    let closing = closing_text.trim();
+    let mut texts = vec![summary.clone()];
+    if closing.is_empty() {
+        texts.push("It left no closing message.".to_owned());
+    } else {
+        texts.push("Its closing message:".to_owned());
+        texts.push(closing.to_owned());
+    }
+    if let Some(diagnostic) = diagnostic.filter(|text| !text.is_empty()) {
+        texts.push(diagnostic.to_owned());
+    }
+    SettlementNotice {
+        texts,
+        summary,
+        sender_session_id: child_id.to_owned(),
+    }
+}
+
+/// Hands a settled child's notice to its parent. Production uses [`subagent_deliverer`]; a test passes a
+/// recorder.
+pub trait SubagentDeliver: Send + Sync {
+    /// Deliver `notice` to `parent`. Resolves once the parent has it **and** has answered it, so a host that
+    /// waits for its children (a one-shot CLI) also waits for the turn the notice started.
+    fn deliver<'a>(
+        &'a self,
+        parent: &'a SessionHandle,
+        notice: SettlementNotice,
+    ) -> BoxFuture<'a, Result<(), SubagentError>>;
+}
+
+/// What [`SubagentService::start`] hands back at once: the child's id and depth, never its answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedSubagent {
+    /// The child's session id.
+    pub child_session: String,
+    /// Its delegation depth.
+    pub depth: u32,
+}
+
+#[derive(Default)]
+struct ServiceState {
+    /// Children in flight, by id; the active limit counts these.
+    in_flight: HashSet<String>,
+    /// Per session, how many of its children are still running or still being reported.
+    pending: HashMap<String, usize>,
+    /// Per parent session, notices delivered.
+    delivered: HashMap<String, usize>,
+}
+
+/// Background delegation, DSH's managed activation: [`start`](Self::start) creates the child and returns at
+/// once, the child runs its turn on its own task, and when it settles its parent receives a settlement notice
+/// through [`SubagentDeliver`].
+///
+/// [`settle`](Self::settle) answers the question a headless host asks before it prints an answer — is any child
+/// of this session still working, or any notice still being answered? — the analogue of DSH's `waitForChildren`
+/// loop (`SubagentService` in the TypeScript build).
+pub struct SubagentService {
+    deps: SubagentDeps,
+    deliver: Arc<dyn SubagentDeliver>,
+    limits: SubagentLimits,
+    state: Mutex<ServiceState>,
+    changed: tokio::sync::Notify,
+}
+
+impl SubagentService {
+    /// A service with nothing in flight.
+    pub fn new(
+        deps: SubagentDeps,
+        deliver: Arc<dyn SubagentDeliver>,
+        limits: SubagentLimits,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            deps,
+            deliver,
+            limits,
+            state: Mutex::new(ServiceState::default()),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, ServiceState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Children of every parent currently in flight.
+    pub fn running(&self) -> usize {
+        self.state().in_flight.len()
+    }
+
+    /// Start one child and return at once.
+    ///
+    /// The refusals are [`open_child`]'s and come back before anything runs. The child's turn takes `cancel`, so
+    /// a parent that is stopped stops its children too, as DSH's session stop cancels its descendants. Must be
+    /// called inside a Tokio runtime: the child runs on a spawned task.
+    pub fn start(
+        self: &Arc<Self>,
+        parent: Option<&SessionHandle>,
+        prompt: &str,
+        cancel: Option<CancellationToken>,
+    ) -> Result<StartedSubagent, SubagentError> {
+        let in_flight = self.state().in_flight.len();
+        let opened = open_child(
+            self.deps.store.as_ref(),
+            parent,
+            prompt,
+            self.limits,
+            in_flight,
+        )?;
+        {
+            let mut state = self.state();
+            state.in_flight.insert(opened.child.id.clone());
+            *state.pending.entry(opened.parent.id.clone()).or_default() += 1;
+        }
+        let started = StartedSubagent {
+            child_session: opened.child.id.clone(),
+            depth: opened.depth,
+        };
+        let service = Arc::clone(self);
+        tokio::spawn(async move { service.run_in_background(opened, cancel).await });
+        Ok(started)
+    }
+
+    /// Wait until no child of `session_id` is running and every notice it was sent has been answered; the
+    /// number of notices delivered to it so far. Work started while waiting (a notice's turn starting another
+    /// child) is waited for too.
+    pub async fn settle(&self, session_id: &str) -> usize {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let state = self.state();
+                if state.pending.get(session_id).copied().unwrap_or(0) == 0 {
+                    return state.delivered.get(session_id).copied().unwrap_or(0);
+                }
+            }
+            notified.await;
+        }
+    }
+
+    async fn run_in_background(
+        self: Arc<Self>,
+        opened: OpenedChild,
+        cancel: Option<CancellationToken>,
+    ) {
+        // Released however this ends, so a panicking child cannot leave its parent waiting for ever.
+        let _pending = PendingGuard {
+            service: Arc::clone(&self),
+            session: opened.parent.id.clone(),
+        };
+        let outcome = self
+            .deps
+            .run
+            .run(&opened.child, opened.prompt.clone(), cancel.clone())
+            .await;
+        let cancelled = cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
+        let (stop, diagnostic) = match outcome {
+            Ok(()) => {
+                // A child settles only after its own children have, so its closing text is final (DSH closes
+                // admission after owned descendants finish).
+                self.settle(&opened.child.id).await;
+                let stop = if cancelled {
+                    SubagentStopReason::Aborted
+                } else {
+                    SubagentStopReason::Completed
+                };
+                (stop, None)
+            }
+            Err(error) => {
+                let stop = if cancelled {
+                    SubagentStopReason::Aborted
+                } else {
+                    SubagentStopReason::Error
+                };
+                (stop, Some(error.message))
+            }
+        };
+        self.state().in_flight.remove(&opened.child.id);
+        let closing = final_assistant_text(&self.deps.store.read(&opened.child));
+        let notice = settlement_notice(&opened.child.id, stop, &closing, diagnostic.as_deref());
+        let delivered = self.deliver.deliver(&opened.parent, notice).await.is_ok();
+        if delivered {
+            *self
+                .state()
+                .delivered
+                .entry(opened.parent.id.clone())
+                .or_default() += 1;
+        }
+    }
+}
+
+impl std::fmt::Debug for SubagentService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubagentService")
+            .field("running", &self.running())
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Counts one child of `session` as pending until dropped, then wakes whoever is settling.
+struct PendingGuard {
+    service: Arc<SubagentService>,
+    session: String,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        {
+            let mut state = self.service.state();
+            if let Some(count) = state.pending.get_mut(&self.session) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.pending.remove(&self.session);
+                }
+            }
+        }
+        self.service.changed.notify_waiters();
+    }
+}
+
+/// Did the session's model see the event at `seq`? True once a model request follows it.
+fn answered_after(events: &[SessionEvent], seq: u64) -> bool {
+    events
+        .iter()
+        .any(|event| event.seq > seq && event.kind == "model/request")
+}
+
+/// The production [`SubagentDeliver`]: a notice reaches its parent the way team mail reaches a member.
+///
+/// Written into a **running** turn, which notices new input between rounds (DSH's steering), or, when the parent
+/// is idle, as the prompt of a new parent turn tagged `subagent-notice`. The loop's last look for new input comes
+/// just before it ends, so a notice written in that window would sit unanswered; the deliverer waits for the
+/// parent to go idle ([`TurnRegistry::when_idle`](crate::TurnRegistry::when_idle)), checks, and answers it with a
+/// turn of its own (`answer_pending`) if the ending turn missed it. Deliveries to one parent run one at a time.
+/// Holds the runtime weakly, as [`subagent_runner`] does.
+pub fn subagent_deliverer(
+    runtime: Weak<AgentRuntime>,
+    store: Arc<dyn SubagentStore>,
+) -> Arc<dyn SubagentDeliver> {
+    Arc::new(RuntimeDeliverer {
+        runtime,
+        store,
+        lanes: Mutex::new(HashMap::new()),
+    })
+}
+
+struct RuntimeDeliverer {
+    runtime: Weak<AgentRuntime>,
+    store: Arc<dyn SubagentStore>,
+    /// One lane per parent, so two notices to one parent are delivered in turn.
+    lanes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl SubagentDeliver for RuntimeDeliverer {
+    fn deliver<'a>(
+        &'a self,
+        parent: &'a SessionHandle,
+        notice: SettlementNotice,
+    ) -> BoxFuture<'a, Result<(), SubagentError>> {
+        Box::pin(async move {
+            let lane = {
+                let mut lanes = self
+                    .lanes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                Arc::clone(lanes.entry(parent.id.clone()).or_default())
+            };
+            let _turn = lane.lock().await;
+            let runtime = self.runtime.upgrade().ok_or_else(|| {
+                SubagentError::new(
+                    SubagentErrorCode::SubagentFailed,
+                    "the agent runtime is gone",
+                )
+            })?;
+            let running = runtime
+                .turns
+                .as_ref()
+                .is_some_and(|turns| turns.is_running(&parent.id));
+            if running {
+                let seq = self
+                    .store
+                    .user_message(parent, notice.parts(), Some(notice.source()))
+                    .map_err(|error| {
+                        SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
+                    })?;
+                if let Some(turns) = &runtime.turns {
+                    turns.when_idle(&parent.id).await;
+                }
+                if answered_after(&self.store.read(parent), seq) {
+                    return Ok(());
+                }
+                return self.wake(&runtime, parent, &notice, true).await;
+            }
+            self.wake(&runtime, parent, &notice, false).await
+        })
+    }
+}
+
+impl RuntimeDeliverer {
+    async fn wake(
+        &self,
+        runtime: &Arc<AgentRuntime>,
+        parent: &SessionHandle,
+        notice: &SettlementNotice,
+        answer_pending: bool,
+    ) -> Result<(), SubagentError> {
+        let meta = self.store.meta(&parent.id);
+        let endpoint = meta
+            .as_ref()
+            .and_then(|meta| meta.endpoint.clone())
+            .or_else(|| runtime.model.default_endpoint())
+            .ok_or_else(|| {
+                SubagentError::new(
+                    SubagentErrorCode::SubagentFailed,
+                    "no endpoint is configured for the parent's turn",
+                )
+            })?;
+        let mut texts = notice.texts.iter().cloned();
+        let first = texts.next().unwrap_or_else(|| notice.summary.clone());
+        let mut options = RunTurnOptions::new(parent.clone(), endpoint, first);
+        options.attachments = texts.map(ContentPart::text).collect();
+        options.source = Some(notice.source());
+        // A turn a notice started, distinguishable by a backend that cares, as a teammate's turn is (`team`).
+        options.purpose = Some("subagent-notice".to_owned());
+        options.model = meta.and_then(|meta| meta.model);
+        options.answer_pending = answer_pending;
+        run_turn(runtime, options)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
+            })
+    }
+}
+
+/// The model-facing `delegate` tool, modelled on DSH's `dsh-tool-subagent`: one call starts one child agent in
+/// the background and returns **at once** with `started subagent <id>` (DSH's start result word for word, with
+/// `data: { childSession, depth, kind: 'activation' }`); the child's closing message reaches the parent later as
+/// a settlement notice. A refusal is a result with the [`SubagentErrorCode`] as its code.
+pub fn subagent_tools(service: Arc<SubagentService>) -> Vec<Arc<dyn Tool>> {
     let spec = ToolSpec {
         name: "delegate".to_owned(),
-        description: "Delegate one task to a child agent that works in its own session and returns its final answer. Use it for a scoped piece of work that benefits from a fresh context; the child sees only the prompt you give it, not this conversation.".to_owned(),
+        description: "Start one task in a child agent that works in its own session. Returns at once with the child id; the child’s final answer arrives later in this conversation as a notice. Use it for a scoped piece of work that benefits from a fresh context; the child sees only the prompt you give it, not this conversation.".to_owned(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -494,47 +940,32 @@ pub fn subagent_tools(deps: SubagentDeps, limits: SubagentLimits) -> Vec<Arc<dyn
         }),
     };
     let tool = tool_fn(spec, move |args: ToolArgs, context: ToolRunContext| {
-        let deps = deps.clone();
-        let active = Arc::clone(&active);
+        let service = Arc::clone(&service);
         Box::pin(async move {
             let prompt = args
                 .get("prompt")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            match delegate_subagent(
-                &deps,
-                context.session.as_ref(),
-                prompt,
-                limits,
-                context.cancel.clone(),
-                &active,
-            )
-            .await
-            {
-                Ok(result) => {
+            match service.start(context.session.as_ref(), prompt, context.cancel.clone()) {
+                Ok(started) => {
                     let data = serde_json::Map::from_iter([
                         (
                             "childSession".to_owned(),
-                            serde_json::json!(result.child_session),
+                            serde_json::json!(started.child_session),
                         ),
-                        ("depth".to_owned(), serde_json::json!(result.depth)),
-                        ("text".to_owned(), serde_json::json!(result.text)),
+                        ("depth".to_owned(), serde_json::json!(started.depth)),
+                        ("kind".to_owned(), serde_json::json!("activation")),
                     ]);
-                    Ok(ToolResult::ok(delegate_output(&result)).with_data(data))
+                    Ok(
+                        ToolResult::ok(format!("started subagent {}", started.child_session))
+                            .with_data(data),
+                    )
                 }
                 Err(error) => Ok(ToolResult::refused(error.code.as_str(), error.message)),
             }
         })
     });
     vec![tool]
-}
-
-/// The output of a successful `delegate` call.
-pub fn delegate_output(result: &SubagentResult) -> String {
-    format!(
-        "child {} (depth {}) answered:\n{}",
-        result.child_session, result.depth, result.text
-    )
 }
 
 #[cfg(test)]
@@ -650,15 +1081,47 @@ mod tests {
     }
 
     #[test]
-    fn a_delegation_result_names_the_child_and_its_depth() {
-        let result = SubagentResult {
-            child_session: "c1".into(),
-            text: "child answer".into(),
-            depth: 1,
-        };
+    fn the_settlement_notice_is_dsh_s_words_for_each_ending() {
+        let done = settlement_notice("c1", SubagentStopReason::Completed, "  the answer  ", None);
         assert_eq!(
-            delegate_output(&result),
-            "child c1 (depth 1) answered:\nchild answer"
+            done.texts,
+            vec![
+                "Background subagent c1 finished. It cannot receive follow-up messages.".to_owned(),
+                "Its closing message:".to_owned(),
+                "the answer".to_owned(),
+            ]
+        );
+        assert_eq!(
+            done.source(),
+            serde_json::json!({
+                "kind": "subagent-settled",
+                "form": "notice",
+                "summary": "Background subagent c1 finished. It cannot receive follow-up messages.",
+                "senderSessionId": "c1",
+            })
+        );
+        assert_eq!(
+            settlement_notice("c2", SubagentStopReason::Completed, "", None).texts[1],
+            "It left no closing message."
+        );
+        assert_eq!(
+            settlement_summary("c3", SubagentStopReason::Error),
+            "Background subagent c3 failed before it finished."
+        );
+        assert_eq!(
+            settlement_summary("c4", SubagentStopReason::Aborted),
+            "Background subagent c4 was stopped before it finished."
+        );
+        let failed = settlement_notice(
+            "c5",
+            SubagentStopReason::Error,
+            "",
+            Some("the model went away"),
+        );
+        assert_eq!(
+            failed.texts.last().unwrap(),
+            "the model went away",
+            "a diagnostic closes the notice"
         );
     }
 
@@ -986,13 +1449,50 @@ mod tests {
         );
     }
 
-    fn delegate_call(
+    /// Records each settlement notice instead of handing it to a parent turn.
+    #[derive(Default)]
+    struct Notices {
+        seen: Mutex<Vec<(String, SettlementNotice)>>,
+    }
+
+    impl Notices {
+        fn seen(&self) -> Vec<(String, SettlementNotice)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl SubagentDeliver for Notices {
+        fn deliver<'a>(
+            &'a self,
+            parent: &'a SessionHandle,
+            notice: SettlementNotice,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                self.seen.lock().unwrap().push((parent.id.clone(), notice));
+                Ok(())
+            })
+        }
+    }
+
+    fn service_with(
         deps: SubagentDeps,
         limits: SubagentLimits,
+    ) -> (Arc<SubagentService>, Arc<Notices>) {
+        let notices = Arc::new(Notices::default());
+        let service = SubagentService::new(
+            deps,
+            Arc::clone(&notices) as Arc<dyn SubagentDeliver>,
+            limits,
+        );
+        (service, notices)
+    }
+
+    fn delegate_call(
+        service: &Arc<SubagentService>,
         args: serde_json::Value,
         parent: Option<SessionHandle>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = heddle_tools::ToolResult>>> {
-        let tools = subagent_tools(deps, limits);
+        let tools = subagent_tools(Arc::clone(service));
         let tool = tools.into_iter().next().unwrap();
         let mut context = ToolContext::new("/w");
         if let Some(parent) = parent {
@@ -1004,35 +1504,220 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_delegate_tool_names_the_child_and_carries_the_data() {
+    async fn the_delegate_tool_answers_the_start_line_and_the_child_reports_by_notice() {
         let store = FakeStore::with(0, Some("child answer"));
-        let deps = deps(&store, Recorder::new(Arc::clone(&store)));
-        let result = delegate_call(
-            deps,
+        let (service, notices) = service_with(
+            deps(&store, Recorder::new(Arc::clone(&store))),
             SubagentLimits::default(),
+        );
+        let result = delegate_call(
+            &service,
             serde_json::json!({ "prompt": "do it" }),
             Some(parent_handle()),
         )
         .await;
-        assert_eq!(
-            result.output,
-            "child child (depth 1) answered:\nchild answer"
-        );
+        assert_eq!(result.output, "started subagent child", "DSH's start line");
         let data = result
             .data
             .expect("the result carries the delegation facts");
         assert_eq!(data["childSession"], "child");
         assert_eq!(data["depth"], 1);
-        assert_eq!(data["text"], "child answer");
+        assert_eq!(data["kind"], "activation");
+        assert!(data.get("text").is_none(), "never the child's answer");
+
+        assert_eq!(service.settle("p").await, 1);
+        let seen = notices.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "p");
+        assert_eq!(seen[0].1.texts[2], "child answer");
+    }
+
+    /// A child that waits for the test to let it finish, so "returns before the child has answered" is proven by
+    /// construction rather than by timing.
+    struct GatedChild {
+        store: Arc<FakeStore>,
+        gate: tokio::sync::Semaphore,
+        fail: Option<&'static str>,
+    }
+
+    impl GatedChild {
+        fn new(store: Arc<FakeStore>, fail: Option<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                store,
+                gate: tokio::sync::Semaphore::new(0),
+                fail,
+            })
+        }
+
+        fn release(&self) {
+            self.gate.add_permits(1);
+        }
+    }
+
+    impl SubagentRun for GatedChild {
+        fn run<'a>(
+            &'a self,
+            _child: &'a SessionHandle,
+            _prompt: String,
+            _cancel: Option<CancellationToken>,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                let _permit = self.gate.acquire().await;
+                if let Some(message) = self.fail {
+                    return Err(SubagentError::new(
+                        SubagentErrorCode::SubagentFailed,
+                        message,
+                    ));
+                }
+                if let Some(answer) = self.store.answer.clone() {
+                    self.store.child_events.lock().unwrap().push(event(
+                        2,
+                        "assistant/completed",
+                        serde_json::json!({ "text": answer }),
+                    ));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_background_start_returns_before_the_child_has_answered_and_settle_waits_for_its_notice()
+     {
+        let store = FakeStore::with(0, Some("the answer"));
+        let child = GatedChild::new(Arc::clone(&store), None);
+        let (service, notices) = service_with(
+            deps(&store, Arc::clone(&child) as Arc<dyn SubagentRun>),
+            SubagentLimits::default(),
+        );
+        let started = service.start(Some(&parent_handle()), "work", None).unwrap();
+        assert_eq!(
+            started,
+            StartedSubagent {
+                child_session: "child".into(),
+                depth: 1
+            }
+        );
+        assert_eq!(
+            service.running(),
+            1,
+            "the child is still in flight when start returns"
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            notices.seen().is_empty(),
+            "nothing is reported before the child settles"
+        );
+        let created = store.created();
+        assert_eq!(
+            created[0].parent_session.as_deref(),
+            Some("p"),
+            "the child names its parent"
+        );
+        assert_eq!(created[0].origin.as_deref(), Some("subagent"));
+
+        child.release();
+        assert_eq!(
+            service.settle("p").await,
+            1,
+            "settle waits for the child and its notice"
+        );
+        assert_eq!(service.running(), 0);
+        assert_eq!(
+            notices.seen()[0].1.texts,
+            vec![
+                "Background subagent child finished. It cannot receive follow-up messages."
+                    .to_owned(),
+                "Its closing message:".to_owned(),
+                "the answer".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_background_start_refuses_synchronously_and_counts_children_in_flight() {
+        let store = FakeStore::with(0, Some("ok"));
+        let child = GatedChild::new(Arc::clone(&store), None);
+        let (service, _) = service_with(
+            deps(&store, Arc::clone(&child) as Arc<dyn SubagentRun>),
+            SubagentLimits {
+                max_depth: Some(2),
+                max_active: Some(1),
+            },
+        );
+        let refused = |result: Result<StartedSubagent, SubagentError>| result.unwrap_err().code;
+        assert_eq!(
+            refused(service.start(None, "x", None)),
+            SubagentErrorCode::SubagentNoSession
+        );
+        assert_eq!(
+            refused(service.start(Some(&parent_handle()), "  ", None)),
+            SubagentErrorCode::SubagentEmptyPrompt
+        );
+        service
+            .start(Some(&parent_handle()), "first", None)
+            .unwrap();
+        assert_eq!(
+            refused(service.start(Some(&parent_handle()), "second", None)),
+            SubagentErrorCode::SubagentBusy,
+            "the first child is still in flight"
+        );
+        child.release();
+        service.settle("p").await;
+        service
+            .start(Some(&parent_handle()), "third", None)
+            .unwrap();
+        child.release();
+        service.settle("p").await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_child_is_reported_with_its_diagnostic_rather_than_lost() {
+        let store = FakeStore::with(0, None);
+        let child = GatedChild::new(Arc::clone(&store), Some("the model went away"));
+        let (service, notices) = service_with(
+            deps(&store, Arc::clone(&child) as Arc<dyn SubagentRun>),
+            SubagentLimits::default(),
+        );
+        service.start(Some(&parent_handle()), "work", None).unwrap();
+        child.release();
+        service.settle("p").await;
+        assert_eq!(
+            notices.seen()[0].1.texts,
+            vec![
+                "Background subagent child failed before it finished.".to_owned(),
+                "It left no closing message.".to_owned(),
+                "the model went away".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_turn_registry_resolves_when_idle_at_the_settle_that_empties_a_session() {
+        let registry = crate::TurnRegistry::new();
+        registry.when_idle("s1").await;
+        let first = registry.begin("s1", None);
+        let second = registry.begin("s1", None);
+        let waiting = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.when_idle("s1").await })
+        };
+        first.settle();
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "one turn is still in flight");
+        second.settle();
+        waiting.await.unwrap();
     }
 
     #[tokio::test]
     async fn the_delegate_tool_reports_a_refusal_by_its_code() {
         let store = FakeStore::with(0, Some("ok"));
-        let deps = deps(&store, Recorder::new(Arc::clone(&store)));
-        let result = delegate_call(
-            deps,
+        let (service, _) = service_with(
+            deps(&store, Recorder::new(Arc::clone(&store))),
             SubagentLimits::default(),
+        );
+        let result = delegate_call(
+            &service,
             serde_json::json!({ "prompt": "  " }),
             Some(parent_handle()),
         )
@@ -1043,14 +1728,11 @@ mod tests {
     #[tokio::test]
     async fn the_delegate_tool_refuses_a_call_with_no_session() {
         let store = FakeStore::with(0, Some("ok"));
-        let deps = deps(&store, Recorder::new(Arc::clone(&store)));
-        let result = delegate_call(
-            deps,
+        let (service, _) = service_with(
+            deps(&store, Recorder::new(Arc::clone(&store))),
             SubagentLimits::default(),
-            serde_json::json!({ "prompt": "do it" }),
-            None,
-        )
-        .await;
+        );
+        let result = delegate_call(&service, serde_json::json!({ "prompt": "do it" }), None).await;
         assert_eq!(result.error.unwrap().code, "SUBAGENT_NO_SESSION");
     }
 
@@ -1342,6 +2024,7 @@ mod tests {
             &serde_json::Value::Null,
             Arc::clone(&store) as Arc<dyn SubagentStore>,
             Arc::clone(&runner),
+            Arc::new(Notices::default()),
         )
         .unwrap();
         assert!(registry.has("delegate"));
@@ -1350,6 +2033,7 @@ mod tests {
             &serde_json::json!({ "bogus": true }),
             store as Arc<dyn SubagentStore>,
             runner,
+            Arc::new(Notices::default()),
         )
         .unwrap_err();
         assert!(error.starts_with("subagent-tool: "), "{error}");

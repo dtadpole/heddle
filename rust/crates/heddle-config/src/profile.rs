@@ -260,7 +260,7 @@ pub fn default_layers(options: &LayerOptions, env: &Env) -> Result<Vec<NamedLaye
 
 /// A layer path as the TypeScript build made it: `~` expanded and resolved against the working
 /// directory, so a relative `--config` names the same file `read_layer` opens.
-fn absolute(path: &Path, env: &Env) -> PathBuf {
+pub(crate) fn absolute(path: &Path, env: &Env) -> PathBuf {
     crate::paths::resolve_from_cwd(&expand_home(&path.to_string_lossy(), env))
 }
 

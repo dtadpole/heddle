@@ -1,6 +1,8 @@
 ---
 title: Goal
-version: 1.0.0
+created: 2026-10-17T22:49:02Z
+modified: 2026-10-29T11:47:04Z
+version: 1.1.0
 description: A persisted goal, its verbs, and the round driver that keeps pushing it across rounds and restarts.
 grounded_in:
   - source: human-authored
@@ -16,7 +18,7 @@ Goal management, modelled on DSH's five `dsh-goal*` packages — the reading wit
 |---|---|
 | [`service.ts`](service.ts) | The **event-sourced state machine**: one `goal/change` event carrying a complete snapshot (or a clear tombstone); `foldGoal` replays it strictly; every mutation is a compare-and-set on `GoalRef{id, revision}`; the transition table is DSH's, including `block` only from `active` and `resume` refused once the round budget is exhausted |
 | [`tool.ts`](tool.ts) | The **model's verbs**: `create_goal`, `get_goal`, `update_goal`. Two policies live in the descriptions where a model reads them — a long request may be inferred to be a goal, and a paused goal is resumed by the *person*, not the model |
-| [`driver.ts`](driver.ts) | The **round driver**: a level-triggered reconciler. A round is a user message the harness writes, carrying `source={kind:'goal', goalId, revision, round}`, which is what `foldGoal` counts as an admitted round; the driver re-evaluates a pure condition on every edge, yields between rounds, and blocks with `round-limit` at the cap |
+| [`driver.ts`](driver.ts) | The **round driver**: a level-triggered reconciler. A round is a user message the harness writes, carrying `source={kind:'goal', goalId, revision, round}`, which is what `foldGoal` counts as an admitted round (in log order and across revisions, as DSH does, so an edit never resets the cap: R-developer-two-31); the driver re-evaluates a pure condition on every edge, yields between rounds, and blocks with `round-limit` at the cap |
 
 ## The rule it follows
 

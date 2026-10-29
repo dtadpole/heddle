@@ -232,3 +232,113 @@ test('the browser shows a Python file as source, and does not run what a file sa
     await server.close()
   }
 })
+
+/**
+ * A file route serves a workspace's own bytes on the page's origin, with the session cookie in scope, so whatever a
+ * browser can run there runs as the user. Measured 2026-10-29 (DSH parity R-developer-twelve-16): `/api/raw` served
+ * a workspace SVG inline, and opened directly its script ran and its `fetch('/api/sessions')` answered 200. DSH
+ * answers its own file route with `Content-Security-Policy: sandbox; default-src 'none'` and
+ * `X-Content-Type-Options: nosniff` on every answer, because "HTML and SVG files may be opened directly on the
+ * authenticated API origin"; heddle's file routes now do the same, success or failure.
+ */
+const FILE_POLICY = "sandbox; default-src 'none'"
+const HOSTILE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="red"/><script>window.__svgRan = true; document.title = "SVG RAN"</script></svg>\n'
+
+test('every answer of the raw and upload routes is sandboxed and never sniffed, as DSH answers its file route', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('file-headers')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'logo.svg'), HOSTILE_SVG)
+    writeFileSync(join(server.work, 'style.css'), 'h1 { color: red; }\n')
+    writeFileSync(join(server.work, 'page.html'), '<!doctype html><h1>page</h1><script>window.__ran = true</script>\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const headersOf = async (path, init = {}) => {
+      const response = await fetch(new URL(path, server.url), { ...init, headers: { cookie, ...(init.headers ?? {}) } })
+      const body = await response.text()
+      return { status: response.status, policy: response.headers.get('content-security-policy'), sniff: response.headers.get('x-content-type-options'), body }
+    }
+    const raw = (name) => `/api/raw?path=${encodeURIComponent(join(server.work, name))}`
+    const cases = [
+      ['an inline SVG', raw('logo.svg'), 200],
+      ['an inline stylesheet', raw('style.css'), 200],
+      ['a page offered as a download', raw('page.html'), 200],
+      ['a missing file', raw('missing.txt'), 404],
+      ['a request without a path', '/api/raw?path=', 400],
+      ['a missing upload', '/api/uploads/no-such-file.svg', 404],
+    ]
+    const uploaded = await headersOf('/api/uploads?name=evil.svg', { method: 'POST', body: HOSTILE_SVG })
+    assert.equal(uploaded.status, 200, `the upload was stored (${uploaded.status})`)
+    const stored = String(JSON.parse(uploaded.body).path ?? '')
+    const leaf = stored.split('/').pop()
+    /**
+     * An upload is read only for a session whose log references it (R-developer-two-10, DSH's session/attachment), so
+     * a turn sends the SVG first; the served answer and the refusal for no session are both sandboxed and unsniffed.
+     */
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'the logo', folder: server.work, attachments: [stored] }),
+    })
+    const turnText = await turn.text()
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(turnText)?.[1]
+    assert.ok(session !== undefined, `the turn that sends the SVG names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
+    cases.push(['an uploaded SVG, read for the session that sent it', `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, 200])
+    cases.push(['an uploaded SVG read for no session', `/api/uploads/${encodeURIComponent(leaf)}`, 404])
+    for (const [what, path, status] of cases) {
+      const answer = await headersOf(path)
+      assert.equal(answer.status, status, `${what} answers ${status} (${answer.status})`)
+      assert.equal(answer.policy, FILE_POLICY, `${what} is sandboxed with no sources (${answer.policy})`)
+      assert.equal(answer.sniff, 'nosniff', `${what} is never sniffed into another type (${answer.sniff})`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('an SVG opened directly runs no script and cannot reach the API, while the same SVG still embeds as an image', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('svg')
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'logo.svg'), HOSTILE_SVG)
+    writeFileSync(join(server.work, 'README.md'), '# Logo\n\n![logo](logo.svg)\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+
+    // The browser holds the session cookie, as a person's does, then opens the SVG itself.
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("tree") !== null', 10_000)
+    await browser.goto(new URL(`/api/raw?path=${encodeURIComponent(join(server.work, 'logo.svg'))}`, server.url).href)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const opened = await browser.evaluate(`(async () => {
+      let api = null
+      try { api = (await fetch('/api/sessions')).status } catch { api = 'refused' }
+      return { ran: window.__svgRan === true, title: document.title, api }
+    })()`)
+    assert.equal(opened.ran, false, "the SVG's script did not run")
+    assert.notEqual(opened.title, 'SVG RAN', 'and did not rename the document')
+    assert.notEqual(opened.api, 200, `nothing in that document can use the session's API (${opened.api})`)
+
+    // The same SVG, embedded by a document, is still an image.
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    await browser.waitFor(`Array.from(document.querySelectorAll('#tree .row')).some((row) => row.dataset.path.endsWith('README.md'))`, 10_000)
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .row')).find((row) => row.dataset.path.endsWith('README.md')).click()`)
+    assert.ok(
+      await browser.waitFor(`(() => { const img = document.querySelector('#file-body img'); return !!img && img.complete && img.naturalWidth > 0 })()`, 10_000).catch(() => false),
+      'the README still shows the SVG as an image',
+    )
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

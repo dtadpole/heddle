@@ -28,8 +28,8 @@
 //! | Method and path | Answers |
 //! |---|---|
 //! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text |
-//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf without ">"` |
-//! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename |
+//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf without ">"` · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
+//! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
 //! | `POST /api/workspaces/pick` | `501 {error: reason}` when unavailable · `200` pretty [`PickerOutcome`] (`picked` or `cancelled`) |
@@ -233,9 +233,39 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
     }
 }
 
-/// `GET /api/raw`: a file's bytes, inline only for a type a document embeds.
+/// The policy **every answer of a file route** carries, success or failure, with `nosniff` beside it.
+///
+/// `/api/raw` and `/api/uploads` serve a workspace's or a person's own bytes on the page's origin, with the session
+/// cookie in scope, so whatever a browser can run from such an answer runs as the user. Measured 2026-10-29 (DSH
+/// parity R-developer-twelve-16): a workspace SVG served inline and opened directly ran its script, and its
+/// `fetch('/api/sessions')` answered 200. DSH answers its own file route with exactly this policy and `nosniff` on
+/// every response, because "HTML and SVG files may be opened directly on the authenticated API origin": `sandbox`
+/// runs such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps
+/// a download from being read as a page. A policy on an image or a stylesheet does not affect the page embedding it.
+/// `FILE_ANSWER_HEADERS` of `src/server/web.ts`.
+pub(crate) const FILE_ANSWER_POLICY: &str = "sandbox; default-src 'none'";
+
+/// Add the file routes' two headers to an answer, whichever way it went.
+fn hardened(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(FILE_ANSWER_POLICY),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+/// `GET /api/raw`: a file's bytes, inline only for a type a document embeds, every answer hardened.
 async fn raw(State(files): State<FilesRoutes>, Query(params): Query<Params>) -> Response {
-    let Some(path) = params.path.filter(|path| !path.is_empty()) else {
+    hardened(raw_answer(&files, params.path))
+}
+
+fn raw_answer(files: &FilesRoutes, path: Option<String>) -> Response {
+    let Some(path) = path.filter(|path| !path.is_empty()) else {
         return text(StatusCode::BAD_REQUEST, "a path is required\n");
     };
     let wanted = canonical_path(Path::new(&path));
@@ -247,23 +277,25 @@ async fn raw(State(files): State<FilesRoutes>, Query(params): Query<Params>) -> 
 }
 
 /// `GET /api/uploads/{leaf}?session=`: an uploaded file's bytes, served only to a session whose log references it,
-/// and confined to the upload directory.
+/// confined to the upload directory, every answer (refusals included) hardened.
 async fn uploaded(
     State(files): State<FilesRoutes>,
     AxumPath(leaf): AxumPath<String>,
     Query(params): Query<Params>,
 ) -> Response {
+    hardened(uploaded_answer(&files, &leaf, params.session.as_deref()))
+}
+
+fn uploaded_answer(files: &FilesRoutes, leaf: &str, session: Option<&str>) -> Response {
     if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') || leaf.contains('\\') {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
     }
     // As DSH's `session/attachment` authorizes a read against that session's events: no session, an unknown one, or
     // one whose log does not carry this leaf is the same 404, so the route does not say which uploads exist.
-    let referenced = params
-        .session
-        .as_deref()
+    let referenced = session
         .filter(|id| is_session_id(id))
         .and_then(|id| files.host.session_events(id))
-        .is_some_and(|events| crate::uploads::upload_referenced(&events, &leaf));
+        .is_some_and(|events| crate::uploads::upload_referenced(&events, leaf));
     if !referenced {
         return text(
             StatusCode::NOT_FOUND,
@@ -271,11 +303,11 @@ async fn uploaded(
         );
     }
     let directory = upload_directory(&files.host.heddle_home());
-    let wanted = directory.join(&leaf);
+    let wanted = directory.join(leaf);
     if !is_under(&canonical_path(&directory), &canonical_path(&wanted)) {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
     }
-    serve_bytes(&wanted, &leaf)
+    serve_bytes(&wanted, leaf)
 }
 
 /// `session-` and a 36-character UUID, as `web.ts`'s `/^session-[0-9a-f-]{36}$/i`.
@@ -993,6 +1025,74 @@ mod tests {
             bytes.len().to_string()
         );
         assert!(bytes.starts_with(b"<svg"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn every_answer_of_a_file_route_is_sandboxed_and_never_sniffed() {
+        // DSH parity R-developer-twelve-16: a workspace SVG opened directly ran its script with the session's access.
+        // DSH answers its file route with this policy and nosniff on every response; so do both of heddle's.
+        let (base, host) = scratch("raw-hardened");
+        let root = host.root.clone();
+        let uploads = upload_directory(&host.heddle_home());
+        std::fs::create_dir_all(&uploads).unwrap();
+        std::fs::write(
+            uploads.join("stored.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .unwrap();
+        // An upload is read only for a session whose log references it (R-developer-two-10).
+        host.log_referencing(SESSION_A, &["stored.svg"]);
+        let app = routes_of(host);
+        let raw = |name: &str| {
+            format!(
+                "/api/raw?path={}",
+                crate::markdown::percent_encode(&root.join(name).to_string_lossy())
+            )
+        };
+        let cases = [
+            ("an inline SVG", raw("heddle.svg"), Status::OK),
+            ("a download", raw("AGENTS.md"), Status::OK),
+            ("a missing file", raw("missing.txt"), Status::NOT_FOUND),
+            (
+                "a request without a path",
+                "/api/raw?path=".to_owned(),
+                Status::BAD_REQUEST,
+            ),
+            (
+                "an uploaded SVG",
+                format!("/api/uploads/stored.svg?session={SESSION_A}"),
+                Status::OK,
+            ),
+            (
+                "a missing upload",
+                "/api/uploads/no-such-file.svg".to_owned(),
+                Status::NOT_FOUND,
+            ),
+            (
+                "an upload read for no session",
+                "/api/uploads/stored.svg".to_owned(),
+                Status::NOT_FOUND,
+            ),
+        ];
+        for (what, uri, status) in cases {
+            let (got, headers, _) = call(app.clone(), "GET", &uri, None).await;
+            assert_eq!(got, status, "{what}");
+            assert_eq!(
+                headers
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .map(|value| value.to_str().unwrap()),
+                Some(FILE_ANSWER_POLICY),
+                "{what} is sandboxed with no sources"
+            );
+            assert_eq!(
+                headers
+                    .get(header::X_CONTENT_TYPE_OPTIONS)
+                    .map(|value| value.to_str().unwrap()),
+                Some("nosniff"),
+                "{what} is never sniffed"
+            );
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 

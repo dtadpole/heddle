@@ -1316,16 +1316,23 @@ impl Component for SubagentToolComponent {
             };
         let sessions = session_service(services, "subagent-tool")?;
         let runtime = crate::runtime::shared_runtime(services)?;
+        let store: Arc<dyn heddle_agent::SubagentStore> =
+            Arc::new(heddle_agent::adapters::SessionSubagents::new(sessions));
         let deps = heddle_agent::SubagentDeps {
-            store: Arc::new(heddle_agent::adapters::SessionSubagents::new(sessions)),
+            store: Arc::clone(&store),
             run: heddle_agent::subagent_runner(Arc::downgrade(&runtime)),
         };
-        for tool in heddle_agent::subagent_tools(deps, config.into()) {
+        // A child runs in the background and reports back by notice; the service is provided as `subagents`
+        // (the TypeScript `ctx.provide('subagents')`) so a one-shot `--turn` can wait for the session's children.
+        let deliver = heddle_agent::subagent_deliverer(Arc::downgrade(&runtime), store);
+        let service = heddle_agent::SubagentService::new(deps, deliver, config.into());
+        for tool in heddle_agent::subagent_tools(Arc::clone(&service)) {
             runtime
                 .tools
                 .register(tool)
                 .map_err(|error| format!("subagent-tool: {error}"))?;
         }
+        services.provide("subagents", service);
         Ok(())
     }
 }
