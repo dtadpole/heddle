@@ -152,7 +152,11 @@ pub fn add_days(date: PlainDate, days: i64) -> PlainDate {
 /// A date stepped by whole years, clamping the day to the target month like Temporal's `constrain`.
 pub fn add_years(date: PlainDate, years: i64) -> PlainDate {
     let year = date.year + years;
-    PlainDate::new(year, date.month, date.day.min(days_in_month(year, date.month)))
+    PlainDate::new(
+        year,
+        date.month,
+        date.day.min(days_in_month(year, date.month)),
+    )
 }
 
 /// The first day of the month after `date`.
@@ -213,9 +217,9 @@ fn digits(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    bytes
-        .iter()
-        .try_fold(0i64, |sum, byte| sum.checked_mul(10)?.checked_add(i64::from(byte - b'0')))
+    bytes.iter().try_fold(0i64, |sum, byte| {
+        sum.checked_mul(10)?.checked_add(i64::from(byte - b'0'))
+    })
 }
 
 /// Whether `text` is the canonical stored instant: four-digit year (never 0000), milliseconds, `Z` (SVC:26).
@@ -314,7 +318,8 @@ pub fn is_iana_shape(value: &str) -> bool {
     let Some(first) = segments.next() else {
         return false;
     };
-    let allowed = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'.' | b'-');
+    let allowed =
+        |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'.' | b'-');
     let first_ok = first
         .bytes()
         .next()
@@ -441,16 +446,37 @@ mod tests {
     #[test]
     fn zones_canonicalize_and_anything_else_is_invalid_time_zone() {
         assert_eq!(canonicalize_time_zone("UTC").unwrap(), "UTC");
-        assert_eq!(canonicalize_time_zone("Asia/Shanghai").unwrap(), "Asia/Shanghai");
-        assert_eq!(canonicalize_time_zone("Etc/UTC").unwrap(), "UTC", "an alias resolves to UTC");
-        assert_eq!(canonicalize_time_zone("asia/shanghai").unwrap(), "Asia/Shanghai", "the database spelling");
+        assert_eq!(
+            canonicalize_time_zone("Asia/Shanghai").unwrap(),
+            "Asia/Shanghai"
+        );
+        assert_eq!(
+            canonicalize_time_zone("Etc/UTC").unwrap(),
+            "UTC",
+            "an alias resolves to UTC"
+        );
+        assert_eq!(
+            canonicalize_time_zone("asia/shanghai").unwrap(),
+            "Asia/Shanghai",
+            "the database spelling"
+        );
         assert!(
             canonicalize_time_zone("America/Argentina/Buenos_Aires")
                 .unwrap()
                 .contains("Buenos_Aires"),
             "a three-part name is an Area/Location name"
         );
-        for bad in ["", "utc", "PST", " UTC", "UTC ", "Mars/Phobos", "Asia/", "/Asia", "asia shanghai"] {
+        for bad in [
+            "",
+            "utc",
+            "PST",
+            " UTC",
+            "UTC ",
+            "Mars/Phobos",
+            "Asia/",
+            "/Asia",
+            "asia shanghai",
+        ] {
             refuses_zone(bad);
         }
     }
@@ -469,8 +495,14 @@ mod tests {
             assert_eq!(date_of_epoch_day(epoch_day(date)), date);
         }
         assert_eq!(epoch_day(PlainDate::new(1970, 1, 1)), 0);
-        assert_eq!(add_days(PlainDate::new(2028, 2, 28), 1), PlainDate::new(2028, 2, 29));
-        assert_eq!(add_days(PlainDate::new(2026, 1, 1), -1), PlainDate::new(2025, 12, 31));
+        assert_eq!(
+            add_days(PlainDate::new(2028, 2, 28), 1),
+            PlainDate::new(2028, 2, 29)
+        );
+        assert_eq!(
+            add_days(PlainDate::new(2026, 1, 1), -1),
+            PlainDate::new(2025, 12, 31)
+        );
     }
 
     #[test]
@@ -478,19 +510,40 @@ mod tests {
         assert_eq!(iso_day_of_week(PlainDate::new(2026, 10, 26)), 1, "a Monday");
         assert_eq!(iso_day_of_week(PlainDate::new(2026, 11, 1)), 7, "a Sunday");
         assert_eq!(iso_day_of_week(PlainDate::new(1970, 1, 1)), 4, "a Thursday");
-        assert_eq!(first_of_next_month(PlainDate::new(2026, 1, 31)), PlainDate::new(2026, 2, 1));
-        assert_eq!(first_of_next_month(PlainDate::new(2026, 12, 5)), PlainDate::new(2027, 1, 1));
-        assert_eq!(last_of_previous_month(PlainDate::new(2028, 3, 17)), PlainDate::new(2028, 2, 29));
-        assert_eq!(add_years(PlainDate::new(2028, 2, 29), 1), PlainDate::new(2029, 2, 28));
-        assert_eq!(add_years(PlainDate::new(2028, 2, 29), 400), PlainDate::new(2428, 2, 29));
+        assert_eq!(
+            first_of_next_month(PlainDate::new(2026, 1, 31)),
+            PlainDate::new(2026, 2, 1)
+        );
+        assert_eq!(
+            first_of_next_month(PlainDate::new(2026, 12, 5)),
+            PlainDate::new(2027, 1, 1)
+        );
+        assert_eq!(
+            last_of_previous_month(PlainDate::new(2028, 3, 17)),
+            PlainDate::new(2028, 2, 29)
+        );
+        assert_eq!(
+            add_years(PlainDate::new(2028, 2, 29), 1),
+            PlainDate::new(2029, 2, 28)
+        );
+        assert_eq!(
+            add_years(PlainDate::new(2028, 2, 29), 400),
+            PlainDate::new(2428, 2, 29)
+        );
     }
 
     #[test]
     fn offsets_come_from_the_iana_data_including_the_hour_change_and_local_mean_time() {
         assert_eq!(offset_at(at("2026-01-15T12:00:00Z"), LA), -8 * 3_600_000);
         assert_eq!(offset_at(at("2026-07-15T12:00:00Z"), LA), -7 * 3_600_000);
-        assert_eq!(offset_at(at("2026-07-15T12:00:00Z"), "Asia/Kolkata"), 5 * 3_600_000 + 1_800_000);
-        assert_eq!(offset_at(at("2026-07-15T12:00:00Z"), "Asia/Shanghai"), 8 * 3_600_000);
+        assert_eq!(
+            offset_at(at("2026-07-15T12:00:00Z"), "Asia/Kolkata"),
+            5 * 3_600_000 + 1_800_000
+        );
+        assert_eq!(
+            offset_at(at("2026-07-15T12:00:00Z"), "Asia/Shanghai"),
+            8 * 3_600_000
+        );
         assert_eq!(offset_at(at("2026-07-15T12:00:00Z"), "UTC"), 0);
         assert_eq!(
             offset_at(MIN_FOUR_DIGIT_YEAR_MS, LA),
@@ -504,8 +557,14 @@ mod tests {
         let instant = at("2026-11-01T08:30:00.250Z");
         assert_eq!(local_date(instant, LA), PlainDate::new(2026, 11, 1));
         assert_eq!(local_time(instant, LA), PlainTime::new(1, 30, 0, 250));
-        assert_eq!(local_date(MIN_FOUR_DIGIT_YEAR_MS, LA), PlainDate::new(0, 12, 31));
-        assert_eq!(local_date(MAX_FOUR_DIGIT_YEAR_MS, "UTC"), PlainDate::new(9999, 12, 31));
+        assert_eq!(
+            local_date(MIN_FOUR_DIGIT_YEAR_MS, LA),
+            PlainDate::new(0, 12, 31)
+        );
+        assert_eq!(
+            local_date(MAX_FOUR_DIGIT_YEAR_MS, "UTC"),
+            PlainDate::new(9999, 12, 31)
+        );
     }
 
     #[test]
@@ -513,7 +572,10 @@ mod tests {
         let day = PlainDate::new(2026, 3, 8);
         assert_eq!(local_instant(day, time(2, 30), LA), None);
         assert_eq!(local_instant(day, time(2, 0), LA), None);
-        assert_eq!(format_instant(local_instant(day, time(3, 0), LA).unwrap()), "2026-03-08T10:00:00.000Z");
+        assert_eq!(
+            format_instant(local_instant(day, time(3, 0), LA).unwrap()),
+            "2026-03-08T10:00:00.000Z"
+        );
         assert_eq!(
             format_instant(local_instant(day, PlainTime::new(1, 59, 59, 999), LA).unwrap()),
             "2026-03-08T09:59:59.999Z"
@@ -523,19 +585,32 @@ mod tests {
     #[test]
     fn a_wall_time_in_a_dst_overlap_resolves_to_the_earlier_instant() {
         let day = PlainDate::new(2026, 11, 1);
-        assert_eq!(format_instant(local_instant(day, time(1, 30), LA).unwrap()), "2026-11-01T08:30:00.000Z");
-        assert_eq!(format_instant(local_instant(day, time(1, 0), LA).unwrap()), "2026-11-01T08:00:00.000Z");
-        assert_eq!(format_instant(local_instant(day, time(2, 0), LA).unwrap()), "2026-11-01T10:00:00.000Z");
+        assert_eq!(
+            format_instant(local_instant(day, time(1, 30), LA).unwrap()),
+            "2026-11-01T08:30:00.000Z"
+        );
+        assert_eq!(
+            format_instant(local_instant(day, time(1, 0), LA).unwrap()),
+            "2026-11-01T08:00:00.000Z"
+        );
+        assert_eq!(
+            format_instant(local_instant(day, time(2, 0), LA).unwrap()),
+            "2026-11-01T10:00:00.000Z"
+        );
     }
 
     #[test]
     fn half_hour_and_date_line_zones_resolve_exactly() {
         assert_eq!(
-            format_instant(local_instant(PlainDate::new(2026, 10, 29), time(23, 0), "Asia/Shanghai").unwrap()),
+            format_instant(
+                local_instant(PlainDate::new(2026, 10, 29), time(23, 0), "Asia/Shanghai").unwrap()
+            ),
             "2026-10-29T15:00:00.000Z"
         );
         assert_eq!(
-            format_instant(local_instant(PlainDate::new(2026, 1, 1), time(0, 0), "Asia/Kathmandu").unwrap()),
+            format_instant(
+                local_instant(PlainDate::new(2026, 1, 1), time(0, 0), "Asia/Kathmandu").unwrap()
+            ),
             "2025-12-31T18:15:00.000Z"
         );
         assert_eq!(
@@ -547,13 +622,25 @@ mod tests {
 
     #[test]
     fn instants_are_spelled_canonically() {
-        assert_eq!(format_instant(at("2026-10-29T15:00:00Z")), "2026-10-29T15:00:00.000Z");
-        assert_eq!(format_instant(MIN_FOUR_DIGIT_YEAR_MS), "0001-01-01T00:00:00.000Z");
-        assert_eq!(format_instant(MAX_FOUR_DIGIT_YEAR_MS), "9999-12-31T23:59:59.999Z");
+        assert_eq!(
+            format_instant(at("2026-10-29T15:00:00Z")),
+            "2026-10-29T15:00:00.000Z"
+        );
+        assert_eq!(
+            format_instant(MIN_FOUR_DIGIT_YEAR_MS),
+            "0001-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            format_instant(MAX_FOUR_DIGIT_YEAR_MS),
+            "9999-12-31T23:59:59.999Z"
+        );
         assert!(is_utc_instant("2026-10-29T15:00:00.000Z"));
         assert!(!is_utc_instant("2026-10-29T15:00:00Z"));
         assert!(!is_utc_instant("0000-10-29T15:00:00.000Z"));
-        assert_eq!(parse_instant("2026-10-30T20:00:00.5+08:00"), Some(at("2026-10-30T12:00:00.500Z")));
+        assert_eq!(
+            parse_instant("2026-10-30T20:00:00.5+08:00"),
+            Some(at("2026-10-30T12:00:00.500Z"))
+        );
         assert_eq!(parse_instant("2026-02-30T00:00:00.000Z"), None);
     }
 }

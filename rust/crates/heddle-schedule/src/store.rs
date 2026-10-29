@@ -190,7 +190,11 @@ pub fn default_schedule_file(heddle_home: &Path) -> PathBuf {
     heddle_home.join("schedule.json")
 }
 
-fn only_keys(map: &Map<String, Value>, allowed: &[&str], what: &str) -> Result<(), ScheduleLogError> {
+fn only_keys(
+    map: &Map<String, Value>,
+    allowed: &[&str],
+    what: &str,
+) -> Result<(), ScheduleLogError> {
     for key in map.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(ScheduleLogError::new(format!(
@@ -226,7 +230,10 @@ fn message_id(value: Option<&Value>, what: &str) -> Result<String, ScheduleLogEr
     }
 }
 
-fn decode_receipt_fields(map: &Map<String, Value>, what: &str) -> Result<DeliveryReceipt, ScheduleLogError> {
+fn decode_receipt_fields(
+    map: &Map<String, Value>,
+    what: &str,
+) -> Result<DeliveryReceipt, ScheduleLogError> {
     Ok(DeliveryReceipt {
         scheduled_at: instant(map.get("scheduledAt"), &format!("{what}.scheduledAt"))?,
         delivered_at: instant(map.get("deliveredAt"), &format!("{what}.deliveredAt"))?,
@@ -248,11 +255,17 @@ fn decode_history(value: &Value) -> Result<DeliveryHistory, ScheduleLogError> {
     };
     only_keys(
         map,
-        &["records", "earlierRecordsUnavailable", "earlierRecordsPruned"],
+        &[
+            "records",
+            "earlierRecordsUnavailable",
+            "earlierRecordsPruned",
+        ],
         "deliveryHistory",
     )?;
     let Some(entries) = map.get("records").and_then(Value::as_array) else {
-        return Err(ScheduleLogError::new("deliveryHistory.records must be an array"));
+        return Err(ScheduleLogError::new(
+            "deliveryHistory.records must be an array",
+        ));
     };
     let mut records = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
@@ -260,16 +273,27 @@ fn decode_history(value: &Value) -> Result<DeliveryHistory, ScheduleLogError> {
         let Some(entry) = entry.as_object() else {
             return Err(ScheduleLogError::new(format!("{what} must be an object")));
         };
-        only_keys(entry, &["scheduledAt", "deliveredAt", "messageId", "prompt"], &what)?;
+        only_keys(
+            entry,
+            &["scheduledAt", "deliveredAt", "messageId", "prompt"],
+            &what,
+        )?;
         let receipt = decode_receipt_fields(entry, &what)?;
         let prompt = match entry.get("prompt") {
             None => None,
             Some(Value::String(prompt)) => Some(prompt.clone()),
-            Some(_) => return Err(ScheduleLogError::new(format!("{what}.prompt must be a string"))),
+            Some(_) => {
+                return Err(ScheduleLogError::new(format!(
+                    "{what}.prompt must be a string"
+                )));
+            }
         };
         records.push(DeliveryRecord { receipt, prompt });
     }
-    let Some(unavailable) = map.get("earlierRecordsUnavailable").and_then(Value::as_bool) else {
+    let Some(unavailable) = map
+        .get("earlierRecordsUnavailable")
+        .and_then(Value::as_bool)
+    else {
         return Err(ScheduleLogError::new(
             "deliveryHistory.earlierRecordsUnavailable must be a boolean",
         ));
@@ -284,7 +308,10 @@ fn decode_history(value: &Value) -> Result<DeliveryHistory, ScheduleLogError> {
         }
     };
     let mut seen = std::collections::HashSet::new();
-    if !records.iter().all(|record| seen.insert(record.receipt.message_id.clone())) {
+    if !records
+        .iter()
+        .all(|record| seen.insert(record.receipt.message_id.clone()))
+    {
         return Err(ScheduleLogError::new(
             "Delivery history message identities must be unique within a task",
         ));
@@ -304,12 +331,22 @@ pub fn decode_task(key: &str, value: &Value) -> Result<ScheduleTask, ScheduleLog
     };
     only_keys(
         map,
-        &["sessionId", "record", "status", "lastDelivery", "deliveryHistory"],
+        &[
+            "sessionId",
+            "record",
+            "status",
+            "lastDelivery",
+            "deliveryHistory",
+        ],
         &what,
     )?;
     let session_id = match map.get("sessionId").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_owned(),
-        _ => return Err(ScheduleLogError::new(format!("{what} needs a non-empty sessionId"))),
+        _ => {
+            return Err(ScheduleLogError::new(format!(
+                "{what} needs a non-empty sessionId"
+            )));
+        }
     };
     let record = decode_schedule_record(map.get("record").unwrap_or(&Value::Null))?;
     let status = match map.get("status") {
@@ -364,7 +401,9 @@ pub fn decode_unit(text: &str) -> Result<Vec<ScheduleTask>, ScheduleLogError> {
     let unit = unit_document.get("unit").and_then(Value::as_object);
     let named = unit.is_some_and(|unit| {
         unit.get("name").and_then(Value::as_str) == Some("schedule")
-            && unit.get("version").is_some_and(|version| js::number_equals(version, 1))
+            && unit
+                .get("version")
+                .is_some_and(|version| js::number_equals(version, 1))
     });
     let Some(unit) = unit.filter(|_| named) else {
         return Err(ScheduleLogError::new(
@@ -406,7 +445,8 @@ pub fn encode_unit(tasks: &[ScheduleTask]) -> String {
     document.insert("unit".into(), Value::Object(unit));
     document.insert("global".into(), Value::Null);
     document.insert("tables".into(), Value::Object(tables));
-    let mut text = serde_json::to_string_pretty(&Value::Object(document)).expect("a unit serializes");
+    let mut text =
+        serde_json::to_string_pretty(&Value::Object(document)).expect("a unit serializes");
     text.push('\n');
     text
 }
@@ -480,7 +520,9 @@ impl ScheduleStore {
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, Vec<ScheduleTask>> {
-        self.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Every task, in storage order.
@@ -490,7 +532,10 @@ impl ScheduleStore {
 
     /// One task.
     pub fn get(&self, id: &str) -> Option<ScheduleTask> {
-        self.table().iter().find(|task| task.record.id == id).cloned()
+        self.table()
+            .iter()
+            .find(|task| task.record.id == id)
+            .cloned()
     }
 
     /// Insert or replace one task; a replaced task keeps its storage position.
@@ -518,7 +563,11 @@ impl ScheduleStore {
         if !table.iter().any(|task| task.record.id == id) {
             return Ok(false);
         }
-        let next: Vec<ScheduleTask> = table.iter().filter(|task| task.record.id != id).cloned().collect();
+        let next: Vec<ScheduleTask> = table
+            .iter()
+            .filter(|task| task.record.id != id)
+            .cloned()
+            .collect();
         write_atomically(&self.file, &encode_unit(&next)).map_err(|error| error.to_string())?;
         *table = next;
         Ok(true)
@@ -547,11 +596,25 @@ pub(crate) mod tests {
     const NOW: i64 = 1_793_275_200_000;
 
     fn daily() -> ScheduleRecord {
-        create_daily_schedule_record("schedule-a", &json!("Review"), &json!({"time": "23:00:00", "time_zone": "Asia/Shanghai"}), NOW, &json!("Daily review")).unwrap()
+        create_daily_schedule_record(
+            "schedule-a",
+            &json!("Review"),
+            &json!({"time": "23:00:00", "time_zone": "Asia/Shanghai"}),
+            NOW,
+            &json!("Daily review"),
+        )
+        .unwrap()
     }
 
     fn every() -> ScheduleRecord {
-        create_every_schedule_record("schedule-b", &json!("Ping"), &json!(60), NOW, &json!("Ping")).unwrap()
+        create_every_schedule_record(
+            "schedule-b",
+            &json!("Ping"),
+            &json!(60),
+            NOW,
+            &json!("Ping"),
+        )
+        .unwrap()
     }
 
     fn task(record: ScheduleRecord) -> ScheduleTask {
@@ -564,7 +627,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_default_file_is_heddle_home_schedule_json() {
-        assert_eq!(default_schedule_file(Path::new("/tmp/h")), PathBuf::from("/tmp/h/schedule.json"));
+        assert_eq!(
+            default_schedule_file(Path::new("/tmp/h")),
+            PathBuf::from("/tmp/h/schedule.json")
+        );
     }
 
     #[test]
@@ -574,15 +640,33 @@ pub(crate) mod tests {
         assert!(store.entries().is_empty());
         store.put("schedule-a", task(daily())).unwrap();
         let unit: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        let keys = |value: &Value| value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        let keys = |value: &Value| {
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         assert_eq!(keys(&unit), ["unit", "global", "tables"]);
         assert_eq!(unit["unit"], json!({"name": "schedule", "version": 1}));
         assert_eq!(unit["global"], Value::Null);
         assert_eq!(keys(&unit["tables"]["tasks"]), ["schedule-a"]);
-        assert_eq!(keys(&unit["tables"]["tasks"]["schedule-a"]), ["sessionId", "record", "status", "deliveryHistory"]);
+        assert_eq!(
+            keys(&unit["tables"]["tasks"]["schedule-a"]),
+            ["sessionId", "record", "status", "deliveryHistory"]
+        );
         assert_eq!(
             keys(&unit["tables"]["tasks"]["schedule-a"]["record"]),
-            ["id", "kind", "title", "prompt", "time", "timeZone", "scheduledAt"]
+            [
+                "id",
+                "kind",
+                "title",
+                "prompt",
+                "time",
+                "timeZone",
+                "scheduledAt"
+            ]
         );
         let names: Vec<String> = std::fs::read_dir(file.parent().unwrap())
             .unwrap()
@@ -608,7 +692,10 @@ pub(crate) mod tests {
             status: TaskStatus::Inactive,
             last_delivery: Some(receipt.clone()),
             delivery_history: Some(DeliveryHistory {
-                records: vec![DeliveryRecord { receipt, prompt: Some("Review".into()) }],
+                records: vec![DeliveryRecord {
+                    receipt,
+                    prompt: Some("Review".into()),
+                }],
                 earlier_records_unavailable: false,
                 earlier_records_pruned: Some(false),
             }),
@@ -616,7 +703,11 @@ pub(crate) mod tests {
         };
         store.put("schedule-a", delivered.clone()).unwrap();
         let reopened = ScheduleStore::open(&file).unwrap();
-        assert_eq!(reopened.entries(), [delivered.clone(), task(every())], "a replaced row keeps its position");
+        assert_eq!(
+            reopened.entries(),
+            [delivered.clone(), task(every())],
+            "a replaced row keeps its position"
+        );
         assert_eq!(reopened.delete("schedule-b"), Ok(true));
         assert_eq!(reopened.delete("schedule-b"), Ok(false));
         assert_eq!(ScheduleStore::open(&file).unwrap().entries(), [delivered]);
@@ -626,11 +717,25 @@ pub(crate) mod tests {
     #[test]
     fn a_row_without_a_status_reads_as_active() {
         let file = file();
-        ScheduleStore::open(&file).unwrap().put("schedule-a", task(daily())).unwrap();
-        let mut unit: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        unit["tables"]["tasks"]["schedule-a"].as_object_mut().unwrap().remove("status");
+        ScheduleStore::open(&file)
+            .unwrap()
+            .put("schedule-a", task(daily()))
+            .unwrap();
+        let mut unit: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        unit["tables"]["tasks"]["schedule-a"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
         std::fs::write(&file, unit.to_string()).unwrap();
-        assert_eq!(ScheduleStore::open(&file).unwrap().get("schedule-a").unwrap().status, TaskStatus::Active);
+        assert_eq!(
+            ScheduleStore::open(&file)
+                .unwrap()
+                .get("schedule-a")
+                .unwrap()
+                .status,
+            TaskStatus::Active
+        );
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
@@ -638,7 +743,10 @@ pub(crate) mod tests {
         let file = file();
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, document).unwrap();
-        let error = ScheduleStore::open(&file).err().unwrap_or_else(|| panic!("refused: {reason}")).to_string();
+        let error = ScheduleStore::open(&file)
+            .err()
+            .unwrap_or_else(|| panic!("refused: {reason}"))
+            .to_string();
         assert!(error.contains(&file.display().to_string()), "{error}");
         assert!(error.contains(reason), "{error} should mention {reason}");
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
@@ -658,7 +766,10 @@ pub(crate) mod tests {
             if change.is_null() && *key == "deliveryHistory" {
                 value.as_object_mut().unwrap().remove(*key);
             } else {
-                value.as_object_mut().unwrap().insert((*key).into(), change.clone());
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert((*key).into(), change.clone());
             }
         }
         value
@@ -670,16 +781,49 @@ pub(crate) mod tests {
         refuses("{\"unit\":", "not JSON");
         refuses("[]", "the unit must be an object");
         refuses(&json!({"unit": {"name": "schedule", "version": 2}, "global": null, "tables": {"tasks": {}}}).to_string(), "unit must be");
-        refuses(&unit_with(json!({}), Some(("extra", json!(1)))), "unknown key \"extra\"");
-        refuses(&unit_with(json!({"schedule-x": row(&[])}), None), "stored task key \"schedule-x\" differs from record id \"schedule-a\"");
-        refuses(&unit_with(json!({"schedule-a": row(&[("sessionId", json!(""))])}), None), "non-empty sessionId");
-        refuses(&unit_with(json!({"schedule-a": row(&[("status", json!("paused"))])}), None), "status must be active or inactive");
-        refuses(&unit_with(json!({"schedule-a": row(&[("surprise", json!(true))])}), None), "unknown key \"surprise\"");
+        refuses(
+            &unit_with(json!({}), Some(("extra", json!(1)))),
+            "unknown key \"extra\"",
+        );
+        refuses(
+            &unit_with(json!({"schedule-x": row(&[])}), None),
+            "stored task key \"schedule-x\" differs from record id \"schedule-a\"",
+        );
+        refuses(
+            &unit_with(
+                json!({"schedule-a": row(&[("sessionId", json!(""))])}),
+                None,
+            ),
+            "non-empty sessionId",
+        );
+        refuses(
+            &unit_with(
+                json!({"schedule-a": row(&[("status", json!("paused"))])}),
+                None,
+            ),
+            "status must be active or inactive",
+        );
+        refuses(
+            &unit_with(
+                json!({"schedule-a": row(&[("surprise", json!(true))])}),
+                None,
+            ),
+            "unknown key \"surprise\"",
+        );
         let mut untrimmed = daily().to_value();
         untrimmed["prompt"] = json!(" untrimmed");
-        refuses(&unit_with(json!({"schedule-a": row(&[("record", untrimmed)])}), None), "daily prompt must be non-empty and already trimmed");
+        refuses(
+            &unit_with(json!({"schedule-a": row(&[("record", untrimmed)])}), None),
+            "daily prompt must be non-empty and already trimmed",
+        );
         let receipt = json!({"scheduledAt": daily().scheduled_at, "deliveredAt": "2026-10-29T15:00:01.000Z", "messageId": "m"});
-        refuses(&unit_with(json!({"schedule-a": row(&[("lastDelivery", receipt.clone())])}), None), "Last delivery must match the latest saved delivery receipt");
+        refuses(
+            &unit_with(
+                json!({"schedule-a": row(&[("lastDelivery", receipt.clone())])}),
+                None,
+            ),
+            "Last delivery must match the latest saved delivery receipt",
+        );
         refuses(
             &unit_with(
                 json!({"schedule-a": row(&[("lastDelivery", receipt.clone()), ("deliveryHistory", json!({"records": [receipt, receipt], "earlierRecordsUnavailable": false}))])}),
@@ -690,7 +834,10 @@ pub(crate) mod tests {
         let mut loose = receipt.clone();
         loose["deliveredAt"] = json!("2026-10-29T15:00:01Z");
         refuses(
-            &unit_with(json!({"schedule-a": row(&[("lastDelivery", loose), ("deliveryHistory", Value::Null)])}), None),
+            &unit_with(
+                json!({"schedule-a": row(&[("lastDelivery", loose), ("deliveryHistory", Value::Null)])}),
+                None,
+            ),
             "canonical four-digit-year UTC calendar instant",
         );
     }

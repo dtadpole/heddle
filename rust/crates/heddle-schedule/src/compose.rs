@@ -91,7 +91,11 @@ impl SchedulePlugin {
         if self.host.registry().is_some() {
             return;
         }
-        let mut in_turn = self.host.in_turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut in_turn = self
+            .host
+            .in_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match kind {
             "turn/completed" | "turn/failed" => {
                 in_turn.remove(session);
@@ -107,7 +111,13 @@ impl SchedulePlugin {
 }
 
 fn integer(value: Option<f64>) -> Option<i64> {
-    value.map(|number| if number.fract() == 0.0 { number as i64 } else { 0 })
+    value.map(|number| {
+        if number.fract() == 0.0 {
+            number as i64
+        } else {
+            0
+        }
+    })
 }
 
 fn expand_home(path: &str, home: &std::path::Path) -> PathBuf {
@@ -145,7 +155,9 @@ pub fn start_row(row: ScheduleRow<'_>) -> Result<Arc<SchedulePlugin>, String> {
     options.retention_days = integer(config.delivery_history_days);
     options.retention_records = integer(config.delivery_history_records);
     let delegated = Arc::clone(&store);
-    options.is_delegated = Some(Arc::new(move |session: &str| delegation_depth(&delegated, session) > 0));
+    options.is_delegated = Some(Arc::new(move |session: &str| {
+        delegation_depth(&delegated, session) > 0
+    }));
     options.warn = Some(Arc::clone(&warn));
     let service = Arc::new(ScheduleService::new(options).map_err(|error| error.to_string())?);
 
@@ -201,7 +213,11 @@ pub fn register_tools(registry: &ToolRegistry, tools: &ScheduleTools) -> Result<
         let tool = heddle_tools::tool_fn(spec, move |args, context| {
             let tools = tools.clone();
             let name = name.clone();
-            let session = context.context().session.as_ref().map(|handle| handle.id.clone());
+            let session = context
+                .context()
+                .session
+                .as_ref()
+                .map(|handle| handle.id.clone());
             let cancel = context.context().cancel.clone();
             Box::pin(async move {
                 let result: ToolResult = tools
@@ -231,7 +247,9 @@ struct RuntimeHost {
 
 impl RuntimeHost {
     fn registry(&self) -> Option<heddle_agent::TurnRegistry> {
-        self.runtime.upgrade().and_then(|runtime| runtime.turns.clone())
+        self.runtime
+            .upgrade()
+            .and_then(|runtime| runtime.turns.clone())
     }
 
     fn begin(&self, session_id: &str, text: &str, source: Value) -> Result<(), String> {
@@ -256,7 +274,9 @@ impl RuntimeHost {
             .ok_or("no endpoint is configured for a reminder turn")?;
         let mut options = RunTurnOptions::new(handle, endpoint, text);
         options.source = Some(source);
-        options.model = meta.as_ref().and_then(|meta| meta.model().map(str::to_owned));
+        options.model = meta
+            .as_ref()
+            .and_then(|meta| meta.model().map(str::to_owned));
         options.reasoning_effort = meta
             .as_ref()
             .and_then(|meta| meta.reasoning_effort().map(str::to_owned));
@@ -265,7 +285,8 @@ impl RuntimeHost {
         }
         // Started, not awaited: the user message and the live registration are durable when begin returns, which
         // is all delivery needs, and a drive must not hold the schedule queue for the length of a model call.
-        let begun = heddle_agent::begin_turn(&runtime, options).map_err(|error| error.to_string())?;
+        let begun =
+            heddle_agent::begin_turn(&runtime, options).map_err(|error| error.to_string())?;
         let warn = Arc::clone(&self.warn);
         let driver = self.driver.get().cloned();
         let session = session_id.to_owned();
@@ -312,7 +333,12 @@ impl DeliveryHost for RuntimeHost {
             .map_or(0, |count| count as usize)
     }
 
-    fn start_turn(&self, session_id: &str, text: &str, source: Value) -> BoxFuture<'static, Result<(), String>> {
+    fn start_turn(
+        &self,
+        session_id: &str,
+        text: &str,
+        source: Value,
+    ) -> BoxFuture<'static, Result<(), String>> {
         let started = self.begin(session_id, text, source);
         Box::pin(async move { started })
     }
@@ -387,7 +413,9 @@ mod tests {
         heddle_agent::upstream::ContextReport {
             messages: vec![heddle_llm::Message::new(
                 heddle_llm::Role::User,
-                vec![heddle_llm::ContentPart::Text { text: "continue".into() }],
+                vec![heddle_llm::ContentPart::Text {
+                    text: "continue".into(),
+                }],
             )],
             ..Default::default()
         }
@@ -448,7 +476,8 @@ mod tests {
             .unwrap(),
         );
         let config: SessionConfig =
-            serde_json::from_value(json!({"root": root.join("sessions").display().to_string()})).unwrap();
+            serde_json::from_value(json!({"root": root.join("sessions").display().to_string()}))
+                .unwrap();
         let sessions = Arc::new(SessionService::new(&config, &Env::default(), None));
         let sandbox_config: heddle_sandbox::SandboxConfig = serde_json::from_value(json!({
             "mode": "workspace-write",
@@ -458,7 +487,8 @@ mod tests {
         .unwrap();
         let host = heddle_sandbox::SandboxHost::detect(root.join("home")).unwrap();
         let sandbox = Arc::new(heddle_sandbox::SandboxService::new(&sandbox_config, &host));
-        let approvals: heddle_sandbox::ApprovalsConfig = serde_json::from_value(json!({"mode": "allow"})).unwrap();
+        let approvals: heddle_sandbox::ApprovalsConfig =
+            serde_json::from_value(json!({"mode": "allow"})).unwrap();
         let gates = heddle_tools::ToolGates {
             approvals: Arc::new(heddle_tools::adapters::SandboxApprovals::new(Arc::new(
                 heddle_sandbox::ApprovalService::new(approvals),
@@ -475,7 +505,11 @@ mod tests {
             hooks: Arc::new(heddle_agent::NoTurnHooks),
             turns: turns.then(heddle_agent::TurnRegistry::new),
         });
-        Fixture { root, sessions, runtime }
+        Fixture {
+            root,
+            sessions,
+            runtime,
+        }
     }
 
     fn start(fixture: &Fixture, config: Value) -> Result<Arc<SchedulePlugin>, String> {
@@ -534,28 +568,74 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_row_registers_the_four_tools_and_delivers_a_due_reminder_into_the_real_session_log() {
+    async fn the_row_registers_the_four_tools_and_delivers_a_due_reminder_into_the_real_session_log()
+     {
         let fixture = fixture("deliver", true);
         let plugin = start(&fixture, json!({})).unwrap();
-        let names: Vec<String> = fixture.runtime.tools.describe().iter().map(|spec| spec.name.clone()).collect();
-        for name in ["schedule_create", "schedule_list", "schedule_delete", "schedule_update"] {
+        let names: Vec<String> = fixture
+            .runtime
+            .tools
+            .describe()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        for name in [
+            "schedule_create",
+            "schedule_list",
+            "schedule_delete",
+            "schedule_update",
+        ] {
             assert!(names.contains(&name.to_owned()), "{name} in {names:?}");
         }
         let session = session(&fixture);
-        let record = create_after_schedule_record("schedule-due", &json!("check the build"), &json!(30), now() - 60_000, &json!("Build")).unwrap();
-        plugin.service.store().put(&record.id, ScheduleTask::new(session.clone(), record.clone())).unwrap();
+        let record = create_after_schedule_record(
+            "schedule-due",
+            &json!("check the build"),
+            &json!(30),
+            now() - 60_000,
+            &json!("Build"),
+        )
+        .unwrap();
+        plugin
+            .service
+            .store()
+            .put(
+                &record.id,
+                ScheduleTask::new(session.clone(), record.clone()),
+            )
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(user_messages(&fixture, &session).is_empty(), "nothing is delivered until the host starts delivery");
+        assert!(
+            user_messages(&fixture, &session).is_empty(),
+            "nothing is delivered until the host starts delivery"
+        );
         plugin.start_delivery();
-        until("the delivery to commit", || plugin.service.tasks()[0].status == crate::store::TaskStatus::Inactive).await;
+        until("the delivery to commit", || {
+            plugin.service.tasks()[0].status == crate::store::TaskStatus::Inactive
+        })
+        .await;
         let messages = user_messages(&fixture, &session);
         assert_eq!(messages[0]["source"], json!({"kind": "schedule"}));
-        assert_eq!(messages[0]["content"][0]["text"], json!(render_reminder_framing(&record)));
-        let message_id = plugin.service.tasks()[0].last_delivery.clone().unwrap().message_id;
-        assert!(message_id.starts_with("message-") && message_id.len() == "message-".len() + 36, "{message_id}");
+        assert_eq!(
+            messages[0]["content"][0]["text"],
+            json!(render_reminder_framing(&record))
+        );
+        let message_id = plugin.service.tasks()[0]
+            .last_delivery
+            .clone()
+            .unwrap()
+            .message_id;
+        assert!(
+            message_id.starts_with("message-") && message_id.len() == "message-".len() + 36,
+            "{message_id}"
+        );
         let store = fixture.sessions.store();
         until("the reminder turn to complete", || {
-            store.read(&store.open(&session).unwrap()).unwrap().iter().any(|event| event.kind == "turn/completed")
+            store
+                .read(&store.open(&session).unwrap())
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "turn/completed")
         })
         .await;
     }
@@ -565,16 +645,47 @@ mod tests {
         let fixture = fixture("busy", true);
         let plugin = start(&fixture, json!({})).unwrap();
         let session = session(&fixture);
-        let record = create_after_schedule_record("schedule-due", &json!("after the turn"), &json!(30), now() - 60_000, &json!("Later")).unwrap();
-        plugin.service.store().put(&record.id, ScheduleTask::new(session.clone(), record.clone())).unwrap();
-        let running = fixture.runtime.turns.as_ref().unwrap().begin(&session, None);
+        let record = create_after_schedule_record(
+            "schedule-due",
+            &json!("after the turn"),
+            &json!(30),
+            now() - 60_000,
+            &json!("Later"),
+        )
+        .unwrap();
+        plugin
+            .service
+            .store()
+            .put(
+                &record.id,
+                ScheduleTask::new(session.clone(), record.clone()),
+            )
+            .unwrap();
+        let running = fixture
+            .runtime
+            .turns
+            .as_ref()
+            .unwrap()
+            .begin(&session, None);
         plugin.start_delivery();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(user_messages(&fixture, &session).is_empty(), "nothing is written while the turn runs");
-        assert_eq!(plugin.service.tasks()[0].status, crate::store::TaskStatus::Active);
+        assert!(
+            user_messages(&fixture, &session).is_empty(),
+            "nothing is written while the turn runs"
+        );
+        assert_eq!(
+            plugin.service.tasks()[0].status,
+            crate::store::TaskStatus::Active
+        );
         running.settle();
-        until("the delivery after the turn completed", || plugin.service.tasks()[0].status == crate::store::TaskStatus::Inactive).await;
-        assert_eq!(user_messages(&fixture, &session)[0]["content"][0]["text"], json!(render_reminder_framing(&record)));
+        until("the delivery after the turn completed", || {
+            plugin.service.tasks()[0].status == crate::store::TaskStatus::Inactive
+        })
+        .await;
+        assert_eq!(
+            user_messages(&fixture, &session)[0]["content"][0]["text"],
+            json!(render_reminder_framing(&record))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -582,7 +693,11 @@ mod tests {
         let fixture = fixture("corrupt", true);
         let file = fixture.root.join("home").join("schedule.json");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, r#"{"unit":{"name":"schedule","version":1},"global":null,"tables":{"tasks":{"x":{}}}}"#).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"unit":{"name":"schedule","version":1},"global":null,"tables":{"tasks":{"x":{}}}}"#,
+        )
+        .unwrap();
         let error = start(&fixture, json!({})).err().unwrap();
         assert!(error.contains("is not a valid schedule store"), "{error}");
     }

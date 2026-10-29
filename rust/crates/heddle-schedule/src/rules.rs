@@ -11,14 +11,16 @@
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::cron::{ParsedCron, canonicalize_cron_expression, parse_cron_expression, parse_cron_value};
+use crate::cron::{
+    ParsedCron, canonicalize_cron_expression, parse_cron_expression, parse_cron_value,
+};
 use crate::errors::{ScheduleError, ScheduleErrorCode, ScheduleInputError, ScheduleLogError};
 use crate::js;
 use crate::time::{
     MAX_FOUR_DIGIT_YEAR_MS, MIN_FOUR_DIGIT_YEAR_MS, PlainDate, PlainTime, add_days, add_years,
     canonicalize_time_zone, first_of_next_month, format_instant, is_real_date, is_utc_instant,
-    iso_day_of_week, last_of_previous_month, local_date, local_instant, local_time,
-    parse_instant, wall_ms,
+    iso_day_of_week, last_of_previous_month, local_date, local_instant, local_time, parse_instant,
+    wall_ms,
 };
 
 /// Fixed lower bound of a fixed-rate reminder, in seconds.
@@ -203,7 +205,10 @@ fn has_keys_with_optional(map: &Map<String, Value>, required: &[&str], optional:
 /// Validate a supplied title: required, trimmed, at most 120 characters. Returns the trimmed title.
 pub fn schedule_title(title: &Value) -> Result<String, ScheduleInputError> {
     let Some(text) = title.as_str().filter(|text| !js::trim(text).is_empty()) else {
-        return Err(input(ScheduleErrorCode::InvalidPrompt, REQUIRED_TITLE_MESSAGE));
+        return Err(input(
+            ScheduleErrorCode::InvalidPrompt,
+            REQUIRED_TITLE_MESSAGE,
+        ));
     };
     let normalized = js::trim(text);
     if js::utf16_len(normalized) > MAX_TITLE_LENGTH {
@@ -252,7 +257,10 @@ fn decode_id(value: Option<&Value>) -> Result<String, ScheduleLogError> {
 
 /// Validate one canonical four-digit-year UTC instant.
 pub fn decode_instant(value: Option<&Value>) -> Result<String, ScheduleLogError> {
-    let Some(text) = value.and_then(Value::as_str).filter(|text| is_utc_instant(text)) else {
+    let Some(text) = value
+        .and_then(Value::as_str)
+        .filter(|text| is_utc_instant(text))
+    else {
         return Err(ScheduleLogError::new(
             "scheduledAt must be a canonical four-digit-year RFC 3339 UTC instant",
         ));
@@ -410,7 +418,9 @@ fn parse_offset_instant(value: &str) -> Result<i64, ScheduleInputError> {
         return Ok(local);
     };
     if hours > 23 || minutes > 59 || (sign == b'-' && hours == 0 && minutes == 0) {
-        return Err(ScheduleInputError::rule("The at numeric offset is invalid."));
+        return Err(ScheduleInputError::rule(
+            "The at numeric offset is invalid.",
+        ));
     }
     let direction = if sign == b'+' { 1 } else { -1 };
     Ok(local - direction * (hours * 60 + minutes) * 60_000)
@@ -460,9 +470,12 @@ fn parse_local_at(date: &str, time: &str) -> Result<(PlainDate, PlainTime), Sche
 }
 
 fn time_zone_string(value: Option<&Value>) -> Result<&str, ScheduleInputError> {
-    value
-        .and_then(Value::as_str)
-        .ok_or_else(|| input(ScheduleErrorCode::InvalidTimeZone, "time_zone must be a string."))
+    value.and_then(Value::as_str).ok_or_else(|| {
+        input(
+            ScheduleErrorCode::InvalidTimeZone,
+            "time_zone must be a string.",
+        )
+    })
 }
 
 /// Parse an absolute selector without requiring it to be future (SVC:977-996): a string carries its own offset;
@@ -584,7 +597,9 @@ pub fn parse_daily_input(daily: &Value) -> Result<(String, String), ScheduleInpu
 }
 
 /// Normalize a weekly selector without computing a target: the stored time, the canonical zone, the weekdays.
-pub fn parse_weekly_input(weekly: &Value) -> Result<(String, String, Vec<i64>), ScheduleInputError> {
+pub fn parse_weekly_input(
+    weekly: &Value,
+) -> Result<(String, String, Vec<i64>), ScheduleInputError> {
     let shape = || {
         ScheduleInputError::rule(
             "weekly must contain exactly time, time_zone, and weekdays, with time HH:mm:ss and optional 1-3 fractional digits.",
@@ -613,7 +628,10 @@ pub fn parse_cron_input(cron: &Value) -> Result<(String, String), ScheduleInputE
         .as_object()
         .filter(|map| has_exact_keys(map, &["expression", "time_zone"]))
         .ok_or_else(shape)?;
-    let expression = map.get("expression").filter(|value| value.is_string()).ok_or_else(shape)?;
+    let expression = map
+        .get("expression")
+        .filter(|value| value.is_string())
+        .ok_or_else(shape)?;
     let zone = time_zone_string(map.get("time_zone"))?;
     let expression = parse_cron_value(expression)?.expression;
     Ok((expression, canonicalize_time_zone(zone)?))
@@ -641,7 +659,13 @@ fn require_creation_time(now: i64, label: &str) -> Result<(), ScheduleInputError
     Ok(())
 }
 
-fn record(id: &str, title: String, prompt: String, rule: ScheduleRule, scheduled_at: String) -> ScheduleRecord {
+fn record(
+    id: &str,
+    title: String,
+    prompt: String,
+    rule: ScheduleRule,
+    scheduled_at: String,
+) -> ScheduleRecord {
     ScheduleRecord {
         id: id.to_owned(),
         title,
@@ -695,7 +719,9 @@ pub fn create_at_schedule_record(
 
 fn every_interval(every_seconds: &Value) -> Result<i64, ScheduleInputError> {
     let Some(seconds) = js::safe_integer(every_seconds) else {
-        return Err(ScheduleInputError::rule("every_seconds must be a safe integer."));
+        return Err(ScheduleInputError::rule(
+            "every_seconds must be a safe integer.",
+        ));
     };
     if seconds < MIN_EVERY_INTERVAL_SECONDS {
         return Err(input(
@@ -741,12 +767,13 @@ pub fn create_daily_schedule_record(
     let prompt = normalized_prompt_of(prompt)?;
     let (time, time_zone) = parse_daily_input(daily)?;
     require_creation_time(now, "Daily")?;
-    let scheduled_at = next_daily_target(parse_plain_time(&time), &time_zone, now, None).ok_or_else(|| {
-        input(
-            ScheduleErrorCode::TimeOutOfRange,
-            "No future daily occurrence is representable as a four-digit-year UTC instant.",
-        )
-    })?;
+    let scheduled_at = next_daily_target(parse_plain_time(&time), &time_zone, now, None)
+        .ok_or_else(|| {
+            input(
+                ScheduleErrorCode::TimeOutOfRange,
+                "No future daily occurrence is representable as a four-digit-year UTC instant.",
+            )
+        })?;
     let title = schedule_title(title)?;
     Ok(record(
         id,
@@ -768,13 +795,19 @@ pub fn create_weekly_schedule_record(
     let prompt = normalized_prompt_of(prompt)?;
     let (time, time_zone, weekdays) = parse_weekly_input(weekly)?;
     require_creation_time(now, "Weekly")?;
-    let scheduled_at = next_weekly_target(parse_plain_time(&time), &time_zone, &weekdays, now, None)
-        .ok_or_else(|| {
-            input(
-                ScheduleErrorCode::TimeOutOfRange,
-                "No future weekly occurrence is representable as a four-digit-year UTC instant.",
-            )
-        })?;
+    let scheduled_at = next_weekly_target(
+        parse_plain_time(&time),
+        &time_zone,
+        &weekdays,
+        now,
+        None,
+    )
+    .ok_or_else(|| {
+        input(
+            ScheduleErrorCode::TimeOutOfRange,
+            "No future weekly occurrence is representable as a four-digit-year UTC instant.",
+        )
+    })?;
     let title = schedule_title(title)?;
     Ok(record(
         id,
@@ -964,11 +997,18 @@ pub fn resolve_daily_occurrence(
     let decision = accepted_decision("daily", accepted_at)?;
     let saved = record.scheduled_ms();
     if decision < saved {
-        return Err(ScheduleLogError::new("daily dispatch cannot precede the active scheduledAt").into());
+        return Err(
+            ScheduleLogError::new("daily dispatch cannot precede the active scheduledAt").into(),
+        );
     }
     let time = local_clock_time(time, "daily")?;
     let occurrence = latest_due_occurrence(time_zone, &|_| true, time, decision, saved);
-    let next = next_daily_target(time, time_zone, decision, Some(local_date(occurrence, time_zone)));
+    let next = next_daily_target(
+        time,
+        time_zone,
+        decision,
+        Some(local_date(occurrence, time_zone)),
+    );
     Ok(Occurrence::new(format_instant(occurrence), next))
 }
 
@@ -984,7 +1024,9 @@ pub fn resolve_weekly_occurrence(
     let decision = accepted_decision("weekly", accepted_at)?;
     let saved = record.scheduled_ms();
     if decision < saved {
-        return Err(ScheduleLogError::new("weekly dispatch cannot precede the active scheduledAt").into());
+        return Err(
+            ScheduleLogError::new("weekly dispatch cannot precede the active scheduledAt").into(),
+        );
     }
     let time = local_clock_time(time, "weekly")?;
     let weekdays = normalize_weekdays(&Value::from(weekdays.to_vec()))?;
@@ -1041,12 +1083,21 @@ pub fn next_cron_target(parsed: &ParsedCron, time_zone: &str, floor: i64) -> Opt
 
 /// The latest matching cron occurrence at or before the decision, never earlier than the committed target
 /// (SVC:791-819).
-pub fn latest_cron_occurrence(parsed: &ParsedCron, time_zone: &str, decision: i64, saved_target: i64) -> i64 {
+pub fn latest_cron_occurrence(
+    parsed: &ParsedCron,
+    time_zone: &str,
+    decision: i64,
+    saved_target: i64,
+) -> i64 {
     let times = parsed.times();
     let mut date = add_days(local_date(decision, "UTC"), 1);
     let floor_date = local_date(MIN_FOUR_DIGIT_YEAR_MS, time_zone);
     let horizon = add_years(date, -CRON_SEARCH_HORIZON_YEARS);
-    let first_date = if horizon > floor_date { horizon } else { floor_date };
+    let first_date = if horizon > floor_date {
+        horizon
+    } else {
+        floor_date
+    };
     while date >= first_date {
         if !parsed.months.contains(&date.month) {
             date = last_of_previous_month(date);
@@ -1085,7 +1136,9 @@ pub fn resolve_cron_occurrence(
     let decision = accepted_decision("cron", accepted_at)?;
     let saved = record.scheduled_ms();
     if decision < saved {
-        return Err(ScheduleLogError::new("cron dispatch cannot precede the active scheduledAt").into());
+        return Err(
+            ScheduleLogError::new("cron dispatch cannot precede the active scheduledAt").into(),
+        );
     }
     let parsed = parse_cron_expression(expression)?;
     let occurrence = latest_cron_occurrence(&parsed, time_zone, decision, saved);
@@ -1101,7 +1154,8 @@ pub fn resolve_recurring_occurrence(
     Some(match &record.rule {
         ScheduleRule::After { .. } | ScheduleRule::At => return None,
         ScheduleRule::Every { every_seconds } => {
-            resolve_every_occurrence(record, *every_seconds, accepted_at).map_err(ScheduleError::from)
+            resolve_every_occurrence(record, *every_seconds, accepted_at)
+                .map_err(ScheduleError::from)
         }
         ScheduleRule::Daily { time, time_zone } => {
             resolve_daily_occurrence(record, time, time_zone, accepted_at)
@@ -1154,7 +1208,11 @@ fn decode_legacy_title(
     expected: &[&str],
     message: &str,
 ) -> Result<Option<String>, ScheduleLogError> {
-    let required: Vec<&str> = expected.iter().copied().filter(|key| *key != "title").collect();
+    let required: Vec<&str> = expected
+        .iter()
+        .copied()
+        .filter(|key| *key != "title")
+        .collect();
     if !has_keys_with_optional(map, &required, &["title"]) {
         return Err(ScheduleLogError::new(message));
     }
@@ -1191,7 +1249,14 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
         Some("after") => {
             let title = decode_legacy_title(
                 map,
-                &["id", "kind", "title", "prompt", "afterSeconds", "scheduledAt"],
+                &[
+                    "id",
+                    "kind",
+                    "title",
+                    "prompt",
+                    "afterSeconds",
+                    "scheduledAt",
+                ],
                 "after schedule must contain exactly id, kind, title, prompt, afterSeconds, and scheduledAt",
             )?;
             let prompt = decode_stored_prompt(map.get("prompt"), "after")?;
@@ -1200,7 +1265,9 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
                 .and_then(js::safe_integer)
                 .filter(|seconds| *seconds > 0)
             else {
-                return Err(ScheduleLogError::new("afterSeconds must be a positive safe integer"));
+                return Err(ScheduleLogError::new(
+                    "afterSeconds must be a positive safe integer",
+                ));
             };
             let id = decode_id(map.get("id"))?;
             let scheduled_at = decode_instant(map.get("scheduledAt"))?;
@@ -1221,22 +1288,35 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
             let prompt = decode_stored_prompt(map.get("prompt"), "at")?;
             let id = decode_id(map.get("id"))?;
             let scheduled_at = decode_instant(map.get("scheduledAt"))?;
-            Ok(record(&id, require_title(title)?, prompt, ScheduleRule::At, scheduled_at))
+            Ok(record(
+                &id,
+                require_title(title)?,
+                prompt,
+                ScheduleRule::At,
+                scheduled_at,
+            ))
         }
         Some("every") => {
             let title = decode_legacy_title(
                 map,
-                &["id", "kind", "title", "prompt", "everySeconds", "scheduledAt"],
+                &[
+                    "id",
+                    "kind",
+                    "title",
+                    "prompt",
+                    "everySeconds",
+                    "scheduledAt",
+                ],
                 "every schedule must contain exactly id, kind, title, prompt, everySeconds, and scheduledAt",
             )?;
             let prompt = decode_stored_prompt(map.get("prompt"), "every")?;
-            let Some(every_seconds) = map
-                .get("everySeconds")
-                .and_then(js::safe_integer)
-                .filter(|seconds| {
-                    *seconds >= MIN_EVERY_INTERVAL_SECONDS
-                        && seconds.checked_mul(1000).is_some_and(js::is_safe)
-                })
+            let Some(every_seconds) =
+                map.get("everySeconds")
+                    .and_then(js::safe_integer)
+                    .filter(|seconds| {
+                        *seconds >= MIN_EVERY_INTERVAL_SECONDS
+                            && seconds.checked_mul(1000).is_some_and(js::is_safe)
+                    })
             else {
                 return Err(ScheduleLogError::new(format!(
                     "everySeconds must be a safe integer of at least {MIN_EVERY_INTERVAL_SECONDS}"
@@ -1255,7 +1335,15 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
         Some("daily") => {
             let title = decode_record_title(
                 map,
-                &["id", "kind", "title", "prompt", "time", "timeZone", "scheduledAt"],
+                &[
+                    "id",
+                    "kind",
+                    "title",
+                    "prompt",
+                    "time",
+                    "timeZone",
+                    "scheduledAt",
+                ],
                 "daily schedule must contain exactly id, kind, title, prompt, time, timeZone, and scheduledAt",
             )?;
             let prompt = decode_stored_prompt(map.get("prompt"), "daily")?;
@@ -1263,12 +1351,16 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
                 map.get("time").and_then(Value::as_str),
                 map.get("timeZone").and_then(Value::as_str),
             ) else {
-                return Err(ScheduleLogError::new("daily time and timeZone must be strings"));
+                return Err(ScheduleLogError::new(
+                    "daily time and timeZone must be strings",
+                ));
             };
             let normalized = format_plain_time(local_clock_time(time, "daily").map_err(rethrow)?);
             canonicalize_time_zone(time_zone).map_err(rethrow)?;
             if time != normalized {
-                return Err(ScheduleLogError::new("daily time must be normalized to HH:mm:ss.SSS"));
+                return Err(ScheduleLogError::new(
+                    "daily time must be normalized to HH:mm:ss.SSS",
+                ));
             }
             let id = decode_id(map.get("id"))?;
             let scheduled_at = decode_instant(map.get("scheduledAt"))?;
@@ -1286,7 +1378,16 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
         Some("weekly") => {
             let title = decode_record_title(
                 map,
-                &["id", "kind", "title", "prompt", "time", "timeZone", "weekdays", "scheduledAt"],
+                &[
+                    "id",
+                    "kind",
+                    "title",
+                    "prompt",
+                    "time",
+                    "timeZone",
+                    "weekdays",
+                    "scheduledAt",
+                ],
                 "weekly schedule must contain exactly id, kind, title, prompt, time, timeZone, weekdays, and scheduledAt",
             )?;
             let prompt = decode_stored_prompt(map.get("prompt"), "weekly")?;
@@ -1294,20 +1395,25 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
                 map.get("time").and_then(Value::as_str),
                 map.get("timeZone").and_then(Value::as_str),
             ) else {
-                return Err(ScheduleLogError::new("weekly time and timeZone must be strings"));
+                return Err(ScheduleLogError::new(
+                    "weekly time and timeZone must be strings",
+                ));
             };
             canonicalize_time_zone(time_zone).map_err(rethrow)?;
             let normalized = format_plain_time(local_clock_time(time, "weekly").map_err(rethrow)?);
             if time != normalized {
-                return Err(ScheduleLogError::new("weekly time must be normalized to HH:mm:ss.SSS"));
+                return Err(ScheduleLogError::new(
+                    "weekly time must be normalized to HH:mm:ss.SSS",
+                ));
             }
             let stored = map.get("weekdays").unwrap_or(&Value::Null);
             let weekdays = normalize_weekdays(stored).map_err(rethrow)?;
             let entries = stored.as_array().map(Vec::as_slice).unwrap_or(&[]);
-            let reordered = weekdays
-                .iter()
-                .enumerate()
-                .any(|(index, weekday)| !entries.get(index).is_some_and(|entry| js::number_equals(entry, *weekday)));
+            let reordered = weekdays.iter().enumerate().any(|(index, weekday)| {
+                !entries
+                    .get(index)
+                    .is_some_and(|entry| js::number_equals(entry, *weekday))
+            });
             if reordered {
                 return Err(ScheduleLogError::new(
                     "weekly weekdays must be normalized to unique ascending ISO weekday numbers",
@@ -1330,7 +1436,15 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
         Some("cron") => {
             let title = decode_record_title(
                 map,
-                &["id", "kind", "title", "prompt", "expression", "timeZone", "scheduledAt"],
+                &[
+                    "id",
+                    "kind",
+                    "title",
+                    "prompt",
+                    "expression",
+                    "timeZone",
+                    "scheduledAt",
+                ],
                 "cron schedule must contain exactly id, kind, title, prompt, expression, timeZone, and scheduledAt",
             )?;
             let prompt = decode_stored_prompt(map.get("prompt"), "cron")?;
@@ -1338,10 +1452,14 @@ pub fn decode_schedule_record(value: &Value) -> Result<ScheduleRecord, ScheduleL
                 map.get("expression").and_then(Value::as_str),
                 map.get("timeZone").and_then(Value::as_str),
             ) else {
-                return Err(ScheduleLogError::new("cron expression and timeZone must be strings"));
+                return Err(ScheduleLogError::new(
+                    "cron expression and timeZone must be strings",
+                ));
             };
             canonicalize_time_zone(time_zone).map_err(rethrow)?;
-            let canonical = parse_cron_expression(expression).map_err(rethrow)?.expression;
+            let canonical = parse_cron_expression(expression)
+                .map_err(rethrow)?
+                .expression;
             if expression != canonical {
                 return Err(ScheduleLogError::new("cron expression must be canonical"));
             }
@@ -1458,7 +1576,9 @@ fn validate_change(value: &Value) -> Result<(&'static str, &Value), ScheduleInpu
     };
     let selector = timing_selector(map.get("kind"));
     match selector {
-        Some(selector) if map.len() == 2 && map.contains_key("kind") && map.contains_key(selector) => {
+        Some(selector)
+            if map.len() == 2 && map.contains_key("kind") && map.contains_key(selector) =>
+        {
             let kind = map["kind"].as_str().unwrap_or_default();
             let kind = match kind {
                 "at" => "at",
@@ -1622,13 +1742,23 @@ mod tests {
     }
 
     #[track_caller]
-    fn refuses<T: std::fmt::Debug>(result: Result<T, ScheduleInputError>, code: &str, message: &str) {
+    fn refuses<T: std::fmt::Debug>(
+        result: Result<T, ScheduleInputError>,
+        code: &str,
+        message: &str,
+    ) {
         let error = result.expect_err("a refusal");
         assert_eq!(error.code.as_str(), code, "{}", error.message);
         assert_eq!(error.message, message);
     }
 
-    fn after(id: &str, prompt: &str, seconds: Value, now: i64, title: &str) -> Result<ScheduleRecord, ScheduleInputError> {
+    fn after(
+        id: &str,
+        prompt: &str,
+        seconds: Value,
+        now: i64,
+        title: &str,
+    ) -> Result<ScheduleRecord, ScheduleInputError> {
         create_after_schedule_record(id, &json!(prompt), &seconds, now, &json!(title))
     }
 
@@ -1656,18 +1786,47 @@ mod tests {
 
     #[test]
     fn prompt_and_title_trimmed_non_empty_title_at_most_120_characters() {
-        refuses(after("s", "   ", json!(60), now(), "t"), "invalid_prompt", "prompt must be non-empty after trimming.");
-        refuses(after("s", "p", json!(60), now(), "  "), "invalid_prompt", "title is required and must be non-empty after trimming.");
-        refuses(after("s", "p", json!(60), now(), &"x".repeat(121)), "invalid_prompt", "title must be at most 120 characters.");
-        let record = after("s", "  check CI  ", json!(60), now(), &format!("  {}  ", "x".repeat(120))).unwrap();
+        refuses(
+            after("s", "   ", json!(60), now(), "t"),
+            "invalid_prompt",
+            "prompt must be non-empty after trimming.",
+        );
+        refuses(
+            after("s", "p", json!(60), now(), "  "),
+            "invalid_prompt",
+            "title is required and must be non-empty after trimming.",
+        );
+        refuses(
+            after("s", "p", json!(60), now(), &"x".repeat(121)),
+            "invalid_prompt",
+            "title must be at most 120 characters.",
+        );
+        let record = after(
+            "s",
+            "  check CI  ",
+            json!(60),
+            now(),
+            &format!("  {}  ", "x".repeat(120)),
+        )
+        .unwrap();
         assert_eq!(record.prompt, "check CI");
         assert_eq!(record.title.len(), 120);
     }
 
     #[test]
     fn after_seconds_a_positive_safe_integer_target_is_now_plus_seconds() {
-        for bad in [json!(0), json!(-1), json!(1.5), json!(9_007_199_254_740_992_i64), json!("60")] {
-            refuses(after("s", "p", bad, now(), "t"), "invalid_rule", "after_seconds must be a positive safe integer.");
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(9_007_199_254_740_992_i64),
+            json!("60"),
+        ] {
+            refuses(
+                after("s", "p", bad, now(), "t"),
+                "invalid_rule",
+                "after_seconds must be a positive safe integer.",
+            );
         }
         assert_eq!(
             after("s", "p", json!(90), now(), "t").unwrap().to_value(),
@@ -1682,50 +1841,121 @@ mod tests {
 
     #[test]
     fn every_seconds_a_safe_integer_of_at_least_60_first_target_now_plus_interval() {
-        let every = |seconds: Value| create_every_schedule_record("s", &json!("p"), &seconds, now(), &json!("t"));
-        refuses(every(json!(60.5)), "invalid_rule", "every_seconds must be a safe integer.");
-        refuses(every(json!(59)), "frequency_too_high", "every_seconds must be at least 60.");
-        assert_eq!(every(json!(3600)).unwrap().scheduled_at, "2026-10-29T13:00:00.000Z");
+        let every = |seconds: Value| {
+            create_every_schedule_record("s", &json!("p"), &seconds, now(), &json!("t"))
+        };
+        refuses(
+            every(json!(60.5)),
+            "invalid_rule",
+            "every_seconds must be a safe integer.",
+        );
+        refuses(
+            every(json!(59)),
+            "frequency_too_high",
+            "every_seconds must be at least 60.",
+        );
+        assert_eq!(
+            every(json!(3600)).unwrap().scheduled_at,
+            "2026-10-29T13:00:00.000Z"
+        );
     }
 
     #[test]
     fn at_as_a_string_is_strict_rfc_3339_with_an_explicit_offset() {
         let shape = "at must use YYYY-MM-DDTHH:mm:ss with optional 1-3 digit fractional seconds and an explicit Z or numeric offset.";
-        for bad in ["2026-10-30T12:00Z", "2026-10-30T12:00:00", "2026-10-30 12:00:00Z", "2026-10-30T12:00:00.1234Z", "2026-10-30T12:00:00+0800"] {
+        for bad in [
+            "2026-10-30T12:00Z",
+            "2026-10-30T12:00:00",
+            "2026-10-30 12:00:00Z",
+            "2026-10-30T12:00:00.1234Z",
+            "2026-10-30T12:00:00+0800",
+        ] {
             refuses(parse_at_input(&json!(bad)), "invalid_rule", shape);
         }
         let calendar = "The at value must be a real ISO calendar date and time.";
-        for bad in ["2026-02-30T00:00:00Z", "2026-13-01T00:00:00Z", "0000-01-01T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:00:60Z"] {
+        for bad in [
+            "2026-02-30T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "0000-01-01T00:00:00Z",
+            "2026-01-01T24:00:00Z",
+            "2026-01-01T00:00:60Z",
+        ] {
             refuses(parse_at_input(&json!(bad)), "invalid_rule", calendar);
         }
-        for bad in ["2026-10-30T12:00:00-00:00", "2026-10-30T12:00:00+24:00", "2026-10-30T12:00:00+05:60"] {
-            refuses(parse_at_input(&json!(bad)), "invalid_rule", "The at numeric offset is invalid.");
+        for bad in [
+            "2026-10-30T12:00:00-00:00",
+            "2026-10-30T12:00:00+24:00",
+            "2026-10-30T12:00:00+05:60",
+        ] {
+            refuses(
+                parse_at_input(&json!(bad)),
+                "invalid_rule",
+                "The at numeric offset is invalid.",
+            );
         }
-        assert_eq!(parse_at_input(&json!("2026-10-30T20:00:00.5+08:00")).unwrap(), at("2026-10-30T12:00:00.500Z"));
-        refuses(parse_at_input(&json!(42)), "invalid_rule", "at must be an explicit-offset string or local calendar object.");
+        assert_eq!(
+            parse_at_input(&json!("2026-10-30T20:00:00.5+08:00")).unwrap(),
+            at("2026-10-30T12:00:00.500Z")
+        );
+        refuses(
+            parse_at_input(&json!(42)),
+            "invalid_rule",
+            "at must be an explicit-offset string or local calendar object.",
+        );
     }
 
     #[test]
     fn at_as_a_local_object_exact_keys_strings_a_real_date_and_a_wall_time_that_exists() {
-        refuses(parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00"})), "invalid_rule", "Local at must contain exactly date, time, and time_zone.");
-        refuses(parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": "UTC", "x": 1})), "invalid_rule", "Local at must contain exactly date, time, and time_zone.");
-        refuses(parse_at_input(&json!({"date": 20261030, "time": "09:00:00", "time_zone": "UTC"})), "invalid_rule", "Local at date and time must be strings.");
-        refuses(parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": 8})), "invalid_time_zone", "time_zone must be a string.");
+        refuses(
+            parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00"})),
+            "invalid_rule",
+            "Local at must contain exactly date, time, and time_zone.",
+        );
+        refuses(
+            parse_at_input(
+                &json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": "UTC", "x": 1}),
+            ),
+            "invalid_rule",
+            "Local at must contain exactly date, time, and time_zone.",
+        );
+        refuses(
+            parse_at_input(&json!({"date": 20261030, "time": "09:00:00", "time_zone": "UTC"})),
+            "invalid_rule",
+            "Local at date and time must be strings.",
+        );
+        refuses(
+            parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": 8})),
+            "invalid_time_zone",
+            "time_zone must be a string.",
+        );
         refuses(
             parse_at_input(&json!({"date": "2026-10-30", "time": "9:00", "time_zone": "UTC"})),
             "invalid_rule",
             "Local at requires date YYYY-MM-DD and time HH:mm:ss with optional one-to-three digit milliseconds.",
         );
-        refuses(parse_at_input(&json!({"date": "2026-10-30", "time": "25:00:00", "time_zone": "UTC"})), "invalid_rule", "The local at value must be a real ISO calendar date and time.");
-        refuses(parse_at_input(&json!({"date": "2026-02-29", "time": "09:00:00", "time_zone": "UTC"})), "invalid_rule", "The at value must be a real ISO calendar date and time.");
-        refuses(parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": "PST"})), "invalid_time_zone", "time_zone must be UTC or a valid IANA Area/Location name.");
+        refuses(
+            parse_at_input(&json!({"date": "2026-10-30", "time": "25:00:00", "time_zone": "UTC"})),
+            "invalid_rule",
+            "The local at value must be a real ISO calendar date and time.",
+        );
+        refuses(
+            parse_at_input(&json!({"date": "2026-02-29", "time": "09:00:00", "time_zone": "UTC"})),
+            "invalid_rule",
+            "The at value must be a real ISO calendar date and time.",
+        );
+        refuses(
+            parse_at_input(&json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": "PST"})),
+            "invalid_time_zone",
+            "time_zone must be UTC or a valid IANA Area/Location name.",
+        );
         refuses(
             parse_at_input(&json!({"date": "2026-03-08", "time": "02:30:00", "time_zone": LA})),
             "invalid_rule",
             "The local at time does not exist in the selected time zone.",
         );
         assert_eq!(
-            parse_at_input(&json!({"date": "2026-11-01", "time": "01:30:00", "time_zone": LA})).unwrap(),
+            parse_at_input(&json!({"date": "2026-11-01", "time": "01:30:00", "time_zone": LA}))
+                .unwrap(),
             at("2026-11-01T08:30:00.000Z"),
             "an overlap takes the earlier instant"
         );
@@ -1733,16 +1963,31 @@ mod tests {
 
     #[test]
     fn at_must_be_strictly_future_and_keeps_only_the_utc_instant() {
-        let create = |at: Value, prompt: &str| create_at_schedule_record("s", &json!(prompt), &at, now(), &json!("t"));
-        refuses(create(json!("2026-10-29T12:00:00Z"), "p"), "not_future", "The scheduled time must be strictly in the future.");
-        refuses(create(json!("2026-10-29T11:00:00Z"), "p"), "not_future", "The scheduled time must be strictly in the future.");
+        let create = |at: Value, prompt: &str| {
+            create_at_schedule_record("s", &json!(prompt), &at, now(), &json!("t"))
+        };
+        refuses(
+            create(json!("2026-10-29T12:00:00Z"), "p"),
+            "not_future",
+            "The scheduled time must be strictly in the future.",
+        );
+        refuses(
+            create(json!("2026-10-29T11:00:00Z"), "p"),
+            "not_future",
+            "The scheduled time must be strictly in the future.",
+        );
         refuses(
             create(json!("0001-01-01T00:00:00+01:00"), "p"),
             "time_out_of_range",
             "The scheduled time must be representable as a four-digit-year RFC 3339 UTC instant.",
         );
         assert_eq!(
-            create(json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": "Asia/Shanghai"}), " p ").unwrap().to_value(),
+            create(
+                json!({"date": "2026-10-30", "time": "09:00:00", "time_zone": "Asia/Shanghai"}),
+                " p "
+            )
+            .unwrap()
+            .to_value(),
             json!({"id": "s", "kind": "at", "title": "t", "prompt": "p", "scheduledAt": "2026-10-30T01:00:00.000Z"})
         );
     }
@@ -1750,10 +1995,22 @@ mod tests {
     #[test]
     fn daily_shape_strict_time_and_zone_diagnostics() {
         let shape = "daily must contain exactly time and time_zone, with time HH:mm:ss and optional 1-3 fractional digits.";
-        refuses(daily(json!({"time": "09:00:00"}), now()), "invalid_rule", shape);
-        refuses(daily(json!({"time": 9, "time_zone": "UTC"}), now()), "invalid_rule", shape);
+        refuses(
+            daily(json!({"time": "09:00:00"}), now()),
+            "invalid_rule",
+            shape,
+        );
+        refuses(
+            daily(json!({"time": 9, "time_zone": "UTC"}), now()),
+            "invalid_rule",
+            shape,
+        );
         refuses(daily(json!("daily"), now()), "invalid_rule", shape);
-        refuses(daily(json!({"time": "09:00:00", "time_zone": null}), now()), "invalid_time_zone", "time_zone must be a string.");
+        refuses(
+            daily(json!({"time": "09:00:00", "time_zone": null}), now()),
+            "invalid_time_zone",
+            "time_zone must be a string.",
+        );
         for bad in ["24:00:00", "23:59:60", "9:00:00", "09:00", "09:00:00.1234"] {
             refuses(
                 daily(json!({"time": bad, "time_zone": "UTC"}), now()),
@@ -1761,26 +2018,64 @@ mod tests {
                 "daily.time must use HH:mm:ss with optional 1-3 fractional digits, without leap seconds or 24:00.",
             );
         }
-        refuses(daily(json!({"time": "09:00:00", "time_zone": "Mars/Base"}), now()), "invalid_time_zone", "time_zone must be UTC or a valid IANA Area/Location name.");
+        refuses(
+            daily(json!({"time": "09:00:00", "time_zone": "Mars/Base"}), now()),
+            "invalid_time_zone",
+            "time_zone must be UTC or a valid IANA Area/Location name.",
+        );
     }
 
     #[test]
     fn daily_stores_the_normalized_time_and_canonical_zone_and_targets_today_or_tomorrow() {
-        let record = create_daily_schedule_record("s", &json!("Review"), &json!({"time": "23:00:00", "time_zone": "Asia/Shanghai"}), now(), &json!("Daily review")).unwrap();
+        let record = create_daily_schedule_record(
+            "s",
+            &json!("Review"),
+            &json!({"time": "23:00:00", "time_zone": "Asia/Shanghai"}),
+            now(),
+            &json!("Daily review"),
+        )
+        .unwrap();
         assert_eq!(
             record.to_value(),
             json!({"id": "s", "kind": "daily", "title": "Daily review", "prompt": "Review", "time": "23:00:00.000", "timeZone": "Asia/Shanghai", "scheduledAt": "2026-10-29T15:00:00.000Z"})
         );
-        assert_eq!(daily(json!({"time": "19:00:00.5", "time_zone": "Asia/Shanghai"}), now()).unwrap().scheduled_at, "2026-10-30T11:00:00.500Z");
-        assert!(matches!(daily(json!({"time": "12:00:00", "time_zone": "Etc/UTC"}), now()).unwrap().rule, ScheduleRule::Daily { ref time_zone, .. } if time_zone == "UTC"));
-        assert_eq!(daily(json!({"time": "12:00:00", "time_zone": "UTC"}), now()).unwrap().scheduled_at, "2026-10-30T12:00:00.000Z", "now itself is not the future");
+        assert_eq!(
+            daily(
+                json!({"time": "19:00:00.5", "time_zone": "Asia/Shanghai"}),
+                now()
+            )
+            .unwrap()
+            .scheduled_at,
+            "2026-10-30T11:00:00.500Z"
+        );
+        assert!(
+            matches!(daily(json!({"time": "12:00:00", "time_zone": "Etc/UTC"}), now()).unwrap().rule, ScheduleRule::Daily { ref time_zone, .. } if time_zone == "UTC")
+        );
+        assert_eq!(
+            daily(json!({"time": "12:00:00", "time_zone": "UTC"}), now())
+                .unwrap()
+                .scheduled_at,
+            "2026-10-30T12:00:00.000Z",
+            "now itself is not the future"
+        );
     }
 
     #[test]
     fn daily_across_dst_a_gap_skips_the_date_an_overlap_fires_once_at_the_earlier_instant() {
-        let gap = daily(json!({"time": "02:30:00", "time_zone": LA}), at("2026-03-08T08:00:00Z")).unwrap();
-        assert_eq!(gap.scheduled_at, "2026-03-09T09:30:00.000Z", "2026-03-08 02:30 does not exist; the next date is taken");
-        let overlap = daily(json!({"time": "01:30:00", "time_zone": LA}), at("2026-11-01T07:00:00Z")).unwrap();
+        let gap = daily(
+            json!({"time": "02:30:00", "time_zone": LA}),
+            at("2026-03-08T08:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            gap.scheduled_at, "2026-03-09T09:30:00.000Z",
+            "2026-03-08 02:30 does not exist; the next date is taken"
+        );
+        let overlap = daily(
+            json!({"time": "01:30:00", "time_zone": LA}),
+            at("2026-11-01T07:00:00Z"),
+        )
+        .unwrap();
         assert_eq!(overlap.scheduled_at, "2026-11-01T08:30:00.000Z");
         assert_eq!(
             occurrence(&overlap, at("2026-11-01T08:30:00Z")),
@@ -1792,91 +2087,221 @@ mod tests {
     #[test]
     fn weekly_shape_weekday_diagnostics_sorted_weekdays_and_the_next_selected_day() {
         let shape = "weekly must contain exactly time, time_zone, and weekdays, with time HH:mm:ss and optional 1-3 fractional digits.";
-        refuses(weekly(json!({"time": "09:00:00", "time_zone": "UTC"}), now()), "invalid_rule", shape);
-        refuses(weekly(json!({"time": "09:00:00", "time_zone": 1, "weekdays": [1]}), now()), "invalid_time_zone", "time_zone must be a string.");
         refuses(
-            weekly(json!({"time": "9:00", "time_zone": "UTC", "weekdays": [1]}), now()),
+            weekly(json!({"time": "09:00:00", "time_zone": "UTC"}), now()),
+            "invalid_rule",
+            shape,
+        );
+        refuses(
+            weekly(
+                json!({"time": "09:00:00", "time_zone": 1, "weekdays": [1]}),
+                now(),
+            ),
+            "invalid_time_zone",
+            "time_zone must be a string.",
+        );
+        refuses(
+            weekly(
+                json!({"time": "9:00", "time_zone": "UTC", "weekdays": [1]}),
+                now(),
+            ),
             "invalid_rule",
             "weekly.time must use HH:mm:ss with optional 1-3 fractional digits, without leap seconds or 24:00.",
         );
-        refuses(weekly(json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": []}), now()), "invalid_rule", "weekly.weekdays must be a non-empty array of ISO weekday numbers.");
-        refuses(weekly(json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": "mon"}), now()), "invalid_rule", "weekly.weekdays must be a non-empty array of ISO weekday numbers.");
+        refuses(
+            weekly(
+                json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": []}),
+                now(),
+            ),
+            "invalid_rule",
+            "weekly.weekdays must be a non-empty array of ISO weekday numbers.",
+        );
+        refuses(
+            weekly(
+                json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": "mon"}),
+                now(),
+            ),
+            "invalid_rule",
+            "weekly.weekdays must be a non-empty array of ISO weekday numbers.",
+        );
         for bad in [json!([0]), json!([8]), json!([1.5]), json!(["1"])] {
             refuses(
-                weekly(json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": bad}), now()),
+                weekly(
+                    json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": bad}),
+                    now(),
+                ),
                 "invalid_rule",
                 "Each weekly.weekdays entry must be an integer from 1 (Monday) through 7 (Sunday).",
             );
         }
-        refuses(weekly(json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": [3, 1, 3]}), now()), "invalid_rule", "weekly.weekdays must not repeat weekday 3.");
-        let record = weekly(json!({"time": "09:00:00", "time_zone": "Asia/Shanghai", "weekdays": [5, 1]}), now()).unwrap();
-        assert!(matches!(&record.rule, ScheduleRule::Weekly { weekdays, .. } if weekdays == &[1, 5]));
-        assert_eq!(record.scheduled_at, "2026-10-30T01:00:00.000Z", "Friday 2026-10-30 09:00 in Shanghai");
-        let gap = weekly(json!({"time": "02:30:00", "time_zone": LA, "weekdays": [7]}), at("2026-03-07T12:00:00Z")).unwrap();
-        assert_eq!(gap.scheduled_at, "2026-03-15T09:30:00.000Z", "Sunday 2026-03-08 02:30 is in the gap");
+        refuses(
+            weekly(
+                json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": [3, 1, 3]}),
+                now(),
+            ),
+            "invalid_rule",
+            "weekly.weekdays must not repeat weekday 3.",
+        );
+        let record = weekly(
+            json!({"time": "09:00:00", "time_zone": "Asia/Shanghai", "weekdays": [5, 1]}),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&record.rule, ScheduleRule::Weekly { weekdays, .. } if weekdays == &[1, 5])
+        );
+        assert_eq!(
+            record.scheduled_at, "2026-10-30T01:00:00.000Z",
+            "Friday 2026-10-30 09:00 in Shanghai"
+        );
+        let gap = weekly(
+            json!({"time": "02:30:00", "time_zone": LA, "weekdays": [7]}),
+            at("2026-03-07T12:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            gap.scheduled_at, "2026-03-15T09:30:00.000Z",
+            "Sunday 2026-03-08 02:30 is in the gap"
+        );
     }
 
     #[test]
     fn cron_shape_and_zone_diagnostics_the_next_match_and_no_future_exhaustion() {
         let shape = "cron must contain exactly expression and time_zone, with a five-field cron expression.";
-        refuses(cron(json!({"expression": "* * * * *"}), now()), "invalid_rule", shape);
-        refuses(cron(json!({"expression": 5, "time_zone": "UTC"}), now()), "invalid_rule", shape);
-        refuses(cron(json!({"expression": "* * * * *", "time_zone": []}), now()), "invalid_time_zone", "time_zone must be a string.");
-        refuses(cron(json!({"expression": "61 * * * *", "time_zone": "UTC"}), now()), "invalid_rule", "cron.expression minute field value 61 is outside 0-59.");
         refuses(
-            cron(json!({"expression": "0 0 31 2 *", "time_zone": "UTC"}), now()),
+            cron(json!({"expression": "* * * * *"}), now()),
+            "invalid_rule",
+            shape,
+        );
+        refuses(
+            cron(json!({"expression": 5, "time_zone": "UTC"}), now()),
+            "invalid_rule",
+            shape,
+        );
+        refuses(
+            cron(json!({"expression": "* * * * *", "time_zone": []}), now()),
+            "invalid_time_zone",
+            "time_zone must be a string.",
+        );
+        refuses(
+            cron(
+                json!({"expression": "61 * * * *", "time_zone": "UTC"}),
+                now(),
+            ),
+            "invalid_rule",
+            "cron.expression minute field value 61 is outside 0-59.",
+        );
+        refuses(
+            cron(
+                json!({"expression": "0 0 31 2 *", "time_zone": "UTC"}),
+                now(),
+            ),
             "time_out_of_range",
             "No future cron occurrence is representable as a four-digit-year UTC instant.",
         );
-        let record = cron(json!({"expression": "0,15,30,45 9-17 * * 1-5", "time_zone": "Asia/Shanghai"}), now()).unwrap();
-        assert!(matches!(&record.rule, ScheduleRule::Cron { expression, .. } if expression == "0-45/15 9-17 * * 1-5"));
-        assert_eq!(record.scheduled_at, "2026-10-30T01:00:00.000Z", "Friday 09:00 in Shanghai");
-        let or = cron(json!({"expression": "0 9 1 * 1", "time_zone": "UTC"}), at("2026-10-27T10:00:00Z")).unwrap();
-        assert_eq!(or.scheduled_at, "2026-11-01T09:00:00.000Z", "day 1 comes before the next Monday under the OR rule");
+        let record = cron(
+            json!({"expression": "0,15,30,45 9-17 * * 1-5", "time_zone": "Asia/Shanghai"}),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&record.rule, ScheduleRule::Cron { expression, .. } if expression == "0-45/15 9-17 * * 1-5")
+        );
+        assert_eq!(
+            record.scheduled_at, "2026-10-30T01:00:00.000Z",
+            "Friday 09:00 in Shanghai"
+        );
+        let or = cron(
+            json!({"expression": "0 9 1 * 1", "time_zone": "UTC"}),
+            at("2026-10-27T10:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            or.scheduled_at, "2026-11-01T09:00:00.000Z",
+            "day 1 comes before the next Monday under the OR rule"
+        );
     }
 
     #[test]
     fn cron_across_dst_a_gap_time_is_skipped_an_overlap_time_fires_once() {
-        let gap = cron(json!({"expression": "30 2 * * *", "time_zone": LA}), at("2026-03-08T08:00:00Z")).unwrap();
+        let gap = cron(
+            json!({"expression": "30 2 * * *", "time_zone": LA}),
+            at("2026-03-08T08:00:00Z"),
+        )
+        .unwrap();
         assert_eq!(gap.scheduled_at, "2026-03-09T09:30:00.000Z");
-        let overlap = cron(json!({"expression": "30 1 * * *", "time_zone": LA}), at("2026-11-01T07:00:00Z")).unwrap();
+        let overlap = cron(
+            json!({"expression": "30 1 * * *", "time_zone": LA}),
+            at("2026-11-01T07:00:00Z"),
+        )
+        .unwrap();
         assert_eq!(overlap.scheduled_at, "2026-11-01T08:30:00.000Z");
-        assert_eq!(occurrence(&overlap, at("2026-11-01T08:30:00Z")).next_scheduled_at.as_deref(), Some("2026-11-02T09:30:00.000Z"));
+        assert_eq!(
+            occurrence(&overlap, at("2026-11-01T08:30:00Z"))
+                .next_scheduled_at
+                .as_deref(),
+            Some("2026-11-02T09:30:00.000Z")
+        );
     }
 
     #[test]
     fn no_future_daily_or_weekly_occurrence_near_the_year_9999_ceiling() {
         let late = at("9999-12-31T23:00:00Z");
-        refuses(daily(json!({"time": "22:00:00", "time_zone": "UTC"}), late), "time_out_of_range", "No future daily occurrence is representable as a four-digit-year UTC instant.");
         refuses(
-            weekly(json!({"time": "22:00:00", "time_zone": "UTC", "weekdays": [5]}), late),
+            daily(json!({"time": "22:00:00", "time_zone": "UTC"}), late),
+            "time_out_of_range",
+            "No future daily occurrence is representable as a four-digit-year UTC instant.",
+        );
+        refuses(
+            weekly(
+                json!({"time": "22:00:00", "time_zone": "UTC", "weekdays": [5]}),
+                late,
+            ),
             "time_out_of_range",
             "No future weekly occurrence is representable as a four-digit-year UTC instant.",
         );
         refuses(
-            daily(json!({"time": "22:00:00", "time_zone": "UTC"}), MAX_FOUR_DIGIT_YEAR_MS + 1),
+            daily(
+                json!({"time": "22:00:00", "time_zone": "UTC"}),
+                MAX_FOUR_DIGIT_YEAR_MS + 1,
+            ),
             "time_out_of_range",
             "Daily creation time must be a representable four-digit-year UTC instant.",
         );
     }
 
     fn every(scheduled_at: &str, every_seconds: i64) -> ScheduleRecord {
-        record("e", "t".into(), "p".into(), ScheduleRule::Every { every_seconds }, scheduled_at.into())
+        record(
+            "e",
+            "t".into(),
+            "p".into(),
+            ScheduleRule::Every { every_seconds },
+            scheduled_at.into(),
+        )
     }
 
     #[test]
     fn every_fixed_rate_from_the_anchor_downtime_delivers_one_occurrence_and_keeps_the_phase() {
         assert_eq!(
-            occurrence(&every("2026-10-29T12:00:00.000Z", 60), at("2026-10-29T12:00:00Z")),
+            occurrence(
+                &every("2026-10-29T12:00:00.000Z", 60),
+                at("2026-10-29T12:00:00Z")
+            ),
             occ("2026-10-29T12:00:00.000Z", Some("2026-10-29T12:01:00.000Z"))
         );
         assert_eq!(
-            occurrence(&every("2026-10-29T12:00:00.000Z", 60), at("2026-10-29T12:02:30Z")),
+            occurrence(
+                &every("2026-10-29T12:00:00.000Z", 60),
+                at("2026-10-29T12:02:30Z")
+            ),
             occ("2026-10-29T12:02:00.000Z", Some("2026-10-29T12:03:00.000Z")),
             "the 12:00 and 12:01 occurrences are dropped; the next keeps the :00 phase"
         );
         assert!(matches!(
-            resolve_recurring_occurrence(&every("2026-10-29T12:00:00.000Z", 60), at("2026-10-29T11:59:00Z")),
+            resolve_recurring_occurrence(
+                &every("2026-10-29T12:00:00.000Z", 60),
+                at("2026-10-29T11:59:00Z")
+            ),
             Some(Err(ScheduleError::Log(_)))
         ));
     }
@@ -1886,23 +2311,41 @@ mod tests {
             "d",
             "t".into(),
             "p".into(),
-            ScheduleRule::Daily { time: "09:00:00.000".into(), time_zone: "UTC".into() },
+            ScheduleRule::Daily {
+                time: "09:00:00.000".into(),
+                time_zone: "UTC".into(),
+            },
             scheduled_at.into(),
         )
     }
 
     #[test]
-    fn daily_and_weekly_downtime_only_the_latest_missed_occurrence_the_next_on_a_later_local_date() {
+    fn daily_and_weekly_downtime_only_the_latest_missed_occurrence_the_next_on_a_later_local_date()
+    {
         let daily = daily_record("2026-03-01T09:00:00.000Z");
-        assert_eq!(occurrence(&daily, at("2026-03-05T10:00:00Z")), occ("2026-03-05T09:00:00.000Z", Some("2026-03-06T09:00:00.000Z")));
-        assert_eq!(occurrence(&daily, at("2026-03-05T08:00:00Z")), occ("2026-03-04T09:00:00.000Z", Some("2026-03-05T09:00:00.000Z")));
+        assert_eq!(
+            occurrence(&daily, at("2026-03-05T10:00:00Z")),
+            occ("2026-03-05T09:00:00.000Z", Some("2026-03-06T09:00:00.000Z"))
+        );
+        assert_eq!(
+            occurrence(&daily, at("2026-03-05T08:00:00Z")),
+            occ("2026-03-04T09:00:00.000Z", Some("2026-03-05T09:00:00.000Z"))
+        );
         let drifted = daily_record("2026-03-05T09:30:00.000Z");
-        assert_eq!(occurrence(&drifted, at("2026-03-05T09:45:00Z")).occurrence_at, "2026-03-05T09:30:00.000Z", "never earlier than the committed target");
+        assert_eq!(
+            occurrence(&drifted, at("2026-03-05T09:45:00Z")).occurrence_at,
+            "2026-03-05T09:30:00.000Z",
+            "never earlier than the committed target"
+        );
         let weekly = record(
             "w",
             "t".into(),
             "p".into(),
-            ScheduleRule::Weekly { time: "09:00:00.000".into(), time_zone: "UTC".into(), weekdays: vec![1, 4] },
+            ScheduleRule::Weekly {
+                time: "09:00:00.000".into(),
+                time_zone: "UTC".into(),
+                weekdays: vec![1, 4],
+            },
             "2026-10-01T09:00:00.000Z".into(),
         );
         assert_eq!(
@@ -1918,21 +2361,41 @@ mod tests {
             "c",
             "t".into(),
             "p".into(),
-            ScheduleRule::Cron { expression: "0 * * * *".into(), time_zone: "UTC".into() },
+            ScheduleRule::Cron {
+                expression: "0 * * * *".into(),
+                time_zone: "UTC".into(),
+            },
             "2026-10-29T06:00:00.000Z".into(),
         );
-        assert_eq!(occurrence(&hourly, at("2026-10-29T11:30:00Z")), occ("2026-10-29T11:00:00.000Z", Some("2026-10-29T12:00:00.000Z")));
-        assert_eq!(occurrence(&hourly, at("2026-10-29T12:00:00Z")), occ("2026-10-29T12:00:00.000Z", Some("2026-10-29T13:00:00.000Z")));
+        assert_eq!(
+            occurrence(&hourly, at("2026-10-29T11:30:00Z")),
+            occ("2026-10-29T11:00:00.000Z", Some("2026-10-29T12:00:00.000Z"))
+        );
+        assert_eq!(
+            occurrence(&hourly, at("2026-10-29T12:00:00Z")),
+            occ("2026-10-29T12:00:00.000Z", Some("2026-10-29T13:00:00.000Z"))
+        );
     }
 
     #[test]
     fn a_view_adds_state_and_delivery_mode_after_the_record_in_dsh_key_order() {
-        let record = create_daily_schedule_record("schedule-1", &json!("Review today's tasks"), &json!({"time": "23:00:00", "time_zone": "Asia/Shanghai"}), now(), &json!("Daily review")).unwrap();
+        let record = create_daily_schedule_record(
+            "schedule-1",
+            &json!("Review today's tasks"),
+            &json!({"time": "23:00:00", "time_zone": "Asia/Shanghai"}),
+            now(),
+            &json!("Daily review"),
+        )
+        .unwrap();
         assert_eq!(
             serde_json::to_string(&schedule_view(&record, now())).unwrap(),
             r#"{"id":"schedule-1","kind":"daily","title":"Daily review","prompt":"Review today's tasks","time":"23:00:00.000","timeZone":"Asia/Shanghai","scheduledAt":"2026-10-29T15:00:00.000Z","state":"scheduled","deliveryMode":"host"}"#
         );
-        assert_eq!(schedule_view(&record, at("2026-10-29T15:00:00Z"))["state"], "overdue", "now >= scheduledAt is overdue");
+        assert_eq!(
+            schedule_view(&record, at("2026-10-29T15:00:00Z"))["state"],
+            "overdue",
+            "now >= scheduledAt is overdue"
+        );
     }
 
     fn daily_fixture() -> ScheduleRecord {
@@ -1940,17 +2403,39 @@ mod tests {
             "d",
             "Review".into(),
             "p".into(),
-            ScheduleRule::Daily { time: "09:00:00.000".into(), time_zone: "UTC".into() },
+            ScheduleRule::Daily {
+                time: "09:00:00.000".into(),
+                time_zone: "UTC".into(),
+            },
             "2026-10-30T09:00:00.000Z".into(),
         )
     }
 
-    fn update(current: &ScheduleRecord, expected: &Value, change: Option<Value>, title: Option<Value>, prompt: Option<Value>) -> UpdateResolution {
-        resolve_schedule_update(current, expected, change.as_ref(), now(), UpdateContent { title: title.as_ref(), prompt: prompt.as_ref() }).unwrap()
+    fn update(
+        current: &ScheduleRecord,
+        expected: &Value,
+        change: Option<Value>,
+        title: Option<Value>,
+        prompt: Option<Value>,
+    ) -> UpdateResolution {
+        resolve_schedule_update(
+            current,
+            expected,
+            change.as_ref(),
+            now(),
+            UpdateContent {
+                title: title.as_ref(),
+                prompt: prompt.as_ref(),
+            },
+        )
+        .unwrap()
     }
 
     fn refused(code: &str, message: &str) -> UpdateResolution {
-        UpdateResolution::Refused { code: code.into(), message: message.into() }
+        UpdateResolution::Refused {
+            code: code.into(),
+            message: message.into(),
+        }
     }
 
     #[test]
@@ -1958,12 +2443,36 @@ mod tests {
         let current = daily_fixture();
         let mut extra = current.to_map();
         extra.insert("extra".into(), json!(1));
-        let invalid = refused("invalid_rule", "expected must be a complete valid Schedule record.");
-        assert_eq!(update(&current, &Value::Object(extra), None, Some(json!("x")), None), invalid);
-        assert_eq!(update(&current, &Value::Null, None, Some(json!("x")), None), invalid);
+        let invalid = refused(
+            "invalid_rule",
+            "expected must be a complete valid Schedule record.",
+        );
+        assert_eq!(
+            update(
+                &current,
+                &Value::Object(extra),
+                None,
+                Some(json!("x")),
+                None
+            ),
+            invalid
+        );
+        assert_eq!(
+            update(&current, &Value::Null, None, Some(json!("x")), None),
+            invalid
+        );
         let mut other = current.to_map();
         other.insert("prompt".into(), json!("other"));
-        assert_eq!(update(&current, &Value::Object(other), None, Some(json!("x")), None), UpdateResolution::Conflict { id: "d".into() });
+        assert_eq!(
+            update(
+                &current,
+                &Value::Object(other),
+                None,
+                Some(json!("x")),
+                None
+            ),
+            UpdateResolution::Conflict { id: "d".into() }
+        );
     }
 
     #[test]
@@ -1974,43 +2483,153 @@ mod tests {
         renamed.title = "Evening review".into();
         renamed.prompt = "new".into();
         assert_eq!(
-            update(&current, &expected, None, Some(json!("  Evening review ")), Some(json!(" new "))),
-            UpdateResolution::Record { id: "d".into(), updated: true, record: renamed }
+            update(
+                &current,
+                &expected,
+                None,
+                Some(json!("  Evening review ")),
+                Some(json!(" new "))
+            ),
+            UpdateResolution::Record {
+                id: "d".into(),
+                updated: true,
+                record: renamed
+            }
         );
         assert_eq!(
             update(&current, &expected, None, Some(json!("Review")), None),
-            UpdateResolution::Record { id: "d".into(), updated: false, record: current.clone() }
+            UpdateResolution::Record {
+                id: "d".into(),
+                updated: false,
+                record: current.clone()
+            }
         );
-        assert_eq!(update(&current, &expected, None, None, Some(json!("  "))), refused("invalid_prompt", "prompt must be non-empty after trimming."));
-        assert_eq!(update(&current, &expected, None, Some(json!("x".repeat(121))), None), refused("invalid_prompt", "title must be at most 120 characters."));
+        assert_eq!(
+            update(&current, &expected, None, None, Some(json!("  "))),
+            refused("invalid_prompt", "prompt must be non-empty after trimming.")
+        );
+        assert_eq!(
+            update(
+                &current,
+                &expected,
+                None,
+                Some(json!("x".repeat(121))),
+                None
+            ),
+            refused("invalid_prompt", "title must be at most 120 characters.")
+        );
     }
 
     #[test]
-    fn update_every_re_anchors_to_the_save_time_on_a_different_interval_the_same_interval_is_a_no_op() {
+    fn update_every_re_anchors_to_the_save_time_on_a_different_interval_the_same_interval_is_a_no_op()
+     {
         let current = every("2026-10-29T12:00:30.000Z", 60);
         let expected = current.to_value();
-        let UpdateResolution::Record { record: changed, .. } = update(&current, &expected, Some(json!({"kind": "every", "every_seconds": 120})), None, None) else {
+        let UpdateResolution::Record {
+            record: changed, ..
+        } = update(
+            &current,
+            &expected,
+            Some(json!({"kind": "every", "every_seconds": 120})),
+            None,
+            None,
+        )
+        else {
             panic!("a record");
         };
-        assert_eq!(changed.scheduled_at, "2026-10-29T12:02:00.000Z", "save time + new interval, not the old anchor");
-        let UpdateResolution::Record { updated, record: same, .. } = update(&current, &expected, Some(json!({"kind": "every", "every_seconds": 60})), None, None) else {
+        assert_eq!(
+            changed.scheduled_at, "2026-10-29T12:02:00.000Z",
+            "save time + new interval, not the old anchor"
+        );
+        let UpdateResolution::Record {
+            updated,
+            record: same,
+            ..
+        } = update(
+            &current,
+            &expected,
+            Some(json!({"kind": "every", "every_seconds": 60})),
+            None,
+            None,
+        )
+        else {
             panic!("a record");
         };
         assert!(!updated);
         assert_eq!(same.scheduled_at, current.scheduled_at);
-        assert_eq!(update(&current, &expected, Some(json!({"kind": "every", "every_seconds": 30})), None, None), refused("frequency_too_high", "every_seconds must be at least 60."));
+        assert_eq!(
+            update(
+                &current,
+                &expected,
+                Some(json!({"kind": "every", "every_seconds": 30})),
+                None,
+                None
+            ),
+            refused("frequency_too_high", "every_seconds must be at least 60.")
+        );
     }
 
     #[test]
     fn update_equivalent_normalized_rules_keep_the_target_a_different_rule_or_kind_recomputes() {
         let current = daily_fixture();
-        let not_updated = |resolution: UpdateResolution| matches!(resolution, UpdateResolution::Record { updated: false, .. });
-        assert!(not_updated(update(&current, &current.to_value(), Some(json!({"kind": "daily", "daily": {"time": "09:00:00", "time_zone": "Etc/UTC"}})), None, None)));
-        let weekly = record("w", "t".into(), "p".into(), ScheduleRule::Weekly { time: "09:00:00.000".into(), time_zone: "UTC".into(), weekdays: vec![1, 5] }, "2026-10-30T09:00:00.000Z".into());
-        assert!(not_updated(update(&weekly, &weekly.to_value(), Some(json!({"kind": "weekly", "weekly": {"time": "09:00:00.000", "time_zone": "UTC", "weekdays": [5, 1]}})), None, None)));
-        let cron_record = record("c", "t".into(), "p".into(), ScheduleRule::Cron { expression: "0-45/15 * * * *".into(), time_zone: "UTC".into() }, "2026-10-29T12:15:00.000Z".into());
-        assert!(not_updated(update(&cron_record, &cron_record.to_value(), Some(json!({"kind": "cron", "cron": {"expression": "0,15,30,45 * * * *", "time_zone": "UTC"}})), None, None)));
-        let to_cron = update(&current, &current.to_value(), Some(json!({"kind": "cron", "cron": {"expression": "30 12 * * *", "time_zone": "UTC"}})), None, None);
+        let not_updated = |resolution: UpdateResolution| {
+            matches!(resolution, UpdateResolution::Record { updated: false, .. })
+        };
+        assert!(not_updated(update(
+            &current,
+            &current.to_value(),
+            Some(json!({"kind": "daily", "daily": {"time": "09:00:00", "time_zone": "Etc/UTC"}})),
+            None,
+            None
+        )));
+        let weekly = record(
+            "w",
+            "t".into(),
+            "p".into(),
+            ScheduleRule::Weekly {
+                time: "09:00:00.000".into(),
+                time_zone: "UTC".into(),
+                weekdays: vec![1, 5],
+            },
+            "2026-10-30T09:00:00.000Z".into(),
+        );
+        assert!(not_updated(update(
+            &weekly,
+            &weekly.to_value(),
+            Some(
+                json!({"kind": "weekly", "weekly": {"time": "09:00:00.000", "time_zone": "UTC", "weekdays": [5, 1]}})
+            ),
+            None,
+            None
+        )));
+        let cron_record = record(
+            "c",
+            "t".into(),
+            "p".into(),
+            ScheduleRule::Cron {
+                expression: "0-45/15 * * * *".into(),
+                time_zone: "UTC".into(),
+            },
+            "2026-10-29T12:15:00.000Z".into(),
+        );
+        assert!(not_updated(update(
+            &cron_record,
+            &cron_record.to_value(),
+            Some(
+                json!({"kind": "cron", "cron": {"expression": "0,15,30,45 * * * *", "time_zone": "UTC"}})
+            ),
+            None,
+            None
+        )));
+        let to_cron = update(
+            &current,
+            &current.to_value(),
+            Some(
+                json!({"kind": "cron", "cron": {"expression": "30 12 * * *", "time_zone": "UTC"}}),
+            ),
+            None,
+            None,
+        );
         assert_eq!(
             to_cron.to_value(),
             json!({"id": "d", "updated": true, "record": {"id": "d", "kind": "cron", "title": "Review", "prompt": "p", "expression": "30 12 * * *", "timeZone": "UTC", "scheduledAt": "2026-10-29T12:30:00.000Z"}})
@@ -2021,44 +2640,133 @@ mod tests {
     fn update_at_keeps_an_after_record_when_the_instant_is_the_same_and_refuses_a_past_instant() {
         let current = after("a", "p", json!(3600), now(), "t").unwrap();
         let expected = current.to_value();
-        let UpdateResolution::Record { updated, record: same, .. } = update(&current, &expected, Some(json!({"kind": "at", "at": "2026-10-29T13:00:00Z"})), None, None) else {
+        let UpdateResolution::Record {
+            updated,
+            record: same,
+            ..
+        } = update(
+            &current,
+            &expected,
+            Some(json!({"kind": "at", "at": "2026-10-29T13:00:00Z"})),
+            None,
+            None,
+        )
+        else {
             panic!("a record");
         };
         assert!(!updated && same.kind() == "after");
-        let UpdateResolution::Record { record: moved, .. } = update(&current, &expected, Some(json!({"kind": "at", "at": "2026-10-29T14:00:00+00:00"})), None, None) else {
+        let UpdateResolution::Record { record: moved, .. } = update(
+            &current,
+            &expected,
+            Some(json!({"kind": "at", "at": "2026-10-29T14:00:00+00:00"})),
+            None,
+            None,
+        ) else {
             panic!("a record");
         };
-        assert_eq!((moved.kind(), moved.scheduled_at.as_str()), ("at", "2026-10-29T14:00:00.000Z"));
-        assert_eq!(update(&current, &expected, Some(json!({"kind": "at", "at": "2026-10-29T11:00:00Z"})), None, None), refused("not_future", "The scheduled time must be strictly in the future."));
+        assert_eq!(
+            (moved.kind(), moved.scheduled_at.as_str()),
+            ("at", "2026-10-29T14:00:00.000Z")
+        );
+        assert_eq!(
+            update(
+                &current,
+                &expected,
+                Some(json!({"kind": "at", "at": "2026-10-29T11:00:00Z"})),
+                None,
+                None
+            ),
+            refused(
+                "not_future",
+                "The scheduled time must be strictly in the future."
+            )
+        );
     }
 
     #[test]
     fn update_a_malformed_timing_change_is_invalid_rule_with_dsh_wording() {
         let current = daily_fixture();
         let expected = current.to_value();
-        assert_eq!(update(&current, &expected, Some(Value::Null), None, None), refused("invalid_rule", "Timing change must be an object with exactly one supported timing selector."));
-        let exact = refused("invalid_rule", "Timing change must contain exactly kind and its matching timing selector.");
-        assert_eq!(update(&current, &expected, Some(json!({"kind": "hourly", "at": "x"})), None, None), exact);
-        assert_eq!(update(&current, &expected, Some(json!({"kind": "at"})), None, None), exact);
-        assert_eq!(update(&current, &expected, Some(json!({"kind": "at", "at": "x", "cron": {}})), None, None), exact);
+        assert_eq!(
+            update(&current, &expected, Some(Value::Null), None, None),
+            refused(
+                "invalid_rule",
+                "Timing change must be an object with exactly one supported timing selector."
+            )
+        );
+        let exact = refused(
+            "invalid_rule",
+            "Timing change must contain exactly kind and its matching timing selector.",
+        );
+        assert_eq!(
+            update(
+                &current,
+                &expected,
+                Some(json!({"kind": "hourly", "at": "x"})),
+                None,
+                None
+            ),
+            exact
+        );
+        assert_eq!(
+            update(&current, &expected, Some(json!({"kind": "at"})), None, None),
+            exact
+        );
+        assert_eq!(
+            update(
+                &current,
+                &expected,
+                Some(json!({"kind": "at", "at": "x", "cron": {}})),
+                None,
+                None
+            ),
+            exact
+        );
     }
 
     #[test]
     fn decode_every_kind_round_trips_malformed_stored_records_are_log_errors() {
         let records = [
             after("a", "p", json!(60), now(), "t").unwrap(),
-            create_at_schedule_record("b", &json!("p"), &json!("2026-11-01T00:00:00Z"), now(), &json!("t")).unwrap(),
+            create_at_schedule_record(
+                "b",
+                &json!("p"),
+                &json!("2026-11-01T00:00:00Z"),
+                now(),
+                &json!("t"),
+            )
+            .unwrap(),
             create_every_schedule_record("c", &json!("p"), &json!(60), now(), &json!("t")).unwrap(),
             daily_fixture(),
-            create_weekly_schedule_record("w", &json!("p"), &json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": [3, 1]}), now(), &json!("t")).unwrap(),
-            create_cron_schedule_record("x", &json!("p"), &json!({"expression": "0 9 * * 7", "time_zone": "UTC"}), now(), &json!("t")).unwrap(),
+            create_weekly_schedule_record(
+                "w",
+                &json!("p"),
+                &json!({"time": "09:00:00", "time_zone": "UTC", "weekdays": [3, 1]}),
+                now(),
+                &json!("t"),
+            )
+            .unwrap(),
+            create_cron_schedule_record(
+                "x",
+                &json!("p"),
+                &json!({"expression": "0 9 * * 7", "time_zone": "UTC"}),
+                now(),
+                &json!("t"),
+            )
+            .unwrap(),
         ];
         for record in &records {
             let text = serde_json::to_string(record).unwrap();
-            assert_eq!(&decode_schedule_record(&serde_json::from_str(&text).unwrap()).unwrap(), record);
+            assert_eq!(
+                &decode_schedule_record(&serde_json::from_str(&text).unwrap()).unwrap(),
+                record
+            );
         }
         let corrupt = |value: Value, message: &str| {
-            assert_eq!(decode_schedule_record(&value).expect_err(message).message, message);
+            assert_eq!(
+                decode_schedule_record(&value).expect_err(message).message,
+                message
+            );
         };
         let with = |record: &ScheduleRecord, key: &str, value: Value| {
             let mut map = record.to_map();
@@ -2067,15 +2775,42 @@ mod tests {
         };
         let mut untitled = records[2].to_map();
         untitled.remove("title");
-        corrupt(Value::Object(untitled), "title is required and must be non-empty after trimming.");
-        corrupt(with(&records[3], "prompt", json!(" p")), "daily prompt must be non-empty and already trimmed");
-        corrupt(with(&records[3], "time", json!("09:00:00")), "daily time must be normalized to HH:mm:ss.SSS");
-        corrupt(with(&records[3], "extra", json!(1)), "daily schedule must contain exactly id, kind, title, prompt, time, timeZone, and scheduledAt");
-        corrupt(with(&records[3], "scheduledAt", json!("2026-10-30T09:00:00Z")), "scheduledAt must be a canonical four-digit-year RFC 3339 UTC instant");
-        corrupt(with(&records[4], "weekdays", json!([3, 1])), "weekly weekdays must be normalized to unique ascending ISO weekday numbers");
-        corrupt(with(&records[5], "expression", json!("0 9 * * 7")), "cron expression must be canonical");
-        corrupt(with(&records[3], "kind", json!("hourly")), "v1 schedule kind must be \"after\", \"at\", or \"every\"");
+        corrupt(
+            Value::Object(untitled),
+            "title is required and must be non-empty after trimming.",
+        );
+        corrupt(
+            with(&records[3], "prompt", json!(" p")),
+            "daily prompt must be non-empty and already trimmed",
+        );
+        corrupt(
+            with(&records[3], "time", json!("09:00:00")),
+            "daily time must be normalized to HH:mm:ss.SSS",
+        );
+        corrupt(
+            with(&records[3], "extra", json!(1)),
+            "daily schedule must contain exactly id, kind, title, prompt, time, timeZone, and scheduledAt",
+        );
+        corrupt(
+            with(&records[3], "scheduledAt", json!("2026-10-30T09:00:00Z")),
+            "scheduledAt must be a canonical four-digit-year RFC 3339 UTC instant",
+        );
+        corrupt(
+            with(&records[4], "weekdays", json!([3, 1])),
+            "weekly weekdays must be normalized to unique ascending ISO weekday numbers",
+        );
+        corrupt(
+            with(&records[5], "expression", json!("0 9 * * 7")),
+            "cron expression must be canonical",
+        );
+        corrupt(
+            with(&records[3], "kind", json!("hourly")),
+            "v1 schedule kind must be \"after\", \"at\", or \"every\"",
+        );
         corrupt(json!("x"), "schedule record must be an object");
-        corrupt(with(&records[3], "timeZone", json!("Mars/Base")), "ScheduleInputError: time_zone must be UTC or a valid IANA Area/Location name.");
+        corrupt(
+            with(&records[3], "timeZone", json!("Mars/Base")),
+            "ScheduleInputError: time_zone must be UTC or a valid IANA Area/Location name.",
+        );
     }
 }
