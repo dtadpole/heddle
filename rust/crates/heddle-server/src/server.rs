@@ -3668,11 +3668,18 @@ mod tests {
         let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
         assert_eq!(status, StatusCode::OK);
         let text = body_text(&bytes);
-        assert!(text.contains("event: error\n") && text.contains("upstream answered 502"), "{text}");
+        assert!(
+            text.contains("event: error\n") && text.contains("upstream answered 502"),
+            "{text}"
+        );
         let recorded = sessions.recorded.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec![(session.to_owned(), "turn/failed".to_owned(), json!({"message": "upstream answered 502"}))]
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
         );
     }
 
