@@ -18,7 +18,7 @@ import { createDirectory, DirectoryError, listDirectory } from './directories.ts
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
-import { PREVIEW_CSP, rewriteResources } from './html.ts'
+import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
@@ -625,6 +625,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     if (workspaces === undefined || workspaces.owner(wanted) === undefined) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: 'that path is not under any workspace root' })}\n`)
+      return
+    }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or not, is refused.
+    if (!isHtmlDocument(wanted)) {
+      respond(response, 415, 'application/json', `${JSON.stringify({ error: NOT_AN_HTML_DOCUMENT })}\n`)
       return
     }
     try {

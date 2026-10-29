@@ -1532,6 +1532,14 @@ async fn html_preview(
             "that path is not under any workspace root",
         );
     }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or
+    // not, is refused, as web.ts does.
+    if !preview::is_html_document(&path) {
+        return respond::error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            preview::NOT_AN_HTML_DOCUMENT,
+        );
+    }
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => metadata,
         _ => return respond::error(StatusCode::NOT_FOUND, "not a file"),
@@ -2388,6 +2396,53 @@ mod tests {
             Some(1),
             "the route hands the registry the store's sessions: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_html_route_previews_only_an_html_document() {
+        let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<h1>page</h1>").unwrap();
+        // A real Word document is a zip; a text file is valid UTF-8. Neither is a page.
+        std::fs::write(
+            dir.join("report.docx"),
+            b"PK\x03\x04\x14\x00\x00\x00\x08\x00binary",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain words").unwrap();
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("html-only")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = |leaf: &str| {
+            format!(
+                "/api/html?path={}",
+                dir.join(leaf).to_string_lossy().replace('/', "%2F")
+            )
+        };
+        let (status, _, bytes) = call(&router, Method::GET, &uri("page.html"), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("page"), "{}", body_text(&bytes));
+        for leaf in ["report.docx", "notes.txt"] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri(leaf), Some(&cookie)).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{leaf}");
+            assert_eq!(
+                body_text(&bytes),
+                format!("{{\"error\":\"{}\"}}\n", preview::NOT_AN_HTML_DOCUMENT),
+                "{leaf}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
