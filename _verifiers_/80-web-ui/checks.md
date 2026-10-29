@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T11:59:56Z
+modified: 2026-10-29T15:36:18Z
 level: L3
 version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -18,6 +18,10 @@ grounded_in:
 - [`check-team-view.mjs`](check-team-view.mjs) — a Lead's team as the Web UI shows it: the roster with live status,
   the shared board with its revisions and the mailbox ledger, read from the same `/api/team` projection the
   tools use; and no panel at all for a session with no team.
+- [`check-stream.mjs`](check-stream.mjs) — the live event stream against DSH's `$events` stream: it opens with
+  `{ type: 'ready', clientId, host: { home } }` after its listeners are attached, so a baseline read on `ready`
+  misses no increment; an idle stream gets a heartbeat every interval and a peer that stops reading is cut after
+  two (DSH parity phase B, developer-ten).
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
@@ -42,8 +46,9 @@ grounded_in:
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
   workspace* and *Delete workspace* dialogs end to end.
 - [`check-row-errors.mjs`](check-row-errors.mjs) — a session row's Rename and Archive with the server stopped under
-  an open page: each shows its failure in the sidebar note ("could not rename that session: …", "could not archive
-  that session: …") and leaves no unhandled rejection, as DSH resolves every call to ok or error and shows the failure
+  an open page: Rename shows "could not rename that session: …" in its dialog, which stays open (DSH's Rename
+  session dialog), Archive shows "could not archive that session: …" in the sidebar note, and neither leaves an unhandled
+  rejection, as DSH resolves every call to ok or error and shows the failure
   (R-developer-six-3, parity S81; before the fix both builds showed nothing and left `Failed to fetch` unhandled).
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a

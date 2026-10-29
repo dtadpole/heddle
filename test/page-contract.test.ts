@@ -321,3 +321,24 @@ test('the + menu carries the computer-side File action and the input it drives',
   assert.match(page, /saved\.path, name: file\.name, bytes: saved\.bytes/, 'the stored reference waits as a pending attachment')
   assert.match(page, /pendingAttachments = \[\.\.\.pendingAttachments, \.\.\.added\]/, 'and it is kept with the draft, not typed into it')
 })
+
+test("a session is renamed in DSH's Rename session dialog, opened by the menu, the chord and a double-click on its title", () => {
+  /**
+   * DSH (`dsh-client-ui-workspace`, `RenameSession.js`) opens one dialog from three places: the row menu's `Rename`,
+   * the `session.rename` chord (`Mod+Alt+G`), and a double-click on the row's title (`onDoubleClick` →
+   * `onRenameRequest`). The dialog is titled `Rename session`, its field is `Session name` and starts with the stored
+   * title, and `Rename` is disabled only while the trimmed draft is empty — an unchanged title is accepted, which is
+   * how it pins the automatic one. The browser check in `_verifiers_/70-workspaces-sessions/` judges the gestures; this
+   * is the removal detector underneath it.
+   */
+  assert.match(page, /<dialog id="session-rename" class="ws-dialog" aria-labelledby="session-rename-title">/, 'the dialog exists')
+  assert.match(page, /<h2 id="session-rename-title">Rename session<\/h2>/, "and carries DSH's title")
+  assert.match(page, /<input type="text" id="session-rename-input" aria-label="Session name"/, "with DSH's field name")
+  assert.match(page, /<button type="button" id="session-rename-confirm" class="ws-primary" disabled>Rename<\/button>/, 'and its Rename button')
+  assert.match(page, /input\.value = node\.session\.title \?\? ''/, 'the field starts with the stored title, empty for an unnamed session')
+  assert.match(page, /\.disabled = sessionRenameTarget\.busy \|\| trimmed === ''/, 'only an empty draft (or one in flight) is refused, so an unchanged title can pin')
+  assert.match(page, /label\.addEventListener\('dblclick', \(event\) => \{\s*event\.stopPropagation\(\)\s*renameSession\(node\)/, 'a double-click on the title opens it')
+  assert.match(page, /items\.push\(\{ label: 'Rename', glyph: 'rename', run: \(\) => renameSession\(node\) \}\)/, 'and so does the menu item')
+  assert.match(page, /else if \(action === 'rename'\) renameSession\(node\)/, 'and the chord')
+  assert.doesNotMatch(page, /window\.prompt\('Rename this session'/, 'the native prompt is gone')
+})

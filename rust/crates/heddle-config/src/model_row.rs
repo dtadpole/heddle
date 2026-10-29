@@ -77,6 +77,92 @@ pub fn model_row_endpoints(
     })
 }
 
+/// The model row's composition kept current, as `plugins/model.ts` keeps it: [`ModelRowSource::changed`]
+/// answers the recomposed endpoints when a machine-file candidate changed since it last looked (its path,
+/// modification time and size), so an edit applies to the next request without a restart — DSH's provider
+/// settings apply that way. A run with `readLocalConfig: false` never reads the file, now or later.
+#[derive(Debug)]
+pub struct ModelRowSource {
+    row_endpoints: Vec<EndpointPatch>,
+    row_default: Option<String>,
+    read_local: bool,
+    env: Env,
+    candidates: Vec<PathBuf>,
+    stamp: std::sync::Mutex<String>,
+}
+
+impl ModelRowSource {
+    /// The row's composition inputs, with the candidates' stamp taken now.
+    pub fn new(
+        row_endpoints: Vec<EndpointPatch>,
+        row_default: Option<String>,
+        read_local: bool,
+        env: Env,
+    ) -> Self {
+        let candidates = local_config_candidates(&env);
+        let stamp = std::sync::Mutex::new(stamp_of(&candidates));
+        Self {
+            row_endpoints,
+            row_default,
+            read_local,
+            env,
+            candidates,
+            stamp,
+        }
+    }
+
+    /// The composition as the files stand now ([`model_row_endpoints`]).
+    pub fn compose(&self) -> Result<ModelRowEndpoints, ConfigError> {
+        model_row_endpoints(
+            &self.row_endpoints,
+            self.row_default.as_deref(),
+            self.read_local,
+            &self.env,
+        )
+    }
+
+    /// `None` when nothing changed since the last look (or the row does not read the file); otherwise the
+    /// recomposition, which fails as [`model_row_endpoints`] fails — a caller keeps its previous endpoints
+    /// then. Either way the new stamp is kept, so one bad edit is reported once, not on every request.
+    pub fn changed(&self) -> Option<Result<ModelRowEndpoints, ConfigError>> {
+        if !self.read_local {
+            return None;
+        }
+        let now = stamp_of(&self.candidates);
+        {
+            let mut stamp = self
+                .stamp
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *stamp == now {
+                return None;
+            }
+            *stamp = now;
+        }
+        Some(self.compose())
+    }
+}
+
+/// What identifies the candidate files' contents without reading them: path, modification time and size.
+fn stamp_of(candidates: &[PathBuf]) -> String {
+    candidates
+        .iter()
+        .map(|path| match std::fs::metadata(path) {
+            Ok(metadata) => {
+                let modified = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or_default();
+                format!("{}:{modified}:{}", path.display(), metadata.len())
+            }
+            Err(_) => format!("{}:absent", path.display()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -248,5 +334,57 @@ mod tests {
             None,
             "an empty row default is still written"
         );
+    }
+
+    #[test]
+    fn a_source_answers_the_recomposition_once_per_edit_of_the_machine_file() {
+        let root = scratch("source");
+        let env = machine(&root, MACHINE);
+        let file = root.join("home/.heddle/heddle.json");
+        let source = ModelRowSource::new(Vec::new(), None, true, env.clone());
+        assert!(
+            source.changed().is_none(),
+            "nothing changed since it was built"
+        );
+        assert_eq!(
+            source.compose().unwrap().nominated.as_deref(),
+            Some("router-a")
+        );
+
+        std::fs::write(
+            &file,
+            MACHINE.replace("\"default\": \"router-a\"", "\"default\": \"router-b\""),
+        )
+        .unwrap();
+        let changed = source.changed().expect("an edit is noticed").unwrap();
+        assert_eq!(
+            changed.nominated.as_deref(),
+            Some("router-b"),
+            "the next request reads the edit"
+        );
+        assert!(source.changed().is_none(), "and only once");
+
+        std::fs::write(&file, "{ not json").unwrap();
+        assert!(
+            source.changed().expect("noticed").is_err(),
+            "an unreadable edit is reported"
+        );
+        assert!(source.changed().is_none(), "once, not on every request");
+
+        let fixed = MACHINE.replace("\"default\": \"router-a\"", "\"default\": \"fusion\"");
+        std::fs::write(&file, fixed).unwrap();
+        assert_eq!(
+            source.changed().unwrap().unwrap().nominated.as_deref(),
+            Some("fusion"),
+            "the next good edit applies"
+        );
+
+        let silent = ModelRowSource::new(Vec::new(), None, false, env);
+        std::fs::write(&file, MACHINE).unwrap();
+        assert!(
+            silent.changed().is_none(),
+            "readLocalConfig false never reads the file"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -563,18 +563,36 @@ pub fn decode_goal_change(event: &Value) -> Result<Option<GoalChange>, GoalError
 /// non-complete goal is current, reuses an id, or starts at a revision other than 1; any other operation has no
 /// current goal, changes the id, does not advance the revision by exactly one, changes the objective or the cap
 /// without being an edit, or mutates a complete goal; a clear names another goal or a revision other than one
-/// past the current; `roundsStarted` goes backwards for the same goal. The rounds of the current goal are then
-/// raised to the count of user messages whose `source` is `{kind:"goal", goalId, revision, round ≥ 1}` for its
-/// exact id and revision.
+/// past the current; a recorded `roundsStarted` goes backwards for the same goal.
+///
+/// Rounds are counted **in log order, across revisions**, as DSH's `dsh-goal` fold does: a goal change carries the
+/// count forward, and a user message whose `source` is `{kind:"goal", goalId, revision, round ≥ 1}` for the goal and
+/// revision current at that point raises the count to its round. A cap is a cap for the goal, not for one revision.
+/// The earlier fold counted only the final revision's messages after the loop and took the larger of that and the
+/// recorded count, so after an edit the goal ran past its cap (R-developer-two-31: five rounds under a cap of three).
+/// Two leniencies keep logs written before that fix replayable where DSH would refuse them: a round number that does
+/// not exceed the count is not counted again, and a recorded count lower than the in-order count does not lower it.
 pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
     let mut goal: Option<GoalSnapshot> = None;
     let mut rounds_started = 0u64;
+    // The count the last mutation of the current goal recorded; recorded counts may not go backwards.
+    let mut recorded = 0u64;
     let mut created_at: Option<String> = None;
     let mut updated_at: Option<String> = None;
     let mut last_ref: Option<GoalRef> = None;
     let mut seen: std::collections::HashSet<GoalId> = std::collections::HashSet::new();
 
     for event in events {
+        if let Some((goal_id, revision, round)) = goal_round_of(event) {
+            if let Some(current) = &goal
+                && current.id.as_str() == goal_id
+                && current.revision == revision
+                && round > rounds_started
+            {
+                rounds_started = round;
+            }
+            continue;
+        }
         let Some(change) = decode_goal_change(event)? else {
             continue;
         };
@@ -597,6 +615,7 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
                 }
                 goal = None;
                 rounds_started = 0;
+                recorded = 0;
                 created_at = None;
                 updated_at = None;
                 last_ref = Some(cleared);
@@ -660,12 +679,16 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
                         ));
                     }
                 }
-                if next_rounds < rounds_started
-                    && last_ref.as_ref().is_some_and(|last| last.id == next.id)
-                {
+                let same_goal = last_ref.as_ref().is_some_and(|last| last.id == next.id);
+                if next_rounds < recorded && same_goal {
                     return Err(invalid_log("roundsStarted cannot go backwards"));
                 }
-                rounds_started = next_rounds;
+                rounds_started = if same_goal {
+                    rounds_started.max(next_rounds)
+                } else {
+                    next_rounds
+                };
+                recorded = next_rounds;
                 created_at = Some(next_created);
                 updated_at = Some(next_updated);
                 last_ref = Some(next.goal_ref());
@@ -674,9 +697,6 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
         }
     }
 
-    if let Some(current) = &goal {
-        rounds_started = rounds_started.max(admitted_rounds(events, current));
-    }
     Ok(FoldedGoal {
         goal,
         rounds_started,
@@ -686,40 +706,27 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
     })
 }
 
-/// Count the continuation rounds the log proves were admitted for one exact goal revision.
-fn admitted_rounds(events: &[Value], goal: &GoalSnapshot) -> u64 {
-    let mut count = 0;
-    for event in events {
-        if event.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let Some(message) = event.get("message").and_then(Value::as_object) else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("user") {
-            continue;
-        }
-        let Some(source) = message.get("source").and_then(Value::as_object) else {
-            continue;
-        };
-        if source.get("kind").and_then(Value::as_str) != Some("goal") {
-            continue;
-        }
-        if source.get("goalId").and_then(Value::as_str) != Some(goal.id.as_str()) {
-            continue;
-        }
-        if source.get("revision").and_then(integer_of) != Some(goal.revision) {
-            continue;
-        }
-        if source
-            .get("round")
-            .and_then(integer_of)
-            .is_some_and(|round| round >= 1)
-        {
-            count += 1;
-        }
+/// The goal round a goal-attributed user message announces — `(goalId, revision, round ≥ 1)` — or `None` for any
+/// other event.
+fn goal_round_of(event: &Value) -> Option<(&str, u64, u64)> {
+    if event.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
     }
-    count
+    let message = event.get("message").and_then(Value::as_object)?;
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let source = message.get("source").and_then(Value::as_object)?;
+    if source.get("kind").and_then(Value::as_str) != Some("goal") {
+        return None;
+    }
+    let goal_id = source.get("goalId").and_then(Value::as_str)?;
+    let revision = source.get("revision").and_then(integer_of)?;
+    let round = source
+        .get("round")
+        .and_then(integer_of)
+        .filter(|round| *round >= 1)?;
+    Some((goal_id, revision, round))
 }
 
 /// The body a change appends, in the TypeScript key order: `{type, version, operation, goal, roundsStarted,
@@ -892,6 +899,23 @@ impl GoalService {
         Ok(self.view_of(&session, &folded))
     }
 
+    /// The session's log, as the goal tools read it to decide **who is asking**.
+    ///
+    /// Authority is judged on the same log the fold reads, and through the same port: a direct human turn is a
+    /// person's message in the open turn, and a goal round is the driver's sourced message for the goal's current
+    /// revision and round. Reading it here keeps the tools on the service they already hold.
+    pub fn session_events(&self, session: &str) -> Result<Vec<Value>, GoalError> {
+        let session = self.session_of(session)?;
+        Ok(self.log.read(&session)?)
+    }
+
+    /// The session's metadata record, which says whether it is a delegated (subagent or teammate) session; `None`
+    /// when there is no such session or the log keeps no record ([`SessionLog::meta`]).
+    pub fn session_meta(&self, session: &str) -> Option<Value> {
+        let session = self.log.open(session)?;
+        self.log.meta(&session)
+    }
+
     /// Remove this process's continuation authority without changing the phase or the revision.
     pub fn disarm(&self, session: &str) -> Result<Option<GoalView>, GoalError> {
         let session = self.session_of(session)?;
@@ -963,9 +987,10 @@ impl GoalService {
         let folded = self.fold_session(&session)?;
         let current = expect_current(&folded, goal)?.clone();
         if request.objective.is_none() && request.max_goal_rounds.is_none() {
+            // DSH's sentence (dsh-goal `edit`), which the model reads back through `update_goal`.
             return Err(refused(
                 GoalErrorCode::InvalidEdit,
-                "an edit needs an objective and/or maxGoalRounds",
+                "goal edit requires objective and/or maxGoalRounds",
             ));
         }
         let objective = match request.objective {

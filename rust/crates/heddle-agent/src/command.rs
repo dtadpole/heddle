@@ -30,7 +30,7 @@ use heddle_llm::ModelService;
 use heddle_session::{OpenAtOptions, SessionService, StartOptions};
 
 use crate::turn::{AgentRuntime, ContextSummary, Denial, RoundLimit, RunTurnOptions, run_turn};
-use crate::upstream::SessionHandle;
+use crate::upstream::{SessionEvent, SessionHandle};
 
 /// The command words this crate answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +121,9 @@ pub struct Context<'a> {
     pub stream: Option<StreamStarter<'a>>,
     /// The goal driver, when the profile has one.
     pub goal: Option<&'a dyn GoalAdvance>,
+    /// Background delegation, when the profile has the `subagent-tool` row: the one-shot process waits for the
+    /// session's children and the turns their notices start before it prints its answer.
+    pub subagents: Option<&'a crate::SubagentService>,
 }
 
 /// The sentence a turn fails with when nothing names an endpoint (`heddle-llm`'s, which owns `--endpoint`).
@@ -144,6 +147,8 @@ struct TurnJson<'a> {
     context: Option<ContextSummary>,
     endpoint: &'a str,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_notices: Option<usize>,
     finish_reason: &'a str,
     rounds: u32,
     tool_calls: Vec<CallJson<'a>>,
@@ -260,6 +265,14 @@ async fn turn(
         .await
         .map_err(|error| error.to_string())?;
 
+    // Background children report back by notice, so a one-shot process waits for them — DSH's headless host
+    // waits for its children before its final answer. `settle` returns once no child of this session is running
+    // and every notice has been answered; the answer printed is then the session's last one.
+    let mut notices = match context.subagents {
+        Some(subagents) => subagents.settle(&handle.id).await,
+        None => 0,
+    };
+
     // A goal continues itself; joining its chain keeps a one-shot process alive until its rounds are done.
     if let Some(goal) = context.goal {
         let driven = goal.advance(&handle).await;
@@ -271,6 +284,25 @@ async fn turn(
             )
             .map_err(io)?;
         }
+        if let Some(subagents) = context.subagents {
+            notices = subagents.settle(&handle.id).await;
+        }
+    }
+    let final_text = if notices > 0 {
+        let events = context
+            .sessions
+            .events(&handle)
+            .map_err(|error| error.to_string())?;
+        let events: Vec<SessionEvent> = events
+            .iter()
+            .map(|event| SessionEvent::clone(event))
+            .collect();
+        crate::final_assistant_text(&events)
+    } else {
+        result.text.clone()
+    };
+    if !args.json && notices > 0 {
+        writeln!(out, "heddle: answered {notices} subagent notice(s)").map_err(io)?;
     }
     let streamed = view.map(|view| {
         view.dispose();
@@ -283,7 +315,8 @@ async fn turn(
             stream: streamed,
             context: result.context,
             endpoint: &endpoint,
-            text: &result.text,
+            text: &final_text,
+            subagent_notices: (notices > 0).then_some(notices),
             finish_reason: &result.finish_reason,
             rounds: result.rounds,
             tool_calls: result
@@ -300,7 +333,7 @@ async fn turn(
         let text = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
         writeln!(out, "{text}").map_err(io)?;
     } else {
-        writeln!(out, "{}", result.text).map_err(io)?;
+        writeln!(out, "{final_text}").map_err(io)?;
         for call in &result.tool_calls {
             match &call.result.error {
                 Some(error) => writeln!(
@@ -338,7 +371,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::adapters::tests::{SessionMessages, scripted_service, sessions_at};
+    use crate::adapters::tests::{ScratchDir, SessionMessages, scripted_service, sessions_at};
     use crate::adapters::{LlmModel, Sessions};
     use crate::ports::NoTurnHooks;
     use crate::turns::TurnRegistry;
@@ -350,19 +383,14 @@ mod tests {
         models: Arc<ModelService>,
         sessions: Arc<SessionService>,
         runtime: AgentRuntime,
+        /// The scratch folders behind `work`, the step file and the sessions, removed when the harness drops.
+        _scratch: Vec<ScratchDir>,
     }
 
-    fn scratch(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "heddle-agent-command-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+    /// A scratch workspace (its canonical path) and the guard that removes it.
+    fn scratch(label: &str) -> (PathBuf, ScratchDir) {
+        let dir = ScratchDir::new(&format!("command-{label}"));
+        (dir.path().canonicalize().unwrap(), dir)
     }
 
     fn sandbox_at(root: &Path) -> Arc<SandboxService> {
@@ -381,9 +409,9 @@ mod tests {
     }
 
     fn harness(label: &str, steps: serde_json::Value, allow: &[&str]) -> Harness {
-        let work = scratch(label);
-        let sessions = sessions_at(label);
-        let models = scripted_service(label, steps);
+        let (work, work_dir) = scratch(label);
+        let (sessions, sessions_dir) = sessions_at(label);
+        let (models, models_dir) = scripted_service(label, steps);
         let gates = gates_over(
             sandbox_at(&work),
             Arc::new(ApprovalService::new(ApprovalsConfig::default())),
@@ -411,6 +439,7 @@ mod tests {
             models,
             sessions,
             runtime,
+            _scratch: vec![work_dir, sessions_dir, models_dir],
         }
     }
 
@@ -425,6 +454,7 @@ mod tests {
                 ensure_workspace: None,
                 stream: None,
                 goal: None,
+                subagents: None,
             }
         }
 
@@ -828,13 +858,9 @@ mod tests {
             json!([{ "reasoning": "thinking", "text": "streamed answer" }]),
             &[],
         );
-        let root = std::env::temp_dir().join(format!(
-            "heddle-agent-command-stream-store-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = ScratchDir::new("command-stream-store");
         let config = heddle_session::SessionConfig {
-            root: Some(root.to_str().unwrap().to_owned()),
+            root: Some(root.path().to_str().unwrap().to_owned()),
         };
         let sessions = Arc::new(SessionService::new(
             &config,

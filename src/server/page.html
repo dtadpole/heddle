@@ -1879,8 +1879,9 @@
   #access-enable:disabled { opacity: .45; cursor: default; }
   /**
    * The three workspace dialogs — DSH's *Select Workspace Directory* (its browse picker), *Rename workspace* and
-   * *Delete workspace*. Native `<dialog>`s like Settings, so Escape, focus containment and the backdrop are the
-   * platform's; the card is the access gate's (surface, 16px radius, right-aligned actions).
+   * *Delete workspace* — and DSH's *Rename session*, which wears the same card. Native `<dialog>`s like Settings, so
+   * Escape, focus containment and the backdrop are the platform's; the card is the access gate's (surface, 16px radius,
+   * right-aligned actions).
    */
   .ws-dialog {
     width: min(92vw, 440px); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
@@ -3013,6 +3014,23 @@
   <div class="ws-actions">
     <button type="button" data-ws-close>Cancel</button>
     <button type="button" id="workspace-delete-confirm" class="ws-danger">Delete workspace</button>
+  </div>
+</dialog>
+<!--
+  DSH's Rename session dialog (dsh-client-ui-workspace, RenameSession.js): opened by the row menu's Rename, the
+  Alt+Meta+G chord and a double-click on the row's title. Its strings are DSH's: "Rename session", "Session name",
+  Cancel and Rename.
+-->
+<dialog id="session-rename" class="ws-dialog" aria-labelledby="session-rename-title">
+  <div class="ws-head">
+    <h2 id="session-rename-title">Rename session</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <input type="text" id="session-rename-input" aria-label="Session name" spellcheck="false" autocomplete="off">
+  <p id="session-rename-error" class="ws-error" role="alert" hidden></p>
+  <div class="ws-actions">
+    <button type="button" data-ws-close>Cancel</button>
+    <button type="button" id="session-rename-confirm" class="ws-primary" disabled>Rename</button>
   </div>
 </dialog>
 <script type="module">
@@ -5677,7 +5695,7 @@ events.addEventListener('session', (message) => {
   } else if (event.type === 'message' && event.message.role === 'user') {
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
-      attachments: contentAttachments(event.message.content),
+      attachments: contentAttachments(event.message.content, payload.session),
     })
   }
   else if (event.type === 'message' && event.message.role === 'tool') {
@@ -6416,7 +6434,11 @@ function queueAttachmentStrip(attachments) {
   const strip = document.createElement('div')
   strip.className = 'queue-files'
   for (const file of attachments) {
-    const url = uploadUrlFor(file.path)
+    /**
+     * A queued message is not in the session's log yet, so the server does not serve its upload; the thumbnail is the
+     * page's own copy of the picked file, as DSH's queue draws its previews from the client's memory.
+     */
+    const url = typeof file.preview === 'string' ? file.preview : null
     if (url !== null && /[.](png|jpe?g|webp|gif)$/i.test(String(file.name ?? ''))) {
       const thumb = document.createElement('img')
       thumb.className = 'queue-thumb'
@@ -7554,18 +7576,25 @@ function takeAttachments() {
   return taken
 }
 
-/** The same-origin address a stored upload path is served at, or null when there is no leaf. */
-function uploadUrlFor(path) {
+/**
+ * The same-origin address a stored upload path is served at for one session, or null when there is no leaf.
+ *
+ * The server serves an upload only to a session whose log references it (DSH's `session/attachment`), so the address
+ * names the session the card belongs to.
+ */
+function uploadUrlFor(path, session) {
   const leaf = String(path ?? '').split('/').pop() ?? ''
-  return leaf.length === 0 ? null : `/api/uploads/${encodeURIComponent(leaf)}`
+  if (leaf.length === 0) return null
+  const scope = typeof session === 'string' && session.length > 0 ? `?session=${encodeURIComponent(session)}` : ''
+  return `/api/uploads/${encodeURIComponent(leaf)}${scope}`
 }
 
-/** The attachments a live message event carries, shaped like the transcript's own metadata. */
-function contentAttachments(content) {
+/** The attachments a live message event of one session carries, shaped like the transcript's own metadata. */
+function contentAttachments(content, session) {
   const attachments = []
   for (const part of content ?? []) {
     if (part.type !== 'image' && part.type !== 'file') continue
-    const url = uploadUrlFor(part.path)
+    const url = uploadUrlFor(part.path, session)
     if (url === null) continue
     attachments.push({
       kind: part.type,
@@ -7663,7 +7692,9 @@ async function addPickedFiles(files) {
         throw new Error(detail.length > 0 ? detail : `the server answered ${response.status}`)
       }
       const saved = await response.json()
-      added.push({ path: saved.path, name: file.name, bytes: saved.bytes })
+      // The page's own preview of an image, for the queue's thumbnail before the message reaches the log.
+      const preview = /^image\//.test(String(file.type ?? '')) ? URL.createObjectURL(file) : undefined
+      added.push({ path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) })
     } catch (error) {
       showAttachFailure(files, error)
       return
@@ -9673,8 +9704,20 @@ function menuItemsFor(node) {
 /**
  * Rename a session: its **title**, which the row shows, while the folder stays the identity.
  *
- * One function for the menu and (in future) a shortcut, because the two must not drift: a rename that one of them
- * wrote differently would be two behaviours wearing one label.
+ * DSH's *Rename session* dialog (`dsh-client-ui-workspace`, `RenameSession.js`), one for the three ways in — the menu's
+ * `Rename`, the `Alt+Meta+G` chord and a double-click on the row's title — because they must not drift: a rename that
+ * one of them wrote differently would be two behaviours wearing one label. DSH's rules, read from its `RenameForm`:
+ *
+ * - the field starts with the **stored** title — empty for a session nobody named — and is selected on focus;
+ * - `Rename` is disabled only while the trimmed name is empty or a rename is in flight. An **unchanged** title is
+ *   accepted ("unlike Workspace rename an unchanged title is NOT blocked"), which is how confirming the automatic
+ *   title makes it the person's own;
+ * - Enter confirms (not while an input method is composing); the trimmed name is what is sent;
+ * - a refusal is shown in the dialog, which stays open; while the request is in flight the field and Cancel are
+ *   disabled and closing does nothing.
+ *
+ * A blank name is never sent, as in DSH, where the host refuses one (`session/title-invalid`). Clearing a title back to
+ * the folder name stays an API act (`"title": ""`), which this page does not offer.
  */
 /** The folder holding a session's definition, when one is known: a definition row's own path, or one a listing showed. */
 function definitionFolder(node) {
@@ -9706,26 +9749,107 @@ async function sessionRequest(path, init, what) {
   return response.ok ? { ok: true, body } : { ok: false, error: body.error ?? `could not ${what}` }
 }
 
-async function renameSession(node) {
-  const title = window.prompt('Rename this session', node.session?.title ?? '')
-  if (title === null) return
-  const result = await sessionRequest('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    /**
-     * The definition folder goes with the rename when the tree has seen one, so the store and `session.json` agree; a
-     * session with no definition (bound to a folder by a run) renames in the store alone.
-     */
-    body: JSON.stringify({ title, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  }, 'rename that session')
-  if (!result.ok) {
-    setNote(result.error)
+const sessionRenameDialog = document.getElementById('session-rename')
+/** The request the open dialog answers: `{ node, busy }`. Replaced on every open, read only while the dialog is open. */
+let sessionRenameTarget = null
+
+/**
+ * Open the dialog for one session. Nothing happens while any modal dialog is already open — DSH's chord is blocked
+ * while a modal obscures the conversation, and a second request must not reseed a draft a person is typing.
+ */
+function renameSession(node) {
+  if (node?.session === undefined || node.session === null) return
+  if (document.querySelector('dialog[open]') !== null) return
+  sessionRenameTarget = { node, busy: false }
+  const input = document.getElementById('session-rename-input')
+  input.value = node.session.title ?? ''
+  dialogError('session-rename-error', '')
+  setSessionRenameBusy(false)
+  sessionRenameDialog.showModal()
+  input.focus()
+  input.select()
+}
+
+function refreshSessionRename() {
+  if (sessionRenameTarget === null) return
+  const trimmed = document.getElementById('session-rename-input').value.trim()
+  document.getElementById('session-rename-confirm').disabled = sessionRenameTarget.busy || trimmed === ''
+}
+
+function setSessionRenameBusy(busy) {
+  if (sessionRenameTarget !== null) sessionRenameTarget.busy = busy
+  document.getElementById('session-rename-input').disabled = busy
+  for (const close of sessionRenameDialog.querySelectorAll('[data-ws-close]')) close.disabled = busy
+  refreshSessionRename()
+}
+
+function closeSessionRename() {
+  if (sessionRenameTarget !== null && sessionRenameTarget.busy) return
+  sessionRenameDialog.close()
+}
+
+async function confirmSessionRename() {
+  refreshSessionRename()
+  const target = sessionRenameTarget
+  if (target === null || !sessionRenameDialog.open || document.getElementById('session-rename-confirm').disabled) return
+  const title = document.getElementById('session-rename-input').value.trim()
+  /**
+   * The definition folder goes with the rename when the tree has seen one, so the store and `session.json` agree; a
+   * session with no definition (bound to a folder by a run) renames in the store alone.
+   */
+  const folder = definitionFolder(target.node)
+  setSessionRenameBusy(true)
+  const refuse = (text) => {
+    if (sessionRenameTarget !== target) return
+    setSessionRenameBusy(false)
+    dialogError('session-rename-error', text)
+    document.getElementById('session-rename-input').focus()
+  }
+  try {
+    const response = await fetch('/api/sessions/' + encodeURIComponent(target.node.session.id) + '/title', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title, ...(folder !== undefined ? { folder } : {}) }),
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      refuse(body.error ?? 'could not rename that session')
+      return
+    }
+  } catch (error) {
+    refuse('could not rename that session: ' + (error && error.message))
     return
+  }
+  if (sessionRenameTarget === target) {
+    setSessionRenameBusy(false)
+    sessionRenameTarget = null
+    sessionRenameDialog.close()
   }
   setNote('')
   await renderTree()
   await refreshSessions()
 }
+
+for (const close of sessionRenameDialog.querySelectorAll('[data-ws-close]')) close.addEventListener('click', closeSessionRename)
+/** A click that lands on the dialog element itself is a click on the backdrop. */
+sessionRenameDialog.addEventListener('click', (clickEvent) => {
+  if (clickEvent.target === sessionRenameDialog) closeSessionRename()
+})
+/** Escape is the platform's close; it is held while the rename is in flight, as DSH's close is. */
+sessionRenameDialog.addEventListener('cancel', (cancelEvent) => {
+  if (sessionRenameTarget !== null && sessionRenameTarget.busy) cancelEvent.preventDefault()
+})
+document.getElementById('session-rename-input').addEventListener('input', () => {
+  dialogError('session-rename-error', '')
+  refreshSessionRename()
+})
+document.getElementById('session-rename-input').addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key === 'Enter' && !keyEvent.isComposing) {
+    keyEvent.preventDefault()
+    void confirmSessionRename()
+  }
+})
+document.getElementById('session-rename-confirm').addEventListener('click', () => void confirmSessionRename())
 
 /**
  * Fork a session: DSH's item and DSH's naming — `<title> (1)` — appearing beside its parent, with the view left
@@ -10071,7 +10195,7 @@ document.addEventListener('keydown', (event) => {
   setNote('')
   if (action === 'archive') void archiveSession(node)
   else if (action === 'fork') void forkSession(node)
-  else if (action === 'rename') void renameSession(node)
+  else if (action === 'rename') renameSession(node)
 })
 
 /** The `…` control: a button, and the one list it opens. */
@@ -10610,6 +10734,17 @@ function nodeRow(node, depth = 0) {
   /** The folder a session works in is its tooltip: the tree groups by workspace, and the folder is still its identity. */
   if (node.kind === 'session') row.title = (node.session !== null && node.session !== undefined ? definitionOf.get(node.session.id) : undefined) ?? node.cwd ?? node.path
   row.append(label)
+  /**
+   * DSH's session row opens the Rename session dialog on a **double-click on its title** (`onDoubleClick` →
+   * `onRenameRequest`), the same request its menu's `Rename` and the chord raise. Here it is wired on the rows whose menu
+   * offers `Rename`, and the event stops at the title, as DSH's does; the two clicks before it open the session as usual.
+   */
+  if (node.kind === 'session' && node.session) {
+    label.addEventListener('dblclick', (event) => {
+      event.stopPropagation()
+      renameSession(node)
+    })
+  }
 
   /**
    * The dot that used to sit here said whether an instance held a session: hollow when none, filled when one.

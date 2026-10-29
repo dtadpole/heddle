@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { trackScratch, untrackScratch } from './scratch.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -47,7 +48,7 @@ export { browserPath }
  * because a check that opens a window steals focus on the machine it runs on. The caller must `close()`.
  */
 export async function openBrowser(options = {}) {
-  const profile = mkdtempSync(join(tmpdir(), 'heddle-check-browser-'))
+  const profile = trackScratch(mkdtempSync(join(tmpdir(), 'heddle-check-browser-')))
   let browser
   try {
     browser = await openToolBrowser({
@@ -62,6 +63,7 @@ export async function openBrowser(options = {}) {
     rmSync(profile, { recursive: true, force: true })
     throw error
   }
+  trackScratch(profile, browser.running?.child) // a check that never calls close() still leaves no profile
   const page = browser.page()
   return {
     /** The page-level protocol call, for the one thing the wrapper does not cover. */
@@ -102,6 +104,7 @@ export async function openBrowser(options = {}) {
       for (let attempt = 0; attempt < 20; attempt += 1) {
         try {
           rmSync(profile, { recursive: true, force: true })
+          untrackScratch(profile)
           return
         } catch {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))

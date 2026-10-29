@@ -108,10 +108,16 @@ pub struct ProbeResult {
     pub milliseconds: u64,
 }
 
+/// Where a changed configuration comes from: asked before every read and every call, it answers the new endpoints
+/// and default when the configuration changed since it last answered, and `None` when it did not.
+pub type RefreshSource =
+    Arc<dyn Fn() -> Option<(Vec<EndpointConfig>, Option<String>)> + Send + Sync>;
+
 /// The model service. Shared as `Arc<ModelService>`; every method takes `&self`.
 pub struct ModelService {
     adapters: std::sync::RwLock<Vec<Arc<dyn Adapter>>>,
     nominated: std::sync::RwLock<Option<String>>,
+    refresh: std::sync::RwLock<Option<RefreshSource>>,
     hooks: std::sync::RwLock<Vec<(HooksId, Arc<dyn ModelHooks>)>>,
     next_hooks_id: AtomicU64,
     model_lists: Arc<ModelListCache>,
@@ -123,6 +129,7 @@ impl ModelService {
         let service = Self {
             adapters: std::sync::RwLock::new(Vec::new()),
             nominated: std::sync::RwLock::new(None),
+            refresh: std::sync::RwLock::new(None),
             hooks: std::sync::RwLock::new(Vec::new()),
             next_hooks_id: AtomicU64::new(0),
             model_lists: Arc::new(ModelListCache::new()),
@@ -163,6 +170,56 @@ impl ModelService {
             .collect::<Vec<_>>()
             .join(", ");
         format!("model: {} endpoint(s) — {described}", adapters.len())
+    }
+
+    /// Ask `source` before every read and every call, and swap in what it answers (`setRefresh`): a configuration
+    /// change applies to the next request without a restart, as DSH's provider settings do.
+    pub fn set_refresh(&self, source: RefreshSource) {
+        *self
+            .refresh
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+    }
+
+    /// Replace every endpoint and the nominated default at once (`reconfigure`). Every adapter is built before
+    /// anything is replaced, so an endpoint no adapter speaks leaves the service as it was; a stream already started
+    /// holds its own adapter and finishes on the configuration it began with.
+    pub fn reconfigure(
+        &self,
+        endpoints: Vec<EndpointConfig>,
+        nominated: Option<&str>,
+    ) -> Result<(), ModelError> {
+        let next = endpoints
+            .into_iter()
+            .map(crate::adapter::adapter_for)
+            .collect::<Result<Vec<_>, _>>()?;
+        let present = |name: &str| next.iter().any(|adapter| adapter.endpoint().name == name);
+        let nominated = nominated.filter(|name| present(name)).map(str::to_string);
+        *self
+            .adapters
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        *self
+            .nominated
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = nominated;
+        Ok(())
+    }
+
+    /// Ask the refresh source, if any; a configuration it answers that cannot be built keeps the previous one.
+    fn refresh(&self) {
+        let source = self
+            .refresh
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some((endpoints, nominated)) = source.and_then(|source| source())
+            && let Err(error) = self.reconfigure(endpoints, nominated.as_deref())
+        {
+            tracing::warn!(
+                "model: the changed configuration cannot be used ({error}); the previous endpoints stay"
+            );
+        }
     }
 
     /// Add an endpoint, replacing one of the same name in place; its discovered modalities are dropped with it.
@@ -232,6 +289,7 @@ impl ModelService {
 
     /// The recorded default, if any. The composer's endpoint listing reports it.
     pub fn nominated(&self) -> Option<String> {
+        self.refresh();
         self.nominated
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -387,6 +445,7 @@ impl ModelService {
     }
 
     fn adapters(&self) -> Vec<Arc<dyn Adapter>> {
+        self.refresh();
         self.adapters
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -632,6 +691,56 @@ mod tests {
             Some("b".to_string()),
             "an unknown name changes nothing"
         );
+    }
+
+    #[test]
+    fn a_refresh_source_swaps_endpoints_and_default_on_the_next_read() {
+        let fixture = Fixture::new();
+        let service = ModelService::from_configuration(
+            vec![fixture.endpoint("a", json!({ "steps": [] }))],
+            Some("a"),
+        )
+        .expect("registers");
+        let edited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let next = vec![
+            fixture.endpoint("b", json!({ "steps": [] })),
+            fixture.endpoint("c", json!({ "steps": [] })),
+        ];
+        let flag = Arc::clone(&edited);
+        service.set_refresh(Arc::new(move || {
+            flag.swap(false, Ordering::SeqCst)
+                .then(|| (next.clone(), Some("c".to_string())))
+        }));
+        assert_eq!(
+            service.names(),
+            vec!["a".to_string()],
+            "nothing changed yet"
+        );
+        edited.store(true, Ordering::SeqCst);
+        assert_eq!(
+            service.names(),
+            vec!["b".to_string(), "c".to_string()],
+            "the next read sees the edit"
+        );
+        assert_eq!(service.default_endpoint(None), Some("c".to_string()));
+        assert_eq!(
+            service.names(),
+            vec!["b".to_string(), "c".to_string()],
+            "and keeps it"
+        );
+
+        service
+            .reconfigure(
+                vec![fixture.endpoint("d", json!({ "steps": [] }))],
+                Some("missing"),
+            )
+            .expect("reconfigures");
+        assert_eq!(
+            service.nominated(),
+            None,
+            "a default the new list lacks is no default"
+        );
+        assert_eq!(service.default_endpoint(None), Some("d".to_string()));
     }
 
     #[test]

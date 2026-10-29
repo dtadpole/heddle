@@ -57,10 +57,17 @@ test('Rename, Fork, Pin and Archive all go through it, and none awaits fetch ung
     assert.ok(match, `the page defines ${name}`)
     return match[0]
   }
-  for (const name of ['renameSession', 'forkSession', 'setSessionFlags']) {
+  for (const name of ['forkSession', 'setSessionFlags']) {
     assert.match(body(name), /await sessionRequest\(/, `${name} uses sessionRequest`)
     assert.doesNotMatch(body(name), /await fetch\(/, `${name} no longer awaits fetch itself`)
   }
+  /**
+   * Rename is DSH's dialog (developer-eight, 9b9b8375), which already guards its request: a rejection is caught and shown
+   * in the dialog, which stays open — DSH's own behaviour for a failed rename, so it keeps its fetch rather than the helper.
+   */
+  const confirm = body('confirmSessionRename')
+  assert.match(confirm, /try \{\s*const response = await fetch\(/, 'the rename request is inside a try')
+  assert.match(confirm, /\} catch \(error\) \{\s*refuse\('could not rename that session: '/, 'and a rejection is shown in the dialog')
   // The workspace row's "Rename conversation…" item is inline in the menu builder.
   const inline = /label: 'Rename conversation…'[\s\S]*?\n {6}}\)/.exec(page)?.[0] ?? ''
   assert.match(inline, /await sessionRequest\(/)

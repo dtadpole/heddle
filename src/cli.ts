@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import { createApp } from './app.ts'
 import { boot, failedEntries, settle } from './boot.ts'
 import { runTurn } from './agent/loop.ts'
+import { finalAssistantText, type SubagentService } from './agent/subagent.ts'
 import { describeEndpoint } from './endpoints.ts'
 import { describeContent } from './llm/types.ts'
 import { canonicalPath } from './paths.ts'
@@ -419,11 +420,22 @@ function describeTree(node: TreeNode): string[] {
   return { patches: args.patch, includeProjectPatch: false }
 }
 
-/** Boot from the default profile or from the flags. **/
-async function bootFromArgs(args: Args) {
+/**
+ * Boot from the default profile or from the flags.
+ *
+ * `machineOutput` is a one-shot run whose stdout is `--json`'s document. Its plugins, and a turn it runs, log errors
+ * only: the console exporter writes `info` to stdout, and measured on 2026-10-29 `heddle goal <session> --json`
+ * printed `model: 1 endpoint(s) — …`, `tools: 4 registered, …` and `team: durable team service ready` ahead of the
+ * JSON — and a `--turn` added `turn: wrote …` for a `write_file` call — so stdout did not parse. The Rust binary
+ * prints those lines on neither stream, so this matches it; an error a row logs still reaches stderr. `web` does
+ * not ask for it — its `--json` line follows human lines, and its log is a server's — and a run without `--json`
+ * prints exactly what it did.
+ */
+async function bootFromArgs(args: Args, options: { readonly machineOutput?: boolean } = {}) {
   const layers = baseLayer(args)
   return boot({
     configDir: process.cwd(),
+    ...(options.machineOutput === true ? { logLevel: 0 } : {}),
     ...(args.profile !== undefined ? { profile: args.profile } : {}),
     ...(layers.base !== undefined ? { base: layers.base } : {}),
     patches: [...layers.patches],
@@ -530,6 +542,8 @@ async function runWeb(args: Args): Promise<void> {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
       }
     }
+    /** Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule). */
+    if (app.ctx.get('schedule') !== undefined) app.ctx.schedule.startDelivery()
     process.stdout.write(`heddle web: ${server.url}\n`)
     process.stdout.write(`heddle web: serving on ${server.host}:${server.port}; pass --port to change it\n`)
     if (args.json) process.stdout.write(`${JSON.stringify({ url: server.url, host: server.host, port: server.port, token: server.token })}\n`)
@@ -639,7 +653,7 @@ function applyToolAllowList(ctx: { tools?: { filterTo?: (allow: readonly string[
 }
 
 async function runCommand(command: string, target: string | undefined, json: boolean, args: Args): Promise<boolean> {
-  const app = await bootFromArgs(args)
+  const app = await bootFromArgs(args, { machineOutput: json })
   try {
     await settle(app.ctx)
     /**
@@ -966,7 +980,7 @@ async function main(): Promise<void> {
     return
   }
 
-  const app = await bootFromArgs(emptyArgs(args))
+  const app = await bootFromArgs(emptyArgs(args), { machineOutput: args.json && args.turn !== undefined })
   try {
     const pending = await settle(app.ctx)
     /**
@@ -1059,6 +1073,16 @@ async function main(): Promise<void> {
     })
 
     /**
+     * Background children report back by notice, so a one-shot process waits for them — DSH's headless host waits
+     * for its children before its final answer. `settle` returns once no child of this session is running and every
+     * notice has been answered (each notice to an idle parent starts a turn of its own); the answer printed is then
+     * the session's last one, not the turn that only started the children.
+     */
+    const subagents = app.ctx.get('subagents') as SubagentService | undefined
+    const settleSubagents = async (): Promise<number> => (subagents !== undefined ? subagents.settle(handle.id) : 0)
+    let notices = await settleSubagents()
+
+    /**
      * A goal continues itself. The driver started on this turn's own `turn/completed` event, so this call
      * **joins** the running chain rather than starting a second one — and joining it here is what keeps a
      * one-shot process alive until its rounds are done.
@@ -1068,7 +1092,10 @@ async function main(): Promise<void> {
       if (!args.json && driven.rounds > 0) {
         process.stdout.write(`heddle: the goal continued for ${driven.rounds} round(s); ${driven.stopped}\n`)
       }
+      notices = await settleSubagents()
     }
+    const finalText = notices > 0 ? finalAssistantText(app.ctx.session.store.read(handle)) : result.text
+    if (!args.json && notices > 0) process.stdout.write(`heddle: answered ${notices} subagent notice(s)\n`)
     printer?.dispose()
     const streamed = printer?.summary()
     if (args.json) {
@@ -1082,7 +1109,8 @@ async function main(): Promise<void> {
             // check, and the context check reads exactly this.
             ...(result.context !== undefined ? { context: result.context } : {}),
             endpoint,
-            text: result.text,
+            text: finalText,
+            ...(notices > 0 ? { subagentNotices: notices } : {}),
             finishReason: result.finishReason,
             rounds: result.rounds,
             toolCalls: result.toolCalls.map((call) => ({ name: call.name, ok: call.result.error === undefined })),
@@ -1094,7 +1122,7 @@ async function main(): Promise<void> {
         )}\n`,
       )
     } else {
-      process.stdout.write(`${result.text}\n`)
+      process.stdout.write(`${finalText}\n`)
       for (const call of result.toolCalls) {
         process.stdout.write(
           `heddle: tool ${call.name} ${call.result.error ? `refused (${call.result.error.code}) — ${call.result.error.message}` : 'ok'}\n`,

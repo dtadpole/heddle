@@ -13,8 +13,8 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  * Unpin raise a warning toast, and a rejected call is logged. Measured on both builds before the fix: with the server
  * stopped under an open page, Rename and Archive changed nothing on screen and left `Failed to fetch` as an unhandled
  * rejection. The check opens the page on a real `heddle web` (the TypeScript build, or the binary through `HEDDLE_BIN`),
- * stops the server, uses each action from the row's menu, and reads the sidebar note and the page's unhandled
- * rejections.
+ * stops the server, uses Rename (through DSH's Rename session dialog) and Archive from the row's menu, and reads the
+ * dialog's error, the sidebar note and the page's unhandled rejections.
  */
 
 const CAPABILITY = 'the Web UI'
@@ -69,6 +69,33 @@ const useRowAction = (label) => `(async () => {
   return JSON.stringify({ note: note && !note.hidden ? note.textContent : '', rejections: window.__rejections.slice() })
 })()`
 
+/**
+ * Rename through DSH's *Rename session* dialog (developer-eight, 9b9b8375): open it from the row's menu, type a name,
+ * confirm, and read the dialog. DSH keeps the dialog open with the reason in the error colour, so the failure is read
+ * there, and the dialog is closed afterwards so the next action is not blocked by a modal.
+ */
+const renameThroughDialog = () => `(async () => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const row = document.querySelector('li[data-session-id="${SESSION}"]')
+  row?.querySelector(':scope > .row .menu-wrap > button')?.click()
+  await sleep(300)
+  const item = [...(row?.querySelectorAll('.menu [role=menuitem], .menu button') ?? [])].find((element) => element.textContent.trim() === 'Rename')
+  if (!item) return JSON.stringify({ error: 'no menu item Rename' })
+  item.click()
+  await sleep(300)
+  const dialog = document.getElementById('session-rename')
+  const input = document.getElementById('session-rename-input')
+  if (!dialog?.open || !input) return JSON.stringify({ error: 'the rename dialog did not open' })
+  input.value = 'renamed while the server is down'
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  document.getElementById('session-rename-confirm').click()
+  await sleep(2000)
+  const shown = document.getElementById('session-rename-error')
+  const result = { dialogError: shown && !shown.hidden ? shown.textContent : '', stillOpen: dialog.open, rejections: window.__rejections.slice() }
+  dialog.close()
+  return JSON.stringify(result)
+})()`
+
 test('with the server down, Rename and Archive show their failure instead of failing silently', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
@@ -91,22 +118,22 @@ test('with the server down, Rename and Archive show their failure instead of fai
     await browser.goto(url)
     // The tree's row carries the menu (the flat list's rows do not); a first visit opens the workspace that holds it.
     await browser.waitFor(`document.querySelector('li[data-session-id="${SESSION}"] > .row .menu-wrap > button') !== null`, 15_000)
-    // The rename prompt is answered, and every unhandled rejection is kept for the verdict.
+    // Every unhandled rejection is kept for the verdict; Archive's running-session confirm is answered.
     await browser.evaluate(`(() => {
       window.__rejections = []
       window.addEventListener('unhandledrejection', (event) => window.__rejections.push(String(event.reason && event.reason.message || event.reason)))
-      window.prompt = () => 'renamed while the server is down'
       window.confirm = () => true
       return true
     })()`)
 
     await server.close()
 
-    const rename = JSON.parse(await browser.evaluate(useRowAction('Rename'), 15_000))
+    const rename = JSON.parse(await browser.evaluate(renameThroughDialog(), 15_000))
     const archive = JSON.parse(await browser.evaluate(useRowAction('Archive session'), 15_000))
     assert.equal(rename.error, undefined, JSON.stringify(rename))
     assert.equal(archive.error, undefined, JSON.stringify(archive))
-    assert.match(rename.note, /^could not rename that session: /, `Rename shows its failure; the page showed ${JSON.stringify(rename)}`)
+    assert.match(rename.dialogError, /^could not rename that session: /, `Rename shows its failure in its dialog; the page showed ${JSON.stringify(rename)}`)
+    assert.equal(rename.stillOpen, true, 'and the dialog stays open, as DSH\'s does')
     assert.match(archive.note, /^could not archive that session: /, `Archive shows its failure; the page showed ${JSON.stringify(archive)}`)
     assert.deepEqual(archive.rejections, [], 'neither action leaves an unhandled rejection')
   } finally {

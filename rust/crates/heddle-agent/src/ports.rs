@@ -147,6 +147,20 @@ pub trait SessionPort: Send + Sync {
         kind: &str,
         fields: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), PortError>;
+
+    /// Write what waits in the session's next-step inbox into the conversation, at a step boundary, and
+    /// answer how many messages were claimed (`heddle_session::inbox`, DSH's `ReactLoopInbox.claim`).
+    ///
+    /// A steer is queued there rather than written, so it reaches the conversation after the result of the
+    /// tool call it arrived during. A session with no inbox claims nothing, which is the default.
+    fn claim_pending_input(&self, _session: &SessionHandle) -> Result<usize, PortError> {
+        Ok(0)
+    }
+
+    /// Whether a message waits in the session's next-step inbox. The loop asks before it ends a turn.
+    fn has_pending_input(&self, _session: &SessionHandle) -> bool {
+        false
+    }
 }
 
 /// The context service, narrowed to the three questions a turn asks.
@@ -238,6 +252,14 @@ pub trait TurnHooks: Send + Sync {
         let _ = payload;
         Box::pin(async { None })
     }
+
+    /// Right after a round's runtime-context snapshot is recorded, before its request is assembled: the harness's
+    /// own per-step notes (the time context, `recordTimeContext` in `src/agent/loop.ts`). `step` is the round's
+    /// number in its turn, from 1. A failure fails the turn, as a failed snapshot does.
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        let _ = (session, step);
+        Ok(())
+    }
 }
 
 /// A [`TurnHooks`] with no listeners.
@@ -283,6 +305,12 @@ impl TurnHooks for ChainedTurnHooks {
             }
             None
         })
+    }
+
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        self.hooks
+            .iter()
+            .try_for_each(|hooks| hooks.record_step_context(session, step))
     }
 }
 
