@@ -1,7 +1,7 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.7.0
+version: 1.8.0
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
@@ -61,6 +61,14 @@ target then gets **one minimal real turn per pass**:
   It listed no new id, and a turn written there landed `other`. So a New session that lists nothing new
   sends no turn. `--no-deployment-turn` pauses the deployment's turn alone until the coordinator
   answers.
+- **8082's real turn has its own workspace and session** (the coordinator's option b, 2026-10-29). The
+  monitor's own folder `~/.heddle-live-monitor/health`, under no user workspace, is registered on the
+  deployment (`POST /api/workspaces`, idempotent). The session is created there with `POST /api/sessions`
+  and titled `live health check <UTC date>`; its id comes from the reply. The model is recorded with
+  `POST /api/sessions/<id>/model`, and exactly that id's tree row is opened in the page.
+  - The day's id is kept in `~/.heddle-live-monitor/state.json` and used again only while it is the
+    same UTC day and the server still lists it (`--health-session=pass` makes one every pass).
+  - Nothing on 8082 is chosen by title, so no session someone else made can be adopted.
 
 **Verdicts.** Staleness against a fresh `origin/main` (`dirty`, `behind`, `ahead`) is recorded,
 not failed. `passVerdict` fails on any failed check and is unjudged on any unjudged one: exit `0`

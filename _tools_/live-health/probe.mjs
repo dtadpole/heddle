@@ -53,7 +53,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -124,6 +124,15 @@ const PREVIEW_TURN = options['no-preview-turn'] !== true
  * turned out to be someone's existing empty session). A paused turn is unjudged, never a pass.
  */
 const DEPLOYMENT_TURN = options['no-deployment-turn'] !== true
+/**
+ * The monitor's own health workspace (the coordinator's option b, 2026-10-29): a folder of its own,
+ * under no user workspace, registered on the deployment, where the deployment's real-model turn gets a
+ * session the monitor created through the session-creation API - never one found by title, never one
+ * adopted. `--health-session=pass` creates one every pass; the default keeps the day's own id.
+ */
+const HEALTH_DIR = expand(options['health-dir'] ?? '~/.heddle-live-monitor/health')
+const HEALTH_STATE = expand(options['health-state'] ?? '~/.heddle-live-monitor/state.json')
+const HEALTH_SESSION_PER = options['health-session'] === 'pass' ? 'pass' : 'day'
 /**
  * The deployment's two-message check, on demand: the coordinator asked (review 255, 2026-10-25) for a
  * two-message conversation on 8082 as well as 3097 once the page patch is deployed. The follow-up goes
@@ -623,7 +632,140 @@ function judgeMarker(load) {
  * failed turn's code. The Rust preview is judged on the page alone, so its turn passes `false` and
  * never reads the deployment's store.
  */
-async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {}) {
+/**
+ * The deployment's own health session, through its API from inside the page (same origin, the page's
+ * cookie): the health folder is registered as a workspace (idempotent), then the day's recorded id is
+ * kept when the server still lists it, or a new session is created at the folder - its id comes from
+ * the reply, so it is the monitor's by construction. The model is recorded on it the way the page's
+ * selection does. Returns `{ ok, id, created, title, branch }` or `{ ok: false, reason }`.
+ */
+async function ownHealthSession(pageId, scope, choice) {
+  try {
+    mkdirSync(HEALTH_DIR, { recursive: true })
+  } catch (error) {
+    return { ok: false, reason: `the health folder could not be made: ${error.message}` }
+  }
+  const branch = realpathSync(HEALTH_DIR)
+  const today = new Date().toISOString().slice(0, 10)
+  const title = `live health check ${today}`
+  let state = {}
+  try {
+    state = JSON.parse(readFileSync(HEALTH_STATE, 'utf8'))
+  } catch {}
+  const kept = HEALTH_SESSION_PER === 'day' && state?.[scope]?.date === today && typeof state[scope].id === 'string' ? state[scope].id : null
+  const selection = { endpoint: choice.endpoint, model: choice.model, ...(choice.effort !== null ? { reasoningEffort: choice.effort } : {}) }
+  const got = (await callTool(
+    'evaluate_script',
+    {
+      pageId,
+      function: `(async () => {
+        const post = async (url, body) => {
+          const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+          let parsed = null
+          try { parsed = await response.json() } catch {}
+          return { status: response.status, body: parsed }
+        }
+        const said = (reply) => reply.status + (reply.body && reply.body.error ? ': ' + reply.body.error : '')
+        const workspace = await post('/api/workspaces', { path: ${JSON.stringify(branch)}, name: 'live-health' })
+        if (workspace.status !== 200) return { ok: false, reason: 'the health workspace could not be registered (' + said(workspace) + ')' }
+        let id = null
+        let created = false
+        const keep = ${JSON.stringify(kept)}
+        if (keep !== null) {
+          const list = await (await fetch('/api/sessions')).json()
+          if (Array.isArray(list) && list.some((item) => item.id === keep)) id = keep
+        }
+        if (id === null) {
+          const made = await post('/api/sessions', { branch: ${JSON.stringify(branch)}, title: ${JSON.stringify(title)} })
+          if (made.status !== 200 || typeof (made.body && made.body.session) !== 'string') return { ok: false, reason: 'no health session could be created (' + said(made) + ')' }
+          id = made.body.session
+          created = true
+        }
+        const model = await post('/api/sessions/' + encodeURIComponent(id) + '/model', ${JSON.stringify(selection)})
+        if (model.status !== 200) return { ok: false, id, created, reason: 'the model could not be recorded on the health session (' + said(model) + ')' }
+        return { ok: true, id, created }
+      })`,
+    },
+    25_000,
+  ))?.value ?? null
+  if (got?.created === true && typeof got.id === 'string') {
+    try {
+      mkdirSync(dirname(HEALTH_STATE), { recursive: true })
+      writeFileSync(HEALTH_STATE, `${JSON.stringify({ ...state, [scope]: { date: today, id: got.id } }, null, 2)}\n`)
+    } catch {}
+  }
+  if (got === null) return { ok: false, reason: 'the page could not reach the session API' }
+  return { ...got, title, branch }
+}
+
+/**
+ * Open exactly one session's row in the live page: the page's script is a module, so the row is
+ * clicked as a person would. The tree is reloaded with the health workspace marked open in this
+ * browser's own storage, the row keyed `session:<id>` is clicked, and it must then be the selected one.
+ */
+async function openOwnRow(pageId, id, branch) {
+  const key = JSON.stringify(`#tree li[data-row-key=${JSON.stringify(`session:${id}`)}]`)
+  await callTool(
+    'evaluate_script',
+    {
+      pageId,
+      function: `() => {
+        try {
+          const stored = JSON.parse(localStorage.getItem('heddle.tree.expanded.v1') ?? '[]')
+          const open = new Set(Array.isArray(stored) ? stored : [])
+          open.add(${JSON.stringify(branch)})
+          localStorage.setItem('heddle.tree.expanded.v1', JSON.stringify([...open]))
+        } catch {}
+        setTimeout(() => location.reload(), 50)
+        return true
+      }`,
+    },
+    15_000,
+  ).catch(() => {})
+  await new Promise((done) => setTimeout(done, 1_500))
+  if (!(await waitFor(pageId, '#prompt textarea', 20_000))) return { ok: false, reason: 'the page did not come back after the reload' }
+  for (let round = 0; round < 6; round += 1) {
+    const where = (await callTool(
+      'evaluate_script',
+      {
+        pageId,
+        function: `() => {
+          const li = document.querySelector(${key})
+          if (li !== null) {
+            const row = li.querySelector('.row') ?? li
+            row.scrollIntoView({ block: 'center' })
+            const r = row.getBoundingClientRect()
+            return { found: true, selected: li.getAttribute('aria-selected') === 'true', x: r.left + Math.min(r.width / 2, 120), y: r.top + r.height / 2 }
+          }
+          const top = [...document.querySelectorAll('#tree li[data-kind="workspace"]')].find((node) => node.querySelector('.row')?.dataset.path === ${JSON.stringify(branch)}) ?? null
+          if (top === null) return { found: false, expand: null }
+          const closed = [top, ...top.querySelectorAll('li[aria-expanded="false"]')].find((node) => node.getAttribute('aria-expanded') === 'false') ?? null
+          if (closed === null) return { found: false, expand: null }
+          const row = closed.querySelector('.row') ?? closed
+          row.scrollIntoView({ block: 'center' })
+          const r = row.getBoundingClientRect()
+          return { found: false, expand: { x: r.left + Math.min(r.width / 2, 120), y: r.top + r.height / 2 } }
+        }`,
+      },
+      15_000,
+    ))?.value ?? null
+    if (where?.found === true) {
+      if (where.selected === true) return { ok: true }
+      await callTool('click_at', { pageId, x: Math.round(where.x), y: Math.round(where.y) }, 15_000)
+      await new Promise((done) => setTimeout(done, 600))
+      continue
+    }
+    if (where?.expand) {
+      await callTool('click_at', { pageId, x: Math.round(where.expand.x), y: Math.round(where.expand.y) }, 15_000)
+      await new Promise((done) => setTimeout(done, 600))
+      continue
+    }
+    await new Promise((done) => setTimeout(done, 700))
+  }
+  return { ok: false, reason: "the health session's row could not be opened in the tree" }
+}
+
+async function judgeTurn(pageId, beforeSession, { deploymentTrace = true, ownSession = false } = {}) {
   if (!SEND_TURN) return { verdict: 'unjudged', detail: '--no-turn' }
   if (pageId === undefined) return { verdict: 'unjudged', detail: 'the page is not open, so a turn cannot be sent' }
   try {
@@ -655,7 +797,16 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
     if (choice !== null && choice.ok !== true) {
       return { mode, selection: choice, session: { reused: false, via: 'none', title: null }, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
     }
-    const found = (await callTool(
+    /**
+     * The deployment's real turn goes only into a session the monitor created itself through the API, in
+     * its own health workspace (option b). Nothing is looked up by title there, so no session someone
+     * else made - like the empty one 8082's New session opened on 2026-10-29 - can be chosen.
+     */
+    const own = ownSession && mode === 'real' ? await ownHealthSession(pageId, 'deployment', choice) : null
+    if (own !== null && own.ok !== true) {
+      return { mode, selection: choice, session: { reused: false, via: 'api', title: null }, verdict: 'unjudged', detail: `no turn was sent: ${own.reason}` }
+    }
+    const found = own !== null ? null : (await callTool(
       'evaluate_script',
       {
         pageId,
@@ -680,7 +831,7 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
      * is, never written into again by a real turn.
      */
     const retired = mode === 'real' && found !== null && healthSessionExpired(found.created) ? found.title : null
-    const healthSession = retired === null ? found : null
+    const healthSession = own !== null ? { id: own.id, title: own.title, row: null, own: true } : retired === null ? found : null
     /** The session list as the page's server holds it: id and `updated` only, never titles of others. */
     const sessionsNow = async () =>
       (await callTool(
@@ -723,7 +874,13 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       }
       reused = 'started'
     }
-    if (healthSession?.row !== null && healthSession?.row !== undefined) {
+    if (healthSession?.own === true) {
+      const opened = await openOwnRow(pageId, healthSession.id, own.branch)
+      if (opened.ok !== true) {
+        return { mode, selection: choice, session: { reused: !own.created, via: 'api', title: own.title }, verdict: 'unjudged', detail: `no turn was sent: ${opened.reason}` }
+      }
+      reused = own.created ? 'api-created' : 'api-kept'
+    } else if (healthSession?.row !== null && healthSession?.row !== undefined) {
       await callTool('click_at', { pageId, x: Math.round(healthSession.row.x), y: Math.round(healthSession.row.y) }, 15_000)
       reused = 'tree'
     } else if (healthSession?.id !== undefined) {
@@ -732,7 +889,7 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       reused = 'selection'
     }
     if (reused !== 'new') await new Promise((done) => setTimeout(done, 400))
-    const sessionNote = { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null, ...(retired !== null ? { retired } : {}) }
+    const sessionNote = { reused: ['tree', 'selection', 'api-kept'].includes(reused), via: reused, title: healthSession?.title ?? null, ...(retired !== null ? { retired } : {}) }
     let selection = null
     if (mode === 'real') {
       /**
@@ -1221,13 +1378,13 @@ if (pass.checks.load.verdict === 'pass') {
   const pageId = pass.checks.load.pageId
   pass.checks.consoleOnLoad = await judgeConsole(pageId, 'load')
   pass.checks.turn = DEPLOYMENT_TURN
-    ? await judgeTurn(pageId, pass.checks.load.page)
+    ? await judgeTurn(pageId, pass.checks.load.page, { ownSession: true })
     : { verdict: 'unjudged', detail: 'the deployment turn is paused (--no-deployment-turn)' }
   if (DEPLOYMENT_CONVERSATION) {
     const first = pass.checks.turn
     let conversation = { verdict: 'unjudged', detail: 'the first message did not pass, so no follow-up was sent' }
     if (first.verdict === 'pass') {
-      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null)
+      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { ownSession: true })
       conversation = {
         ...conversationVerdict({ gate: { open: true }, first, second: followUp, sameSession: sameHealthSession(first, followUp) }),
         followUp: { landing: followUp.landing ?? null, answerHead: followUp.answerHead ?? null, settledMs: followUp.settledMs ?? null },
