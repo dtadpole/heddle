@@ -232,6 +232,27 @@ pub fn events_frames(subscription: Subscription, client_id: &str, home: &str) ->
     futures::stream::once(std::future::ready(SseFrame::ready(client_id, home))).chain(subscription)
 }
 
+/// The replay without questions that no longer wait: an `approval` frame is kept only while its question is in
+/// `waiting` (the approval service's pending ids), as DSH replays pending questions and not settled ones. Every
+/// other frame, `approval-settled` included, is kept. `withoutSettledApprovals` in `src/server/stream.ts` is the same.
+pub fn without_settled_approvals(
+    frames: Vec<SseFrame>,
+    waiting: &std::collections::HashSet<String>,
+) -> Vec<SseFrame> {
+    frames
+        .into_iter()
+        .filter(|frame| {
+            if frame.event != names::APPROVAL {
+                return true;
+            }
+            serde_json::from_str::<Value>(&frame.data)
+                .ok()
+                .and_then(|data| data.get("id").and_then(Value::as_str).map(str::to_owned))
+                .is_some_and(|id| waiting.contains(&id))
+        })
+        .collect()
+}
+
 /// The frames of `/api/events` for a client that may be reconnecting: `ready` with the follow fields, then
 /// `reset` when its cursor could not be honoured, else the frames it missed, then everything published after.
 pub fn follow_frames(
@@ -664,6 +685,23 @@ mod tests {
         let ready = restarted.next().await.unwrap();
         assert!(ready.data.contains("\"resumed\":false"), "{}", ready.data);
         assert_eq!(restarted.next().await.unwrap().event, names::RESET);
+    }
+
+    #[test]
+    fn a_replay_keeps_an_approval_question_only_while_it_waits() {
+        let hub = EventHub::with_log("e1".into(), 16, 1 << 20);
+        hub.publish_approval_request(&serde_json::json!({"id": "approval-1", "tool": "bash"}));
+        hub.publish(SseFrame::new(
+            "approval-settled",
+            &serde_json::json!({"type": "approval/settled", "id": "approval-1", "outcome": "rejected"}),
+        ));
+        hub.publish_approval_request(&serde_json::json!({"id": "approval-2", "tool": "bash"}));
+        let replay = hub.subscribe_from(Some("e1-0")).replay.unwrap();
+        let waiting: std::collections::HashSet<String> = ["approval-2".to_owned()].into_iter().collect();
+        let kept = without_settled_approvals(replay, &waiting);
+        let events: Vec<&str> = kept.iter().map(|frame| frame.event.as_str()).collect();
+        assert_eq!(events, vec!["approval-settled", "approval"], "the answered question is dropped, its settlement kept");
+        assert!(kept[1].data.contains("approval-2"));
     }
 
     #[tokio::test]

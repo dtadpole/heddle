@@ -17,6 +17,7 @@ import {
   StallWatch,
   STREAM_OPEN,
   type WatchedSocket,
+  withoutSettledApprovals,
 } from '../src/server/stream.ts'
 
 /** Parse one SSE frame block into its event name and JSON data. */
@@ -194,4 +195,16 @@ test('the log is bounded by bytes as well as by count, and always keeps the newe
   assert.equal(log.since('e1-1')?.length, 1)
   log.record('session', 'z'.repeat(500))
   assert.equal(log.since('e1-2')?.length, 1, 'a frame larger than the bound is still kept on its own')
+})
+
+test('a replay keeps an approval question only while it waits, as DSH replays pending questions only', () => {
+  const log = new EventLog({ epoch: 'e1' })
+  const asked = log.record('approval', '{"id":"approval-1","tool":"bash"}')
+  const settled = log.record('approval-settled', '{"type":"approval/settled","id":"approval-1","outcome":"rejected"}')
+  const other = log.record('session', '{"session":"s","event":{"type":"message"}}')
+  const stillAsked = log.record('approval', '{"id":"approval-2","tool":"bash"}')
+  const replay = log.since('e1-0') ?? []
+  assert.deepEqual(withoutSettledApprovals(replay, new Set(['approval-2'])), [settled, other, stillAsked], 'the answered question is dropped, its settlement kept')
+  assert.deepEqual(withoutSettledApprovals(replay, new Set(['approval-1', 'approval-2'])), [asked, settled, other, stillAsked])
+  assert.deepEqual(withoutSettledApprovals(['id: e1-9\nevent: approval\ndata: not json\n\n'], new Set()), [], 'an unreadable question is not replayed')
 })
