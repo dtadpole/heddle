@@ -5954,11 +5954,12 @@ const field = composer.elements.prompt
  * waits for it. Until it has loaded nothing is claimed, so a line typed in that instant is an ordinary message.
  */
 /**
- * What the composer lends a feature module (agreed with developer-twelve, 2026-10-29): a row appended through the
- * page's own path, so tail-following and session switches treat it like any other row, and the three controls a
- * command opens instead of typing — the model seat, the file picker and the access chip.
+ * What the page lends a feature module — one named surface (developer-ten) whose choices are the composer's
+ * (developer-twelve), agreed 2026-10-29: a row appended through the page's own path, so tail-following and session
+ * switches treat it like any other `#log` row, and the three controls a command opens instead of typing — the model
+ * seat, the file picker and the access chip. Ids move when the composer is restyled; this surface does not.
  */
-window.heddleComposer = {
+window.heddlePage = {
   addRow(kind, node) {
     node.classList.add('turn', kind)
     node.dataset.kind = kind
@@ -5981,11 +5982,11 @@ const slashReady = import('/commands/menu.js')
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
       sendAsPrompt: (text) => (anyRunning() ? enqueue(text, 'queue', []) : void sendNow(text, [])),
-      addRow: (node) => window.heddleComposer.addRow('command', node),
+      addRow: (node) => window.heddlePage.addRow('command', node),
       notice: (text) => add('denied', text),
-      openModelMenu: window.heddleComposer.openModelMenu,
-      openFilePicker: window.heddleComposer.openFilePicker,
-      openAccessMenu: window.heddleComposer.openAccessMenu,
+      openModelMenu: window.heddlePage.openModelMenu,
+      openFilePicker: window.heddlePage.openFilePicker,
+      openAccessMenu: window.heddlePage.openAccessMenu,
     })
     return slashCommands
   })

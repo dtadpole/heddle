@@ -140,7 +140,7 @@ const STYLE = `
  * session the composer is attached to, or null), `ensureSession()` (start one when there is none), `sendAsPrompt(text)`
  * (the page's ordinary send, for a line the host does not recognise), `addRow(node)` (append to the transcript),
  * `notice(text)` (say something went wrong), and optionally `openFilePicker()`, `openModelMenu()` and
- * `openAccessMenu()` (the page's `window.heddleComposer` affordances).
+ * `openAccessMenu()` (the page's `window.heddlePage` affordances).
  */
 export function install(api) {
   const field = api.field
