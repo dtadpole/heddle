@@ -226,24 +226,34 @@ test("the stream opens with DSH's ready frame, and a baseline read on it misses 
     const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'baseline' })
     assert.equal(created.status, 200, created.text)
     const session = created.json.session
-    // The creation's own frame is waited for first, so it cannot arrive after the clock starts and be counted
-    // against the turn (a race the Rust server's asynchronous body write exposed).
-    await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'session/created', 10_000)
+    /**
+     * Counted by the log's own sequence numbers, not by arrival time: under load, or after the 80 checks that run
+     * before this one, frames and log lines land at their own pace (integrator-two saw an arrival-time count fail in
+     * full lanes). Every session frame carries its event's `seq`, the entry's index in the log, so "every entry the
+     * turn wrote reached the stream" is: the stream holds each seq from the baseline up to the log's end.
+     */
     const baseline = await logEntries(server, cookie, session)
-    const startedAt = Date.now()
     const turn = await runTurn(server, cookie, { session, prompt: 'go' })
     assert.equal(turn.status, 200, turn.text)
-    await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'turn/completed', 10_000)
-    const carried = stream.frames.filter((frame) => frame.event === 'session' && frame.data?.session === session && frame.at >= startedAt).length
-    // The claim is completeness, not write-before-push order: the log is read until it stops growing (up to 2 s),
-    // because the Rust server may push a frame a moment before its line is on disk.
-    let appended = (await logEntries(server, cookie, session)) - baseline
-    for (let tries = 0; tries < 40 && appended < carried; tries += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
-      appended = (await logEntries(server, cookie, session)) - baseline
+    await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'turn/completed', 30_000)
+    const carriedSeqs = () =>
+      new Set(
+        stream.frames
+          .filter((frame) => frame.event === 'session' && frame.data?.session === session && Number.isInteger(frame.data?.event?.seq) && frame.data.event.seq >= baseline)
+          .map((frame) => frame.data.event.seq),
+      )
+    // The log may still be a line behind the stream, or the stream behind the log, for a moment: both settle.
+    let logged = await logEntries(server, cookie, session)
+    const settleBy = Date.now() + 10_000
+    while (carriedSeqs().size !== logged - baseline && Date.now() < settleBy) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      logged = await logEntries(server, cookie, session)
     }
+    const appended = logged - baseline
+    const carried = carriedSeqs()
     assert.ok(appended > 3, `the turn wrote to the log (${appended} entries)`)
-    assert.equal(carried, appended, `every entry the turn wrote reached the stream (${carried} of ${appended})`)
+    assert.equal(carried.size, appended, `every entry the turn wrote reached the stream (${carried.size} of ${appended})`)
+    for (let seq = baseline; seq < logged; seq += 1) assert.ok(carried.has(seq), `log entry ${seq} reached the stream`)
     stream.close()
   } finally {
     await server.close()
