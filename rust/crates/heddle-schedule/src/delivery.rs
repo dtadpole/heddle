@@ -638,6 +638,7 @@ mod tests {
     use crate::service::tests::{T0, args, options};
     use crate::service::{ScheduleService, ScheduleServiceOptions};
     use crate::store::ScheduleStore;
+    use crate::store::tests::Scratch;
     use serde_json::json;
     use std::sync::atomic::AtomicI64;
 
@@ -787,11 +788,13 @@ mod tests {
         driver: Arc<ScheduleDriver>,
         warnings: Arc<Mutex<Vec<String>>>,
         changes: Arc<AtomicU64>,
+        /// The store's folder, removed when the setup drops; declared last so the service goes first.
+        _scratch: Scratch,
     }
 
     fn setup(label: &str, seed: &[ScheduleTask], start: bool) -> Setup {
         let clock = Arc::new(AtomicI64::new(T0));
-        let options: ScheduleServiceOptions = options(label, &clock);
+        let (scratch, options): (Scratch, ScheduleServiceOptions) = options(label, &clock);
         if !seed.is_empty() {
             let store = ScheduleStore::open(&options.file).unwrap();
             for task in seed {
@@ -832,6 +835,7 @@ mod tests {
             driver,
             warnings,
             changes,
+            _scratch: scratch,
         }
     }
 

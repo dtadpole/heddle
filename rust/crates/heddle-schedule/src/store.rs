@@ -580,7 +580,35 @@ pub(crate) mod tests {
     use crate::rules::{create_daily_schedule_record, create_every_schedule_record};
     use serde_json::json;
 
-    pub(crate) fn scratch(label: &str) -> PathBuf {
+    /// One test's scratch folder under the temp dir, removed when the guard drops — at the end of
+    /// the test, and also when the test panics. Hold the guard for as long as anything in the folder
+    /// is in use: a dropped guard lets a later write recreate the folder, and that one would leak.
+    pub(crate) struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // A test may stand a plain file where the folder was; remove whichever is there.
+            match std::fs::symlink_metadata(&self.0) {
+                Ok(metadata) if metadata.is_dir() => {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub(crate) fn scratch(label: &str) -> Scratch {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -589,7 +617,7 @@ pub(crate) mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        dir
+        Scratch(dir)
     }
 
     /// 2026-10-29T12:00:00.000Z.
@@ -621,8 +649,11 @@ pub(crate) mod tests {
         ScheduleTask::new("session-1", record)
     }
 
-    fn file() -> PathBuf {
-        scratch("store").join("schedule.json")
+    /// A fresh store file and the guard of its folder; the caller holds the guard to the end.
+    fn file() -> (Scratch, PathBuf) {
+        let root = scratch("store");
+        let file = root.join("schedule.json");
+        (root, file)
     }
 
     #[test]
@@ -635,7 +666,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_absent_file_is_an_empty_store_and_a_write_creates_it_in_the_exact_unit_shape() {
-        let file = file();
+        let (_root, file) = file();
         let store = ScheduleStore::open(&file).unwrap();
         assert!(store.entries().is_empty());
         store.put("schedule-a", task(daily())).unwrap();
@@ -674,12 +705,11 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(names, ["schedule.json"], "no temp file is left behind");
         assert!(std::fs::read_to_string(&file).unwrap().ends_with("}\n"));
-        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]
     fn a_store_reopened_from_its_file_reads_back_the_same_rows_in_the_same_order() {
-        let file = file();
+        let (_root, file) = file();
         let store = ScheduleStore::open(&file).unwrap();
         store.put("schedule-a", task(daily())).unwrap();
         store.put("schedule-b", task(every())).unwrap();
@@ -711,12 +741,11 @@ pub(crate) mod tests {
         assert_eq!(reopened.delete("schedule-b"), Ok(true));
         assert_eq!(reopened.delete("schedule-b"), Ok(false));
         assert_eq!(ScheduleStore::open(&file).unwrap().entries(), [delivered]);
-        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]
     fn a_row_without_a_status_reads_as_active() {
-        let file = file();
+        let (_root, file) = file();
         ScheduleStore::open(&file)
             .unwrap()
             .put("schedule-a", task(daily()))
@@ -736,11 +765,10 @@ pub(crate) mod tests {
                 .status,
             TaskStatus::Active
         );
-        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     fn refuses(document: &str, reason: &str) {
-        let file = file();
+        let (_root, file) = file();
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, document).unwrap();
         let error = ScheduleStore::open(&file)
@@ -749,7 +777,6 @@ pub(crate) mod tests {
             .to_string();
         assert!(error.contains(&file.display().to_string()), "{error}");
         assert!(error.contains(reason), "{error} should mention {reason}");
-        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     fn unit_with(rows: Value, extra: Option<(&str, Value)>) -> String {
@@ -844,12 +871,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_write_leaves_the_table_as_it_was() {
-        let file = file();
+        let (_root, file) = file();
         let store = ScheduleStore::open(&file).unwrap();
         store.put("schedule-a", task(daily())).unwrap();
         let error = store.put("schedule-other", task(daily())).unwrap_err();
         assert!(error.contains("differs from record id"), "{error}");
         assert_eq!(store.entries(), [task(daily())]);
-        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 }

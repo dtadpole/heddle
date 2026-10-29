@@ -448,15 +448,10 @@ mod tests {
     }
 
     struct Fixture {
-        root: PathBuf,
         sessions: Arc<SessionService>,
         runtime: Arc<AgentRuntime>,
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
+        /// The fixture's folder, removed when the fixture drops; declared last so it goes last.
+        root: crate::store::tests::Scratch,
     }
 
     fn fixture(label: &str, turns: bool) -> Fixture {
@@ -506,9 +501,9 @@ mod tests {
             turns: turns.then(heddle_agent::TurnRegistry::new),
         });
         Fixture {
-            root,
             sessions,
             runtime,
+            root,
         }
     }
 
