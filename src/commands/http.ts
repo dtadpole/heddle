@@ -1,0 +1,97 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
+
+import type { SessionHandle } from '../session/store.ts'
+import type { CommandLog, CommandRegistry } from './registry.ts'
+
+/**
+ * The command routes, handed to by the server in one line:
+ *
+ *   if (await handleCommandRequest(commandHost, request, response, url)) return
+ *
+ * - `GET /api/commands` lists the registered commands (the page's slash menu reads it).
+ * - `POST /api/sessions/{id}/commands` with `{line}` runs one line. A line that is not a registered command answers
+ *   `{matched: false}` and writes nothing, so the page sends it on as an ordinary prompt — DSH's rule, and how an
+ *   unknown `/word` still reaches the model. A registered one answers `{matched: true, commandId, name, kind, text?,
+ *   action?, seq}`; a handler's refusal is `kind: 'error'` with status 200, because the command ran and its row says
+ *   so.
+ *
+ * The server calls this behind its door, after the token check, like every other `/api` route.
+ */
+
+/** What the routes read: the registry, the session store and the log a run writes to. */
+export interface CommandRouteHost {
+  readonly registry: CommandRegistry
+  readonly log: CommandLog
+  open(id: string): SessionHandle | null
+}
+
+/** A session id as the store mints it. */
+const SESSION_ID = /^session-[0-9a-f-]{36}$/i
+
+/** The largest command line a request may carry. */
+export const MAX_COMMAND_LINE = 64 * 1024
+
+/** Handle a command route, or answer `false` so the server goes on to its other routes. */
+export async function handleCommandRequest(host: CommandRouteHost, request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
+  if (url.pathname === '/api/commands' && request.method === 'GET') {
+    json(response, 200, { commands: host.registry.list() })
+    return true
+  }
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/commands') && request.method === 'POST') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/commands'.length))
+    if (!SESSION_ID.test(id)) {
+      json(response, 400, { error: 'not a session id' })
+      return true
+    }
+    const handle = host.open(id)
+    if (handle === null) {
+      json(response, 404, { error: `no session ${id}` })
+      return true
+    }
+    const body = await readBody(request)
+    if (body === 'too-large') {
+      json(response, 413, { error: `a command line is at most ${MAX_COMMAND_LINE} bytes` })
+      return true
+    }
+    if (body === null || typeof body.line !== 'string') {
+      json(response, 400, { error: 'the body must be JSON with a string "line"' })
+      return true
+    }
+    const execution = await host.registry.execute(host.log, handle, body.line)
+    if (execution === undefined) {
+      json(response, 200, { matched: false })
+      return true
+    }
+    const { result } = execution
+    json(response, 200, {
+      matched: true,
+      commandId: execution.commandId,
+      name: execution.name,
+      kind: result.kind,
+      ...(result.text !== undefined ? { text: result.text } : {}),
+      ...(result.kind === 'success' && result.action !== undefined ? { action: result.action } : {}),
+      seq: execution.seq,
+    })
+    return true
+  }
+  return false
+}
+
+async function readBody(request: IncomingMessage): Promise<Record<string, unknown> | null | 'too-large'> {
+  let raw = ''
+  for await (const chunk of request) {
+    raw += chunk
+    if (Buffer.byteLength(raw) > MAX_COMMAND_LINE + 1024) return 'too-large'
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+function json(response: ServerResponse, status: number, value: unknown): void {
+  response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+  response.end(`${JSON.stringify(value, null, 2)}\n`)
+}
