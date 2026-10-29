@@ -443,7 +443,12 @@ export function install(api) {
     renderPlan()
   }
 
+  /** What the composer last drew, so a show or a replayed event that changes nothing touches nothing on the page. */
+  let planDrawn = false
+
   function renderPlan() {
+    if (planDrawn === planOn) return
+    planDrawn = planOn
     if (typeof api.setModeChip === 'function') {
       api.setModeChip(
         planOn

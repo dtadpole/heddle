@@ -312,7 +312,11 @@ test("the composer shows DSH's Plan chip and placeholder in plan mode, keeps the
     await show()
     assert.equal((await chipState(browser)).count, 0, 'no chip in the default mode')
 
+    // Enter on the open menu picks /plan (it takes input, so the line becomes "/plan "); Enter again runs it.
     await typeInto(browser, '/plan')
+    await browser.waitFor('document.getElementById("slash-menu") !== null && document.getElementById("slash-menu").hidden === false', 10_000)
+    await press(browser, 'Enter')
+    await browser.waitFor(`${FIELD}.value === "/plan "`, 5_000)
     await press(browser, 'Enter')
     await browser.waitFor('document.querySelector("#prompt-tools .mode-chip") !== null', 15_000)
     let chip = await chipState(browser)
