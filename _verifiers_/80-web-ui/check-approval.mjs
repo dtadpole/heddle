@@ -246,3 +246,87 @@ test('Stop ends a turn that is waiting on an approval, instead of leaving it stu
     await server.close()
   }
 })
+
+test('a session awaiting approval says Approval on its row, and a turn that ends off screen keeps a done dot until it is opened', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's row status (`sessionStatuses`, dsh-client-ui-workspace `client.js:2068-2117`, drawn at `client.js:2304-2321`): a
+   * session waiting on a person carries a warning dot with `Approval` where its time was, whichever session is open; a
+   * turn that ends while its session is off screen leaves a done dot (`completionUnread`, dsh-client-ui-session
+   * `client.js:948-965`) until the session is opened. Phase A measured neither: only the spinner and "now".
+   */
+  const server = await startServer('row-status', escalationSteps)
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const added = await request(server, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    assert.equal(added.status, 200, 'the work folder is a workspace')
+    const made = async (title) => {
+      const response = await request(server, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: server.work, title }) })
+      assert.equal(response.status, 200, `created ${title}`)
+      return (await response.json()).session
+    }
+    const quiet = await made('quiet session')
+    const busy = await made('busy session')
+    const row = (id) => `document.querySelector('#tree li[data-row-key="session:${id}"] > .row')`
+    const status = async (id) =>
+      JSON.parse(
+        await browser.evaluate(`(() => {
+          const row = ${row(id)}
+          const dot = row === null ? null : row.querySelector(':scope > .status-dot')
+          return JSON.stringify({
+            row: row !== null,
+            state: dot === null ? null : dot.dataset.state,
+            label: dot === null ? null : dot.getAttribute('aria-label'),
+            beforeName: dot !== null && dot.nextElementSibling !== null && dot.nextElementSibling.classList.contains('label'),
+            time: row === null ? null : row.querySelector('.age')?.textContent ?? null,
+            fill: dot === null ? null : getComputedStyle(dot, '::after').backgroundColor,
+          })
+        })()`),
+      )
+    const open = async (id, title) => {
+      await browser.evaluate(`${row(id)}.click()`)
+      assert.ok(await browser.waitFor(`document.getElementById('session-title').textContent.includes(${JSON.stringify(title)})`, 10_000), `${title} opens`)
+    }
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    assert.ok(await browser.waitFor(`${row(busy)} !== null && ${row(quiet)} !== null`, 15_000), 'both rows are drawn')
+    await open(busy, 'busy session')
+    await sendMessage(browser, 'write outside the workspace')
+    assert.ok(await browser.waitFor('document.getElementById("approval-card").hidden === false', 20_000), 'the turn asks for approval')
+
+    assert.ok(await browser.waitFor(`${row(busy)}.querySelector(':scope > .status-dot[data-state="warning"]') !== null`, 10_000), 'the row turns to the warning dot')
+    const waiting = await status(busy)
+    assert.equal(waiting.label, 'Waiting for approval', `the dot says what it waits for\nsaw: ${JSON.stringify(waiting)}`)
+    assert.equal(waiting.beforeName, true, 'before the name, where the spinner was')
+    assert.equal(waiting.time, 'Approval', 'and the row says Approval in place of its time')
+    assert.match(String(waiting.fill), /183, 121, 31/, `drawn as a filled warning dot\nsaw: ${waiting.fill}`)
+
+    /** Another session open: the waiting row still says so, and the open one is quiet. */
+    await open(quiet, 'quiet session')
+    const elsewhere = await status(busy)
+    assert.deepEqual([elsewhere.state, elsewhere.time], ['warning', 'Approval'], `the waiting row keeps its mark while off screen\nsaw: ${JSON.stringify(elsewhere)}`)
+
+    /** Answered from outside the page; the turn finishes while the busy session is off screen. */
+    const pending = await request(server, '/api/approvals').then((response) => response.json())
+    const asked = pending.requests.find((entry) => entry.session === busy)
+    assert.ok(asked !== undefined, `the waiting question belongs to the busy session\nsaw: ${JSON.stringify(pending)}`)
+    const answer = await request(server, `/api/approvals/${encodeURIComponent(asked.id)}`, { method: 'POST', body: JSON.stringify({ outcome: 'allowed-once' }) })
+    assert.equal(answer.status, 200, 'the answer lands')
+    assert.ok(await browser.waitFor(`${row(busy)}?.querySelector(':scope > .status-dot[data-state="done"]') != null`, 20_000), 'the finished row carries the done dot')
+    const finished = await status(busy)
+    assert.equal(finished.label, 'Completed', `labelled for a reader who cannot see it\nsaw: ${JSON.stringify(finished)}`)
+    assert.notEqual(finished.time, 'Approval', 'and its time is back')
+    assert.match(String(finished.fill), /47, 163, 107/, `in the done colour\nsaw: ${finished.fill}`)
+    assert.equal((await status(quiet)).state, null, 'the open session carries no mark')
+    assert.equal(existsSync(server.outsidePath), true, 'the allowed call ran')
+
+    /** Opening it is what reads it. */
+    await open(busy, 'busy session')
+    assert.ok(await browser.waitFor(`${row(busy)}?.querySelector(':scope > .status-dot') === null`, 10_000), 'opening the session clears the done dot')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

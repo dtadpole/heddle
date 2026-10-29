@@ -36,6 +36,8 @@ interface Tree {
   nextWatermark: (total: number, shown: number) => number
   overflow: (total: number, shown: number) => 'more' | 'less' | null
   sessionOrder: (left: unknown, right: unknown) => number
+  rowStatus: (facts?: { pending?: string; running?: boolean; completed?: boolean }) => { state: string; label: string; trailingLabel?: string }
+  completionUnread: (unread: boolean, change: { wasRunning?: boolean; running?: boolean; viewing?: boolean }) => boolean
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -158,4 +160,31 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+/**
+ * A session row's status is DSH's `sessionStatuses` (dsh-client-ui-workspace `client.js:2068-2117`, words from its
+ * `en` locale at `client.js:4970-4980`): a pending interaction first, as a warning whose short word replaces the time;
+ * then running; then a completion nobody has seen; else idle, which draws no mark.
+ */
+test('a row awaiting a person says Approval, Plan review or Answer, and outranks running and an unread completion', () => {
+  assert.equal(typeof tree.rowStatus, 'function', 'the block derives a row status')
+  assert.deepEqual(tree.rowStatus({ pending: 'approval', running: true, completed: true }), { state: 'warning', label: 'Waiting for approval', trailingLabel: 'Approval' })
+  assert.deepEqual(tree.rowStatus({ pending: 'plan-review' }), { state: 'warning', label: 'Plan awaiting review', trailingLabel: 'Plan review' })
+  assert.deepEqual(tree.rowStatus({ pending: 'question' }), { state: 'warning', label: 'Waiting for answer', trailingLabel: 'Answer' })
+  assert.deepEqual(tree.rowStatus({ running: true, completed: true }), { state: 'ongoing', label: 'Running' }, 'live activity outranks a completion reminder')
+  assert.deepEqual(tree.rowStatus({ completed: true }), { state: 'done', label: 'Completed' })
+  assert.deepEqual(tree.rowStatus({}), { state: 'idle', label: 'Idle' })
+  assert.deepEqual(tree.rowStatus({ pending: 'toString' }), { state: 'idle', label: 'Idle' }, 'an unknown kind is no interaction')
+})
+
+/** DSH's completion reminder (dsh-client-ui-session `client.js:948-965`): set by a turn ending off screen, read by opening. */
+test('a turn that ends while its session is off screen stays unread until the session is opened or runs again', () => {
+  assert.equal(typeof tree.completionUnread, 'function', 'the block decides the completion reminder')
+  assert.equal(tree.completionUnread(false, { wasRunning: true, running: false, viewing: false }), true, 'ended off screen: unread')
+  assert.equal(tree.completionUnread(false, { wasRunning: true, running: false, viewing: true }), false, 'ended on screen: already seen')
+  assert.equal(tree.completionUnread(false, { wasRunning: false, running: false, viewing: false }), false, 'no running edge, no reminder')
+  assert.equal(tree.completionUnread(true, { wasRunning: false, running: false, viewing: false }), true, 'a reminder stays while nothing changes')
+  assert.equal(tree.completionUnread(true, { wasRunning: false, running: false, viewing: true }), false, 'opening the session reads it')
+  assert.equal(tree.completionUnread(true, { wasRunning: false, running: true, viewing: false }), false, 'running again clears it')
 })
