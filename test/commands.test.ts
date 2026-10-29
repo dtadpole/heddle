@@ -10,6 +10,7 @@ import {
   compactCommand,
   describeGoal,
   exportCommand,
+  FEEDBACK_CATEGORIES,
   feedbackCommand,
   FEEDBACK_EVENT,
   goalCommand,
@@ -266,7 +267,11 @@ test('/feedback records the text in its own event, keeps it out of command/run, 
   const events = store.read(handle)
   const feedback = events.filter((event) => event.type === FEEDBACK_EVENT)
   assert.equal(feedback.length, 1)
-  assert.equal(feedback[0]?.text, 'the menu is lovely')
+  assert.deepEqual(
+    { ...feedback[0], seq: undefined, at: undefined },
+    { type: FEEDBACK_EVENT, text: 'the menu is lovely', seq: undefined, at: undefined },
+    "DSH's event is {text, category}: the anonymous id is told to the person, not written into the remark",
+  )
   const runs = events.filter((event) => event.type === COMMAND_RUN_EVENT)
   assert.ok(runs.every((event) => event.args === undefined), 'recordInput:false keeps the text out of command/run')
 })
@@ -425,4 +430,46 @@ test("a session's history shows each command as its own row, settled by its done
     { kind: 'command', text: '', commandId: 'cmd-0000abcd-3', name: 'compact', state: 'running' },
   ])
   assert.equal(turns[0]?.kind, 'user', 'the conversation keeps its place')
+})
+
+test("POST /api/sessions/{id}/feedback records DSH's feedback/record {text?, category?}, and refuses what it cannot record", async () => {
+  const { store, handle, log } = session()
+  const host: CommandRouteHost = { registry: new CommandRegistry(), log, open: (id) => store.open(id) }
+  const { base, server } = await routes(host)
+  const post = (id: string, body: string) => fetch(`${base}/api/sessions/${id}/feedback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+  try {
+    const recorded = await post(handle.id, JSON.stringify({ text: '  the plan card is clear  ', category: 'product-interaction' }))
+    assert.equal(recorded.status, 200)
+    assert.deepEqual(await recorded.json(), { recorded: true })
+    assert.equal((await post(handle.id, JSON.stringify({ category: 'task-result' }))).status, 200, 'a category alone')
+    assert.equal((await post(handle.id, JSON.stringify({ text: '   ' }))).status, 200, 'blank text is recorded as absent')
+    const remarks = store
+      .read(handle)
+      .filter((event) => event.type === FEEDBACK_EVENT)
+      .map((event) => ({ text: event.text, category: event.category }))
+    assert.deepEqual(remarks, [
+      { text: 'the plan card is clear', category: 'product-interaction' },
+      { text: undefined, category: 'task-result' },
+      { text: undefined, category: undefined },
+    ])
+
+    const before = store.read(handle).length
+    assert.equal((await post(handle.id, JSON.stringify({ category: 'speed' }))).status, 400, 'an unknown category')
+    assert.equal((await post(handle.id, JSON.stringify({ text: 7 }))).status, 400, 'text that is not a string')
+    assert.equal((await post(handle.id, '[1]')).status, 400, 'a body that is not an object')
+    assert.equal((await post('nope', '{}')).status, 400, 'not a session id')
+    assert.equal((await post('session-00000000-0000-4000-8000-000000000000', '{}')).status, 404, 'an unknown session')
+    assert.equal(store.read(handle).length, before, 'a refusal writes nothing')
+    assert.deepEqual([...FEEDBACK_CATEGORIES], [
+      'task-result',
+      'instruction-following',
+      'product-interaction',
+      'service-stability',
+      'resource-cost',
+      'security-privacy-permission',
+      'other',
+    ])
+  } finally {
+    server.close()
+  }
 })

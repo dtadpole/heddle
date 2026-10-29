@@ -141,6 +141,33 @@ export function compactCommand(host: CompactionHost): CommandDefinition {
 export const FEEDBACK_EVENT = 'feedback/record'
 
 /** `/feedback <text>` — record feedback about this session in its log. The text is not repeated in `command/run`. */
+/** DSH's session-feedback categories, in the order its dialog offers them. */
+export const FEEDBACK_CATEGORIES = [
+  'task-result',
+  'instruction-following',
+  'product-interaction',
+  'service-stability',
+  'resource-cost',
+  'security-privacy-permission',
+  'other',
+] as const
+
+export type FeedbackCategory = (typeof FEEDBACK_CATEGORIES)[number]
+
+/**
+ * Append one session remark, as DSH's `recordFeedback` does: `feedback/record {text?, category?}`, blank text recorded
+ * as absent. The `/feedback <text>` command and the feedback dialog (`POST /api/sessions/{id}/feedback`) both write
+ * through here.
+ */
+export function recordFeedback(log: CommandLog, session: SessionHandle, entry: { readonly text?: string; readonly category?: FeedbackCategory }): void {
+  const text = entry.text?.trim() ?? ''
+  log.append(session, {
+    type: FEEDBACK_EVENT,
+    ...(text.length === 0 ? {} : { text }),
+    ...(entry.category === undefined ? {} : { category: entry.category }),
+  })
+}
+
 export function feedbackCommand(log: CommandLog, anonymousUser: () => string): CommandDefinition {
   return {
     name: 'feedback',
@@ -151,8 +178,9 @@ export function feedbackCommand(log: CommandLog, anonymousUser: () => string): C
     recordInput: false,
     handler: ({ session, args }) => {
       if (args.length === 0) return { kind: 'error', text: 'Feedback text is required. Usage: /feedback <text>' }
+      // The anonymous id is told to the person, not written into the remark (DSH's event is {text, category}).
       const user = anonymousUser()
-      log.append(session, { type: FEEDBACK_EVENT, text: args, anonymousUser: user })
+      recordFeedback(log, session, { text: args })
       return { kind: 'success', text: `Feedback recorded for session ${session.id}\nAnonymous user: ${user}.` }
     },
   }
