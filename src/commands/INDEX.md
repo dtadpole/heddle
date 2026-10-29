@@ -2,7 +2,7 @@
 title: Commands
 created: 2026-10-29T12:05:41Z
 modified: 2026-10-29T12:05:41Z
-version: 0.1.0
+version: 0.2.0
 description: The host's slash commands — the registry, the line parser, the built-in commands and the two routes the composer's menu uses.
 grounded_in:
   - source: the DSH package's dsh-commands, dsh-command-compact, dsh-command-goal, dsh-command-feedback, dsh-permission-presets, dsh-session-log-export and dsh-client-ui-commands, read 2026-10-29
@@ -24,6 +24,7 @@ DSH's rule, and how `/skillname` reaches the model.
 | [`builtins.ts`](builtins.ts) | `/compact`, `/goal`, `/feedback`, `/permission`, `/export`, each over the smallest host it needs |
 | [`http.ts`](http.ts) | `handleCommandRequest`: `GET /api/commands` and `POST /api/sessions/{id}/commands` |
 | [`service.ts`](service.ts) | the `commands` plugin: the registry with the built-ins wired to the session, goal, context, model and sandbox services |
+| [`menu.js`](menu.js) | the composer's slash menu, a browser module the page imports from `GET /commands/menu.js`: the trigger rule, DSH's sections and ranking, the keys, `/name ` with its hint, the command row |
 
 ## The built-in commands
 
@@ -35,12 +36,29 @@ DSH's rule, and how `/skillname` reaches the model.
 | `/permission` | `<preset>` | Commands | the session's sandbox mode; widening to `danger-full-access` is left to the access chip's risk gate |
 | `/export` | none | Commands | asks the page to download the session log, the same bytes as Download log |
 
-`/plan` (plan mode) and the page's menu (`/model`, `/file` and the menu itself) are later pieces.
+`/model` and `/file` are page entries the menu adds when the page lends them (`openModelMenu`, `openFilePicker`);
+they are never logged as commands, as in DSH. `/plan` (plan mode) is a later piece.
+
+## The menu
+
+`/` at the caret opens it — at the start of the draft, or after whitespace or punctuation, never inside a word, a
+path or a URL. An empty query shows DSH's sections, **Add** (file, goal, plan, feedback) and **Commands** (compact,
+permission, model, export); a typed one ranks prefixes first, then ordered subsequences; an inline token hides every
+command that takes input. ↑/↓ wrap, Enter or Tab pick, Escape or Shift+Tab close and leave that token alone. A command
+that takes input becomes `/name ` with DSH's hint; one that takes none runs at once. A run's row is drawn from the
+`command/run` and `command/done` events, live and — through the transcript's `command` turns — after a reload.
+
+One deliberate difference from DSH's web client: a registered command's name always reaches the host, so
+`/compact now` gets the host's usage sentence instead of being sent to the model as a prompt.
 
 ## Wiring
 
 - The profile row `commands` in `heddle.patch.yml` loads the plugin; only the session store is required.
 - `src/server/web.ts` hands over in one place, behind its door:
-  `if (commands !== undefined && (await handleCommandRequest(commands.routes, request, response, url))) return`.
+  `if (commands !== undefined && (await handleCommandRequest(commands.routes, request, response, url))) return`;
+  its `transcriptTurns` folds `command/run` and `command/done` into `command` turns.
+- `src/server/page.html` imports the menu after the composer exists and hands over at three points: `submitDraft`
+  (a claimed line runs, anything else is a message), the session-event handler (a live row), and the history render
+  (a row's placeholder, drawn once the module has loaded).
 
 Judged by `_verifiers_/80-web-ui/check-slash-commands.mjs`; unit tests in `test/commands.test.ts`.

@@ -377,3 +377,23 @@ test('the routes list commands, run a registered line, and answer matched:false 
     server.close()
   }
 })
+
+test("a session's history shows each command as its own row, settled by its done event, outside the conversation", async () => {
+  const { transcriptTurns } = await import('../src/server/web.ts')
+  const turns = transcriptTurns([
+    { type: 'message', seq: 0, message: { role: 'user', content: [{ type: 'text', text: 'hello' }] } },
+    { type: 'command/run', seq: 1, commandId: 'cmd-0000abcd-1', name: 'goal', args: 'ship it', source: { kind: 'user' } },
+    { type: 'goal/change', seq: 2 },
+    { type: 'command/done', seq: 3, commandId: 'cmd-0000abcd-1', kind: 'success', text: 'Goal set: ship it' },
+    { type: 'command/run', seq: 4, commandId: 'cmd-0000abcd-2', name: 'export' },
+    { type: 'command/done', seq: 5, commandId: 'cmd-0000abcd-2', kind: 'error', text: 'The Web /export command does not accept a path.' },
+    { type: 'command/run', seq: 6, commandId: 'cmd-0000abcd-3', name: 'compact' },
+  ])
+  const commands = turns.filter((turn) => turn.kind === 'command')
+  assert.deepEqual(commands, [
+    { kind: 'command', text: 'Goal set: ship it', commandId: 'cmd-0000abcd-1', name: 'goal', args: 'ship it', state: 'done' },
+    { kind: 'command', text: 'The Web /export command does not accept a path.', commandId: 'cmd-0000abcd-2', name: 'export', state: 'error' },
+    { kind: 'command', text: '', commandId: 'cmd-0000abcd-3', name: 'compact', state: 'running' },
+  ])
+  assert.equal(turns[0]?.kind, 'user', 'the conversation keeps its place')
+})

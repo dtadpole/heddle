@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
@@ -240,3 +241,124 @@ test('a line that names no command is left for the model, and nothing is recorde
     server.close()
   }
 })
+
+const KEY_CODES = { ArrowDown: 40, ArrowUp: 38, Enter: 13, Escape: 27, Tab: 9 }
+
+/** A real key press through the browser's input pipeline, so the page's own listeners decide what it does. */
+async function press(browser, key) {
+  const code = KEY_CODES[key]
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: code, ...(key === 'Enter' ? { text: '\r' } : {}) })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code })
+}
+
+const FIELD = 'document.querySelector("#prompt textarea")'
+
+async function menuState(browser) {
+  return JSON.parse(
+    await browser.evaluate(`JSON.stringify({
+      open: document.getElementById('slash-menu') !== null && document.getElementById('slash-menu').hidden === false,
+      groups: [...document.querySelectorAll('#slash-menu .hc-group')].map((element) => element.textContent),
+      rows: [...document.querySelectorAll('#slash-menu .hc-row')].map((element) => element.dataset.command),
+      selected: document.querySelector('#slash-menu [aria-selected="true"]')?.dataset.command ?? null,
+      value: ${FIELD}.value,
+    })`),
+  )
+}
+
+async function typeInto(browser, text) {
+  await browser.evaluate(`(() => { const field = ${FIELD}; field.focus(); field.value = ''; field.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+  await browser.send('Input.insertText', { text })
+}
+
+test('typing / opens the grouped menu at the caret, a picked command runs on the host, and its row survives a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('menu')
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    await browser.goto(server.url)
+    await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
+    await browser.waitFor(`${FIELD} !== null`, 10_000)
+
+    // `/` opens the menu, grouped as DSH groups it, with the first row highlighted.
+    await typeInto(browser, '/')
+    await browser.waitFor('document.getElementById("slash-menu") !== null && document.getElementById("slash-menu").hidden === false', 10_000)
+    let menu = await menuState(browser)
+    assert.deepEqual(menu.groups, ['Add', 'Commands'], 'an empty query shows the Add and Commands sections')
+    for (const name of ['goal', 'feedback', 'compact', 'permission', 'export']) assert.ok(menu.rows.includes(name), `/${name} is offered (rows: ${menu.rows.join(', ')})`)
+    assert.equal(menu.selected, menu.rows[0], 'the first row is highlighted')
+
+    // The arrows wrap; Escape closes and leaves the draft alone.
+    await press(browser, 'ArrowUp')
+    menu = await menuState(browser)
+    assert.equal(menu.selected, menu.rows[menu.rows.length - 1], 'ArrowUp from the first row wraps to the last')
+    await press(browser, 'ArrowDown')
+    assert.equal((await menuState(browser)).selected, menu.rows[0], 'ArrowDown wraps back')
+    await press(browser, 'Escape')
+    menu = await menuState(browser)
+    assert.equal(menu.open, false, 'Escape closes the menu')
+    assert.equal(menu.value, '/', 'and keeps the draft')
+
+    // A line that names no command is an ordinary message: the model answers it.
+    await typeInto(browser, '/nosuch hello there')
+    await press(browser, 'Enter')
+    await browser.waitFor('document.getElementById("log").innerText.includes("the model answered")', 20_000)
+    let log = await sessionLog(server, cookie, id)
+    assert.ok(log.events.some((event) => event.type === 'message' && JSON.stringify(event).includes('/nosuch hello there')), 'the unknown line reached the model as a message')
+    assert.equal(log.events.some((event) => event.type === 'command/run'), false, 'and no command ran')
+
+    // Typing narrows the menu; Enter picks a command that takes input and shows its hint.
+    await typeInto(browser, '/go')
+    await browser.waitFor('document.getElementById("slash-menu").hidden === false', 10_000)
+    menu = await menuState(browser)
+    assert.equal(menu.rows[0], 'goal', `typing /go ranks Goal first (rows: ${menu.rows.join(', ')})`)
+    await press(browser, 'Enter')
+    menu = await menuState(browser)
+    assert.equal(menu.value, '/goal ', 'picking a command that takes input leaves /goal and a space')
+    assert.equal(menu.open, false)
+    assert.equal(
+      await browser.evaluate('document.getElementById("slash-hint").hidden === false ? document.getElementById("slash-hint").textContent : null'),
+      'describe the objective for a long-running task',
+      "DSH's hint is shown while the input is empty",
+    )
+
+    // Submitting runs it on the host: a Completed row, the goal set, and no message carrying the line.
+    await browser.send('Input.insertText', { text: 'ship the parity table' })
+    await press(browser, 'Enter')
+    await browser.waitFor('document.querySelector(".hc-command[data-state=done]") !== null', 15_000)
+    const row = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        title: document.querySelector('.hc-command[data-state=done] .hc-title').textContent,
+        state: document.querySelector('.hc-command[data-state=done] .hc-state').textContent,
+        text: document.querySelector('.hc-command[data-state=done] .hc-text').textContent,
+      })`),
+    )
+    assert.deepEqual(row, { title: '/goal', state: 'Completed', text: 'Goal set: ship the parity table' })
+    assert.equal(await browser.evaluate(`${FIELD}.value`), '', 'the draft is cleared')
+    assert.equal((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(id)}`)).body.goal?.objective, 'ship the parity table')
+    log = await sessionLog(server, cookie, id)
+    assert.equal(
+      log.events.some((event) => event.type === 'message' && JSON.stringify(event).includes('/goal ship the parity table')),
+      false,
+      'the command line never became a message',
+    )
+
+    // A reload draws the row again from the log, in place.
+    await browser.goto(server.url)
+    await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
+    await browser.waitFor('[...document.querySelectorAll(".hc-command .hc-text")].some((element) => element.textContent === "Goal set: ship the parity table")', 15_000)
+    assert.equal(
+      await browser.evaluate('[...document.querySelectorAll(".hc-command")].find((element) => element.querySelector(".hc-text")?.textContent === "Goal set: ship the parity table").querySelector(".hc-state").textContent'),
+      'Completed',
+      'the reloaded row is settled',
+    )
+  } finally {
+    await browser.close()
+    server.close()
+  }
+})
+
