@@ -6494,29 +6494,49 @@ function renderTodo() {
   )
 }
 
+/* chat-scroll:begin */
 /**
  * Where a reader was in each session's transcript, DSH's scroll restoration: a reader who scrolled back, opened another
  * session and came back finds the same place, while one who was following the tail keeps following it. Kept for the
- * page's lifetime, keyed by session; a position is recorded only while the chat view is showing, because a hidden
- * transcript reads as scrolled to the top.
+ * page's lifetime, keyed by session. Only a showing transcript is recorded, because a hidden one reads as scrolled to
+ * the top, and an empty one has no place to keep. Pure, and fenced by these markers, so a unit test
+ * (test/page-chat-scroll.test.ts) judges the decisions directly.
  */
-const chatScrollMemory = new Map()
+const ChatScrollMemory = {
+  create() {
+    const places = new Map()
+    return {
+      /** Record `session`'s place; `false` when nothing was recorded. */
+      remember(session, { showing, rows, following, top }) {
+        if (session === null || session === undefined || !showing || rows === 0) return false
+        places.set(session, { following: following === true, top: Math.max(0, Number(top) || 0) })
+        return true
+      },
+      /** What to do on opening `session`: follow the tail, or stand where its reader left it. */
+      plan(session) {
+        const place = places.get(session)
+        return place === undefined || place.following ? { follow: true } : { follow: false, top: place.top }
+      },
+    }
+  },
+}
+/* chat-scroll:end */
+const chatScrollMemory = ChatScrollMemory.create()
 function rememberChatScroll() {
-  if (current === null || view !== 'chat' || log.childElementCount === 0) return
-  chatScrollMemory.set(current, { following: chatFollowing, top: log.scrollTop })
+  chatScrollMemory.remember(current, { showing: view === 'chat', rows: log.childElementCount, following: chatFollowing, top: log.scrollTop })
 }
 function restoreChatScroll(id) {
-  const memory = chatScrollMemory.get(id)
-  if (memory === undefined || memory.following) {
+  const plan = chatScrollMemory.plan(id)
+  if (plan.follow) {
     followChatTail(true)
     return
   }
   chatFollowing = false
   log.dataset.following = 'false'
-  log.scrollTop = memory.top
+  log.scrollTop = plan.top
   /** Once more after layout has landed: a settled document or an image can change the height under the first try. */
   requestAnimationFrame(() => {
-    if (current === id && !chatFollowing) log.scrollTop = memory.top
+    if (current === id && !chatFollowing) log.scrollTop = plan.top
   })
 }
 
