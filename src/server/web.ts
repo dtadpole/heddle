@@ -566,7 +566,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         'content-type': contentType ?? 'application/octet-stream',
         'content-length': String(stats.size),
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
-        'content-disposition': contentType === null ? `attachment; filename="${basename(wanted).replace(/"/g, '')}"` : 'inline',
+        'content-disposition': contentType === null ? attachmentDisposition(basename(wanted)) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
@@ -619,7 +619,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
         'content-length': String(stats.size),
-        'content-disposition': contentType === null ? `attachment; filename="${leaf.replace(/"/g, '')}"` : 'inline',
+        'content-disposition': contentType === null ? attachmentDisposition(leaf) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
@@ -2476,6 +2476,22 @@ function respondSse(response: ServerResponse): void {
  * such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps a
  * download from being read as a page. A policy on an image or a stylesheet does not affect the page that embeds it.
  */
+/**
+ * The `attachment` disposition for a file's own name, with nothing but visible ASCII in the header. A name of visible
+ * ASCII without `"` or a backslash is sent as it is. Any other name keeps an ASCII `filename="…"` fallback, each other
+ * character (per code point) replaced by `_`, and carries the real name in `filename*=UTF-8''…` (RFC 6266, RFC 5987):
+ * `encodeURIComponent` with `'()*` also encoded, the same bytes the Rust server's `attachment_disposition` writes.
+ * Before this the raw name went into the header: Node refused a name above U+00FF part-way through `writeHead`
+ * (`ERR_INVALID_CHAR`, and the catch then wrote a 404 over the started 200 with the file's length), and a Latin-1
+ * name went out as a raw byte (live issues developer-two-2 and developer-two-3).
+ */
+export function attachmentDisposition(name: string): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/gu, '_')
+  if (fallback === name) return `attachment; filename="${name}"`
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
+}
+
 export const FILE_ANSWER_HEADERS: Readonly<Record<string, string>> = {
   'content-security-policy': "sandbox; default-src 'none'",
   'x-content-type-options': 'nosniff',

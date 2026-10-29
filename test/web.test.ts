@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { validateHeaderValue } from 'node:http'
 import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentsOf, FILE_ANSWER_HEADERS, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -96,6 +97,30 @@ test('a file route answers with the sandbox and nosniff headers DSH puts on its 
     'content-security-policy': "sandbox; default-src 'none'",
     'x-content-type-options': 'nosniff',
   })
+})
+
+test('a download name reaches the header as visible ASCII, with the real name in filename*', () => {
+  /**
+   * Live issues developer-two-2 and developer-two-3 (2026-10-29): the raw name went into `content-disposition`, so
+   * Node refused `说明.txt` part-way through writeHead (a 404 written over the started 200) and `café.txt` went out
+   * as a raw Latin-1 byte. These are the same strings the Rust server's `attachment_disposition` test expects.
+   */
+  const cases: Array<[string, string]> = [
+    ['notes.txt', 'attachment; filename="notes.txt"'],
+    ['说明.txt', `attachment; filename="__.txt"; filename*=UTF-8''%E8%AF%B4%E6%98%8E.txt`],
+    ['café.txt', `attachment; filename="caf_.txt"; filename*=UTF-8''caf%C3%A9.txt`],
+    ['say "hi"\\now.txt', `attachment; filename="say _hi__now.txt"; filename*=UTF-8''say%20%22hi%22%5Cnow.txt`],
+    ["line\nbreak (1)'*.txt", `attachment; filename="line_break (1)'*.txt"; filename*=UTF-8''line%0Abreak%20%281%29%27%2A.txt`],
+    ['🦀.bin', `attachment; filename="_.bin"; filename*=UTF-8''%F0%9F%A6%80.bin`],
+  ]
+  for (const [name, expected] of cases) {
+    const value = attachmentDisposition(name)
+    assert.equal(value, expected, `the disposition for ${JSON.stringify(name)}`)
+    assert.match(value, /^[\x20-\x7e]*$/, `only visible ASCII for ${JSON.stringify(name)}`)
+    assert.doesNotThrow(() => validateHeaderValue('content-disposition', value), `Node accepts it for ${JSON.stringify(name)}`)
+    const encoded = /filename\*=UTF-8''(.*)$/.exec(value)?.[1]
+    assert.equal(encoded === undefined ? /filename="(.*)"/.exec(value)?.[1] : decodeURIComponent(encoded), name, 'it decodes back to the real name')
+  }
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {
