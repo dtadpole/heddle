@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-29T11:58:00Z
+modified: 2026-10-29T12:04:00Z
 level: L3
-version: 1.7.0
+version: 1.8.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `ed16f85` (a goal's round cap holds across an edit), with the
+**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `6a806b3` (delegation no longer blocks the parent), with the
 machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
@@ -27,8 +27,9 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**123 checks: 122 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 50
-gained `check-goal-rounds.mjs`: an edit during a goal's round does not let it run past its cap.
+**124 checks: 123 pass, 0 fail, 1 unjudged.** Part 50's subagent check is restated as two claims: the delegation
+returns at once, and the child's closing message reaches the parent by notice. They succeed the claim that the
+child's answer came back as the parent's tool result, which DSH parity retires; nothing else stopped passing.
 
 **Failing:** none in the backend lane. Part 98 reads the machine's recorded validation, so it judges the configuration:
 every configured model now passes it. For the Claude models that means several text deltas, not arrival as they are
@@ -46,7 +47,7 @@ list.
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 9 of 9 |
 | 4 tools | `40-pluggable-tools` | **passes** — 6 of 6 |
-| 5 agentic loop | `50-agentic-loop` | **passes** — 10 of 10 |
+| 5 agentic loop | `50-agentic-loop` | **passes** — 11 of 11 |
 | 6 hooks | `60-hooks` | **passes** — 6 of 6 |
 | 7 workspaces and sessions | `70-workspaces-sessions` | **passes** — 48 of 48 |
 | 8 sandbox | `75-permission-sandbox` | **passes** — 17 of 17 |
