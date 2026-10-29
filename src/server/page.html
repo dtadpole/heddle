@@ -1518,13 +1518,12 @@
   #tree li[data-kind='folder'] .label { opacity: .8; }
   #tree .empty { font-size: .78rem; opacity: .5; padding-left: 1.4rem; }
   /**
-   * The workspace tree (G2), after DSH's workspace browser: a session row leads with a **16-pixel status cell** rather
-   * than a glyph (DSH's `SessionNodeItem`: the running loader there, nothing while idle), and a workspace whose subtree
-   * holds the open session tints its folder (DSH's `folderActive`), which is how a collapsed group still says "it is in
-   * here". `Show more` is DSH's 28-pixel overflow row in the tertiary label colour; `Files` is the quiet heading over the
+   * The workspace tree (G2), after DSH's workspace browser: a workspace whose subtree holds the open session tints its
+   * folder (DSH's `folderActive`), which is how a collapsed group still says "it is in here". A session row keeps its
+   * conversation glyph and the running spinner after it, as this page's rows already did. `Show more` is DSH's 28-pixel overflow row in the tertiary label colour; `Files` is the quiet heading over the
    * folder rows heddle keeps under a workspace's sessions.
    */
-  #tree li[data-kind='session'] > .row > .status-cell, #tree li[data-kind='more'] > .row > .status-cell { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; }
+  #tree li[data-kind='more'] > .row > .spacer { display: inline-flex; flex: none; width: 14px; height: 14px; }
   #tree li[data-contains-current='true'] > .row > .icon { color: var(--accent); }
   #tree li[data-kind='more'] > .row { height: 28px; color: var(--text-3); font-size: 13px; }
   #tree li[data-kind='more'] > .row:hover { color: var(--text-2); background: transparent; }
@@ -8752,14 +8751,11 @@ function paintRunningMarks() {
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
     const row = li.querySelector(':scope > .row')
     if (row === null) continue
-    /** A session row's spinner lives in its status cell; a row without one (an older shape) keeps it after the icon. */
-    const cell = row.querySelector(':scope > .status-cell')
-    const existing = cell !== null ? cell.querySelector(':scope > .status-dot') : row.querySelector(':scope > .status-dot')
+    const existing = row.querySelector(':scope > .status-dot')
     const running = runningSessions.has(node.session.id)
     if (running && existing === null) {
       const mark = runningMark()
-      if (cell !== null) cell.append(mark)
-      else row.querySelector(':scope > .icon')?.after(mark)
+      row.querySelector(':scope > .icon')?.after(mark)
       /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
       for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
     } else if (!running && existing !== null) {
@@ -9403,8 +9399,11 @@ function markSelection() {
   }
   for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
     if (!li.hasAttribute('aria-selected')) continue
-    /** A tree row is chosen by path; a flat list row by the session it opens, because it has no definition folder. */
-    if (li.dataset.sessionId !== undefined) {
+    /**
+     * A tree row is chosen by path (a session row's path is `session:<id>`, so a file shown in the panel takes the mark
+     * away from it); a flat list row by the session it opens, because it has no path of its own.
+     */
+    if (li.dataset.sessionId !== undefined && li.dataset.rowKey === undefined) {
       li.setAttribute('aria-selected', li.dataset.sessionId === current ? 'true' : 'false')
       continue
     }
@@ -9698,7 +9697,7 @@ async function startSessionAt(node) {
   activeFolder = node.path
   expanded.add(node.path)
   rememberExpanded()
-  if (typeof body.definition === 'string') definitionOf.set(body.session, body.definition.replace(/\/session\.json$/, ''))
+  if (typeof body.definition === 'string') learnDefinition(body.session, body.definition.replace(/\/session\.json$/, ''))
   /** The new session's row is the selected one; the tree keys a session row by its id. */
   chooseSelected('session:' + body.session)
   await showSession(body.session)
@@ -10269,10 +10268,47 @@ const WorkspaceTree = (() => {
 let treeGroups = []
 const watermarks = new Map()
 const definitionOf = new Map()
+/** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
+let listedSessions = new Set()
 
-/** A session's row label: its stored title, `New session` while it has no turn, else `Untitled` (DSH's words). */
+/**
+ * Remember where a session's definition sits, and let its row say so: a session nobody named is labelled with its
+ * definition folder's name and carries that folder as its tooltip, which is what this page showed before the tree
+ * grouped sessions by workspace. The row is updated in place, because the listing that reveals a definition arrives
+ * after the session rows are drawn.
+ */
+function learnDefinition(id, folder) {
+  if (definitionOf.get(id) === folder) return
+  definitionOf.set(id, folder)
+  const entry = rowIndex.get('session:' + id)
+  if (entry === undefined) return
+  const row = entry.li.querySelector(':scope > .row')
+  if (row !== null) row.title = folder
+  if (entry.node.session?.title) return
+  const label = row?.querySelector(':scope > .label')
+  if (label !== null && label !== undefined) label.textContent = WorkspaceTree.basename(folder)
+  entry.node.label = WorkspaceTree.basename(folder)
+}
+
+/** What a folder listing draws: no nested root (it is a group), and no definition of a session the tree already lists. */
+function folderRows(children) {
+  for (const entry of children) {
+    if (entry.kind === 'session' && entry.session !== null && entry.session !== undefined) learnDefinition(entry.session.id, entry.path)
+  }
+  return children.filter(
+    (entry) => entry.kind !== 'workspace' && !(entry.kind === 'session' && entry.session !== null && entry.session !== undefined && listedSessions.has(entry.session.id)),
+  )
+}
+
+/**
+ * A session's row label: its stored title; else the name of its definition folder when the tree knows one (the name
+ * this page always showed for a session nobody named, `session-<date>-<time>`); else DSH's words, `New session` while
+ * it has no turn and `Untitled` after.
+ */
 function sessionLabel(meta) {
   if (typeof meta.title === 'string' && meta.title.trim().length > 0) return meta.title
+  const definition = definitionOf.get(meta.id)
+  if (definition !== undefined) return WorkspaceTree.basename(definition)
   return (meta.turns ?? 0) === 0 ? 'New session' : 'Untitled'
 }
 
@@ -10344,9 +10380,9 @@ function paintSessionRows(list, group, depth) {
     row.className = 'row'
     row.tabIndex = 0
     row.setAttribute('role', 'button')
-    /** An empty status cell, so the words line up with the session titles above them, as DSH's overflow row does. */
+    /** An empty icon cell, so the words line up with the session titles above them, as DSH's overflow row does. */
     const spacer = document.createElement('span')
-    spacer.className = 'status-cell'
+    spacer.className = 'icon spacer'
     spacer.setAttribute('aria-hidden', 'true')
     const label = document.createElement('span')
     label.className = 'label'
@@ -10416,12 +10452,7 @@ function nodeRow(node, depth = 0) {
   /** The left of the row is what it **is**: its kind, a type's badge, and its name. */
   const icon = document.createElement('span')
   icon.className = 'icon'
-  /**
-   * A session row leads with DSH's **status cell** rather than a glyph: 16 pixels that hold the running spinner while a
-   * turn runs and nothing while the session is idle (`SessionNodeItem`). Every other row keeps its kind glyph.
-   */
-  if (node.kind === 'session') icon.classList.add('status-cell')
-  else icon.append(kindIcon(node.kind, false))
+  icon.append(kindIcon(node.kind, false))
   row.append(icon)
   /**
    * A running session carries the reference's **spinner** before its name — not a word: `StateDot`'s ongoing state is a
@@ -10430,7 +10461,7 @@ function nodeRow(node, depth = 0) {
    */
   if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
     const mark = runningMark()
-    icon.append(mark)
+    row.append(mark)
     for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
   }
   if (node.badge) {
@@ -10451,7 +10482,7 @@ function nodeRow(node, depth = 0) {
    */
   label.textContent = node.kind === 'session' && node.session?.title ? node.session.title : node.label
   /** The folder a session works in is its tooltip: the tree groups by workspace, and the folder is still its identity. */
-  if (node.kind === 'session') row.title = node.cwd ?? node.path
+  if (node.kind === 'session') row.title = (node.session !== null && node.session !== undefined ? definitionOf.get(node.session.id) : undefined) ?? node.cwd ?? node.path
   row.append(label)
 
   /**
@@ -10752,11 +10783,7 @@ async function loadChildren(node, li) {
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
         if (!response.ok) throw new Error('the tree answered ' + response.status)
-        const listed = (await response.json()).children ?? []
-        for (const entry of listed) {
-          if (entry.kind === 'session' && entry.session !== null && entry.session !== undefined) definitionOf.set(entry.session.id, entry.path)
-        }
-        files = listed.filter((entry) => entry.kind !== 'workspace' && entry.kind !== 'session')
+        files = folderRows((await response.json()).children ?? [])
       } catch (error) {
         setNote('could not read ' + node.label + ': ' + (error && error.message))
       }
@@ -10813,14 +10840,12 @@ async function loadChildren(node, li) {
     group.append(empty)
     return
   }
-  for (const entry of children) {
-    if (entry.kind === 'session' && entry.session !== null && entry.session !== undefined) definitionOf.set(entry.session.id, entry.path)
-  }
   /**
-   * A deeper folder drops the same two kinds a workspace's listing drops: a nested root is a group of its own, and a
-   * hoisted `_sessions_` definition is already its workspace's session row.
+   * A deeper folder drops what a workspace's listing drops: a nested root is a group of its own, and a hoisted
+   * `_sessions_` definition of a listed session is already its workspace's session row. A definition naming a session
+   * this store does not hold keeps its row here, as before, so it does not vanish.
    */
-  for (const child of children.filter((entry) => entry.kind !== 'workspace' && entry.kind !== 'session')) group.append(nodeRow(child, depth + 1))
+  for (const child of folderRows(children)) group.append(nodeRow(child, depth + 1))
   if (group.children.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'empty'
@@ -11049,6 +11074,7 @@ async function renderTree() {
     return
   }
   rowIndex.clear()
+  listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
   treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode })
   /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
   treeTops = WorkspaceTree.flatten(treeGroups)
