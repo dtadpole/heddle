@@ -94,8 +94,8 @@ pub use settings::{
     PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsError, SettingsNamespace,
     SettingsOpener, SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService,
     SettingsTarget, SettingsView, SettingsWrite, commit_settings_write, default_opener,
-    describe_settings, handle_settings_request, is_secret_key, plan_settings_write,
-    settings_target,
+    describe_settings, handle_settings_request, handle_settings_request_from, is_secret_key,
+    plan_settings_write, settings_target,
 };
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,

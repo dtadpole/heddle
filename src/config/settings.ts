@@ -303,6 +303,7 @@ export async function handleSettingsRequest(
   method: string,
   path: string,
   body: string,
+  origin: { readonly local?: boolean } = {},
 ): Promise<{ readonly status: number; readonly body: unknown } | undefined> {
   const pathname = path.split('?')[0] ?? path
   if (!pathname.startsWith('/api/settings')) return undefined
@@ -340,6 +341,15 @@ export async function handleSettingsRequest(
       return fail(400, 'bad-request', 'the body must be a JSON object')
     }
     if (action !== 'open-document') return fail(400, 'bad-request', "the settings collection takes { \"action\": \"open-document\" }")
+    /**
+     * Opening a file in this machine's editor is for a person at this machine (DSH offers it only to a loopback
+     * browser). Hiding the button is the page's courtesy; the refusal is here, so a remote client holding the cookie
+     * cannot open anything. The mount decides `local` (a loopback connection, no forwarding header, a loopback Host);
+     * a caller that says nothing is not local.
+     */
+    if (origin.local !== true) {
+      return fail(403, 'settings-rejected', 'opening the configuration file is offered only to a page open on this machine')
+    }
     try {
       await service.openDocument()
     } catch (error) {

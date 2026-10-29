@@ -566,6 +566,20 @@ pub fn handle_settings_request(
     path: &str,
     body: &[u8],
 ) -> Option<SettingsResponse> {
+    handle_settings_request_from(service, method, path, body, false)
+}
+
+/// [`handle_settings_request`] for a request the mount has judged: `local` is whether it comes from a person at this
+/// machine. `{action: open-document}` acts on this machine's screen, so it needs `local` (DSH offers it only to a
+/// loopback browser; hiding the button is the page's courtesy, the refusal is here). The plain function passes
+/// `false`, so the action fails closed until the mount says otherwise. The TypeScript build's `origin.local`.
+pub fn handle_settings_request_from(
+    service: &SettingsService,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    local: bool,
+) -> Option<SettingsResponse> {
     let path = path.split('?').next().unwrap_or(path);
     let rest = path.strip_prefix("/api/settings")?;
     let ns = match rest {
@@ -607,6 +621,14 @@ pub fn handle_settings_request(
                     400,
                     "bad-request",
                     "the settings collection takes { \"action\": \"open-document\" }".into(),
+                ));
+            }
+            if !local {
+                return Some(fail(
+                    403,
+                    "settings-rejected",
+                    "opening the configuration file is offered only to a page open on this machine"
+                        .into(),
                 ));
             }
             match service.open_document() {
@@ -1924,11 +1946,24 @@ mod tests {
             Ok(())
         }));
         assert!(!fixture.patch_file().exists());
-        let answer = handle_settings_request(
+        let remote = handle_settings_request(
             &service,
             "POST",
             "/api/settings",
             json!({ "action": "open-document" }).to_string().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            remote.status, 403,
+            "a request the mount did not vouch for as local is refused"
+        );
+        assert!(opened.lock().unwrap().is_empty(), "and nothing was opened");
+        let answer = handle_settings_request_from(
+            &service,
+            "POST",
+            "/api/settings",
+            json!({ "action": "open-document" }).to_string().as_bytes(),
+            true,
         )
         .unwrap();
         assert_eq!(answer.status, 200);
@@ -1981,11 +2016,12 @@ mod tests {
         .unwrap()
         .with_opener(Box::new(|_| Ok(())));
         let call = |service: &SettingsService, body: Value| {
-            handle_settings_request(
+            handle_settings_request_from(
                 service,
                 "POST",
                 "/api/settings",
                 body.to_string().as_bytes(),
+                true,
             )
             .unwrap()
         };
