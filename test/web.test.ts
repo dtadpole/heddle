@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentsOf, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentsOf, FILE_ANSWER_HEADERS, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -85,6 +85,17 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   assert.equal(answers.length, 2, 'one answer per exchange')
   assert.deepEqual(answers[0]?.files, [{ path: 'a.txt', added: 1 }])
   assert.equal(answers[1]?.files, undefined, 'the next exchange does not inherit the previous one\'s files')
+})
+
+test('a file route answers with the sandbox and nosniff headers DSH puts on its own file route', () => {
+  /**
+   * DSH parity R-developer-twelve-16, measured 2026-10-29: a workspace SVG served inline by `/api/raw` and opened
+   * directly ran its script with the session's access. DSH's file route sends exactly these on every answer.
+   */
+  assert.deepEqual(FILE_ANSWER_HEADERS, {
+    'content-security-policy': "sandbox; default-src 'none'",
+    'x-content-type-options': 'nosniff',
+  })
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {
