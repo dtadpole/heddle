@@ -1,8 +1,8 @@
 ---
 title: The heddle-commands crate
 created: 2026-10-29T12:21:02Z
-modified: 2026-10-29T12:33:43Z
-version: 0.1.0
+modified: 2026-10-29T13:40:00Z
+version: 0.2.0
 description: The Rust port crate for the host's slash commands — the registry, the line parser, the five built-in commands and the two routes the composer's slash menu uses — its public API, what it needs from other crates, and how it is mounted.
 grounded_in:
   - source: src/commands/registry.ts, src/commands/builtins.ts, src/commands/http.ts, src/commands/service.ts and src/commands/INDEX.md, read 2026-10-29
@@ -56,6 +56,12 @@ A reload draws a command's row from the session's history: `heddle-server`'s tra
 | `/permission` | `<preset>` | Commands | the session's sandbox mode; widening to `danger-full-access` is refused and left to the access chip's risk gate |
 | `/export` | none | Commands | `action: {kind: "download", href: "/api/sessions/<id>/log"}`, the same bytes as Download log |
 
+A row that contributes a command hands it to `Commands::with_contributed`: plan mode's `/plan`
+([`../heddle-plan/`](../heddle-plan/INDEX.md)) when the profile loads the `plan` row. It is registered after the
+built-ins; one the registry refuses (a taken or malformed name) is left out and reported by `Commands::refused`,
+which `heddle web` prints. A result's `action` is `{kind: "download", href}` or `{kind: "prompt", text}` — the
+latter hands the words to the page's ordinary send, as `/plan <words>` does.
+
 ## Public API
 
 | Item | What it is |
@@ -64,7 +70,7 @@ A reload draws a command's row from the session's history: `heddle-server`'s tra
 | `parse_command_line`, `is_command_name`, `default_label` | the TypeScript `COMMAND_LINE` and `COMMAND_NAME` rules, without a regex crate |
 | `CommandDefinition` (`new`, `sync`, `label`, `section`, `input`, `record_input`), `CommandResult`, `CommandAction`, `CommandDescriptor`, `CommandExecution`, `CommandLog` | the shapes; a handler's `Err` (or panic) is a result of kind `error` |
 | `goal_command`, `compact_command`, `feedback_command`, `permission_command`, `export_command`, `describe_goal` | the built-ins over `GoalHost`, `CompactionHost`, `CommandLog` + `AnonymousUser`, `PermissionHost` |
-| `Commands` (`new(CommandServices)`, `with_registry`, `open`, `execute`), `CommandServices` | the host the routes read, wired to the real services |
+| `Commands` (`new(CommandServices)`, `with_contributed`, `with_registry`, `open`, `execute`, `refused`), `CommandServices` | the host the routes read, wired to the real services |
 | `router(Arc<Commands>) -> axum::Router`, `ROUTES`, `MAX_COMMAND_LINE` | the mount |
 
 ## What it needs from other crates

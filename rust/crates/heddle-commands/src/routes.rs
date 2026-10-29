@@ -377,6 +377,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_prompt_action_is_answered_for_the_page_to_send_as_a_message() {
+        use crate::registry::{CommandAction, CommandDefinition, CommandResult};
+        let fixture = Fixture::new("routes-prompt");
+        let registry = CommandRegistry::new();
+        registry
+            .register(CommandDefinition::sync("plan", "plan", |context| {
+                Ok(
+                    CommandResult::success_text("Plan mode on. Use /plan off to leave.")
+                        .with_action(CommandAction::Prompt { text: context.args }),
+                )
+            }))
+            .unwrap();
+        let host = Commands::with_registry(
+            Arc::new(SessionService::from_store(fixture.store.clone())),
+            registry,
+        );
+        let response = call(
+            routes(Arc::new(host)),
+            Method::POST,
+            &post_path(&fixture.handle.id),
+            Some(r#"{"line":"/plan design the slash menu"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let answer = json_of(response).await;
+        assert_eq!(
+            answer["action"],
+            json!({"kind": "prompt", "text": "design the slash menu"})
+        );
+        assert_eq!(
+            serde_json::to_string(&answer["action"]).unwrap(),
+            r#"{"kind":"prompt","text":"design the slash menu"}"#
+        );
+        let keys: Vec<&str> = answer
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "matched",
+                "commandId",
+                "name",
+                "kind",
+                "text",
+                "action",
+                "seq"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn the_menu_module_is_served_as_the_typescript_tree_has_it() {
         let fixture = Fixture::new("routes-menu");
         let response = call(app(&fixture), Method::GET, MENU_PATH, None).await;

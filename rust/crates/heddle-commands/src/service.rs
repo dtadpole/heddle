@@ -23,7 +23,9 @@ use crate::builtins::{
     PermissionHost, compact_command, export_command, feedback_command, goal_command,
     permission_command,
 };
-use crate::registry::{CommandExecution, CommandLog, CommandRegistry};
+use crate::registry::{
+    CommandDefinition, CommandExecution, CommandLog, CommandRegistry, RegistrationError,
+};
 use crate::text;
 
 /// The sentence every `/goal` answers when the profile loads no goal service.
@@ -64,6 +66,7 @@ pub struct CommandServices {
 pub struct Commands {
     registry: CommandRegistry,
     sessions: Arc<SessionService>,
+    refused: Vec<RegistrationError>,
 }
 
 impl std::fmt::Debug for Commands {
@@ -106,14 +109,41 @@ impl Commands {
         Self::with_registry(services.sessions, registry)
     }
 
+    /// The same host with the commands another loaded row contributes (plan mode's `/plan`), registered after the
+    /// built-ins — the binary's form of a plugin's `ctx.commands.registry.register(...)`.
+    ///
+    /// A contributed command the registry refuses — a malformed name, a blank description, a name already taken —
+    /// is left out and kept in [`Commands::refused`], so one bad contribution neither takes the built-ins down nor
+    /// goes unsaid; the TypeScript `register` throws, failing the contributing plugin's row.
+    pub fn with_contributed(
+        mut self,
+        definitions: impl IntoIterator<Item = CommandDefinition>,
+    ) -> Self {
+        for definition in definitions {
+            if let Err(refusal) = self.registry.register(definition) {
+                self.refused.push(refusal);
+            }
+        }
+        self
+    }
+
     /// A host over a registry the caller filled.
     pub fn with_registry(sessions: Arc<SessionService>, registry: CommandRegistry) -> Self {
-        Self { registry, sessions }
+        Self {
+            registry,
+            sessions,
+            refused: Vec::new(),
+        }
     }
 
     /// The registry.
     pub fn registry(&self) -> &CommandRegistry {
         &self.registry
+    }
+
+    /// Why each command [`Commands::with_contributed`] left out was refused, in the order they were given.
+    pub fn refused(&self) -> &[RegistrationError] {
+        &self.refused
     }
 
     /// The session `id` names, or `None`.
@@ -451,6 +481,71 @@ mod tests {
                 name: "goal".to_owned(),
                 raw_input: " x".to_owned()
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_contributed_command_joins_the_built_ins_and_one_the_registry_refuses_is_reported() {
+        use crate::registry::{CommandAction, CommandInput, CommandSection};
+        let fixture = Fixture::new("host-extra");
+        let contributed = vec![
+            CommandDefinition::sync("plan", "Enter or leave plan mode", |context| {
+                Ok(
+                    CommandResult::success_text("Plan mode on. Use /plan off to leave.")
+                        .with_action(CommandAction::Prompt { text: context.args }),
+                )
+            })
+            .label("Plan")
+            .section(CommandSection::Add)
+            .input(CommandInput {
+                hint: "[off|message]".to_owned(),
+                attachments: Some(true),
+            }),
+            CommandDefinition::sync("goal", "a second goal", |_| Ok(CommandResult::success())),
+            CommandDefinition::sync("Bad", "malformed", |_| Ok(CommandResult::success())),
+        ];
+        let commands = Commands::new(services(&fixture)).with_contributed(contributed);
+        let names: Vec<String> = commands
+            .registry()
+            .list()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "compact",
+                "export",
+                "feedback",
+                "goal",
+                "permission",
+                "plan"
+            ]
+        );
+        let refused: Vec<String> = commands.refused().iter().map(ToString::to_string).collect();
+        assert_eq!(
+            refused,
+            [
+                "a command named 'goal' is already registered",
+                "command name 'Bad' must be lower-case and start with a letter (/^[a-z][a-z0-9_-]*$/)",
+            ]
+        );
+        assert_eq!(
+            run(&commands, &fixture.handle, "/goal").await,
+            CommandResult::error(NO_GOAL_SERVICE),
+            "the built-in keeps its name"
+        );
+        assert_eq!(
+            run(&commands, &fixture.handle, "/plan design it").await,
+            CommandResult::success_text("Plan mode on. Use /plan off to leave.").with_action(
+                CommandAction::Prompt {
+                    text: "design it".to_owned()
+                }
+            )
+        );
+        assert!(
+            Commands::new(services(&fixture)).refused().is_empty(),
+            "nothing contributed, nothing refused"
         );
     }
 

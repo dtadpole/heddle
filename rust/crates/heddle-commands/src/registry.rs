@@ -120,7 +120,8 @@ pub enum CommandSection {
     Commands,
 }
 
-/// Something the page does after a successful run, because only the page can do it.
+/// Something the page does after a successful run, because only the page can do it: download a file, or send words
+/// as an ordinary message (DSH's `/plan <message>` enters plan mode and then hands the message to the model).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum CommandAction {
@@ -128,6 +129,11 @@ pub enum CommandAction {
     Download {
         /// The route to download.
         href: String,
+    },
+    /// `{kind: "prompt", text}`: send `text` as the page's ordinary message.
+    Prompt {
+        /// The words to send.
+        text: String,
     },
 }
 
@@ -978,6 +984,20 @@ mod tests {
         assert_eq!(
             CommandResult::error("no").with_action(action).action(),
             None
+        );
+        let prompt = CommandAction::Prompt {
+            text: "design the slash menu".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&prompt).unwrap(),
+            r#"{"kind":"prompt","text":"design the slash menu"}"#,
+            "the TypeScript `{{kind: 'prompt', text}}`, in its key order"
+        );
+        assert_eq!(
+            CommandResult::success_text("on")
+                .with_action(prompt.clone())
+                .action(),
+            Some(&prompt)
         );
     }
 }
