@@ -36,8 +36,10 @@ const NEXT_STALE_S = number('BROWSER_SLOT_NEXT_SECONDS', 1800) // an older brows
 const POLL_MS = number('BROWSER_SLOT_POLL_MS', 1000)
 const MAX_HOLD_S = 600 // the team's rule: hold the slot at most ten minutes
 const QUEUED = 75 // EX_TEMPFAIL: still waiting, the ticket is kept
-const MIN_FREE_PCT = number('BROWSER_SLOT_MIN_FREE_PCT', 25) // D-060: memory_pressure free under this admits no one
-const SWAP_STOP_MB = number('BROWSER_SLOT_SWAP_STOP_MB', 7168) // D-051/D-060: swap used at or over this admits no one
+// D-061: memory_pressure free under 25% admits no one (the primary gate); swap used at or over 7680M is the
+// backstop. browser-cap may override both ("min-free=25 swap-stop=7680"), then the environment (tests).
+const MIN_FREE_PCT = 25
+const SWAP_STOP_MB = 7680
 
 export const lockDir = (n) => path.join(ROOT, n === 1 ? 'browser.lock' : `browser.lock${n}`)
 
@@ -49,7 +51,10 @@ export function config() {
   } catch {}
   const count = Math.max(1, Math.floor(Number(text.trim().split(/\s+/)[0])) || 1)
   const reserve = (text.match(/reserve=([a-z0-9-]+)/) || [])[1] || null
-  return { count, reserve: count >= 2 ? reserve : null }
+  const key = (name, fallback) => Number((text.match(new RegExp(`${name}=(\\d+)`)) || [])[1]) || fallback
+  const minFree = number('BROWSER_SLOT_MIN_FREE_PCT', key('min-free', MIN_FREE_PCT))
+  const swapStop = number('BROWSER_SLOT_SWAP_STOP_MB', key('swap-stop', SWAP_STOP_MB))
+  return { count, reserve: count >= 2 ? reserve : null, minFree, swapStop }
 }
 
 export const roleOf = (seat, role) => role || (seat.startsWith('integrator-') ? 'integrator' : 'developer')
@@ -72,8 +77,8 @@ function slotNumbers(cfg) {
   return [...Array.from({ length: cfg.count }, (_, i) => i + 1), ...extra.sort((a, b) => a - b)]
 }
 
-/** D-060: no new holder while memory_pressure reports under 25% free or swap used is at or over 7168M. */
-export function memoryGate() {
+/** D-061: no new holder while memory_pressure reports under 25% free, or swap used is at or over 7680M. */
+export function memoryGate(cfg = config()) {
   const read = (fake, cmd, args, pattern) => {
     if (env[fake] !== undefined && env[fake] !== '') return Number(env[fake])
     const r = spawnSync(cmd, args, { encoding: 'utf8' })
@@ -83,8 +88,8 @@ export function memoryGate() {
   const free = read('BROWSER_SLOT_FAKE_FREE_PCT', 'memory_pressure', [], /free percentage:\s*(\d+)%/)
   const swap = read('BROWSER_SLOT_FAKE_SWAP_MB', 'sysctl', ['-n', 'vm.swapusage'], /used\s*=\s*([\d.]+)M/)
   const reading = `memory free ${free ?? '?'}%, swap ${swap === null ? '?' : Math.round(swap)}M`
-  if (free !== null && free < MIN_FREE_PCT) return { ok: false, reading, why: `memory free ${free}% < ${MIN_FREE_PCT}% (D-060)` }
-  if (swap !== null && swap >= SWAP_STOP_MB) return { ok: false, reading, why: `swap ${Math.round(swap)}M >= ${SWAP_STOP_MB}M (D-051)` }
+  if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-061)` }
+  if (swap !== null && swap >= cfg.swapStop) return { ok: false, reading, why: `swap ${Math.round(swap)}M >= ${cfg.swapStop}M (D-061 backstop)` }
   return { ok: true, reading, why: '' }
 }
 
@@ -248,7 +253,7 @@ export function take({ seat, role, purpose = 'browser gate', waitS = 100, pid = 
     let held = ''
     for (const n of slots.filter((k) => k <= cfg.count && !holders.get(k) && eligible(k, role, cfg))) {
       if (order.find((t) => eligible(n, t.role, cfg))?.seat !== seat) continue
-      const gate = memoryGate()
+      const gate = memoryGate(cfg)
       if (!gate.ok) {
         held = `no new holder: ${gate.why}`
         break
@@ -295,7 +300,7 @@ export function release({ seat, force = false, slot, out = console.log }) {
 
 export function status({ out = console.log } = {}) {
   const cfg = config()
-  const gate = memoryGate()
+  const gate = memoryGate(cfg)
   const reserved = cfg.reserve ? `, ${path.basename(lockDir(cfg.count))} reserved for ${cfg.reserve}` : ''
   out(`cap     ${cfg.count} slot(s)${reserved}; ${gate.reading}: ${gate.ok ? 'new holders allowed' : `no new holder, ${gate.why}`}`)
   for (const n of slotNumbers(cfg)) {
