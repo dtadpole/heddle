@@ -9,16 +9,19 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /**
- * The three wire formats heddle speaks, named for the provider family a person recognises.
+ * The wire formats heddle speaks, named for the provider family a person recognises.
  *
- * A machine's endpoint list may name five backends (Meta's Claude and Codex gateways, plugboard's two routes,
- * DeepSeek's own API), but the interactions under test are three: Anthropic's publisher stream, OpenAI's
- * Responses stream, and OpenAI's Chat Completions stream. The validation is organised by **format**, because
- * that is what decides which request shape, which reasoning field and which tool-call event a check must
- * exercise.
+ * A machine's endpoint list may name several backends (Meta's Claude and Codex gateways, plugboard's two routes,
+ * the Conclave gateway, DeepSeek's own API), but the interactions under test are three families: Anthropic's event
+ * stream, OpenAI's Responses stream, and OpenAI's Chat Completions stream. The validation is organised by
+ * **family**, because that is what decides which reasoning field and which tool-call event a check must exercise —
+ * and the Claude family has two envelopes, the publisher route (`anthropic-vertex`) and Anthropic's own Messages
+ * API (`anthropic-messages`), which stream the same events and are held to the same claims, visible summarized
+ * thinking included.
  */
 export const API_TYPES = Object.freeze({
   'anthropic-vertex': 'claude',
+  'anthropic-messages': 'claude',
   'openai-responses': 'codex',
   'openai-chat': 'deepseek',
 })

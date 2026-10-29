@@ -1,8 +1,8 @@
 ---
 title: The heddle-llm crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T15:04:22Z
-version: 0.6.0
+modified: 2026-10-29T09:52:29Z
+version: 0.7.0
 description: The Rust port crate for the backend wire shapes, the HTTP client, streamed content and reasoning deltas, model info and usage — what it is, its state, and where to read next.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -12,7 +12,8 @@ grounded_in:
 
 # `rust/crates/heddle-llm`
 
-The model layer: one streaming call over three provider wire shapes and an offline scripted endpoint, the endpoint
+The model layer: one streaming call over four provider wire shapes (Chat Completions, Responses, Anthropic's Messages
+API, Anthropic's publisher route) and an offline scripted endpoint, the endpoint
 registry with its `model/request` and `model/stream` hooks, the `--stream` view, and the `models` command.
 
 | | |
@@ -22,7 +23,9 @@ registry with its `model/request` and `model/stream` hooks, the `--stream` view,
 | Unit tests | `cargo test --manifest-path rust/Cargo.toml -p heddle-llm`, offline |
 
 **State.** Every body is ported and tested, and the binary on main passes `20-streaming` and the six local checks of
-`10-llm-backends`; what remains is outside the crate (see the port plan).
+`10-llm-backends`; what remains is outside the crate (see the port plan). The `anthropic-messages` kind (D-052 gap a,
+[`src/messages.rs`](src/messages.rs)) is ported beside its TypeScript adapter and measured against the Conclave
+gateway; see the port plan's last section.
 
 ## Read next
 

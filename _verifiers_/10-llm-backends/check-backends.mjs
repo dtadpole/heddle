@@ -150,8 +150,8 @@ test('the configured default endpoint is the one a turn uses when none is named'
   if (!skipUnless(context, await supportsBackends(), CAPABILITY)) return
   /**
    * A person configures a default so they do not have to name an endpoint every time. The check sets a
-   * default that is deliberately **not** first in the list, so honouring it cannot be an accident of
-   * ordering.
+   * default that is deliberately **not** first, neither in the file nor by name (both builds sort endpoints
+   * by name), so honouring it cannot be an accident of ordering.
    */
   const home = isolatedHome('backends-default')
   let first, chosen
@@ -161,7 +161,7 @@ test('the configured default endpoint is the one a turn uses when none is named'
     const config = writeJson(join(home, 'heddle.json'), {
       default: 'chosen',
       endpoints: [
-        { name: 'first', kind: 'openai-chat', baseUrl: first.baseUrl, model: 'double', stream: true },
+        { name: 'a-first', kind: 'openai-chat', baseUrl: first.baseUrl, model: 'double', stream: true },
         { name: 'chosen', kind: 'openai-chat', baseUrl: chosen.baseUrl, model: 'double', stream: true },
       ],
     })

@@ -1,9 +1,9 @@
 ---
 title: The decisions behind the heddle-llm API
 created: 2026-10-23T05:08:05Z
-modified: 2026-10-23T05:09:31Z
+modified: 2026-10-29T09:52:29Z
 level: L1
-version: 1.0.0
+version: 1.1.0
 description: Why the heddle-llm API has the shape it has — JSON parity, stream cancellation, the hook seam, the fold split and the HTTP client.
 status: unverified
 grounded_in:
@@ -32,3 +32,10 @@ grounded_in:
    stream is not cut. A proxied call sends the target in the proxy's absolute form.
 9. **The `--stream` view is shared and fed through a hub.** The session service takes its one listener before any turn
    exists, so `StreamHub` sits between it and each turn's view, holding views weakly.
+10. **`anthropic-messages` is spoken from `EndpointKind::Other`.** `heddle-config` reads every kind it has no variant
+    for as `Other(String)` and leaves the decision to this crate, so the kind needs no change outside it:
+    `adapter_for` matches `Other("anthropic-messages")` ([`messages::ANTHROPIC_MESSAGES`]). A variant in
+    `heddle-config` later is a rename of one match arm.
+11. **The two Anthropic kinds share the translation and the fold**, not the envelope: `to_anthropic_messages`,
+    `anthropic_system` and `AnthropicFold` serve both; the Messages adapter turns on live tool-call fragments
+    (`with_live_tool_calls`), so the publisher route's output is unchanged.

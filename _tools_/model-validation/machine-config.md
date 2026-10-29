@@ -1,6 +1,6 @@
 ---
 title: The machine configuration file
-version: 1.0.0
+version: 1.1.0
 description: The shape of the machine-local endpoint file both builds read, with a worked example in the three wire formats, how a secret is referenced, and how a seat or a second service points at the same file.
 grounded_in:
   - source: src/local-config.ts, src/endpoints.ts and src/llm/types.ts — the file's precedence, the endpoint ladder and the two-tier model catalogue
@@ -80,6 +80,27 @@ route). Every value is a placeholder.
           { "id": "high", "name": "High", "value": "high" }
         ] } }
       ]
+    },
+    {
+      "name": "claude-messages",
+      "kind": "anthropic-messages",
+      "baseUrl": "https://gateway.example.com/v1",
+      "apiKeyFile": "/absolute/path/to/.heddle/keys/gateway.api.key",
+      "model": "claude-opus-model",
+      "maxOutputTokens": 64000,
+      "capabilities": ["tools", "reasoning"],
+      "models": [
+        { "id": "claude-opus-model", "name": "Claude Opus", "reasoning": { "default": "high", "levels": [
+          { "id": "low", "name": "Low", "value": "low" },
+          { "id": "high", "name": "High", "value": "high" },
+          { "id": "max", "name": "Max", "value": "max" }
+        ] } },
+        { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "reasoning": { "levels": [
+          { "id": "low", "name": "Low", "value": 2048 },
+          { "id": "medium", "name": "Medium", "value": 8192 },
+          { "id": "high", "name": "High", "value": 16384 }
+        ] } }
+      ]
     }
   ]
 }
@@ -92,11 +113,17 @@ route). Every value is a placeholder.
 - **`kind` is one of** `openai-chat` (`<baseUrl>/chat/completions`, effort as `reasoning_effort`, reasoning read
   from `reasoning_content`), `openai-responses` (`<baseUrl>/responses`, `reasoning.effort` plus
   `reasoning.summary`), `anthropic-vertex` (`<baseUrl>/projects/<project>/locations/<region>/publishers/anthropic/
-  models/<model>:streamRawPredict`) or `scripted`. There is no plain Anthropic Messages kind (`<baseUrl>/v1/messages`):
-  a gateway that only streams Claude incrementally on that route can be reached through its Chat Completions route,
-  if it has one, but 98-model-endpoints will then judge the streaming it actually gets.
+  models/<model>:streamRawPredict`), `anthropic-messages` (Anthropic's Messages API, `<baseUrl>/messages` with
+  `baseUrl` the versioned root such as `https://api.anthropic.com/v1`; the version travels as the `anthropic-version`
+  header) or `scripted`. Prefer `anthropic-messages` for a gateway that serves Claude on both routes: measured on
+  the Conclave gateway, its Chat Completions route answered Claude in one chunk and its Messages route streamed.
+- **On `anthropic-messages` a level's value chooses the thinking form**: a string (`low` … `max`) is adaptive
+  thinking with that effort, a number is a thinking budget in tokens. The route says which a model takes —
+  the newest Opus model refuses a budget, `claude-sonnet-4-5` refuses adaptive thinking — so a model of the older
+  generation declares its levels as numbers (the example's `2048`/`8192`/`16384`). Both forms ask for summarized
+  thinking, which is what the page's Think row shows.
 - **A secret is a path or a variable, never a value in the file.** `apiKeyFile` is read and trimmed at start and
-  sent as `Authorization: Bearer`; keep the file mode 600 and give an **absolute** path, so a seat with another
+  sent as `Authorization: Bearer` (as `x-api-key` on `anthropic-messages`, Anthropic's header); keep the file mode 600 and give an **absolute** path, so a seat with another
   working directory or another `HEDDLE_HOME` reads the same file. The `HEDDLE_<ENDPOINT>_API_KEY` /
   `_API_KEY_FILE` environment overrides apply only to an endpoint that restates a default or a layer row, not to
   one this file alone declares (both builds), so for a machine endpoint the file path is the reference.
