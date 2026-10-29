@@ -55,6 +55,7 @@ mod error;
 mod home;
 mod layer;
 mod local;
+mod model_row;
 pub mod paths;
 mod profile;
 mod references;
@@ -74,6 +75,7 @@ pub use error::ConfigError;
 pub use home::{expand_home, heddle_home, profiles_dir};
 pub use layer::{INLINE_FILE, Layer, NamedLayer, anchor_dir, read_layer};
 pub use local::{LocalConfig, LocalConfigLocation, local_config_candidates, read_local_config};
+pub use model_row::{ModelRowEndpoints, model_row_endpoints, nominated_default};
 pub use paths::{canonical_path, depth_of, is_under};
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,

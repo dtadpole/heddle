@@ -24,11 +24,22 @@ pub struct LocalConfig {
     /// or declaring a new one. Kept as written; [`LocalConfig::endpoint_patches`] reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Value>,
-    /// The endpoint a run uses when nothing else says.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The endpoint a run uses when nothing else says (see [`crate::nominated_default`]). A value that is not
+    /// a string reads as absent, as `typeof nominated === 'string'` skipped it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_absent"
+    )]
     pub default: Option<String>,
-    /// Endpoint names this machine does not want offered at all, applied after every layer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Endpoint names this machine does not want offered at all, applied after every layer. A value that is
+    /// not a list reads as absent (`Array.isArray(local.config.exclude) ? … : []`), and a non-string element is
+    /// dropped, since it could never match an endpoint's name.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "names_or_absent"
+    )]
     pub exclude: Option<Vec<String>>,
     /// Anything else, passed through untouched for the caller that reads it.
     #[serde(flatten)]
@@ -69,6 +80,34 @@ impl LocalConfig {
         }
         Ok(patches)
     }
+}
+
+/// `default` as the TypeScript build read it: a string, or nothing.
+fn string_or_absent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(text) => Some(text),
+        _ => None,
+    })
+}
+
+/// `exclude` as the TypeScript build read it: a list's string elements, or nothing.
+fn names_or_absent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Array(items) => Some(
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Value::String(name) => Some(name),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    })
 }
 
 /// Where the local configuration was found, and what it holds.

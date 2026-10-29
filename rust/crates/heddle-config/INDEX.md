@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T13:59:45Z
-version: 0.6.1
+modified: 2026-10-29T09:42:21Z
+version: 0.7.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -44,6 +44,7 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `schema` | `Schema` (a JSON Schema subset), `SchemaType`, `TypeSet`, `Additional`, `SchemaProblem` | Schemastery, as the validator used it |
 | `validate` | `ComponentCatalog` (trait), `SchemaLookup`, `StaticCatalog`, `ComponentManifest`, `ManifestCatalog`, `read_component_manifest`, `ValidationResult`, `validate_rows` | `validate.ts`; the manifest catalog is the part-0 shape for outside components |
 | `local` | `LocalConfig` (`endpoint_patches`), `LocalConfigLocation`, `local_config_candidates`, `read_local_config` | `src/local-config.ts` |
+| `model_row` | `model_row_endpoints`, `ModelRowEndpoints` (`endpoints`, `nominated`, `local`), `nominated_default` — the model row's endpoint list and the endpoint an unnamed caller gets: the row's `default`, else the machine file's, kept only when it names a listed endpoint | `src/plugins/model.ts` |
 | `endpoints` | `EndpointConfig` (catalogue methods), `EndpointPatch`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel(s)`, `ReasoningValue`, `default_endpoints`, `environment_override`, `merge_endpoint`, `read_key_file`, `materialize_key`, `resolve_endpoints`, `describe_endpoint(s)`, `EndpointsView`, `selection_problem`, `config_paths` | `src/endpoints.ts`, `src/llm/types.ts` |
 | `command` | `ConfigCommand`, `ConfigArgs`, `CommandContext`, `run` — `heddle profiles` and `heddle config [--json] [--origins] [--validate]`, output and exit codes | `runConfigCommand` |
 
@@ -57,6 +58,11 @@ Measured on main `37da0fd` in each crate's production code (test modules exclude
 | `heddle-llm` | `EndpointConfig`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel` and `ReasoningLevels`, `ReasoningValue`, `describe_endpoint` | the adapters |
 | `heddle-session` | `canonical_path`, `expand_home`, `heddle_home`, `paths`, `Env` | `session/*.ts` |
 | `heddle-workspace` | `canonical_path`, `is_under`, `depth_of`, `expand_home`, `heddle_home`, `Env` | `workspace/service.ts` |
+
+**The model row should read `model_row_endpoints`.** On main `f72def9` the binary's model adapter composes the row
+itself and hands the model service only the row's `default`, dropping `heddle.json`'s (D-052 gap c: the 3097
+preview reported `default: null`, and an unnamed turn went to the first endpoint by name instead of the one the
+file nominates). One call replaces that composition; the patch is with integrator-one for developer-two's crate.
 
 `heddle-server`, `heddle-web-composer`, `heddle-web-files` and `heddle-context` take nothing from this crate in
 production code, and `heddle-sandbox` does not depend on it: the web routes reach it through the binary's `web.rs`,
@@ -323,6 +329,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-23 | main `33407a4` (UI merge: `heddle-server` runs a turn to its end when its reader goes away) | `HEDDLE_BIN=<debug build of exactly 33407a4> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots |
 | 2026-10-23 | lane `ddc5e2b` (`web`'s default endpoint falls back to the first endpoint, as TypeScript does — the part-70 follow-up turn's 400) | `HEDDLE_BIN=<debug build of exactly ddc5e2b> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1. Main `e69f552` and `c1d59f5` carry the same code (measured: no non-Markdown change under `rust/` since) |
 | 2026-10-23 | lane `65dae73` (`web` leaves goal edges to the boot's goal-driver row) | `HEDDLE_BIN=<debug build of exactly 65dae73> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1 |
+| 2026-10-29 | this branch's `model_row` commit on main `92a9955` (`heddle.json`'s `default` nominated, D-052 gap c), alone and with the offered `adapters.rs` call-site patch | `HEDDLE_BIN=<release build of the branch> sh _verifiers_/05-config-system/verify.sh --json` and its lane gate; the same with a debug build of the branch plus the patch; `--turn` and `GET /api/endpoints` against a machine file nominating an endpoint that sorts after the first | 10/10, verdict 0, lane gate green, both builds. Unnamed turn: main's adapter took the first endpoint by name, the patched binary and the TypeScript build both took the nominated one (the same sentence from each). `/api/endpoints` over the machine file's shape, credentials stripped: `default` `null` on main's adapter, the nominated endpoint patched |
 
 ## Known differences from the TypeScript build
 
