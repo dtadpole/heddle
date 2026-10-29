@@ -1,9 +1,10 @@
 //! `heddle-commands` — the host's slash commands: the registry, the line parser, the built-in commands and the
 //! two routes the composer's slash menu uses.
 //!
-//! Ported from the TypeScript build's `src/commands/` (`registry.ts`, `builtins.ts`, `http.ts`, `service.ts`),
-//! which is modelled on DSH's `dsh-commands`. Judged through the `heddle` binary (`HEDDLE_BIN`) by
-//! `_verifiers_/80-web-ui/check-slash-commands.mjs`; the unit tests port `test/commands.test.ts` case by case.
+//! Ported from the TypeScript build's `src/commands/` (`registry.ts`, `builtins.ts`, `goal.ts`, `http.ts`,
+//! `service.ts`), which is modelled on DSH's `dsh-commands`. Judged through the `heddle` binary
+//! (`HEDDLE_BIN`) by `_verifiers_/80-web-ui/check-slash-commands.mjs`; the unit tests port
+//! `test/commands.test.ts` and `test/commands-goal.test.ts` case by case.
 //!
 //! # The one rule
 //!
@@ -16,7 +17,8 @@
 //! | Module | Ports | What it is |
 //! |---|---|---|
 //! | [`registry`] | `registry.ts` | [`CommandRegistry`], [`parse_command_line`], the two event names, the result shapes |
-//! | [`builtins`] | `builtins.ts` | `/compact`, `/goal`, `/feedback`, `/permission`, `/export`, each over the smallest host it needs |
+//! | [`builtins`] | `builtins.ts` | `/compact`, `/feedback`, `/permission`, `/export`, each over the smallest host it needs |
+//! | [`goal`] | `goal.ts` | `/goal`: DSH's parse, goal card and sentences over [`GoalHost`] (developer-nine's semantics, D-059) |
 //! | [`routes`] | `http.ts` | `GET /commands/menu.js`, `GET /api/commands` and `POST /api/sessions/{id}/commands` |
 //! | [`service`] | `service.ts` | [`Commands`]: the registry with the built-ins wired to the session, goal, context, model and sandbox facts |
 //!
@@ -26,6 +28,7 @@
 //! the server's door. [`ROUTES`] lists the three `(method, path)` pairs, which no server route claims.
 
 pub mod builtins;
+pub mod goal;
 pub mod registry;
 pub mod routes;
 pub mod service;
@@ -37,9 +40,13 @@ pub(crate) mod test_support;
 use std::sync::Arc;
 
 pub use builtins::{
-    AnonymousUser, CompactionHost, CompactionOutcome, FEEDBACK_EVENT, GoalHost, GoalLike,
-    GoalRefLike, PermissionHost, compact_command, describe_goal, export_command, feedback_command,
-    goal_command, permission_command,
+    AnonymousUser, CompactionHost, CompactionOutcome, FEEDBACK_EVENT, PermissionHost,
+    compact_command, export_command, feedback_command, permission_command,
+};
+pub use goal::{
+    GOAL_ATTACHMENTS_REFUSED, GOAL_ATTACHMENTS_TEXT, GOAL_INPUT_HINT, GOAL_STATE_ERROR, GOAL_USAGE,
+    GoalCommand, GoalFollowupSink, GoalHost, GoalHostError, command_hint, execute_goal_command,
+    goal_attachment_followup, goal_command, parse_goal_command, render_goal,
 };
 pub use registry::{
     COMMAND_DONE_EVENT, COMMAND_NAME_RULE, COMMAND_RUN_EVENT, CommandAction, CommandContext,
