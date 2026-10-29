@@ -381,7 +381,11 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     }
                 }
             }
-            close_runs(&mut open_assistant, &mut open_reasoning);
+            // A completion or any other record ends the run of deltas before it. An inbox splice does not: a
+            // steer can be queued while the answer streams, and it is not part of the conversation until claimed.
+            if event_type != heddle_session::inbox::INBOX_SPLICED {
+                close_runs(&mut open_assistant, &mut open_reasoning);
+            }
             continue;
         }
 

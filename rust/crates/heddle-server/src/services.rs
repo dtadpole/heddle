@@ -210,8 +210,15 @@ pub trait SessionService: Send + Sync {
     /// Write the session's mode as one append-only event.
     fn set_mode(&self, id: &str, mode: &str, fallback: &str) -> Result<ModeWrite, ServiceError>;
 
-    /// Append a user message with the given content parts — the delivery of a steer.
+    /// Append a user message with the given content parts.
     fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError>;
+
+    /// Queue a steer in the session's next-step inbox (`heddle_session::inbox`) and answer the pending
+    /// message's id. The running loop writes it at its next step boundary, after any tool result still due,
+    /// which is DSH's steer. A deployment with no session store keeps no inbox.
+    fn queue_steer(&self, _id: &str, _content: Vec<Value>) -> Result<String, ServiceError> {
+        Err(ServiceError::new("this deployment keeps no session inbox"))
+    }
 
     /// The folder the session belongs to, if it has one.
     fn folder(&self, id: &str) -> Option<PathBuf>;
