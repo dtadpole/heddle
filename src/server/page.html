@@ -6494,7 +6494,35 @@ function renderTodo() {
   )
 }
 
+/**
+ * Where a reader was in each session's transcript, DSH's scroll restoration: a reader who scrolled back, opened another
+ * session and came back finds the same place, while one who was following the tail keeps following it. Kept for the
+ * page's lifetime, keyed by session; a position is recorded only while the chat view is showing, because a hidden
+ * transcript reads as scrolled to the top.
+ */
+const chatScrollMemory = new Map()
+function rememberChatScroll() {
+  if (current === null || view !== 'chat' || log.childElementCount === 0) return
+  chatScrollMemory.set(current, { following: chatFollowing, top: log.scrollTop })
+}
+function restoreChatScroll(id) {
+  const memory = chatScrollMemory.get(id)
+  if (memory === undefined || memory.following) {
+    followChatTail(true)
+    return
+  }
+  chatFollowing = false
+  log.dataset.following = 'false'
+  log.scrollTop = memory.top
+  /** Once more after layout has landed: a settled document or an image can change the height under the first try. */
+  requestAnimationFrame(() => {
+    if (current === id && !chatFollowing) log.scrollTop = memory.top
+  })
+}
+
 async function showSession(id) {
+  /** Where the reader left the session being replaced, before anything below changes the view. */
+  rememberChatScroll()
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6600,7 +6628,8 @@ async function showSession(id) {
         log.append(note)
       }
     }
-    followChatTail(true)
+    /** Back where the reader left this session, or at its tail when they were following it (or never here). */
+    restoreChatScroll(id)
   } catch (error) {
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
