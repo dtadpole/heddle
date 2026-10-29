@@ -465,7 +465,8 @@ test('a goal round is drawn as a notice the harness wrote, not as a person\'s me
       assert.ok(live.every((row) => row.trigger === 'goal' || !/Round: \d\/2/.test(row.text)), `no round is drawn as a person's bubble\nlive: ${JSON.stringify(live).slice(0, 600)}`)
       assert.deepEqual([...new Set(rounds.map((row) => row.label))], ['Goal round 1', 'Goal round 2'], `each round is a numbered notice\nlive: ${JSON.stringify(live).slice(0, 600)}`)
       assert.ok(rounds.every((row) => !row.bubble && row.bordered && /Round: \d\/2/.test(row.text)), 'a bordered notice that still carries the round prompt')
-      assert.deepEqual([live[0].trigger, live[0].bubble], [null, true], 'and the person\u2019s own message stays a bubble')
+      const person = live.filter((row) => row.trigger === null)
+      assert.ok(person.length >= 1 && person.every((row) => row.bubble) && person.some((row) => row.text.includes('a person wrote this')), `and the person\u2019s own message stays a bubble\nlive: ${JSON.stringify(live).slice(0, 600)}`)
 
       const record = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
       const users = (record.body.turns ?? []).filter((turn) => turn.kind === 'user')
