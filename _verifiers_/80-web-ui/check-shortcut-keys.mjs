@@ -45,10 +45,14 @@ function startServer(label) {
       const { spawn } = await import('node:child_process')
       const home = isolatedHome(`shortcut-keys-${label}`)
       const work = fixtureDir(`shortcut-keys-${label}-work`)
-      /** The seed turn, then a slow turn (a six-second command) for the double-Escape stop. */
+      /**
+       * The scripted endpoint hands out one step per round and every turn starts again at the first step, so every turn
+       * here runs a nine-second command and then answers: the seed turn (fork needs a completed turn) and the slow turn
+       * the double-Escape stop interrupts.
+       */
       const { config } = scriptedConfig({
         home,
-        steps: [{ text: 'answer one' }, { toolCall: { name: 'bash', arguments: { command: 'sleep 6' } } }, { text: 'slow turn done' }],
+        steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 9' } } }, { text: 'turn done' }],
       })
       const child = spawn(
         ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', `${home}/sessions`]),
@@ -132,11 +136,16 @@ test('the session shortcuts fire on the physical key, with the key values the br
     const created = await call(browser, 'POST', '/api/sessions', { branch: server.work, title: 'chord target' })
     assert.ok(created.json?.session, 'a session is created')
     const target = created.json.session
-    /** Fork refuses a session with no completed turn (409), so the target gets one turn first. */
-    const seeded = await browser.evaluate(
-      `fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session: ${JSON.stringify(target)}, prompt: 'seed the session' }) }).then(async (r) => ({ status: r.status, length: (await r.text()).length }))`,
-    )
-    assert.equal(seeded.status, 200, 'the target session has a completed turn')
+    /** Fork refuses a session with no completed turn (409), so the target gets one turn first; it takes nine seconds. */
+    void call(browser, 'POST', '/api/turn', { session: target, prompt: 'seed the session' })
+    const seedBy = Date.now() + 20_000
+    let seed = null
+    while (Date.now() < seedBy) {
+      await settle(500)
+      seed = (await sessions(browser)).find((s) => s.id === target)
+      if (seed !== undefined && seed.running !== true && (seed.turns ?? 0) >= 1) break
+    }
+    assert.ok(seed !== undefined && seed.running !== true && (seed.turns ?? 0) >= 1, `the target session has a completed turn: ${JSON.stringify(seed)}`)
     await browser.goto(server.url)
     await browser.waitFor(`document.body.dataset.ready === 'true'`)
     await browser.waitFor(`!!document.querySelector('#tree li[data-session-id="${target}"] > .row')`)
@@ -343,7 +352,7 @@ test('the session shortcuts fire on the physical key, with the key values the br
       await escape()
       const stopBy = Date.now() + 2500
       while ((await running()) && Date.now() < stopBy) await settle(150)
-      assert.equal(await running(), false, 'two presses stopped it well before the command would have finished')
+      assert.equal(await running(), false, 'two presses stopped it well before the nine-second command would have finished')
       await settle(1500)
       assert.equal(await queued(), 1, 'the queued message stays queued after the stop, as DSH preserves it')
       assert.equal(await running(), false, 'and no queued turn started on its own')
