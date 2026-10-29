@@ -444,7 +444,9 @@ test('a transcript names its session in every attachment address, and leaves oth
     ],
     session,
   )
-  assert.equal(turns[0].attachments?.[0].url, `/api/uploads/a%20b.png?session=${session}`, 'the card is read for this session')
-  assert.equal('attachments' in turns[1], false, 'a turn without attachments is unchanged')
-  assert.deepEqual(turns[2].attachments, [], 'and an empty list stays empty')
+  const [first, second, third] = turns
+  assert.ok(first !== undefined && second !== undefined && third !== undefined, 'every turn comes back')
+  assert.equal(first.attachments?.[0]?.url, `/api/uploads/a%20b.png?session=${session}`, 'the card is read for this session')
+  assert.equal('attachments' in second, false, 'a turn without attachments is unchanged')
+  assert.deepEqual(third.attachments, [], 'and an empty list stays empty')
 })
