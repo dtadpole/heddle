@@ -1930,6 +1930,67 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
   }
 })
 
+test('a reader who scrolled back finds the same place after visiting another session', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH restores a transcript's scroll position on return (C74 in the parity inventory): a reader who scrolled back,
+   * opened another session and came back finds the same place, and one who was following the tail is still at it.
+   * Measured before this test: opening a session always jumped to its tail.
+   */
+  const longText = Array.from({ length: 80 }, (_, index) => `line ${index + 1} of a long answer to read back through`).join('\n')
+  /** The script's steps restart with each turn, so both sessions get the long answer; their prompts tell them apart. */
+  const server = await startServer('scroll-memory', () => [{ text: longText }])
+  const browser = await openBrowser({ width: 1100, height: 700 })
+  const metrics = () =>
+    browser.evaluate('JSON.stringify((() => { const log = document.getElementById("log"); return { top: Math.round(log.scrollTop), away: Math.round(log.scrollHeight - log.scrollTop - log.clientHeight), following: log.dataset.following } })())').then(JSON.parse)
+  try {
+    const cookie = await cookieFor(server.url)
+    /** Two sessions in a registered workspace, so each has the tree row a person clicks. */
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const sessions = []
+    for (const prompt of ['the first session', 'the second session']) {
+      const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+      const session = opened.body.session?.id ?? opened.body.id
+      const response = await fetch(new URL('/api/turn', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ prompt, folder: server.work, session }) })
+      await response.text()
+      sessions.push(session)
+    }
+    const [first, second] = sessions
+    assert.ok(first !== undefined && second !== undefined, 'two sessions were made')
+    const open = async (id, marker) => {
+      await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]') !== null`, 10_000)
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"] > .row').click()`)
+      await browser.waitFor(`document.getElementById("log").innerText.includes(${JSON.stringify(marker)})`, 10_000)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    }
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await open(first, 'the first session')
+    assert.ok((await metrics()).away <= 1, 'a session opened for the first time shows its tail')
+
+    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = 300 })()')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const left = await metrics()
+    assert.ok(left.away > 100 && left.following === 'false', `the reader scrolled back (${JSON.stringify(left)})`)
+
+    await open(second, 'the second session')
+    await open(first, 'the first session')
+    const back = await metrics()
+    assert.ok(Math.abs(back.top - left.top) <= 2, `the reader is back where they were (${back.top} vs ${left.top})`)
+    assert.equal(back.following, 'false', 'and is still reading back, not following')
+
+    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await open(second, 'the second session')
+    await open(first, 'the first session')
+    assert.ok((await metrics()).away <= 1, 'a reader who was following the tail is at the tail again')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a turn this page did not start still says Weaving', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
