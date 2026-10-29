@@ -62,6 +62,22 @@ impl LlmModel {
 }
 
 impl ModelPort for LlmModel {
+    /// The endpoint's `retryPolicy`, resolved with DSH's defaults when it writes none; an endpoint that is not
+    /// configured has none, and a policy that cannot be read is reported and not used.
+    fn retry_policy(&self, endpoint: &str) -> Option<heddle_llm::RetryPolicy> {
+        let config = self.service.endpoint(endpoint)?;
+        match heddle_llm::resolve_retry_policy(
+            config.retry_policy.as_ref(),
+            &format!("endpoints.{endpoint}.retryPolicy"),
+        ) {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                tracing::warn!("turn: the retry policy of {endpoint} cannot be used: {error}");
+                None
+            }
+        }
+    }
+
     fn stream(
         &self,
         request: GenerateRequest,
@@ -523,6 +539,38 @@ pub(crate) mod tests {
         }))
         .unwrap();
         Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap())
+    }
+
+    #[test]
+    fn the_llm_port_resolves_each_endpoints_retry_policy() {
+        let endpoints: Vec<EndpointConfig> = serde_json::from_value(json!([
+            { "name": "plain", "kind": "scripted", "baseUrl": "/nowhere.json" },
+            { "name": "patient", "kind": "scripted", "baseUrl": "/nowhere.json", "retryPolicy": { "mode": "always" } },
+            { "name": "broken", "kind": "scripted", "baseUrl": "/nowhere.json", "retryPolicy": { "mode": "sometimes" } },
+        ]))
+        .unwrap();
+        let port = LlmModel::new(Arc::new(
+            ModelService::from_configuration(endpoints, None).unwrap(),
+        ));
+        assert_eq!(
+            port.retry_policy("plain"),
+            Some(heddle_llm::RetryPolicy::default()),
+            "DSH's normal default"
+        );
+        assert_eq!(
+            port.retry_policy("patient").map(|policy| policy.mode),
+            Some(heddle_llm::RetryMode::Always)
+        );
+        assert_eq!(
+            port.retry_policy("broken"),
+            None,
+            "a policy that cannot be read is not used"
+        );
+        assert_eq!(
+            port.retry_policy("missing"),
+            None,
+            "an endpoint that is not configured has none"
+        );
     }
 
     fn request(round: u32) -> GenerateRequest {

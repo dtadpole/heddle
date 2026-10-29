@@ -48,6 +48,10 @@ pub const DEFAULT_MAX_OVERFLOW_RETRIES: u32 = 1;
 pub mod events {
     /// A round retried after a recovered failure: `round`, `attempt`, `code`, `estimatedTokens`, `compacted`.
     pub const TURN_RETRY: &str = "turn/retry";
+    /// A provider retry, written before its wait (DSH's `llm/retry`).
+    pub const LLM_RETRY: &str = "llm/retry";
+    /// The retry beginning, written after the wait (DSH's `llm/retry-started`).
+    pub const LLM_RETRY_STARTED: &str = "llm/retry-started";
     /// The turn's answer: `text`, `reasoning`, `finishReason`, `rounds`, `denials`, and `ended` when present.
     pub const ASSISTANT_COMPLETED: &str = "assistant/completed";
     /// The turn finished: `rounds`.
@@ -423,6 +427,10 @@ async fn run_turn_body(
         let mut calls: Vec<(String, String, String)> = Vec::new();
         let mut round_text = String::new();
         let mut attempt: u32 = 0;
+        // Provider retry, as DSH's `dsh-llm-retry` executes the endpoint's `retryPolicy`: counted per round (a
+        // step, in DSH's words); `attempt` stays the overflow recovery's own count.
+        let mut provider_retries: u64 = 0;
+        let mut retry_id: Option<String> = None;
         // The steering window is the model call itself: `prepare` appends to the surface, and counting that
         // would make every turn take an extra round.
         let mut input_before;
@@ -465,11 +473,16 @@ async fn run_turn_body(
 
             let mut stream = runtime.model.stream(request, cancel.clone());
             let mut failure: Option<ModelError> = None;
+            // Whether this attempt recorded any of its answer; a failure after that is not retried (see below).
+            let mut streamed = false;
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(chunk) => {
                         // Recorded as it arrives: an interrupted turn shows the half of the answer that came.
                         runtime.session.assistant_chunk(session, &chunk)?;
+                        if !matches!(chunk, Chunk::ToolCallDelta { .. }) {
+                            streamed = true;
+                        }
                         match &chunk {
                             Chunk::TextDelta { text: delta } => round_text.push_str(delta),
                             Chunk::ReasoningDelta { text: delta } => reasoning.push_str(delta),
@@ -507,6 +520,73 @@ async fn run_turn_body(
             let Some(code) = error.code.clone() else {
                 return Err(TurnError::Model(error));
             };
+            // A transient provider failure is retried as the endpoint's `retryPolicy` says, durably: `llm/retry`
+            // is written, then the wait, then `llm/retry-started`, and the same request goes again over the same
+            // history. A stop aborts the wait. Only a failure before the attempt recorded any answer is retried:
+            // the surface folds a chunk run into one message until `done`, so a retry after partial output would
+            // show the failed text and hide the retried answer (the TypeScript loop keeps the same rule).
+            let stopped = cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
+            if !streamed
+                && !stopped
+                && let Some(policy) = runtime.model.retry_policy(&options.endpoint)
+            {
+                let failure_code = heddle_llm::retry_failure_code(&code, error.status);
+                let judged = heddle_llm::RetryFailure {
+                    code: failure_code.clone(),
+                    retry_after_ms: error.retry_after_ms.map(|delay| delay as f64),
+                };
+                if let Some(plan) = policy.plan(&judged, provider_retries, random_unit()) {
+                    let id = retry_id.get_or_insert_with(new_retry_id).clone();
+                    let mut fields = serde_json::Map::from_iter([
+                        ("retryId".to_owned(), serde_json::json!(id)),
+                        ("round".to_owned(), serde_json::json!(round)),
+                        ("provider".to_owned(), serde_json::json!(options.endpoint)),
+                        (
+                            "mode".to_owned(),
+                            serde_json::json!(match policy.mode {
+                                heddle_llm::RetryMode::Normal { .. } => "normal",
+                                heddle_llm::RetryMode::Always => "always",
+                            }),
+                        ),
+                        ("policyKey".to_owned(), serde_json::json!(policy.key())),
+                        ("retry".to_owned(), serde_json::json!(plan.retry)),
+                    ]);
+                    if let heddle_llm::RetryMode::Normal { max_retries, .. } = &policy.mode {
+                        fields.insert("maxRetries".to_owned(), serde_json::json!(max_retries));
+                    }
+                    fields.insert("delayMs".to_owned(), retry_delay_json(plan.delay_ms));
+                    fields.insert(
+                        "failure".to_owned(),
+                        serde_json::json!({ "code": failure_code, "message": error.message }),
+                    );
+                    runtime.session.append(session, events::LLM_RETRY, fields)?;
+                    let wait = std::time::Duration::from_millis(plan.delay_ms.ceil() as u64);
+                    let waited = match &cancel {
+                        Some(token) => tokio::select! {
+                            () = tokio::time::sleep(wait) => true,
+                            () = token.cancelled() => false,
+                        },
+                        None => {
+                            tokio::time::sleep(wait).await;
+                            true
+                        }
+                    };
+                    if !waited {
+                        return Err(TurnError::Model(error));
+                    }
+                    runtime.session.append(
+                        session,
+                        events::LLM_RETRY_STARTED,
+                        serde_json::Map::from_iter([
+                            ("retryId".to_owned(), serde_json::json!(id)),
+                            ("round".to_owned(), serde_json::json!(round)),
+                            ("retry".to_owned(), serde_json::json!(plan.retry)),
+                        ]),
+                    )?;
+                    provider_retries = plan.retry;
+                    continue;
+                }
+            }
             if attempt >= options.max_overflow_retries {
                 return Err(TurnError::Model(error));
             }
@@ -750,6 +830,42 @@ pub fn pre_step_failure_message(failure: &HookFailure) -> String {
 /// Whether a round's finish reason is worth an `ended` notice: anything but `stop` and `tool_calls`.
 pub fn is_abnormal_finish(finish_reason: &str) -> bool {
     finish_reason != "stop" && finish_reason != "tool_calls"
+}
+
+/// A uniform draw in `[0, 1)` for the retry jitter, from the standard library's per-process random hash keys.
+fn random_unit() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default(),
+    );
+    (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// A fresh id naming one step's retries, in the shape of the TypeScript build's `randomUUID()`.
+fn new_retry_id() -> String {
+    let draw = || (random_unit() * (1u64 << 53) as f64) as u64;
+    let (high, low) = (draw(), draw());
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        (high >> 21) & 0xffff_ffff,
+        (high >> 5) & 0xffff,
+        (low >> 41) & 0xfff,
+        0x8000 | ((low >> 25) & 0x3fff),
+        low & 0xffff_ffff_ffff
+    )
+}
+
+/// A delay as JSON, whole milliseconds written as JavaScript writes them (`500`, not `500.0`).
+fn retry_delay_json(delay_ms: f64) -> serde_json::Value {
+    if delay_ms.fract() == 0.0 && delay_ms.abs() < 1e15 {
+        serde_json::json!(delay_ms as i64)
+    } else {
+        serde_json::json!(delay_ms)
+    }
 }
 
 #[cfg(test)]
@@ -1001,6 +1117,17 @@ pub(crate) mod tests {
                 .collect()
         }
 
+        fn events_of(&self, kind: &str) -> Vec<Recorded> {
+            self.state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| event.kind == kind)
+                .cloned()
+                .collect()
+        }
+
         fn event(&self, kind: &str) -> Option<Recorded> {
             self.state
                 .lock()
@@ -1134,6 +1261,8 @@ pub(crate) mod tests {
     enum Step {
         Chunks(Vec<Chunk>),
         Fail(ModelError),
+        /// Part of an answer, then a failure: the provider broke mid-stream.
+        ChunksThenFail(Vec<Chunk>, ModelError),
     }
 
     /// A model double: one scripted step per call, and every request kept for the assertions.
@@ -1141,6 +1270,7 @@ pub(crate) mod tests {
         steps: Mutex<VecDeque<Step>>,
         requests: Mutex<Vec<GenerateRequest>>,
         on_stream: Option<Arc<dyn Fn() + Send + Sync>>,
+        retry: Option<heddle_llm::RetryPolicy>,
     }
 
     impl ScriptedModel {
@@ -1149,6 +1279,17 @@ pub(crate) mod tests {
                 steps: Mutex::new(steps.into()),
                 requests: Mutex::new(Vec::new()),
                 on_stream: None,
+                retry: None,
+            })
+        }
+
+        /// The same double, judging its failures by `policy` as an endpoint's `retryPolicy`.
+        fn with_retry_policy(self: &Arc<Self>, policy: heddle_llm::RetryPolicy) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(std::mem::take(&mut *self.steps.lock().unwrap())),
+                requests: Mutex::new(Vec::new()),
+                on_stream: self.on_stream.clone(),
+                retry: Some(policy),
             })
         }
 
@@ -1157,6 +1298,7 @@ pub(crate) mod tests {
                 steps: Mutex::new(std::mem::take(&mut *self.steps.lock().unwrap())),
                 requests: Mutex::new(Vec::new()),
                 on_stream: Some(hook),
+                retry: self.retry.clone(),
             })
         }
 
@@ -1166,6 +1308,10 @@ pub(crate) mod tests {
     }
 
     impl ModelPort for ScriptedModel {
+        fn retry_policy(&self, _endpoint: &str) -> Option<heddle_llm::RetryPolicy> {
+            self.retry.clone()
+        }
+
         fn stream(
             &self,
             request: GenerateRequest,
@@ -1179,6 +1325,11 @@ pub(crate) mod tests {
             let items: Vec<Result<Chunk, ModelError>> = match step {
                 Some(Step::Chunks(chunks)) => chunks.into_iter().map(Ok).collect(),
                 Some(Step::Fail(error)) => vec![Err(error)],
+                Some(Step::ChunksThenFail(chunks, error)) => chunks
+                    .into_iter()
+                    .map(Ok)
+                    .chain(std::iter::once(Err(error)))
+                    .collect(),
                 None => vec![Ok(Chunk::Done {
                     finish_reason: "stop".into(),
                     usage: None,
@@ -1764,6 +1915,8 @@ pub(crate) mod tests {
             Step::Fail(ModelError {
                 code: Some("CONTEXT_WINDOW_EXCEEDED".into()),
                 message: "too long".into(),
+                status: None,
+                retry_after_ms: None,
             }),
             Step::Chunks(vec![
                 Chunk::TextDelta {
@@ -1797,12 +1950,186 @@ pub(crate) mod tests {
         assert!(result.context.unwrap().compacted);
     }
 
+    fn http_failure(status: u16, retry_after_ms: Option<u64>) -> ModelError {
+        ModelError {
+            code: Some("HTTP".into()),
+            message: format!("'scripted' answered {status}"),
+            status: Some(status),
+            retry_after_ms,
+        }
+    }
+
+    fn fast_policy(max_retries: u64) -> heddle_llm::RetryPolicy {
+        heddle_llm::resolve_retry_policy(
+            Some(&serde_json::json!({
+                "mode": "normal",
+                "maxRetries": max_retries,
+                "backoff": { "initialDelayMs": 10, "maxDelayMs": 50, "jitterRatio": 0 }
+            })),
+            "endpoints.scripted.retryPolicy",
+        )
+        .unwrap()
+    }
+
+    async fn provider_retry_turn(
+        steps: Vec<Step>,
+        policy: Option<heddle_llm::RetryPolicy>,
+    ) -> (
+        Arc<RecordingSession>,
+        Arc<ScriptedModel>,
+        Result<TurnResult, TurnError>,
+    ) {
+        let session = RecordingSession::new();
+        let scripted = ScriptedModel::new(steps);
+        let model = match policy {
+            Some(policy) => scripted.with_retry_policy(policy),
+            None => scripted,
+        };
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await;
+        (session, model, result)
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_and_a_server_error_are_retried_durably_and_the_turn_answers() {
+        let (session, model, result) = provider_retry_turn(
+            vec![
+                Step::Fail(http_failure(429, Some(20))),
+                Step::Fail(http_failure(503, None)),
+                Step::Chunks(vec![
+                    Chunk::TextDelta {
+                        text: "answered on the third try".into(),
+                    },
+                    done("stop"),
+                ]),
+            ],
+            Some(fast_policy(5)),
+        )
+        .await;
+        assert_eq!(result.unwrap().text, "answered on the third try");
+        assert_eq!(model.requests().len(), 3);
+        let retries = session.events_of(events::LLM_RETRY);
+        let summary: Vec<_> = retries
+            .iter()
+            .map(|event| {
+                (
+                    event.fields["retry"].clone(),
+                    event.fields["failure"]["code"].clone(),
+                    event.fields["delayMs"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    serde_json::json!(1),
+                    serde_json::json!("RATE_LIMIT"),
+                    serde_json::json!(20)
+                ),
+                (
+                    serde_json::json!(2),
+                    serde_json::json!("SERVER"),
+                    serde_json::json!(20)
+                ),
+            ],
+            "the provider's Retry-After first, then the local backoff (10 x 2)"
+        );
+        assert_eq!(
+            retries[0].fields["retryId"], retries[1].fields["retryId"],
+            "one id for the step"
+        );
+        assert_eq!(retries[0].fields["provider"], "scripted");
+        assert_eq!(retries[0].fields["maxRetries"], 5);
+        let order: Vec<String> = session
+            .kinds()
+            .into_iter()
+            .filter(|kind| kind.starts_with("llm/retry"))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "llm/retry",
+                "llm/retry-started",
+                "llm/retry",
+                "llm/retry-started"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_provider_retry_budget_ends_the_turn_with_the_last_failure() {
+        let (session, model, result) = provider_retry_turn(
+            vec![
+                Step::Fail(http_failure(503, None)),
+                Step::Fail(http_failure(503, None)),
+            ],
+            Some(fast_policy(1)),
+        )
+        .await;
+        assert!(matches!(result, Err(TurnError::Model(_))));
+        assert_eq!(model.requests().len(), 2, "the first request and one retry");
+        assert_eq!(session.events_of(events::LLM_RETRY).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_permanent_provider_failure_is_not_retried() {
+        let (session, model, result) = provider_retry_turn(
+            vec![Step::Fail(http_failure(401, None))],
+            Some(fast_policy(5)),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(model.requests().len(), 1);
+        assert!(session.events_of(events::LLM_RETRY).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_part_of_the_answer_arrived_is_not_retried() {
+        let (session, model, result) = provider_retry_turn(
+            vec![Step::ChunksThenFail(
+                vec![Chunk::TextDelta {
+                    text: "half an ans".into(),
+                }],
+                http_failure(503, None),
+            )],
+            Some(fast_policy(5)),
+        )
+        .await;
+        assert!(result.is_err(), "the turn fails as before");
+        assert_eq!(
+            model.requests().len(),
+            1,
+            "no retry after output reached the session"
+        );
+        assert!(session.events_of(events::LLM_RETRY).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_port_without_a_retry_policy_does_not_retry() {
+        let (_, model, result) =
+            provider_retry_turn(vec![Step::Fail(http_failure(503, None))], None).await;
+        assert!(result.is_err());
+        assert_eq!(model.requests().len(), 1);
+    }
+
     #[tokio::test]
     async fn an_uncoded_model_failure_is_not_retried() {
         let session = RecordingSession::new();
         let model = ScriptedModel::new(vec![Step::Fail(ModelError {
             code: None,
             message: "the provider broke".into(),
+            status: None,
+            retry_after_ms: None,
         })]);
         let runtime = runtime(
             Arc::clone(&model),

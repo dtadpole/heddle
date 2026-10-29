@@ -42,6 +42,10 @@ pub struct ModelError {
     pub code: Option<String>,
     /// The provider's sentence.
     pub message: String,
+    /// The HTTP status, when the provider answered with one; a retry policy names the failure by it.
+    pub status: Option<u16>,
+    /// The provider's `Retry-After`, in whole milliseconds, when it sent a positive one.
+    pub retry_after_ms: Option<u64>,
 }
 
 impl From<heddle_llm::ModelError> for ModelError {
@@ -53,6 +57,8 @@ impl From<heddle_llm::ModelError> for ModelError {
         Self {
             code,
             message: error.message.clone(),
+            status: error.status,
+            retry_after_ms: error.retry_after_ms.map(|delay| delay.ceil() as u64),
         }
     }
 }
@@ -69,6 +75,12 @@ pub trait ModelPort: Send + Sync {
 
     /// The endpoint a session with none recorded runs on.
     fn default_endpoint(&self) -> Option<String>;
+
+    /// The retry policy a failed call to `endpoint` is judged by (DSH's provider-owned `retryPolicy`); `None`
+    /// means the loop does not retry, which is the default for a port that does not say.
+    fn retry_policy(&self, _endpoint: &str) -> Option<heddle_llm::RetryPolicy> {
+        None
+    }
 }
 
 /// The `model/request` record, written before each model call. Field order and spelling are the
