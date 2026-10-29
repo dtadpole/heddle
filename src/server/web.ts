@@ -26,6 +26,8 @@ import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
+import { foldInbox, INBOX_SPLICED, queueSteer } from '../session/inbox.ts'
+import type { Inbox } from '../session/inbox.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import {
@@ -1729,6 +1731,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
             turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
           ),
           /**
+           * What a person steered into a turn that has not taken it yet: DSH's inbox projection, the same two lists.
+           *
+           * A steer waits here from the moment it is accepted until the loop's next step boundary writes it, and it
+           * stays here after a stop, until the next turn writes it first (`src/session/inbox.ts`).
+           */
+          inbox: viewInbox(events),
+          /**
            * The composer's bottom statistics, from the same events as everything else in this answer.
            * The reference prints turns, steps, a token total with its cache-hit share, and a context share;
            * every one of those is a fact of this record, so they travel with it rather than being re-derived
@@ -1831,10 +1840,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   /**
    * Steer: deliver a message **into the turn that is already running** — DSH's `steer` mode.
    *
-   * DSH's agent runtime owns an inbox and injects a steered message between steps. heddle has no runtime
-   * between steps, so the delivery is an **append**: the message becomes part of the session's surface, and
-   * the loop — which re-derives its context at the top of every round — sees it and answers it in the same
-   * turn. The loop's half of that rule is in `src/agent/loop.ts`.
+   * DSH's agent runtime owns an inbox and injects a steered message between steps, and so does heddle now: the
+   * message is spliced into the session's next-step inbox (`src/session/inbox.ts`), and the running loop writes
+   * it at its next step boundary and answers it in the same turn (`src/agent/loop.ts`). A steer that arrives
+   * while a tool runs therefore lands after that tool's result. The first version appended the message at once,
+   * which put it between the call and its answer whenever a tool was running (R-developer-two-5). A stop keeps
+   * the inbox, as DSH's cancel does, and the next turn writes what is left before its own prompt.
    *
    * The refusal is DSH's, code and meaning: a steer whose turn has ended is not a queued message the caller
    * can leave to happen, it is a delivery that cannot arrive, so it is answered `409` and the caller (the
@@ -1877,14 +1888,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Recording the message is the delivery.
+     * Queuing the message is the acceptance; the loop's claim is the delivery.
      *
-     * `ctx.session.user` writes the same event the composer's own turn would have written, so the appending
-     * is measured by the loop's next round and streamed to every reader by the one write path — there is no
-     * second channel a steer could travel on without becoming a second truth.
+     * The splice is one event in the session's own log, so it is durable and streamed to every reader by the
+     * one write path. When the loop claims it, it writes the same user message the composer's own turn would
+     * have written. `item` is the pending message's id, the handle a later edit or removal would name.
      */
-    ctx.session.userContent(handle, [{ type: 'text', text: prompt }, ...steerAttachments])
-    respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id }, null, 2)}\n`)
+    const queued = queueSteer(ctx.session.store, handle, [{ type: 'text', text: prompt }, ...steerAttachments])
+    respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id, item: queued.id }, null, 2)}\n`)
     return
   }
 
@@ -2456,6 +2467,20 @@ export function attachmentsOf(
 }
 
 /**
+ * The session's inbox for the view, or empty lists when its history cannot be folded.
+ *
+ * The fold refuses an invalid splice the way DSH's does. A view is still worth drawing without the pending
+ * list, so the refusal is not allowed to take the whole transcript down with it.
+ */
+function viewInbox(events: readonly SessionEvent[]): Inbox {
+  try {
+    return foldInbox(events)
+  } catch {
+    return { 'next-turn': [], 'next-step': [] }
+  }
+}
+
+/**
  * Fold a session's recorded events into the display turns the page renders.
  *
  * Exported so the fold can be judged directly: it is pure, it is where the two subtle rules live (read the
@@ -2617,8 +2642,11 @@ export function transcriptTurns(
           else turns.push({ kind: 'assistant', text: typeof event.text === 'string' ? event.text : '', ended })
         }
       }
-      /** A completion or any other record ends the run of deltas that preceded it. */
-      closeRuns()
+      /**
+       * A completion or any other record ends the run of deltas that preceded it. An inbox splice does not: a steer
+       * can be queued while the answer streams, and it is not part of the conversation until it is claimed.
+       */
+      if (event.type !== INBOX_SPLICED) closeRuns()
       continue
     }
     const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string } | undefined

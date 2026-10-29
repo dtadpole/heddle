@@ -1027,6 +1027,13 @@ async fn session_view_route(
         "turns".into(),
         serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
     );
+    // What a person steered into a turn that has not taken it yet: DSH's inbox projection, the same two
+    // lists. A history that cannot be folded draws the view without them rather than failing it.
+    let inbox = heddle_session::inbox::fold_inbox_values(events.iter()).unwrap_or_default();
+    body.insert(
+        "inbox".into(),
+        serde_json::to_value(&inbox).unwrap_or(Value::Null),
+    );
     if let Some(stats) = state.harness().stats.as_ref() {
         body.insert("stats".into(), stats.stats(id.as_str(), &events));
     }
@@ -1188,10 +1195,13 @@ async fn steer_session(
     }
     let mut content = vec![json!({"type": "text", "text": prompt})];
     content.extend(attachments);
-    match state.harness().sessions.user_content(id.as_str(), content) {
-        Ok(()) => respond::json(
+    // Queuing the message is the acceptance; the running loop's claim at its next step boundary is the
+    // delivery, so a steer sent while a tool runs lands after that tool's result (R-developer-two-5). A stop
+    // keeps the inbox, as DSH's cancel does, and the next turn writes what is left before its own prompt.
+    match state.harness().sessions.queue_steer(id.as_str(), content) {
+        Ok(item) => respond::json(
             StatusCode::OK,
-            &json!({"accepted": true, "session": id.to_string()}),
+            &json!({"accepted": true, "session": id.to_string(), "item": item}),
         ),
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
