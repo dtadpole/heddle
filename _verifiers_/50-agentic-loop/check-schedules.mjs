@@ -260,3 +260,28 @@ test('after downtime a recurring reminder delivers only its latest missed occurr
     first.close()
   }
 })
+
+test('the model is told the current time before it answers, as DSH time context, at most once per ten minutes', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('clock')
+  try {
+    const folder = join(server.work, 'clock')
+    const session = await openSession(server, folder)
+    await turn(server, session, folder, [{ text: 'first answer' }])
+    const readings = () => events(server, session).filter((event) => event.type === 'context/note' && event.message?.source?.kind === 'time-context')
+    const [reading] = readings()
+    assert.ok(reading, 'the first step of the turn carries a time-context reading')
+    const text = textOf(reading)
+    assert.match(
+      text,
+      /^Time sampled while preparing turn 1, step 1: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\[[A-Za-z_+\/.-]+\]\nBrowser time zone for this request: (unavailable\. Ask the user to clarify otherwise-unqualified dates and times\.|[A-Za-z_+\/.-]+\. Interpret otherwise-unqualified dates and times in this zone\.)\nElapsed since the preceding model-visible message: (unavailable|(\d+[dhm] )*\d+s)\.$/,
+      `the reading is DSH three lines\nsaw: ${JSON.stringify(text)}`,
+    )
+    assert.equal(reading.message.role, 'user', 'the model reads it as a message')
+    assert.deepEqual(reading.message.source, { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', text }] })
+    await turn(server, session, folder, [{ text: 'second answer' }])
+    assert.equal(readings().length, 1, 'a second turn inside ten minutes adds no second reading')
+  } finally {
+    server.close()
+  }
+})
