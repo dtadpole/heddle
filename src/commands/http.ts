@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
+import { AttachmentInputError, readAttachments } from '../server/attachments.ts'
 import type { SessionHandle } from '../session/store.ts'
-import type { CommandLog, CommandRegistry } from './registry.ts'
+import { CommandInputError, type CommandLog, type CommandRegistry } from './registry.ts'
 
 /**
  * The command routes, handed to by the server in one line:
@@ -11,7 +12,8 @@ import type { CommandLog, CommandRegistry } from './registry.ts'
  *
  * - `GET /commands/menu.js` serves the composer's slash menu, which the page imports (`menu.js`).
  * - `GET /api/commands` lists the registered commands (the page's slash menu reads it).
- * - `POST /api/sessions/{id}/commands` with `{line}` runs one line. A line that is not a registered command answers
+ * - `POST /api/sessions/{id}/commands` with `{line, attachments?}` runs one line; `attachments` is the same list of
+ *   uploaded paths a turn takes, and a command that does not accept them refuses with `400` before anything is written. A line that is not a registered command answers
  *   `{matched: false}` and writes nothing, so the page sends it on as an ordinary prompt — DSH's rule, and how an
  *   unknown `/word` still reaches the model. A registered one answers `{matched: true, commandId, name, kind, text?,
  *   action?, seq}`; a handler's refusal is `kind: 'error'` with status 200, because the command ran and its row says
@@ -77,7 +79,16 @@ export async function handleCommandRequest(host: CommandRouteHost, request: Inco
       json(response, 400, { error: 'the body must be JSON with a string "line"' })
       return true
     }
-    const execution = await host.registry.execute(host.log, handle, body.line)
+    let execution
+    try {
+      execution = await host.registry.execute(host.log, handle, body.line, readAttachments(body.attachments))
+    } catch (error) {
+      if (error instanceof AttachmentInputError || error instanceof CommandInputError) {
+        json(response, 400, { error: error.message })
+        return true
+      }
+      throw error
+    }
     if (execution === undefined) {
       json(response, 200, { matched: false })
       return true
