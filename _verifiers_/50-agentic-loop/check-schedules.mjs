@@ -285,3 +285,34 @@ test('the model is told the current time before it answers, as DSH time context,
     server.close()
   }
 })
+
+test('the page reads and edits reminders through DSH remote schedule namespace', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('routes')
+  try {
+    const folder = join(server.work, 'routes')
+    const session = await openSession(server, folder)
+    const mark = events(server, session).length
+    await turn(server, session, folder, [
+      { toolCall: { name: 'schedule_create', arguments: { prompt: 'review the day', title: 'Daily review', daily: { time: '23:00:00', time_zone: 'Asia/Shanghai' } } } },
+      { text: 'set' },
+    ])
+    const created = json(toolTexts(server, session, mark)[0] ?? '')
+    const listed = await api(server, `/api/schedule/list?session=${encodeURIComponent(session)}`)
+    assert.equal(listed.status, 200, `the list route answers\nsaw: ${JSON.stringify(listed)}`)
+    assert.deepEqual(listed.body.reminders, [created], 'the page reads the view the tool answered')
+    const catalog = await api(server, '/api/schedule/catalog')
+    assert.deepEqual(catalog.body.tasks.map((task) => [task.id, task.sessionId, task.status]), [[created.id, session, 'active']])
+
+    const { state, deliveryMode, ...expected } = created
+    const renamed = await api(server, '/api/schedule/update', { method: 'POST', body: JSON.stringify({ sessionId: session, id: created.id, expected, title: 'Evening review' }) })
+    assert.equal(renamed.body.updated, true, `an update over the current record lands\nsaw: ${JSON.stringify(renamed.body)}`)
+    const stale = await api(server, '/api/schedule/update', { method: 'POST', body: JSON.stringify({ sessionId: session, id: created.id, expected, title: 'Lost edit' }) })
+    assert.deepEqual(stale.body, { id: created.id, updated: false, code: 'schedule_conflict' }, 'a stale editor is refused, not merged')
+    const deleted = await api(server, '/api/schedule/delete', { method: 'POST', body: JSON.stringify({ sessionId: session, id: created.id }) })
+    assert.deepEqual(deleted.body, { id: created.id, deleted: true })
+    assert.deepEqual((await api(server, `/api/schedule/list?session=${encodeURIComponent(session)}`)).body.reminders, [])
+  } finally {
+    server.close()
+  }
+})

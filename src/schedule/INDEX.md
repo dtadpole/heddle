@@ -1,6 +1,6 @@
 ---
 title: Schedule
-version: 1.1.0
+version: 1.2.0
 description: Durable reminders a session sets for itself - the four model tools, the rules that compute targets, the store file, the service and the delivery driver that turns a due reminder into a turn.
 grounded_in:
   - source: dsh-0.2.1-rc.2
@@ -27,6 +27,7 @@ compiled code, cited in the doc comments here as `TOOL:n` (`dsh-tool-schedule/li
 | [`delivery.ts`](delivery.ts) | the two message templates and `ScheduleDriver`: one timer, one drive at a time inside the FIFO, one-shots alone and a session's recurring reminders in one batch, a busy session waited for, and a delivery committed only once its message is found in the session's own log |
 | [`tool.ts`](tool.ts) | the four tools, their DSH descriptions and compiled parameter schemas, DSH's argument validation with its diagnostics, and the mapping of DSH values onto heddle's `ToolResult` |
 | [`time-context.ts`](time-context.ts) | the clock reading DSH's `dsh-time-context` gives the model, which reminders depend on: DSH's three baselines folded from the log, the ten-minute refresh rule, the exact three-line text, and `recordTimeContext`, which the turn loop calls once per step beside the runtime-context snapshot |
+| [`http.ts`](http.ts) | the page's reminder routes under `/api/schedule/`: DSH's remote `schedule` namespace (`catalog`, `list`, `history`, `update`, `delete`; no create, as in DSH), the service's own values, a refused input as `400 {code, message}` |
 
 The plugin that wires them is [`../plugins/schedule.ts`](../plugins/schedule.ts): it opens the store, provides
 `ctx.schedule`, registers the four tools, forwards change callbacks as the `schedule/changed` event, and runs the driver
