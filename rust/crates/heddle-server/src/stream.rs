@@ -228,7 +228,11 @@ pub fn heartbeat_interval() -> std::time::Duration {
 /// The subscription is passed in already registered with the hub, so every frame published after a client
 /// reads `ready` is queued for it: a baseline read that starts on `ready` cannot race an increment, which is
 /// the ordering DSH's `$events` source guarantees.
-pub fn events_frames(subscription: Subscription, client_id: &str, home: &str) -> impl Stream<Item = SseFrame> + Send + 'static {
+pub fn events_frames(
+    subscription: Subscription,
+    client_id: &str,
+    home: &str,
+) -> impl Stream<Item = SseFrame> + Send + 'static {
     futures::stream::once(std::future::ready(SseFrame::ready(client_id, home))).chain(subscription)
 }
 
@@ -338,7 +342,11 @@ impl EventHub {
     pub fn new() -> Self {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).expect("the operating system entropy source");
-        Self::with_log(bytes.iter().map(|byte| format!("{byte:02x}")).collect(), 4096, 16 * 1024 * 1024)
+        Self::with_log(
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            4096,
+            16 * 1024 * 1024,
+        )
     }
 
     /// A hub with a given epoch and log bounds — what the tests pin; [`EventHub::new`] picks a random epoch.
@@ -468,14 +476,22 @@ impl EventHub {
 /// ahead of it, or malformed — the rule of `EventLog.since` in `src/server/stream.ts`.
 fn since(inner: &HubInner, cursor: &str) -> Option<Vec<SseFrame>> {
     let (epoch, seq) = cursor.rsplit_once('-')?;
-    if epoch.is_empty() || epoch != inner.epoch || seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) {
+    if epoch.is_empty()
+        || epoch != inner.epoch
+        || seq.is_empty()
+        || !seq.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     let seq: u64 = seq.parse().ok()?;
     if seq > inner.seq {
         return None;
     }
-    let oldest = inner.kept.front().map(|(seq, _, _)| *seq).unwrap_or(inner.seq + 1);
+    let oldest = inner
+        .kept
+        .front()
+        .map(|(seq, _, _)| *seq)
+        .unwrap_or(inner.seq + 1);
     if seq + 1 < oldest {
         return None;
     }
@@ -589,9 +605,16 @@ mod tests {
     fn the_heartbeat_interval_is_two_seconds_unless_a_usable_value_is_named() {
         use std::time::Duration;
         assert_eq!(heartbeat_interval_from(None), Duration::from_millis(2000));
-        assert_eq!(heartbeat_interval_from(Some("500")), Duration::from_millis(500));
+        assert_eq!(
+            heartbeat_interval_from(Some("500")),
+            Duration::from_millis(500)
+        );
         for bad in ["", " ", "soon", "-5", "10", "1.5"] {
-            assert_eq!(heartbeat_interval_from(Some(bad)), Duration::from_millis(2000), "{bad:?}");
+            assert_eq!(
+                heartbeat_interval_from(Some(bad)),
+                Duration::from_millis(2000),
+                "{bad:?}"
+            );
         }
     }
 
@@ -603,7 +626,10 @@ mod tests {
             frame.encode(),
             "id: e1-3\nevent: session\ndata: {\"session\":\"s\",\"event\":{\"type\":\"message\"}}\n\n"
         );
-        assert_eq!(SseFrame::reset().encode(), "event: reset\ndata: {\"type\":\"reset\"}\n\n");
+        assert_eq!(
+            SseFrame::reset().encode(),
+            "event: reset\ndata: {\"type\":\"reset\"}\n\n"
+        );
         let follow = ReadyFollow {
             cursor: "e1-7".into(),
             resumed: true,
@@ -616,7 +642,10 @@ mod tests {
     }
 
     fn ids(frames: &[SseFrame]) -> Vec<String> {
-        frames.iter().map(|frame| frame.id.clone().unwrap_or_default()).collect()
+        frames
+            .iter()
+            .map(|frame| frame.id.clone().unwrap_or_default())
+            .collect()
     }
 
     #[test]
@@ -632,8 +661,14 @@ mod tests {
         while let Ok(frame) = subscription.receiver.try_recv() {
             seen.push(frame);
         }
-        assert_eq!(ids(&seen), vec!["e1-1".to_owned(), String::new(), "e1-2".to_owned()]);
-        assert!(EventHub::new().cursor().len() > "-0".len(), "a fresh hub picks a random epoch");
+        assert_eq!(
+            ids(&seen),
+            vec!["e1-1".to_owned(), String::new(), "e1-2".to_owned()]
+        );
+        assert!(
+            EventHub::new().cursor().len() > "-0".len(),
+            "a fresh hub picks a random epoch"
+        );
     }
 
     #[test]
@@ -642,10 +677,16 @@ mod tests {
         for n in 1..=5 {
             hub.publish_session_event("s", &serde_json::json!({ "n": n }));
         }
-        assert_eq!(ids(&hub.subscribe_from(Some("e1-3")).replay.unwrap()), vec!["e1-4", "e1-5"]);
+        assert_eq!(
+            ids(&hub.subscribe_from(Some("e1-3")).replay.unwrap()),
+            vec!["e1-4", "e1-5"]
+        );
         assert!(hub.subscribe_from(Some("e1-5")).replay.unwrap().is_empty());
         assert_eq!(hub.subscribe_from(Some("e1-0")).replay.unwrap().len(), 5);
-        assert!(hub.subscribe_from(None).replay.unwrap().is_empty(), "a first connection replays nothing");
+        assert!(
+            hub.subscribe_from(None).replay.unwrap().is_empty(),
+            "a first connection replays nothing"
+        );
         assert_eq!(hub.subscribe_from(None).cursor, "e1-5");
     }
 
@@ -655,10 +696,19 @@ mod tests {
         for n in 1..=6 {
             hub.publish_session_event("s", &serde_json::json!({ "n": n }));
         }
-        assert!(hub.subscribe_from(Some("e0-3")).replay.is_none(), "another epoch");
-        assert!(hub.subscribe_from(Some("e1-1")).replay.is_none(), "older than the log");
+        assert!(
+            hub.subscribe_from(Some("e0-3")).replay.is_none(),
+            "another epoch"
+        );
+        assert!(
+            hub.subscribe_from(Some("e1-1")).replay.is_none(),
+            "older than the log"
+        );
         assert_eq!(hub.subscribe_from(Some("e1-3")).replay.unwrap().len(), 3);
-        assert!(hub.subscribe_from(Some("e1-9")).replay.is_none(), "ahead of the log");
+        assert!(
+            hub.subscribe_from(Some("e1-9")).replay.is_none(),
+            "ahead of the log"
+        );
         for bad in ["e1", "e1-", "-3", "e1-x", "e1-3.5"] {
             assert!(hub.subscribe_from(Some(bad)).replay.is_none(), "{bad:?}");
         }
@@ -669,7 +719,10 @@ mod tests {
         let hub = EventHub::with_log("e1".into(), 16, 150);
         hub.publish(SseFrame::new("session", &"x".repeat(60)));
         hub.publish(SseFrame::new("session", &"y".repeat(60)));
-        assert!(hub.subscribe_from(Some("e1-0")).replay.is_none(), "the first frame was evicted");
+        assert!(
+            hub.subscribe_from(Some("e1-0")).replay.is_none(),
+            "the first frame was evicted"
+        );
         assert_eq!(hub.subscribe_from(Some("e1-1")).replay.unwrap().len(), 1);
         hub.publish(SseFrame::new("session", &"z".repeat(500)));
         assert_eq!(hub.subscribe_from(Some("e1-2")).replay.unwrap().len(), 1);
@@ -680,15 +733,41 @@ mod tests {
         let hub = EventHub::with_log("e1".into(), 16, 1 << 20);
         hub.publish_session_event("s", &serde_json::json!({"n": 1}));
         hub.publish_session_event("s", &serde_json::json!({"n": 2}));
-        let mut frames = Box::pin(follow_frames(hub.subscribe_from(Some("e1-1")), true, "c", "/h", 2000));
+        let mut frames = Box::pin(follow_frames(
+            hub.subscribe_from(Some("e1-1")),
+            true,
+            "c",
+            "/h",
+            2000,
+        ));
         hub.publish_session_event("s", &serde_json::json!({"n": 3}));
         let ready = frames.next().await.unwrap();
         assert_eq!(ready.event, names::READY);
-        assert!(ready.data.contains("\"cursor\":\"e1-2\",\"resumed\":true,\"heartbeatMs\":2000"), "{}", ready.data);
-        assert_eq!(frames.next().await.unwrap().id.as_deref(), Some("e1-2"), "the missed frame, replayed");
-        assert_eq!(frames.next().await.unwrap().id.as_deref(), Some("e1-3"), "then live, no duplicate");
+        assert!(
+            ready
+                .data
+                .contains("\"cursor\":\"e1-2\",\"resumed\":true,\"heartbeatMs\":2000"),
+            "{}",
+            ready.data
+        );
+        assert_eq!(
+            frames.next().await.unwrap().id.as_deref(),
+            Some("e1-2"),
+            "the missed frame, replayed"
+        );
+        assert_eq!(
+            frames.next().await.unwrap().id.as_deref(),
+            Some("e1-3"),
+            "then live, no duplicate"
+        );
 
-        let mut restarted = Box::pin(follow_frames(hub.subscribe_from(Some("e0-9")), true, "c", "/h", 2000));
+        let mut restarted = Box::pin(follow_frames(
+            hub.subscribe_from(Some("e0-9")),
+            true,
+            "c",
+            "/h",
+            2000,
+        ));
         let ready = restarted.next().await.unwrap();
         assert!(ready.data.contains("\"resumed\":false"), "{}", ready.data);
         assert_eq!(restarted.next().await.unwrap().event, names::RESET);
@@ -704,10 +783,15 @@ mod tests {
         ));
         hub.publish_approval_request(&serde_json::json!({"id": "approval-2", "tool": "bash"}));
         let replay = hub.subscribe_from(Some("e1-0")).replay.unwrap();
-        let waiting: std::collections::HashSet<String> = ["approval-2".to_owned()].into_iter().collect();
+        let waiting: std::collections::HashSet<String> =
+            ["approval-2".to_owned()].into_iter().collect();
         let kept = without_settled_approvals(replay, &waiting);
         let events: Vec<&str> = kept.iter().map(|frame| frame.event.as_str()).collect();
-        assert_eq!(events, vec!["approval-settled", "approval"], "the answered question is dropped, its settlement kept");
+        assert_eq!(
+            events,
+            vec!["approval-settled", "approval"],
+            "the answered question is dropped, its settlement kept"
+        );
         assert!(kept[1].data.contains("approval-2"));
     }
 
@@ -725,7 +809,11 @@ mod tests {
         assert_eq!(ids.len(), 64, "no two streams share an id");
         for id in &ids {
             assert_eq!(id.len(), 32, "{id}");
-            assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{id}");
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "{id}"
+            );
         }
     }
 
