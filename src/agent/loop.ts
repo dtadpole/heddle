@@ -490,37 +490,42 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       break
     }
 
-    for (const call of calls) {
+    /**
+     * The step's calls run as DSH's loop runs them (`dsh-agent-loop` `runGroup`): a call whose tool is parallel-safe
+     * (`concurrencySafe`, DSH's `isConcurrencySafe`) joins the consecutive safe calls around it in a pool of
+     * `tools.maxParallelToolCalls`; any other call runs alone, a barrier between groups. Results commit in model order
+     * after each group, so a call that finishes first is still answered in its place, and the step boundary (where
+     * steered input is claimed) stays after the whole step, never between two results of one group.
+     *
+     * Every call the model asked for is answered in the log — even one that cannot run. The assistant's `tool_calls`
+     * message and its tool messages are one unit to the provider: a Stop or a thrown tool between them used to leave a
+     * call unanswered, and every later request failed with the pairing error. A stopped turn, a refused call and a tool
+     * that threw all become an `error` result the model can read; a call a stop overtook before it started is one.
+     */
+    const runCall = async (call: (typeof calls)[number]): Promise<ToolResult> => {
       const args = parseArguments(call.arguments)
-      /**
-       * Every call the model asked for is answered in the log — even one that cannot run.
-       *
-       * The assistant's `tool_calls` message and its tool messages are one unit to the provider: a Stop or a thrown
-       * tool between them used to leave a call unanswered, and every later request failed with the pairing error.
-       * A stopped turn, a refused call and a tool that threw all become an `error` result the model can read.
-       */
-      let result: ToolResult
       if (stoppedByCaller()) {
-        result = { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
-      } else {
-        try {
-          result = await ctx.tools.call(call.name, args, {
-            cwd,
-            session: options.session,
-            ...(signal !== undefined ? { signal } : {}),
-            log: (message) => ctx.logger.info('turn: %s', message),
-          })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          result = {
-            output: '',
-            error: {
-              code: 'INTERRUPTED',
-              message: stoppedByCaller() ? 'the turn was stopped while this call ran' : message,
-            },
-          }
+        return { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
+      }
+      try {
+        return await ctx.tools.call(call.name, args, {
+          cwd,
+          session: options.session,
+          ...(signal !== undefined ? { signal } : {}),
+          log: (message) => ctx.logger.info('turn: %s', message),
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return {
+          output: '',
+          error: {
+            code: 'INTERRUPTED',
+            message: stoppedByCaller() ? 'the turn was stopped while this call ran' : message,
+          },
         }
       }
+    }
+    const commitCall = (call: (typeof calls)[number], result: ToolResult) => {
       toolCallRecords.push({ name: call.name, arguments: call.arguments, result })
       if (result.error) {
         denials.push({ tool: call.name, code: result.error.code, message: result.error.message })
@@ -539,6 +544,16 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
           },
         ],
       })
+    }
+    const limit = Math.max(1, ctx.tools.maxParallelToolCalls ?? 1)
+    const safe = (name: string) => limit > 1 && ctx.tools.isConcurrencySafe?.(name) === true
+    for (let first = 0; first < calls.length; ) {
+      let end = first + 1
+      if (safe(calls[first]!.name)) while (end < calls.length && safe(calls[end]!.name)) end += 1
+      const group = calls.slice(first, end)
+      const results = await runPool(group, limit, runCall)
+      group.forEach((call, index) => commitCall(call, results[index]!))
+      first = end
     }
   }
 
@@ -652,4 +667,19 @@ export class HookRefusal extends Error {
 /** Whether an error came from a hook that meant to refuse. */
 export function isHookRefusal(error: unknown): boolean {
   return error instanceof Error && (error.name === 'HookRefusal' || error.message.startsWith('refused by hook:'))
+}
+
+/** Run `run` over `items` with at most `limit` in flight, starting each as a slot frees; results keep `items`' order. */
+async function runPool<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next
+      next += 1
+      results[index] = await run(items[index]!)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
 }

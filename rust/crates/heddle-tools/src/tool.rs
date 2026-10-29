@@ -262,6 +262,34 @@ pub trait Tool: Send + Sync {
 
     /// Run one call under `context.mode()`.
     fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> ToolFuture<'a>;
+
+    /// Whether a call may run alongside the other parallel-safe calls of one model step (DSH's
+    /// `isConcurrencySafe`). The default is exclusive: the call runs alone, a barrier between groups, which is the
+    /// safe answer for a tool that writes. [`parallel_safe`] marks a tool.
+    fn concurrency_safe(&self) -> bool {
+        false
+    }
+}
+
+/// `tool`, marked parallel-safe ([`Tool::concurrency_safe`]); its spec and its run are unchanged.
+pub fn parallel_safe(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
+    Arc::new(ParallelSafe(tool))
+}
+
+struct ParallelSafe(Arc<dyn Tool>);
+
+impl Tool for ParallelSafe {
+    fn spec(&self) -> &ToolSpec {
+        self.0.spec()
+    }
+
+    fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> ToolFuture<'a> {
+        self.0.run(args, context)
+    }
+
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
 }
 
 /// The closure a [`tool_fn`] tool runs.
