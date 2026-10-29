@@ -786,6 +786,11 @@ impl heddle_goal::SessionLog for StoreLog {
     ) -> Result<Value, heddle_goal::LogError> {
         StoreLog::append(self, session, event).map_err(heddle_goal::LogError)
     }
+
+    /// The session's record, so the goal tools see `delegationDepth`: a delegated session is never a direct human turn.
+    fn meta(&self, session: &str) -> Option<Value> {
+        self.sessions.meta(session).map(|meta| meta.to_value())
+    }
 }
 
 /// The session service a row injects, or the sentence naming it.
