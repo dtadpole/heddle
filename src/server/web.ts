@@ -41,6 +41,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
+import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
 
 /**
  * The Web UI.
@@ -277,6 +278,26 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     socket.on('close', () => sockets.delete(socket))
   })
 
+  /**
+   * The heartbeat: every interval each stream gets a `heartbeat` frame, and every connection that took no bytes for
+   * two intervals while it still had some to send is destroyed (DSH's dead-peer rule, see `stream.ts`). One timer
+   * for the server, unref'd so it never keeps a process alive on its own.
+   */
+  const heartbeatMs = heartbeatInterval()
+  const stalls = new StallWatch(heartbeatMs)
+  const heartbeat = setInterval(() => {
+    const frame = heartbeatFrame()
+    for (const client of subscribers) {
+      try {
+        client.write(frame)
+      } catch {
+        // a client that is already gone leaves through its close listener
+      }
+    }
+    stalls.sweep(sockets, Date.now())
+  }, heartbeatMs)
+  heartbeat.unref()
+
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => resolvePromise())
@@ -303,6 +324,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
+        clearInterval(heartbeat)
         detachApprovals?.()
         for (const client of subscribers) {
           try {
@@ -1783,8 +1805,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/events' && request.method === 'GET') {
     respondSse(response)
+    /**
+     * Subscribed **before** `ready` is written, so every frame published after a client reads `ready` reaches it:
+     * a baseline read that starts on `ready` cannot race an increment (DSH's opening rule, see `stream.ts`).
+     */
     state.subscribers.add(response)
     request.on('close', () => state.subscribers.delete(response))
+    response.write(readyFrame(newClientId()))
     return
   }
 
@@ -2423,7 +2450,7 @@ function respondSse(response: ServerResponse): void {
     connection: 'keep-alive',
     'x-accel-buffering': 'no',
   })
-  response.write(': heddle stream open\n\n')
+  response.write(STREAM_OPEN)
 }
 
 /**
