@@ -5399,9 +5399,10 @@ async function showSession(id) {
   liveRoundStartedAt = null
   updateStatusBar()
   current = id
+  paintEmptyState()
+  /** A reload comes back here (`SessionRules.startupSession`), and a one-shot child's composer is a record. */
   rememberCurrent(id)
   paintComposerAccess()
-  paintEmptyState()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
   applySessionAccess(null)
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
@@ -5427,14 +5428,15 @@ async function showSession(id) {
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
        */
       current = null
-      rememberCurrent(null)
-      paintComposerAccess()
       const title = document.getElementById('session-title')
       if (title !== null) title.textContent = 'No session'
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
       applySessionAccess(null)
+      /** Nothing to come back to on a reload, and nothing open to lock. */
+      rememberCurrent(null)
+      paintComposerAccess()
       return
     }
     const body = await response.json()
