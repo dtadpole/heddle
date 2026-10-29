@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-29T13:32:00Z
+modified: 2026-10-29T14:10:00Z
 level: L3
-version: 1.9.1
+version: 1.9.2
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,8 +17,8 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `f72cdf2` (uploads served only to the referencing session),
-with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
+**Run 2026-10-29, in `~/heddle--int-backend`, on `main` at `8a9f37a` (a refresh that cannot be built says so; part 70's
+browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
