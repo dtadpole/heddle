@@ -323,7 +323,9 @@ test('the session shortcuts fire on the physical key, with the key values the br
       const deadline = Date.now() + 8000
       while (!(await running()) && Date.now() < deadline) await settle(150)
       assert.equal(await running(), true, 'the slow turn is running')
-      await settle(400)
+      /** The page's own view of the turn decides whether Enter queues, so wait until its Stop button is up. */
+      await browser.waitFor(`!document.getElementById('stop').hidden`, 8000)
+      await settle(200)
       const queued = () => browser.evaluate(`Number((/^(\\d+) queued/.exec(document.querySelector('#queue .panel button')?.textContent ?? '') ?? [0, 0])[1])`)
       await browser.evaluate(`(() => {
         const field = document.querySelector('#prompt textarea')
