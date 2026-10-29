@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T12:56:06Z
-version: 0.8.1
+modified: 2026-10-29T13:53:00Z
+version: 0.8.2
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -58,7 +58,9 @@ restates an entry's complete **raw** config, so an `${ENV}` value stays a refere
 beneath the block, and an entry back at its base leaves it. The complete candidate is composed and validated
 before the disk is touched; a stale revision is `settings-conflict` (409), and an invalid value, a row a later
 layer restates or removes, an overlay's own row, a secret, or a run with no profile patch is `settings-rejected`
-(422), each with the file unchanged. `applies` is `restart` until a change can apply to the running tree. The
+(422), each with the file unchanged. A live entry applies a write to the running tree as it lands (`SettingsService::with_live`, `applies: live`);
+the binary marks the model row, whose `ModelRowSource::set_row_config` takes the written configuration, and the
+TypeScript build applies every entry through the loader. The other Rust entries say `applies: restart`. The
 binary mounts the routes behind the door (`web.rs`, `settings_router`); `05-config-system/check-settings.mjs`
 judges them through `HEDDLE_BIN`.
 
