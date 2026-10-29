@@ -126,6 +126,13 @@ export interface RunTurnOptions {
   readonly attachments?: readonly ContentPart[]
   /** Who wrote the prompt, when it was not a person — an automatic goal round sets this. */
   readonly source?: unknown
+  /**
+   * Answer input that is already in the log instead of writing `prompt` as a new message.
+   *
+   * For a background child's settlement notice that was delivered into a turn which ended before it saw it: the
+   * notice is in the log once, and the turn that answers it must not write it a second time.
+   */
+  readonly answerPending?: boolean
   /** A system prompt, written to the surface as its first node when the session has none. */
   readonly system?: string
   /** The model id, overriding the endpoint's default. */
@@ -206,15 +213,23 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
   const maximumTokens = options.maxOutputTokens
-  const cwd = ctx.sandbox.workspaceRoot
-  // Instructions belong to the conversation; tools retain the configured sandbox root.
-  const instructionCwd = ctx.session.folder(options.session) ?? cwd
+  const folder = ctx.session.folder(options.session)
+  /**
+   * The session's folder is where its tools run: the shell's directory, the base of a relative path and the
+   * `workspace-write` boundary — DSH's rule, so a turn in workspace B acts in B and not in the directory the
+   * server was launched from. A root the operator named still applies to every session (`rootFor`).
+   */
+  const cwd = ctx.sandbox.rootFor(folder)
+  // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
+  const instructionCwd = folder ?? ctx.sandbox.workspaceRoot
 
-  ctx.session.userContent(
-    options.session,
-    [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])],
-    options.source,
-  )
+  if (options.answerPending !== true) {
+    ctx.session.userContent(
+      options.session,
+      [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])],
+      options.source,
+    )
+  }
 
   const tools = specsOf(ctx.tools)
   const denials: { tool: string; code: string; message: string }[] = []
@@ -262,7 +277,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     ctx.context.recordRuntimeContext(options.session, [
       {
         name: 'sandbox:policy',
-        text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode))),
+        text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode), cwd)),
       },
     ])
 

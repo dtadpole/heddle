@@ -407,6 +407,20 @@ export function previewTurnVerdict({ userAppeared, assistantAppeared, settled, a
  */
 export const REAL_MODEL = { endpoint: 'deepseek-official', model: 'deepseek-flash' }
 
+/**
+ * Whether a real-model pass retires its health session and starts a new one: when the session was
+ * created before the current UTC day. A real model receives the whole session as context, and the
+ * reused 8082 session had grown to ~478 fixture turns by 2026-10-29 (a real turn's first delta went
+ * from ~2 s to 24 s). Rolling daily keeps every real turn small and adds at most one session a day
+ * per target. A creation time that cannot be read keeps the session: never a new session every pass.
+ */
+export function healthSessionExpired(created, now = new Date()) {
+  const at = typeof created === 'number' ? created : Date.parse(String(created ?? ''))
+  if (!Number.isFinite(at)) return false
+  const day = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  return at < day
+}
+
 /** Reasoning levels from least to most effort, for catalogues whose ids follow the common names. */
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -455,6 +469,30 @@ export function expectedSeatLabel(choice) {
   return choice.effortName === null
     ? `Select model, current ${choice.modelTitle}`
     : `Select model, current ${choice.modelTitle}, reasoning effort ${choice.effortName}`
+}
+
+/**
+ * Whether the deployment moved during the pass: its checkout's head or built page, read again at the
+ * end, differs from the start. Measured 2026-10-29 11:08Z: a redeploy landed inside a pass, which
+ * read aefbd9c's build at the start, then loaded 551c0a4's page and failed the marker. Null when
+ * nothing moved or a reading is missing.
+ */
+export function deploymentMove(start, end) {
+  if (!start || !end) return null
+  const headMoved = Boolean(start.head && end.head && start.head !== end.head)
+  const markerMoved = Boolean(start.marker && end.marker && start.marker !== end.marker)
+  if (!headMoved && !markerMoved) return null
+  return { fromHead: start.head?.slice(0, 12) ?? null, toHead: end.head?.slice(0, 12) ?? null, fromMarker: start.marker ?? null, toMarker: end.marker ?? null }
+}
+
+/**
+ * A check that failed while the deployment moved under it cannot be decided against either build: it
+ * is unjudged, with the move named. The next pass judges the new build whole, so a real fault in the
+ * new build still fails one pass later.
+ */
+export function acrossMove(check, move) {
+  if (move === null || move === undefined || check?.verdict !== 'fail') return check
+  return { ...check, verdict: 'unjudged', detail: `the deployment moved during the pass (${move.fromHead} -> ${move.toHead}), so this cannot be decided: ${check.detail}` }
 }
 
 /** How a selection reads in a detail line: `endpoint/model` and its effort when one is sent. */

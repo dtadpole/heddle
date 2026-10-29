@@ -1,4 +1,4 @@
-//! The three wire shapes end to end: request builder, HTTP transport and fold, against local doubles.
+//! The wire shapes end to end: request builder, HTTP transport and fold, against local doubles.
 //!
 //! The unit tests judge each half separately (the builder's body, the fold's vocabulary). These drive the
 //! whole path a verifier sees — a real socket speaking the provider's route — because the failure this
@@ -1132,5 +1132,186 @@ async fn adapter_call_writes_a_delta_while_the_provider_is_still_writing() {
     assert!(
         early_at + std::time::Duration::from_millis(200) < ended,
         "the first delta was written at {early_at:?}, the call ended at {ended:?}"
+    );
+}
+
+/// An endpoint of the `anthropic-messages` kind, which `heddle-config` keeps as a named [`EndpointKind::Other`].
+fn messages_endpoint(base_url: &str) -> EndpointConfig {
+    let mut endpoint = endpoint(
+        "claude",
+        EndpointKind::parse("anthropic-messages"),
+        &format!("{base_url}/v1"),
+        "claude-model",
+    );
+    endpoint.api_key = Some("a-test-key".into());
+    endpoint.max_output_tokens = Some(64);
+    endpoint
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_messages_shape_streams_thinking_text_and_a_live_tool_call() {
+    let sse = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}\n\n",
+        "event: ping\ndata: {\"type\":\"ping\"}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"weighing it\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"one \"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"two\"}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"probe_echo\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"value\\\":\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"hello\\\"}\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":12}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let double = Double::start(move |_| reply("text/event-stream", sse));
+    let adapter = adapter_for(messages_endpoint(&double.base_url)).expect("a messages adapter");
+    let mut request = ask("claude", "go");
+    request.messages.insert(
+        0,
+        Message::new(Role::System, vec![ContentPart::text("be brief")]),
+    );
+    let chunks: Vec<Chunk> = collect(adapter.stream(request))
+        .await
+        .into_iter()
+        .map(|item| item.expect("streams"))
+        .collect();
+    assert_eq!(
+        chunks,
+        vec![
+            Chunk::ReasoningDelta {
+                text: "weighing it".into()
+            },
+            Chunk::TextDelta {
+                text: "one ".into()
+            },
+            Chunk::TextDelta { text: "two".into() },
+            Chunk::ToolCallDelta {
+                index: 2,
+                id: Some("toolu_1".into()),
+                name: Some("probe_echo".into()),
+                arguments_delta: String::new(),
+            },
+            Chunk::ToolCallDelta {
+                index: 2,
+                id: None,
+                name: None,
+                arguments_delta: "{\"value\":".into(),
+            },
+            Chunk::ToolCallDelta {
+                index: 2,
+                id: None,
+                name: None,
+                arguments_delta: "\"hello\"}".into(),
+            },
+            Chunk::ToolCall(ToolCall {
+                id: "toolu_1".into(),
+                name: "probe_echo".into(),
+                arguments: "{\"value\":\"hello\"}".into(),
+            }),
+            Chunk::Done {
+                finish_reason: "tool_calls".into(),
+                usage: Some(heddle_llm::TokenUsage {
+                    input_tokens: Some(9),
+                    output_tokens: Some(12),
+                    ..heddle_llm::TokenUsage::default()
+                }),
+            },
+        ]
+    );
+
+    let requests = double.requests();
+    let sent = requests.first().expect("the double was called");
+    assert!(sent.starts_with("POST /v1/messages "), "{sent}");
+    let head = sent.to_ascii_lowercase();
+    assert!(
+        head.contains("\r\nx-api-key: a-test-key\r\n"),
+        "the credential is Anthropic's header: {head}"
+    );
+    assert!(
+        !head.contains("\r\nauthorization:"),
+        "and not a bearer token: {head}"
+    );
+    assert!(
+        head.contains("\r\nanthropic-version: 2023-06-01\r\n"),
+        "{head}"
+    );
+    let body = body_of(sent);
+    assert_eq!(body["model"], serde_json::json!("claude-model"));
+    assert_eq!(body["stream"], serde_json::json!(true));
+    assert_eq!(body["max_tokens"], serde_json::json!(64));
+    assert_eq!(body["system"], serde_json::json!("be brief"));
+}
+
+/// The claim 20-streaming makes, on this kind: a delta is seen before the provider has finished writing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_messages_delta_arrives_while_the_provider_is_still_writing() {
+    let first = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}{}",
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"early\"}}\n\n"
+    )
+    .into_bytes();
+    let rest = concat!(
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" late\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let base_url = staged_double(first, rest, std::time::Duration::from_millis(400));
+    let adapter = adapter_for(messages_endpoint(&base_url)).expect("a messages adapter");
+
+    let started = std::time::Instant::now();
+    let mut stream = adapter.stream(ask("claude", "go"));
+    let mut first_text = None;
+    let mut texts = Vec::new();
+    while let Some(item) = stream.next().await {
+        if let Chunk::TextDelta { text } = item.expect("streams") {
+            first_text.get_or_insert_with(|| started.elapsed());
+            texts.push(text);
+        }
+    }
+    let ended = started.elapsed();
+    let first_text = first_text.expect("a text delta arrived");
+    assert!(
+        first_text + std::time::Duration::from_millis(200) < ended,
+        "the first delta arrived at {first_text:?} and the stream ended at {ended:?}: it did not wait for the end"
+    );
+    assert_eq!(texts, vec!["early".to_string(), " late".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_messages_shape_with_streaming_off_reads_one_json_message() {
+    let body = r#"{"type":"message","content":[{"type":"text","text":"whole"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"#;
+    let double = Double::start(move |_| reply("application/json", body));
+    let mut endpoint = messages_endpoint(&double.base_url);
+    endpoint.stream = Some(false);
+    let adapter = adapter_for(endpoint).expect("a messages adapter");
+    let chunks: Vec<Chunk> = collect(adapter.stream(ask("claude", "go")))
+        .await
+        .into_iter()
+        .map(|item| item.expect("answers"))
+        .collect();
+    assert_eq!(
+        chunks,
+        vec![
+            Chunk::TextDelta {
+                text: "whole".into()
+            },
+            Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: Some(heddle_llm::TokenUsage {
+                    input_tokens: Some(3),
+                    output_tokens: Some(1),
+                    ..heddle_llm::TokenUsage::default()
+                }),
+            },
+        ]
+    );
+    assert_eq!(
+        body_of(&double.requests()[0])["stream"],
+        serde_json::json!(false)
     );
 }

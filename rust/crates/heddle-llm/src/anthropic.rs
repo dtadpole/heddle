@@ -128,23 +128,7 @@ pub fn anthropic_call(
         })?;
 
     // The system prompt is a top-level field, not a message.
-    let system = request
-        .messages
-        .iter()
-        .filter(|message| message.role == crate::types::Role::System)
-        .map(|message| {
-            message
-                .content
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>()
-        })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let system = anthropic_system(&request.messages);
 
     let mut body = serde_json::Map::new();
     body.insert(
@@ -223,6 +207,27 @@ pub fn anthropic_call(
         ),
         stream: true,
     })
+}
+
+/// The system prompt as Anthropic takes it (`anthropicSystem`): every system message's text, as one top-level
+/// string, the messages joined by a blank line. Shared by both Anthropic kinds.
+pub fn anthropic_system(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .filter(|message| message.role == crate::types::Role::System)
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// One message's content (`toAnthropicContent`): text blocks and base64 image blocks.
@@ -329,13 +334,14 @@ pub fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
 
 /// The event-stream fold (`anthropicChunks`): `text_delta`, `thinking_delta`, `tool_use` blocks with
 /// `input_json_delta` fragments, the stop reason and output count from `message_delta`, the end at `message_stop`;
-/// an `error` event is `REMOTE`.
+/// an `error` event is `REMOTE`. `signature_delta`, `ping` and `content_block_stop` carry nothing the loop reads.
 #[derive(Debug)]
 pub struct AnthropicFold {
     endpoint: String,
     calls: Vec<(u32, ToolCall)>,
     finish_reason: String,
     usage: Option<crate::usage::TokenUsage>,
+    live_tool_calls: bool,
 }
 
 impl AnthropicFold {
@@ -346,7 +352,16 @@ impl AnthropicFold {
             calls: Vec::new(),
             finish_reason: "stop".to_owned(),
             usage: None,
+            live_tool_calls: false,
         }
+    }
+
+    /// Also pass each tool-call fragment on as a [`Chunk::ToolCallDelta`] while the model writes it, beside the one
+    /// assembled call the round ends with (`liveToolCalls`). Off by default, so the publisher route's output is what
+    /// its checks pin; the Messages adapter turns it on.
+    pub fn with_live_tool_calls(mut self) -> Self {
+        self.live_tool_calls = true;
+        self
     }
 }
 
@@ -425,6 +440,21 @@ impl StreamFold for AnthropicFold {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
+                    if self.live_tool_calls {
+                        // As the provider sent them: a fragment names only what it carries.
+                        chunks.push(Chunk::ToolCallDelta {
+                            index,
+                            id: block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(ToString::to_string),
+                            name: block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .map(ToString::to_string),
+                            arguments_delta: String::new(),
+                        });
+                    }
                     let call = self.call(index);
                     call.id = id;
                     call.name = name;
@@ -455,6 +485,14 @@ impl StreamFold for AnthropicFold {
                                 None => String::new(),
                             };
                             self.call(index).arguments.push_str(&fragment);
+                            if self.live_tool_calls && !fragment.is_empty() {
+                                chunks.push(Chunk::ToolCallDelta {
+                                    index,
+                                    id: None,
+                                    name: None,
+                                    arguments_delta: fragment,
+                                });
+                            }
                         }
                         _ => {}
                     }

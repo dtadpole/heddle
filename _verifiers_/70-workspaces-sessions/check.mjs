@@ -957,6 +957,95 @@ test('a session interrupted mid-frame still reads, and its next turn lands', asy
   }
 })
 
+test('a session one process is writing refuses a second writer, so its log never holds a seq twice', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * R-developer-eight-27, reproduced the way it was found: a running server held a session, the command line resumed
+   * the same session with a turn, and both appended from their own in-memory count — the log held seqs 14 to 19
+   * twice and each process showed a different history. DSH keeps one writer per session (a lock beside the log;
+   * a second writer is refused with "session ... is already owned by an active write handle"), and so must this.
+   *
+   * The second half is the other order: a session the server has only **read** is written by the command line, and
+   * the server's next write must continue after it rather than from the count it read before.
+   */
+  const h = harness('writer-lock')
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const webTurn = async (body) => {
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return { status: response.status, text: await response.text() }
+    }
+    const said = (id) =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user')
+        .map((event) => event.message.content?.[0]?.text)
+    const assertEverySeqOnce = (id, when) => {
+      const seqs = readTranscript(join(h.home, 'sessions', id)).map((event) => event.seq)
+      assert.deepEqual(seqs, seqs.map((_, index) => index), `${when}: every seq is written once, in order\nsaw: ${seqs.join(', ')}`)
+    }
+
+    /** The server starts the session with a turn of its own, so it is the session's writer. */
+    const first = await webTurn({ prompt: 'remember the word loom', folder: h.work })
+    assert.equal(first.status, 200, `the server's turn ran\n${first.text}`)
+    assert.ok(!first.text.includes('event: error'), `and did not fail\n${first.text}`)
+    const id = /"session":"(session-[^"]+)"/.exec(first.text)?.[1]
+    assert.ok(id, `the turn names its session\n${first.text}`)
+    const transcript = transcriptFile(join(h.home, 'sessions', id))
+    const held = readFileSync(transcript)
+
+    /** The command line resumes it while the server still runs: refused, in DSH's words, and nothing is written. */
+    const cli = await runCli([...h.args, '--resume', id, '--turn', 'resumed from cli'], { env: h.env })
+    assert.equal(cli.timedOut, false, `the refused turn returned\n${cli.stdout}${cli.stderr}`)
+    assert.notEqual(cli.code, 0, `a second writer is refused while the server holds the session\n${cli.stdout}${cli.stderr}`)
+    assert.ok(
+      cli.stderr.includes(`session "${id}" is already owned by an active write handle`),
+      `and the refusal says why\n${cli.stdout}${cli.stderr}`,
+    )
+    assert.ok(readFileSync(transcript).equals(held), 'and the refused writer appended nothing to the log')
+
+    /** The server keeps writing the session it holds, from the log's own next seq. */
+    const second = await webTurn({ session: id, prompt: 'resumed from web' })
+    assert.equal(second.status, 200, `the server's next turn ran\n${second.text}`)
+    assert.ok(!second.text.includes('event: error'), `and did not fail\n${second.text}`)
+    assertEverySeqOnce(id, 'after a refused command-line turn and the next server turn')
+    assert.deepEqual(said(id), ['remember the word loom', 'resumed from web'], 'the log holds one history: the server\'s two turns and nothing else')
+
+    /** The other order: the command line writes a session the server has read but does not hold. */
+    const started = await runCli([...h.args, '--turn', 'started on the command line', '--json'], { env: h.env })
+    assert.equal(started.code, 0, `the command line started a session\n${started.stdout}${started.stderr}`)
+    const other = parseJson(started.stdout)?.session
+    assert.ok(typeof other === 'string' && other !== id, `a second session\n${started.stdout}`)
+    const viewed = await fetch(new URL(`/api/sessions/${other}`, live.url), { headers: { cookie } })
+    assert.equal(viewed.status, 200, 'the server reads the session')
+    await viewed.text()
+    const again = await runCli([...h.args, '--resume', other, '--turn', 'the command line again'], { env: h.env })
+    assert.equal(again.code, 0, `reading does not hold a session, so the command line may still write it\n${again.stdout}${again.stderr}`)
+    const continued = await webTurn({ session: other, prompt: 'the server continues it' })
+    assert.equal(continued.status, 200, `the server's turn on it ran\n${continued.text}`)
+    assert.ok(!continued.text.includes('event: error'), `and did not fail\n${continued.text}`)
+    assertEverySeqOnce(other, 'after the server wrote a session the command line had written since the server read it')
+    assert.deepEqual(
+      said(other),
+      ['started on the command line', 'the command line again', 'the server continues it'],
+      'and the server\'s turn continued the history on disk rather than the one it had read',
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
@@ -1512,6 +1601,120 @@ test('a workspace is unregistered, and a root that still holds sessions is refus
     removeDir(empty)
     removeDir(busy)
     removeDir(parent)
+  }
+})
+
+test('the Web API adds, renames and deletes a workspace the way DSH does', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * The owner's request of 29 Oct — "ensure add, remove, rename workspace all works … function parity" with DSH — judged
+   * over the routes the page calls, on whichever build runs this part:
+   *
+   * - **add** registers an existing absolute folder, answers `created: false` for one already registered (a trailing
+   *   slash is the same folder), nests a folder under the root above it, and refuses a missing, relative, absent or
+   *   file path with `400`;
+   * - **rename** by id or by path; a blank name is `400`, another workspace's name is `409 workspace/name-conflict`
+   *   (DSH's rule), the current name is a no-op, an unknown workspace `404`;
+   * - **delete** removes the registration even while sessions remain — they move to the root above, or out of every
+   *   workspace (Ungrouped) — and an unknown workspace is `404`. The CLI keeps its refusal; the check above judges it.
+   */
+  const h = harness('web-crud')
+  const top = fixtureDir('web-crud-top')
+  const child = join(top, 'child')
+  const loose = fixtureDir('web-crud-loose')
+  const file = join(loose, 'a-file.txt')
+  let live
+  try {
+    mkdirSync(child, { recursive: true })
+    writeFileSync(file, 'not a folder\n')
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body) })
+    const views = async () => (await call('/api/workspaces')).body.workspaces ?? []
+
+    const added = await post('/api/workspaces', { path: top })
+    assert.equal(added.status, 200, `a folder is added (${JSON.stringify(added.body)})`)
+    assert.equal(added.body.created, true, 'and this call created it')
+    assert.equal(added.body.record.path, realpathSync(top), 'under its canonical path')
+    const again = await post('/api/workspaces', { path: `${top}/` })
+    assert.equal(again.status, 200, 'adding it again is not an error')
+    assert.equal(again.body.created, false, 'it reports the workspace that was already there')
+    const nested = await post('/api/workspaces', { path: child })
+    assert.equal(nested.status, 200, 'a folder inside it is added too')
+    const byPath = Object.fromEntries((await views()).map((view) => [view.path, view]))
+    assert.equal(byPath[realpathSync(child)]?.parent, byPath[realpathSync(top)]?.id, 'and nests under the root above it')
+    for (const [what, body] of [
+      ['no path', {}],
+      ['a folder that does not exist', { path: join(loose, 'nowhere') }],
+      ['a relative path', { path: 'not/absolute' }],
+      ['a file', { path: file }],
+    ]) {
+      const refused = await post('/api/workspaces', body)
+      assert.equal(refused.status, 400, `${what} is refused (${JSON.stringify(refused.body)})`)
+      assert.equal(typeof refused.body.error, 'string', `with a sentence for ${what}`)
+    }
+
+    const topId = byPath[realpathSync(top)].id
+    const renamed = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Top Renamed' }) })
+    assert.equal(renamed.status, 200, `a workspace is renamed by id (${JSON.stringify(renamed.body)})`)
+    assert.equal(renamed.body.title, 'Top Renamed')
+    assert.equal(renamed.body.path, realpathSync(top), 'and its path does not move')
+    const byItsPath = await call(`/api/workspaces/${encodeURIComponent(child)}`, { method: 'PATCH', body: JSON.stringify({ title: '  Child  ' }) })
+    assert.equal(byItsPath.body.title, 'Child', 'or by path, trimmed')
+    const clash = await call(`/api/workspaces/${encodeURIComponent(child)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Top Renamed' }) })
+    assert.equal(clash.status, 409, `another workspace's name is refused (${JSON.stringify(clash.body)})`)
+    assert.equal(clash.body.code, 'workspace/name-conflict', "with DSH's code")
+    assert.equal(clash.body.error, 'A workspace named “Top Renamed” already exists.', "and DSH's sentence")
+    const same = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Top Renamed' }) })
+    assert.equal(same.status, 200, 'confirming the current name is not a clash with itself')
+    assert.equal(same.body.updatedAt, renamed.body.updatedAt, 'and changes nothing')
+    const blank = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'PATCH', body: JSON.stringify({ title: '   ' }) })
+    assert.equal(blank.status, 400, 'a blank name is refused')
+    const unknown = await call(`/api/workspaces/${encodeURIComponent(join(loose, 'nowhere'))}`, { method: 'PATCH', body: JSON.stringify({ title: 'x' }) })
+    assert.equal(unknown.status, 404, 'an unknown workspace is not found')
+
+    const inChild = await post('/api/sessions', { branch: child })
+    assert.equal(inChild.status, 200, `a session starts in the child (${JSON.stringify(inChild.body)})`)
+    const inTop = await post('/api/sessions', { branch: top })
+    assert.equal(inTop.status, 200, `and one in the top (${JSON.stringify(inTop.body)})`)
+    const childGone = await call(`/api/workspaces/${encodeURIComponent(child)}`, { method: 'DELETE' })
+    assert.equal(childGone.status, 200, `a workspace holding a session is deleted (${JSON.stringify(childGone.body)})`)
+    assert.equal(childGone.body.ownedSessions, 1, 'and it says how many sessions it held')
+    assert.equal(childGone.body.adoptedBy, 'Top Renamed', 'and that the root above took them')
+    const topGone = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'DELETE' })
+    assert.equal(topGone.status, 200, `a workspace with sessions and nothing above is deleted too (${JSON.stringify(topGone.body)})`)
+    assert.equal(topGone.body.ownedSessions, 2)
+    const left = await views()
+    assert.ok(!left.some((view) => view.path === realpathSync(top) && view.origin !== 'auto'), 'it is no longer a workspace')
+    const owned = new Set(left.filter((view) => view.origin !== 'auto').flatMap((view) => view.sessionIds ?? []))
+    assert.ok(!owned.has(inTop.body.session) && !owned.has(inChild.body.session), 'and its sessions are Ungrouped')
+    const sessions = (await call('/api/sessions')).body.map((meta) => meta.id)
+    assert.ok(sessions.includes(inTop.body.session) && sessions.includes(inChild.body.session), 'but they still exist')
+    assert.ok(existsSync(top), 'and so does the folder')
+    const missing = await call(`/api/workspaces/${encodeURIComponent(join(loose, 'nowhere'))}`, { method: 'DELETE' })
+    assert.equal(missing.status, 404, 'an unknown workspace is not found')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(top)
+    removeDir(loose)
   }
 })
 
@@ -4244,6 +4447,84 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
     assert.notEqual(reduced.first, result.beforeOrder[1], 'while the order still changes')
   } finally {
     browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+/**
+ * The text of every tool result a turn's stream carried, in order: the server's SSE body is one JSON event per data
+ * line, and a tool result is a message whose role is tool.
+ */
+function toolResultsInStream(body) {
+  return body
+    .split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => {
+      try {
+        return JSON.parse(line.slice('data: '.length))
+      } catch {
+        return null
+      }
+    })
+    .map((data) => data?.event)
+    .filter((event) => event?.type === 'message' && event.message?.role === 'tool')
+    .map((event) => (event.message.content ?? []).map((part) => part.text ?? '').join(''))
+}
+
+test("a session's turn runs its tools in the session's own folder, through the server and through the command line", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * R-developer-eight-10 (DSH parity C3), measured on both builds: a turn sent to a session of workspace B ran bash in
+   * the directory the server was launched in, so the model's pwd printed that directory and its relative paths
+   * landed there. DSH runs a session's tools in the session's own directory. The turn here is one scripted bash pwd,
+   * and every process that runs it is launched somewhere else: the server in the repository, the command line in a
+   * sibling folder A. Neither names a sandbox root, so the only thing that can put the shell in B is the session.
+   */
+  const h = harness('tool-cwd')
+  scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'bash', arguments: { command: 'pwd' } } }, { text: 'printed the folder' }] })
+  const folderA = join(h.work, 'ws-a')
+  const folderB = join(h.work, 'ws-b')
+  mkdirSync(folderA, { recursive: true })
+  mkdirSync(folderB, { recursive: true })
+  /** The shell reports its physical directory, so the expectation is the folder's real path. */
+  const expected = `${realpathSync(folderB)}\n`
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', folderB, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created in B\n${made.stdout}${made.stderr}`)
+    const created = parseJson(made.stdout)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const turn = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: created.session, prompt: 'where am I' }),
+    })
+    const stream = await turn.text()
+    assert.equal(turn.status, 200, `the turn ran through the server\n${stream}`)
+    const served = toolResultsInStream(stream)
+    assert.equal(served.length, 1, `the turn made its one tool call\n${stream}`)
+    assert.equal(served[0], expected, `bash ran in the session's folder, not the server's launch directory (${repoRoot})`)
+    live.kill()
+    live = undefined
+
+    /** The same session resumed by a command line launched in A, which is the directory its sandbox falls back to. */
+    const resumed = await runCli(adminArgs(h, ['--resume', created.session, '--turn', 'and where am I now']), { env: h.env, cwd: folderA })
+    assert.equal(resumed.code, 0, `the resumed turn ran\n${resumed.stdout}${resumed.stderr}`)
+    const results = readTranscript(join(h.home, 'sessions', created.session))
+      .filter((event) => event.type === 'message' && event.message?.role === 'tool')
+      .map((event) => (event.message.content ?? []).map((part) => part.text ?? '').join(''))
+    assert.equal(results.length, 2, `both turns' tool results are in the session\nsaw: ${JSON.stringify(results)}`)
+    assert.equal(results[1], expected, `the resumed turn's bash ran in the session's folder, not in A (${folderA})`)
+  } finally {
     live?.kill()
     removeDir(h.home)
     removeDir(h.work)

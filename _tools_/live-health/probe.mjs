@@ -42,6 +42,7 @@
  *   _tools_/live-health/probe.mjs                     # one pass, summary, exit 0/1/3
  *   _tools_/live-health/probe.mjs --json --pin        # append the pass to the pinned JSONL
  *   _tools_/live-health/probe.mjs --no-turn           # judge the page, do not spend a turn
+ *   _tools_/live-health/probe.mjs --no-deployment-turn   # 8082's turn alone paused; the preview's still goes
  *   _tools_/live-health/probe.mjs --deployment-conversation   # 8082 also gets a follow-up, same page
  *   _tools_/live-health/probe.mjs --real-model=deepseek-official/deepseek-flash   # the real turn's model (D-052 default)
  *   _tools_/live-health/probe.mjs --log=~/.heddle/web.log --deploy=~/heddle-live
@@ -52,15 +53,17 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 
 import {
+  acrossMove,
   classifyOutage,
   consoleVerdict,
+  deploymentMove,
   deploymentDown,
   doorVerdict,
   expectedPage,
@@ -72,6 +75,7 @@ import {
   parseArguments,
   expectedSeatLabel,
   fixtureOnly,
+  healthSessionExpired,
   modelLabel,
   REAL_MODEL,
   realModelChoice,
@@ -114,6 +118,21 @@ const SEND_TURN = options['no-turn'] !== true
  * preview wrote into the deployment's session store. A paused turn is unjudged, never a pass.
  */
 const PREVIEW_TURN = options['no-preview-turn'] !== true
+/**
+ * The deployment's turn alone can be paused too: a turn that landed in a session the monitor does not
+ * own pauses that turn until the coordinator answers (2026-10-29 11:35Z, a new-session draft on 8082
+ * turned out to be someone's existing empty session). A paused turn is unjudged, never a pass.
+ */
+const DEPLOYMENT_TURN = options['no-deployment-turn'] !== true
+/**
+ * The monitor's own health workspace (the coordinator's option b, 2026-10-29): a folder of its own,
+ * under no user workspace, registered on the deployment, where the deployment's real-model turn gets a
+ * session the monitor created through the session-creation API - never one found by title, never one
+ * adopted. `--health-session=pass` creates one every pass; the default keeps the day's own id.
+ */
+const HEALTH_DIR = expand(options['health-dir'] ?? '~/.heddle-live-monitor/health')
+const HEALTH_STATE = expand(options['health-state'] ?? '~/.heddle-live-monitor/state.json')
+const HEALTH_SESSION_PER = options['health-session'] === 'pass' ? 'pass' : 'day'
 /**
  * The deployment's two-message check, on demand: the coordinator asked (review 255, 2026-10-25) for a
  * two-message conversation on 8082 as well as 3097 once the page patch is deployed. The follow-up goes
@@ -613,7 +632,140 @@ function judgeMarker(load) {
  * failed turn's code. The Rust preview is judged on the page alone, so its turn passes `false` and
  * never reads the deployment's store.
  */
-async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {}) {
+/**
+ * The deployment's own health session, through its API from inside the page (same origin, the page's
+ * cookie): the health folder is registered as a workspace (idempotent), then the day's recorded id is
+ * kept when the server still lists it, or a new session is created at the folder - its id comes from
+ * the reply, so it is the monitor's by construction. The model is recorded on it the way the page's
+ * selection does. Returns `{ ok, id, created, title, branch }` or `{ ok: false, reason }`.
+ */
+async function ownHealthSession(pageId, scope, choice) {
+  try {
+    mkdirSync(HEALTH_DIR, { recursive: true })
+  } catch (error) {
+    return { ok: false, reason: `the health folder could not be made: ${error.message}` }
+  }
+  const branch = realpathSync(HEALTH_DIR)
+  const today = new Date().toISOString().slice(0, 10)
+  const title = `live health check ${today}`
+  let state = {}
+  try {
+    state = JSON.parse(readFileSync(HEALTH_STATE, 'utf8'))
+  } catch {}
+  const kept = HEALTH_SESSION_PER === 'day' && state?.[scope]?.date === today && typeof state[scope].id === 'string' ? state[scope].id : null
+  const selection = { endpoint: choice.endpoint, model: choice.model, ...(choice.effort !== null ? { reasoningEffort: choice.effort } : {}) }
+  const got = (await callTool(
+    'evaluate_script',
+    {
+      pageId,
+      function: `(async () => {
+        const post = async (url, body) => {
+          const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+          let parsed = null
+          try { parsed = await response.json() } catch {}
+          return { status: response.status, body: parsed }
+        }
+        const said = (reply) => reply.status + (reply.body && reply.body.error ? ': ' + reply.body.error : '')
+        const workspace = await post('/api/workspaces', { path: ${JSON.stringify(branch)}, name: 'live-health' })
+        if (workspace.status !== 200) return { ok: false, reason: 'the health workspace could not be registered (' + said(workspace) + ')' }
+        let id = null
+        let created = false
+        const keep = ${JSON.stringify(kept)}
+        if (keep !== null) {
+          const list = await (await fetch('/api/sessions')).json()
+          if (Array.isArray(list) && list.some((item) => item.id === keep)) id = keep
+        }
+        if (id === null) {
+          const made = await post('/api/sessions', { branch: ${JSON.stringify(branch)}, title: ${JSON.stringify(title)} })
+          if (made.status !== 200 || typeof (made.body && made.body.session) !== 'string') return { ok: false, reason: 'no health session could be created (' + said(made) + ')' }
+          id = made.body.session
+          created = true
+        }
+        const model = await post('/api/sessions/' + encodeURIComponent(id) + '/model', ${JSON.stringify(selection)})
+        if (model.status !== 200) return { ok: false, id, created, reason: 'the model could not be recorded on the health session (' + said(model) + ')' }
+        return { ok: true, id, created }
+      })`,
+    },
+    25_000,
+  ))?.value ?? null
+  if (got?.created === true && typeof got.id === 'string') {
+    try {
+      mkdirSync(dirname(HEALTH_STATE), { recursive: true })
+      writeFileSync(HEALTH_STATE, `${JSON.stringify({ ...state, [scope]: { date: today, id: got.id } }, null, 2)}\n`)
+    } catch {}
+  }
+  if (got === null) return { ok: false, reason: 'the page could not reach the session API' }
+  return { ...got, title, branch }
+}
+
+/**
+ * Open exactly one session's row in the live page: the page's script is a module, so the row is
+ * clicked as a person would. The tree is reloaded with the health workspace marked open in this
+ * browser's own storage, the row keyed `session:<id>` is clicked, and it must then be the selected one.
+ */
+async function openOwnRow(pageId, id, branch) {
+  const key = JSON.stringify(`#tree li[data-row-key=${JSON.stringify(`session:${id}`)}]`)
+  await callTool(
+    'evaluate_script',
+    {
+      pageId,
+      function: `() => {
+        try {
+          const stored = JSON.parse(localStorage.getItem('heddle.tree.expanded.v1') ?? '[]')
+          const open = new Set(Array.isArray(stored) ? stored : [])
+          open.add(${JSON.stringify(branch)})
+          localStorage.setItem('heddle.tree.expanded.v1', JSON.stringify([...open]))
+        } catch {}
+        setTimeout(() => location.reload(), 50)
+        return true
+      }`,
+    },
+    15_000,
+  ).catch(() => {})
+  await new Promise((done) => setTimeout(done, 1_500))
+  if (!(await waitFor(pageId, '#prompt textarea', 20_000))) return { ok: false, reason: 'the page did not come back after the reload' }
+  for (let round = 0; round < 6; round += 1) {
+    const where = (await callTool(
+      'evaluate_script',
+      {
+        pageId,
+        function: `() => {
+          const li = document.querySelector(${key})
+          if (li !== null) {
+            const row = li.querySelector('.row') ?? li
+            row.scrollIntoView({ block: 'center' })
+            const r = row.getBoundingClientRect()
+            return { found: true, selected: li.getAttribute('aria-selected') === 'true', x: r.left + Math.min(r.width / 2, 120), y: r.top + r.height / 2 }
+          }
+          const top = [...document.querySelectorAll('#tree li[data-kind="workspace"]')].find((node) => node.querySelector('.row')?.dataset.path === ${JSON.stringify(branch)}) ?? null
+          if (top === null) return { found: false, expand: null }
+          const closed = [top, ...top.querySelectorAll('li[aria-expanded="false"]')].find((node) => node.getAttribute('aria-expanded') === 'false') ?? null
+          if (closed === null) return { found: false, expand: null }
+          const row = closed.querySelector('.row') ?? closed
+          row.scrollIntoView({ block: 'center' })
+          const r = row.getBoundingClientRect()
+          return { found: false, expand: { x: r.left + Math.min(r.width / 2, 120), y: r.top + r.height / 2 } }
+        }`,
+      },
+      15_000,
+    ))?.value ?? null
+    if (where?.found === true) {
+      if (where.selected === true) return { ok: true }
+      await callTool('click_at', { pageId, x: Math.round(where.x), y: Math.round(where.y) }, 15_000)
+      await new Promise((done) => setTimeout(done, 600))
+      continue
+    }
+    if (where?.expand) {
+      await callTool('click_at', { pageId, x: Math.round(where.expand.x), y: Math.round(where.expand.y) }, 15_000)
+      await new Promise((done) => setTimeout(done, 600))
+      continue
+    }
+    await new Promise((done) => setTimeout(done, 700))
+  }
+  return { ok: false, reason: "the health session's row could not be opened in the tree" }
+}
+
+async function judgeTurn(pageId, beforeSession, { deploymentTrace = true, ownSession = false } = {}) {
   if (!SEND_TURN) return { verdict: 'unjudged', detail: '--no-turn' }
   if (pageId === undefined) return { verdict: 'unjudged', detail: 'the page is not open, so a turn cannot be sent' }
   try {
@@ -627,7 +779,34 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
      * and by the page's own selection function when the tree does not draw it. Only a deployment with
      * no health session yet gets a new one.
      */
-    const healthSession = (await callTool(
+    /**
+     * Which turn this target gets (the coordinator's D-052 decision, 2026-10-29), read before the
+     * session is chosen because a real-model pass rolls its session daily. With only the offline
+     * fixture configured, the fixture turn as before; otherwise one minimal real turn on WANT_MODEL at
+     * its lowest effort, and a model that cannot be had fails the turn - no other model is ever tried.
+     * Endpoints are read by kind only (public-hygiene).
+     */
+    const catalogue = (await callTool(
+      'evaluate_script',
+      { pageId, function: `(async () => { try { return await (await fetch('/api/endpoints')).json() } catch { return null } })` },
+      15_000,
+    ))?.value ?? null
+    const kinds = Array.isArray(catalogue?.endpoints) ? catalogue.endpoints.map((item) => ({ kind: item?.kind ?? null })) : null
+    const mode = fixtureOnly(kinds) ? 'fixture' : 'real'
+    const choice = mode === 'real' ? realModelChoice(catalogue, WANT_MODEL) : null
+    if (choice !== null && choice.ok !== true) {
+      return { mode, selection: choice, session: { reused: false, via: 'none', title: null }, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
+    }
+    /**
+     * The deployment's real turn goes only into a session the monitor created itself through the API, in
+     * its own health workspace (option b). Nothing is looked up by title there, so no session someone
+     * else made - like the empty one 8082's New session opened on 2026-10-29 - can be chosen.
+     */
+    const own = ownSession && mode === 'real' ? await ownHealthSession(pageId, 'deployment', choice) : null
+    if (own !== null && own.ok !== true) {
+      return { mode, selection: choice, session: { reused: false, via: 'api', title: null }, verdict: 'unjudged', detail: `no turn was sent: ${own.reason}` }
+    }
+    const found = own !== null ? null : (await callTool(
       'evaluate_script',
       {
         pageId,
@@ -639,13 +818,20 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
           if (hit === null) return null
           const rows = [...document.querySelectorAll('#tree li[data-kind="session"]')]
           const row = rows.find((item) => (item.querySelector('.label')?.textContent ?? '') === hit.title) ?? null
-          if (row === null) return { id: hit.id, title: hit.title, row: null }
+          if (row === null) return { id: hit.id, title: hit.title, created: hit.created ?? null, row: null }
           const rect = row.getBoundingClientRect()
-          return { id: hit.id, title: hit.title, row: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } }
+          return { id: hit.id, title: hit.title, created: hit.created ?? null, row: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } }
         })`,
       },
       20_000,
     ))?.value ?? null
+    /**
+     * A real model is sent the whole session as context, so a real-model pass retires a health session
+     * from an earlier UTC day and starts a new one (`healthSessionExpired`): the old one is left as it
+     * is, never written into again by a real turn.
+     */
+    const retired = mode === 'real' && found !== null && healthSessionExpired(found.created) ? found.title : null
+    const healthSession = own !== null ? { id: own.id, title: own.title, row: null, own: true } : retired === null ? found : null
     /** The session list as the page's server holds it: id and `updated` only, never titles of others. */
     const sessionsNow = async () =>
       (await callTool(
@@ -678,11 +864,23 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
         target = ((await sessionsNow()) ?? []).find((item) => !known.has(item.id))?.id ?? null
       }
       if (target === null) {
-        return { verdict: 'unjudged', detail: 'New session started nothing the server lists, so no turn was sent', session: { reused: false, via: 'none', title: null } }
+        /**
+         * No new id: send nothing. An empty log cannot tell a page-side draft from an existing empty
+         * session someone else created - on 2026-10-29 at 11:35Z 8082's New session opened such a
+         * session and a turn written there landed `other`. Only a session the server newly lists is
+         * the monitor's own.
+         */
+        return { mode, verdict: 'unjudged', detail: 'New session started nothing the server lists, so no turn was sent', session: { reused: false, via: 'none', title: null, ...(retired !== null ? { retired } : {}) } }
       }
       reused = 'started'
     }
-    if (healthSession?.row !== null && healthSession?.row !== undefined) {
+    if (healthSession?.own === true) {
+      const opened = await openOwnRow(pageId, healthSession.id, own.branch)
+      if (opened.ok !== true) {
+        return { mode, selection: choice, session: { reused: !own.created, via: 'api', title: own.title }, verdict: 'unjudged', detail: `no turn was sent: ${opened.reason}` }
+      }
+      reused = own.created ? 'api-created' : 'api-kept'
+    } else if (healthSession?.row !== null && healthSession?.row !== undefined) {
       await callTool('click_at', { pageId, x: Math.round(healthSession.row.x), y: Math.round(healthSession.row.y) }, 15_000)
       reused = 'tree'
     } else if (healthSession?.id !== undefined) {
@@ -691,27 +889,9 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       reused = 'selection'
     }
     if (reused !== 'new') await new Promise((done) => setTimeout(done, 400))
-    const sessionNote = { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null }
-    /**
-     * Which turn this target gets (the coordinator's D-052 decision, 2026-10-29). With only the offline
-     * fixture configured, the fixture turn as before. Otherwise one minimal real turn: the monitor's own
-     * session is switched onto WANT_MODEL at its lowest effort through the page's own selection
-     * function before the prompt goes, and a model that cannot be had fails the turn - no other model is
-     * ever tried. Endpoints are read by kind only (public-hygiene).
-     */
-    const catalogue = (await callTool(
-      'evaluate_script',
-      { pageId, function: `(async () => { try { return await (await fetch('/api/endpoints')).json() } catch { return null } })` },
-      15_000,
-    ))?.value ?? null
-    const kinds = Array.isArray(catalogue?.endpoints) ? catalogue.endpoints.map((item) => ({ kind: item?.kind ?? null })) : null
-    const mode = fixtureOnly(kinds) ? 'fixture' : 'real'
+    const sessionNote = { reused: ['tree', 'selection', 'api-kept'].includes(reused), via: reused, title: healthSession?.title ?? null, ...(retired !== null ? { retired } : {}) }
     let selection = null
     if (mode === 'real') {
-      const choice = realModelChoice(catalogue, WANT_MODEL)
-      if (choice.ok !== true) {
-        return { mode, selection: choice, session: sessionNote, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
-      }
       /**
        * The page's script is a module, so its selection functions are not reachable from outside: the
        * choice is made the way a person makes it, through the model seat's own menu (Model row, the
@@ -1197,12 +1377,14 @@ pass.checks.marker = judgeMarker(pass.checks.load)
 if (pass.checks.load.verdict === 'pass') {
   const pageId = pass.checks.load.pageId
   pass.checks.consoleOnLoad = await judgeConsole(pageId, 'load')
-  pass.checks.turn = await judgeTurn(pageId, pass.checks.load.page)
+  pass.checks.turn = DEPLOYMENT_TURN
+    ? await judgeTurn(pageId, pass.checks.load.page, { ownSession: true })
+    : { verdict: 'unjudged', detail: 'the deployment turn is paused (--no-deployment-turn)' }
   if (DEPLOYMENT_CONVERSATION) {
     const first = pass.checks.turn
     let conversation = { verdict: 'unjudged', detail: 'the first message did not pass, so no follow-up was sent' }
     if (first.verdict === 'pass') {
-      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null)
+      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { ownSession: true })
       conversation = {
         ...conversationVerdict({ gate: { open: true }, first, second: followUp, sameSession: sameHealthSession(first, followUp) }),
         followUp: { landing: followUp.landing ?? null, answerHead: followUp.answerHead ?? null, settledMs: followUp.settledMs ?? null },
@@ -1235,6 +1417,21 @@ pass.compare = {
   note: 'counts only; they move with content (session rows in the tree, turns in the log), so compare them at equal content and name a move at equal content as a regression for the ui lane',
 }
 
+/**
+ * A redeploy can land inside a pass (2026-10-29 11:08Z). The checkout is read again here: when its
+ * head or built page moved since the start, a failure measured against the start's build is unjudged
+ * and the move is recorded; the next pass judges the new build.
+ */
+const endBuilt = existsSync(deployment.pagePath) ? readFileSync(deployment.pagePath) : null
+const move = deploymentMove(
+  { head: deployment.head, marker: deployment.expectedMarker },
+  { head: gitAt(DEPLOY_ROOT, 'rev-parse', 'HEAD'), marker: endBuilt === null ? null : createHash('sha256').update(endBuilt).digest('hex').slice(0, 12) },
+)
+if (move !== null) {
+  pass.deploymentMoved = move
+  for (const name of Object.keys(pass.checks)) pass.checks[name] = acrossMove(pass.checks[name], move)
+}
+
 pass.verdict = passVerdict(pass.checks)
 
 /** The pinned and printed record is redacted at the boundary: home paths under ~, tokens gone. */
@@ -1250,6 +1447,10 @@ if (options.json === true) {
   const mark = (verdict) => (verdict === 'pass' ? 'pass' : verdict === 'fail' ? 'FAIL' : '----')
   say(`live-health ${pass.at}`)
   say(`deployment  ${deploymentRecord.root} @ ${deployment.headShort ?? 'not a checkout'} (${deployment.branch ?? '?'}), main ${deployment.mainTipShort ?? '?'}${deployment.mainTipFresh ? '' : ' (ref not refreshed)'}, behind ${deployment.behind ?? '?'}, ahead ${deployment.ahead ?? '?'}${deployment.dirty ? `, ${deployment.dirty} uncommitted` : ''}`)
+  if (pass.deploymentMoved !== undefined) {
+    const moved = pass.deploymentMoved
+    say(`moved       the deployment moved during the pass: ${moved.fromHead} -> ${moved.toHead} (page ${moved.fromMarker} -> ${moved.toMarker}); failures are unjudged`)
+  }
   say(`gate        ${mark(pass.checks.gate.verdict)}  ${pass.checks.gate.detail}`)
   if (pass.outage !== undefined) {
     say(

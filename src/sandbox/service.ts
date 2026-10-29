@@ -91,7 +91,10 @@ export const Config = Schema.object({
     Schema.const('workspace-write' as const),
     Schema.const('danger-full-access' as const),
   ]).default('workspace-write'),
-  /** The directory writes are confined to. Defaults to the process's directory. */
+  /**
+   * The directory writes are confined to, for every session. Unset, each call is rooted at its session's own
+   * folder, and the process's directory is the fallback for a call with none (see `rootFor`).
+   */
   workspaceRoot: Schema.string(),
   /** Extra absolute roots a write may also reach, named one by one (in addition to the host temp areas). */
   extraWritableRoots: Schema.array(Schema.string()).default([]),
@@ -138,8 +141,11 @@ export class SandboxService extends Service {
   static readonly provide = 'sandbox'
 
   readonly mode: SandboxMode
+  /** The fallback root: the configured one, else the process's directory. A session's call may be rooted elsewhere. */
   readonly workspaceRoot: string
   readonly extraWritableRoots: readonly string[]
+  /** Whether the operator named the root (`--sandbox-root`, or the row's `workspaceRoot`) rather than inheriting a cwd. */
+  private readonly rootNamed: boolean
   /** The selected platform runner, or `undefined` when the platform (or the config) has none. */
   private readonly backend: SandboxBackend | undefined
 
@@ -147,6 +153,7 @@ export class SandboxService extends Service {
     super(ctx, 'sandbox')
     this.mode = config.mode ?? 'workspace-write'
     this.workspaceRoot = canonical(config.workspaceRoot ?? process.cwd())
+    this.rootNamed = config.workspaceRoot !== undefined
     this.extraWritableRoots = (config.extraWritableRoots ?? []).map((root) => canonical(root))
     this.backend =
       config.backend === 'none'
@@ -154,9 +161,22 @@ export class SandboxService extends Service {
         : selectBackend(process.platform, { ...(config.landlockRunner !== undefined ? { landlockRunner: config.landlockRunner } : {}) })
   }
 
+  /**
+   * The folder one session's calls are rooted at: their working directory and their `workspace-write` boundary.
+   *
+   * DSH's rule (`dsh-sandbox-policy` `resolve`, `dsh-working-directory` `get`): a session's recorded folder is its
+   * workspace, and the configured root is the fallback for a call with no session folder. heddle keeps one
+   * strengthening: a root the operator **named** applies to every session, because `--sandbox-root` promises to
+   * confine file effects to that directory. Without this, every turn ran in the server's launch directory.
+   */
+  rootFor(folder?: string): string {
+    if (this.rootNamed || folder === undefined || folder.trim().length === 0) return this.workspaceRoot
+    return canonical(folder)
+  }
+
   /** The policy a call runs under, so a caller can report it and every consumer shares one value. */
-  policy(mode: SandboxMode = this.mode): SandboxExecutionPolicy {
-    return { mode, workspaceRoot: this.workspaceRoot, extraWritableRoots: this.extraWritableRoots }
+  policy(mode: SandboxMode = this.mode, root: string = this.workspaceRoot): SandboxExecutionPolicy {
+    return { mode, workspaceRoot: root === this.workspaceRoot ? root : canonical(root), extraWritableRoots: this.extraWritableRoots }
   }
 
   /** The selected runner's name, or `null` when this host can confine nothing — reported rather than guessed. */
@@ -185,9 +205,11 @@ export class SandboxService extends Service {
    * admitted the temp directory refuse a write to it, because `/var/folders/...` is a symlink to
    * `/private/var/folders/...` and only one side of the comparison had been resolved. A sandbox that
    * compares a resolved path with an unresolved one is a sandbox that says no for the wrong reason.
+   *
+   * `root` is the call's folder (`rootFor`), which a relative path resolves against; left out, the fallback root.
    */
-  resolvePath(path: string): string {
-    return canonical(isAbsolute(path) ? resolve(path) : resolve(this.workspaceRoot, path))
+  resolvePath(path: string, root: string = this.workspaceRoot): string {
+    return canonical(isAbsolute(path) ? resolve(path) : resolve(root, path))
   }
 
   /**
@@ -198,12 +220,12 @@ export class SandboxService extends Service {
    * failing closed is the whole point, because a command that runs unconfined after being asked to confine it is
    * the silent widening this seam exists to prevent.
    */
-  confine(argv: readonly string[], mode: SandboxMode = this.mode): ConfinedArgv {
+  confine(argv: readonly string[], mode: SandboxMode = this.mode, root: string = this.workspaceRoot): ConfinedArgv {
     if (mode === 'danger-full-access') {
       return { argv: [...argv], enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }
     }
     if (this.backend === undefined || !this.backend.probe()) throw new SandboxUnavailableError(mode)
-    return this.backend.confine(argv, this.policy(mode))
+    return this.backend.confine(argv, this.policy(mode, root))
   }
 
   /**
@@ -216,29 +238,31 @@ export class SandboxService extends Service {
    * `mode` is the **policy for this call**, which is how a session's own access mode reaches the effect:
    * the registry resolves it once per call from the session log and passes it in, so the same service can
    * decide two calls under two sessions at the same instant. Left out, the deployment mode applies, which
-   * keeps every older call site's meaning.
+   * keeps every older call site's meaning. `root` is the call's folder in the same way.
    */
-  assertWritable(path: string, mode: SandboxMode = this.mode): string {
-    const target = this.resolvePath(path)
+  assertWritable(path: string, mode: SandboxMode = this.mode, root: string = this.workspaceRoot): string {
+    const policy = this.policy(mode, root)
+    const target = this.resolvePath(path, policy.workspaceRoot)
     if (mode === 'danger-full-access') return target
     if (mode === 'read-only') {
       throw new SandboxDenial(`the sandbox is read-only, so '${path}' cannot be written`, {
         path: target,
         mode,
-        workspaceRoot: this.workspaceRoot,
+        workspaceRoot: policy.workspaceRoot,
       })
     }
-    const allowed = writableRoots(this.policy(mode))
-    if (allowed.some((root) => contains(root, target))) return target
+    const allowed = writableRoots(policy)
+    if (allowed.some((boundary) => contains(boundary, target))) return target
     throw new SandboxDenial(
-      `'${target}' is outside the sandbox root ${this.workspaceRoot}, so it cannot be written`,
-      { path: target, mode, workspaceRoot: this.workspaceRoot },
+      `'${target}' is outside the sandbox root ${policy.workspaceRoot}, so it cannot be written`,
+      { path: target, mode, workspaceRoot: policy.workspaceRoot },
     )
   }
 
-  /** Refuse a read outside the workspace in the confined modes, under this call's policy. */
-  assertReadable(path: string, mode: SandboxMode = this.mode): string {
-    const target = this.resolvePath(path)
+  /** Refuse a read outside the workspace in the confined modes, under this call's policy and folder. */
+  assertReadable(path: string, mode: SandboxMode = this.mode, root: string = this.workspaceRoot): string {
+    const policy = this.policy(mode, root)
+    const target = this.resolvePath(path, policy.workspaceRoot)
     if (mode === 'danger-full-access') return target
     /**
      * Reading follows the same roots the call may write, plus the harness's own configuration directory so a
@@ -246,7 +270,7 @@ export class SandboxService extends Service {
      * no file effects), so its readable set is the workspace and the named extra roots.
      */
     const allowed = [
-      ...(mode === 'workspace-write' ? writableRoots(this.policy(mode)) : [this.workspaceRoot, ...this.extraWritableRoots]),
+      ...(mode === 'workspace-write' ? writableRoots(policy) : [policy.workspaceRoot, ...this.extraWritableRoots]),
       /**
        * The harness's own directory, resolved the way the rest of the program resolves it.
        *
@@ -257,17 +281,17 @@ export class SandboxService extends Service {
        */
       canonical(heddleHome()),
     ]
-    if (allowed.some((root) => contains(root, target))) return target
+    if (allowed.some((boundary) => contains(boundary, target))) return target
     throw new SandboxDenial(
-      `'${target}' is outside the sandbox root ${this.workspaceRoot}, so it cannot be read in '${mode}' mode`,
-      { path: target, mode, workspaceRoot: this.workspaceRoot },
+      `'${target}' is outside the sandbox root ${policy.workspaceRoot}, so it cannot be read in '${mode}' mode`,
+      { path: target, mode, workspaceRoot: policy.workspaceRoot },
     )
   }
 
   /** Whether a path would be permitted, without throwing. Used by the loop's report. */
-  writable(path: string, mode: SandboxMode = this.mode): boolean {
+  writable(path: string, mode: SandboxMode = this.mode, root: string = this.workspaceRoot): boolean {
     try {
-      this.assertWritable(path, mode)
+      this.assertWritable(path, mode, root)
       return true
     } catch {
       return false

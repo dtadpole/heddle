@@ -95,8 +95,9 @@ export interface GenerateRequest {
    * The reasoning level to ask for, as an **id** the endpoint's model declares.
    *
    * It is the id rather than the provider's wire value because the wire value belongs to the adapter:
-   * `reasoning_effort` for a Chat Completions route, `reasoning.effort` for a Responses one, and
-   * adaptive thinking plus `output_config.effort` for an Anthropic publisher route. The adapter resolves
+   * `reasoning_effort` for a Chat Completions route, `reasoning.effort` for a Responses one,
+   * adaptive thinking plus `output_config.effort` for an Anthropic publisher route, and on the Messages
+   * route adaptive thinking for an effort string or a `budget_tokens` thinking budget for a number. The adapter resolves
    * the id through `reasoningLevelFor` and sends **that model's declared value**, so a level the catalogue
    * does not hold can never be displayed and silently not sent.
    */
@@ -273,8 +274,12 @@ export interface ReasoningLevels {
 export interface EndpointConfig {
   /** Stable name a request addresses this endpoint by. */
   readonly name: string
-  /** Which wire shape this endpoint speaks. */
-  readonly kind: 'openai-chat' | 'openai-responses' | 'anthropic-vertex' | 'scripted'
+  /**
+   * Which wire shape this endpoint speaks: Chat Completions (`openai-chat`), Responses (`openai-responses`),
+   * Anthropic's Messages API (`anthropic-messages`, `POST {baseUrl}/messages`), Anthropic on a cloud publisher route
+   * (`anthropic-vertex`), or the offline fixture (`scripted`).
+   */
+  readonly kind: 'openai-chat' | 'openai-responses' | 'anthropic-vertex' | 'anthropic-messages' | 'scripted'
   /** Scheme, host and path prefix, without a trailing slash. */
   readonly baseUrl: string
   /** The endpoint's default model id. */

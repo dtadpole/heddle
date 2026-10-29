@@ -297,6 +297,28 @@ impl SubagentStore for SessionSubagents {
         heddle_session::inherit_recorded_mode::<SandboxMode>(self.service.store(), parent, child)
             .map_err(port_error)
     }
+
+    fn user_message(
+        &self,
+        session: &SessionHandle,
+        content: Vec<ContentPart>,
+        source: Option<serde_json::Value>,
+    ) -> Result<u64, PortError> {
+        let event = self
+            .service
+            .store()
+            .message(
+                session,
+                Message {
+                    role: Role::User,
+                    tool_call_id: None,
+                    content,
+                    source,
+                },
+            )
+            .map_err(port_error)?;
+        Ok(event.seq)
+    }
 }
 
 /// How the context service names a session, given the loop's handle.

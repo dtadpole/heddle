@@ -108,7 +108,8 @@ JSON the TypeScript build writes; the tests assert the strings.
 ### The routes
 
 `FilesRoutes::router()` answers `GET /api/file`, `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`,
-`POST /api/markdown` and `POST /api/workspaces/pick` — not `GET /api/html`, which is `heddle-server`'s. Each status,
+`POST /api/markdown`, `POST /api/workspaces/pick` and `GET`/`POST /api/directories` (the page's folder chooser,
+[`src/directories.rs`](src/directories.rs)) — not `GET /api/html`, which is `heddle-server`'s. Each status,
 body and header is
 tabled in [`src/routes.rs`](src/routes.rs). The router does no authentication and has no fallback: the server merges
 it and puts its token layer over the result, exactly as every one of these routes sits after the token decision in

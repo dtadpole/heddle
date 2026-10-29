@@ -76,8 +76,22 @@ pub enum EscalationError {
 
 /// The sandbox: where a call's effect may land, and how a shell command is confined.
 pub trait SandboxGate: Send + Sync {
-    /// The workspace every relative path resolves against, and the cwd of a `bash` call.
+    /// The fallback workspace: what a relative path resolves against for a call that is not rooted elsewhere.
     fn workspace_root(&self) -> &Path;
+
+    /// The folder a call of a session recorded at `folder` is rooted at — its working directory and its
+    /// `workspace-write` boundary. DSH's rule: the session's folder, else the fallback root. The real gate keeps
+    /// a root the operator named for every session; this default is DSH's rule alone.
+    fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        folder.map_or_else(|| self.workspace_root().to_path_buf(), Path::to_path_buf)
+    }
+
+    /// This sandbox rooted at `root` for one call (same mode, extra roots and backend), or `None` when the gate
+    /// cannot be re-rooted, in which case its own root applies.
+    fn rooted_at(&self, root: &Path) -> Option<Arc<dyn SandboxGate>> {
+        let _ = root;
+        None
+    }
 
     /// The deployment's mode, which a call with no session runs under.
     fn default_mode(&self) -> SandboxMode;
