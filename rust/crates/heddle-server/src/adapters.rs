@@ -151,6 +151,41 @@ impl SessionService for StoreSessions {
             .map_err(failure)
     }
 
+    fn create_or_reuse_at(
+        &self,
+        branch: &Path,
+        reuse: Option<&str>,
+        running: bool,
+        title: Option<&str>,
+    ) -> Result<(CreatedSession, bool), ServiceError> {
+        let outcome = self
+            .service
+            .create_or_reuse_at(
+                &path_text(branch),
+                reuse,
+                running,
+                heddle_session::CreateAtOptions {
+                    title: title.map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+            .map_err(failure)?;
+        match outcome {
+            heddle_session::NewSession::Started { created, reused } => Ok((
+                CreatedSession {
+                    session: created.handle.id,
+                    name: created.definition.name,
+                    definition: created.definition.file,
+                    log: created.definition.log,
+                },
+                reused,
+            )),
+            heddle_session::NewSession::Refused { code, message } => {
+                Err(ServiceError::with_code(message, code))
+            }
+        }
+    }
+
     fn fork(&self, id: &str) -> ForkOutcome {
         match self.service.fork(id) {
             Ok(heddle_session::ForkOutcome::NotFound) => ForkOutcome::NotFound,

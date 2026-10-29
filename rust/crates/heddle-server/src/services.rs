@@ -185,6 +185,22 @@ pub trait SessionService: Send + Sync {
     fn create_at(&self, branch: &Path, title: Option<&str>)
     -> Result<CreatedSession, ServiceError>;
 
+    /// New session at a branch, reusing the blank session `reuse` names (DSH's `session.create`
+    /// `sessionId`; `heddle_session::blank_reuse`), and whether it was reused. One that cannot be reused
+    /// (unknown, archived, started, `running` a turn, or written by another process) leaves a new session
+    /// made instead; `Err` with code `session/agent-busy` or `session/conflict` is DSH's two refusals.
+    /// The default never reuses.
+    fn create_or_reuse_at(
+        &self,
+        branch: &Path,
+        _reuse: Option<&str>,
+        _running: bool,
+        title: Option<&str>,
+    ) -> Result<(CreatedSession, bool), ServiceError> {
+        self.create_at(branch, title)
+            .map(|created| (created, false))
+    }
+
     /// Fork a session at its last completed turn.
     fn fork(&self, id: &str) -> ForkOutcome;
 

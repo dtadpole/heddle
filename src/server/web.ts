@@ -28,6 +28,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { SessionReuseRefused } from '../session/service.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
@@ -1607,14 +1608,28 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${wanted} is not under any workspace root` })}\n`)
       return
     }
-    const { handle, definition } = ctx.session.createAt(wanted, {
-      ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
-    })
+    /**
+     * `session` names a blank session to reuse, DSH's `session.create` `sessionId` (`SessionService.createOrReuseAt`):
+     * the answer names the session actually used and says whether it was reused. A running one is not blank.
+     */
+    let created
+    try {
+      created = ctx.session.createOrReuseAt(wanted, {
+        ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+        ...(typeof body.session === 'string' && body.session.length > 0 ? { reuse: body.session } : {}),
+        running: (id) => (state.running.get(id) ?? 0) > 0,
+      })
+    } catch (error) {
+      if (!(error instanceof SessionReuseRefused)) throw error
+      respond(response, 409, 'application/json', `${JSON.stringify({ error: error.message, code: error.code })}\n`)
+      return
+    }
+    const { handle, definition, reused } = created
     respond(
       response,
       200,
       'application/json',
-      `${JSON.stringify({ session: handle.id, branch: wanted, name: definition.name, definition: definition.file, log: definition.log }, null, 2)}\n`,
+      `${JSON.stringify({ session: handle.id, branch: wanted, name: definition.name, definition: definition.file, log: definition.log, reused }, null, 2)}\n`,
     )
     return
   }

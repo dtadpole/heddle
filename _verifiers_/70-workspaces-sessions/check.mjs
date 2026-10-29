@@ -4,7 +4,7 @@
  * words in those comments, never backticks.
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
@@ -1860,6 +1860,84 @@ test('a new session is filed under its workspace, and an old one keeps the shape
   } finally {
     removeDir(h.home)
     removeDir(h.work)
+  }
+})
+
+test('New session twice without a prompt reuses the blank session it names, as DSH session.create does', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's session.create reuses a named session while it is blank: no turn started, in the requested folder, not
+   * archived, not written by another owner; a started one stays as it is and a new session is made; a session of another
+   * folder is refused with session/conflict (dsh-api-session-controller lib/index.js:416-465 and 755-770). Phase A
+   * measured heddle making a new blank session, and a new definition folder in the workspace, on every New session
+   * click: four in one workspace (R-developer-eight-9, row C2). The page names the blank, so the route is what is judged.
+   */
+  const h = harness('blank-reuse')
+  const other = fixtureDir('blank-reuse-other')
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body) })
+    for (const path of [h.work, other]) {
+      const added = await post('/api/workspaces', { path })
+      assert.equal(added.status, 200, `the folder is a workspace (${JSON.stringify(added.body)})`)
+    }
+    const branch = realpathSync(h.work)
+    const definitionFolders = () => {
+      const dir = join(branch, '_sessions_')
+      return existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((one) => one.isDirectory()).map((one) => one.name) : []
+    }
+
+    const first = await post('/api/sessions', { branch })
+    assert.equal(first.status, 200, `New session starts a session (${JSON.stringify(first.body)})`)
+    assert.equal(first.body.reused, false, 'a request naming no session makes a new one')
+    const second = await post('/api/sessions', { branch, session: first.body.session })
+    assert.equal(second.status, 200, `the second New session answers (${JSON.stringify(second.body)})`)
+    assert.equal(second.body.session, first.body.session, 'and names the blank session it was given, not another')
+    assert.equal(second.body.reused, true, 'saying it was reused')
+    assert.equal(second.body.definition, first.body.definition, 'with the definition it already had')
+    const here = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    assert.deepEqual(here.map((meta) => meta.id), [first.body.session], `the store holds one blank session for the folder\nsaw: ${JSON.stringify(here)}`)
+    assert.equal(definitionFolders().length, 1, `and the workspace one definition folder\nsaw: ${definitionFolders().join(', ')}`)
+
+    const elsewhere = await post('/api/sessions', { branch: realpathSync(other) })
+    const refused = await post('/api/sessions', { branch, session: elsewhere.body.session })
+    assert.equal(refused.status, 409, `a session of another folder is refused (${JSON.stringify(refused.body)})`)
+    assert.equal(refused.body.code, 'session/conflict', 'with DSH code')
+
+    const turn = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: first.body.session, prompt: 'remember the word loom', folder: branch }),
+    })
+    assert.equal(turn.status, 200, 'a turn runs in the blank session')
+    await turn.text()
+    const afterTurn = await post('/api/sessions', { branch, session: first.body.session })
+    assert.equal(afterTurn.status, 200)
+    assert.equal(afterTurn.body.reused, false, 'a session that has started a turn is not reused')
+    assert.notEqual(afterTurn.body.session, first.body.session, 'so New session makes another')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(other)
   }
 })
 
