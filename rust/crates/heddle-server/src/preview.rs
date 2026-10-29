@@ -115,6 +115,30 @@ fn join_path(base: &str, relative: &str) -> String {
     out.join("/")
 }
 
+/// Whether a path is a document the page previews as a page: an `.html` or `.htm` file, by extension.
+///
+/// DSH registers its HTML renderer for exactly these two extensions (`dsh-client-ui-sidebar-documentpreview`,
+/// `extensions: ["html", "htm"]`); a `.docx` goes to its Office renderer and anything else to its own renderer or
+/// plain text, so no other file is ever framed as a page. `GET /api/html` refuses the rest with `415`, the same
+/// answer as `web.ts`, rather than failing on whatever the bytes happen to be.
+pub fn is_html_document(path: &Path) -> bool {
+    let Some(leaf) = path.file_name().and_then(|leaf| leaf.to_str()) else {
+        return false;
+    };
+    match leaf.rfind('.') {
+        Some(dot) if dot > 0 => {
+            let extension = leaf[dot + 1..].to_ascii_lowercase();
+            extension == "html" || extension == "htm"
+        }
+        _ => false,
+    }
+}
+
+/// The sentence `GET /api/html` answers, with `415`, for a file that is not an HTML document (`web.ts`'s
+/// `NOT_AN_HTML_DOCUMENT`).
+pub const NOT_AN_HTML_DOCUMENT: &str =
+    "not an HTML document; only .html and .htm files are previewed as a page";
+
 /// The address `/api/html` points a rewritten resource at: `/api/raw?path=<percent-encoded path>`, encoded
 /// the way `encodeURIComponent` encodes.
 pub fn raw_route(path: &str) -> String {
@@ -275,6 +299,25 @@ mod tests {
 
     fn serve(path: &str) -> String {
         raw_route(path)
+    }
+
+    #[test]
+    fn only_an_html_or_htm_file_is_a_page_to_preview() {
+        for path in ["/w/page.html", "/w/PAGE.HTM", "/w/a.b/index.Html"] {
+            assert!(is_html_document(Path::new(path)), "{path}");
+        }
+        // A Word document goes to DSH's Office renderer, text to its own; none is framed as a page.
+        for path in [
+            "/w/report.docx",
+            "/w/notes.txt",
+            "/w/readme.md",
+            "/w/page.html.bak",
+            "/w/html",
+            "/w/.html",
+            "/w/x.xhtml",
+        ] {
+            assert!(!is_html_document(Path::new(path)), "{path}");
+        }
     }
 
     #[test]

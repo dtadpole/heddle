@@ -29,6 +29,12 @@ round cap holds when the goal is edited during a round: a real `heddle web` on s
 round 2 runs, and exactly three rounds (1/3, 2/3, 3/3) before the `round-limit` block under a cap of three, as DSH's
 fold counts rounds across revisions (R-developer-two-31; it failed on both builds before the fix with rounds
 1, 2, 3, 3, 3).
+`check-schedules.mjs` judges reminders as DSH's `dsh-schedule` delivers them: a model-created reminder arrives in its
+own session as DSH's exact message and starts a turn, the four tools answer with DSH's results and refusals, a
+recurring reminder delivers only its latest missed occurrence after downtime, the model is told the current time
+(DSH's time context) at most once per ten minutes, and the page's `/api/schedule/` routes read and edit what the
+tools made (R-developer-nine-6 and -7; before the fix it failed every test it had: 5 of 5 on the TS build, and its
+first three tests 3 of 3 on the Rust binary).
 
 ## Running it
 
