@@ -90,10 +90,13 @@
       name: ./src/todo/service.ts
       inject: [session]
 
-    # The model-facing todo verbs, their own row so the durable list can exist without the tools.
+    # The model-facing todo verb, its own row so the durable list can exist without the tool.
+    # allowParallelInProgress is required with no default, as in DSH; true, as every DSH preset ships.
     - id: todo-tool
       name: ./src/plugins/todo-tool.ts
       inject: [todo, tools]
+      config:
+        allowParallelInProgress: true
 
     # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
     # the loop checks for it — so a minimal profile can run turns without interruption.
