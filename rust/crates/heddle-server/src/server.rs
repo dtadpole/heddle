@@ -466,9 +466,25 @@ impl ServerBuilder {
                     }
                 })
             });
+        // The heartbeat: every interval each `/api/events` subscriber gets a `heartbeat` frame, and a connection
+        // whose writes stay pending for two intervals is closed (DSH's dead-peer rule, `stall.rs`).
+        let interval = stream::heartbeat_interval();
+        let heartbeat = {
+            let hub = state.events().clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    hub.publish(SseFrame::heartbeat());
+                }
+            })
+        };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(without_nagle(listener), router)
+            let listener = crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
+            let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
@@ -485,6 +501,7 @@ impl ServerBuilder {
             task: Some(task),
             detach_approvals,
             approval_relay,
+            heartbeat: Some(heartbeat),
         })
     }
 }
@@ -502,6 +519,8 @@ pub struct WebServer {
     detach_approvals: Option<Box<dyn FnOnce() + Send>>,
     /// The task relaying the approval service's published questions into the hub.
     approval_relay: Option<tokio::task::JoinHandle<()>>,
+    /// The task writing a heartbeat to every stream once per interval.
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WebServer {
@@ -560,6 +579,9 @@ impl WebServer {
         }
         if let Some(relay) = self.approval_relay.take() {
             relay.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
         }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {

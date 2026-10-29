@@ -21,7 +21,7 @@ const servers = new Set()
 after(() => Promise.all([...servers].map((server) => server.close())))
 
 /** Spawn `heddle web` on a free port with a scripted endpoint; resolves once it prints its URL. */
-function startServer(label, steps = [{ text: 'scripted answer' }]) {
+function startServer(label, steps = [{ text: 'scripted answer' }], extraEnv = {}) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
@@ -31,7 +31,7 @@ function startServer(label, steps = [{ text: 'scripted answer' }]) {
       const { config, script } = scriptedConfig({ home, steps })
       const child = spawn(
         ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
-        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
+        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
       let settled = false
@@ -235,6 +235,79 @@ test("the stream opens with DSH's ready frame, and a baseline read on it misses 
     const carried = stream.frames.filter((frame) => frame.event === 'session' && frame.data?.session === session && frame.at >= startedAt).length
     assert.ok(appended > 3, `the turn wrote to the log (${appended} entries)`)
     assert.equal(carried, appended, `every entry the turn wrote reached the stream (${carried} of ${appended})`)
+    stream.close()
+  } finally {
+    await server.close()
+  }
+})
+
+/**
+ * A subscriber that reads its response head and the opening frames, then stops reading: a peer that went away
+ * without closing, as the server sees it once the socket's buffers are full. Resolves once `ready` has arrived.
+ */
+async function stalledSubscriber(server, cookie) {
+  const net = await import('node:net')
+  return new Promise((resolvePromise, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port: server.port })
+    const peer = { socket, ended: false, received: 0 }
+    let text = ''
+    let paused = false
+    socket.on('data', (chunk) => {
+      peer.received += chunk.length
+      if (paused) return
+      text += chunk.toString()
+      if (text.includes('event: ready')) {
+        paused = true
+        socket.pause()
+        resolvePromise(peer)
+      }
+    })
+    socket.on('end', () => (peer.ended = true))
+    socket.on('close', () => (peer.ended = true))
+    socket.on('error', () => (peer.ended = true))
+    socket.write(`GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nCookie: ${cookie}\r\nAccept: text/event-stream\r\n\r\n`)
+    setTimeout(() => reject(new Error(`the stalled subscriber saw no ready frame: ${JSON.stringify(text.slice(0, 200))}`)), 10_000).unref()
+  })
+}
+
+test('an idle stream carries a heartbeat every interval, and a peer that stops reading is cut after two', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  // Six megabytes of answer, written to each stream at least twice (the chunk and the completed message): more than
+  // a loopback socket's send and receive buffers can absorb (4 MB each at most on macOS), so the stalled peer's
+  // writes stop moving.
+  const flood = 'x'.repeat(6 * 1024 * 1024)
+  const server = await startServer('heartbeat', [{ text: flood }], { HEDDLE_WEB_HEARTBEAT_MS: '300' })
+  try {
+    const cookie = await cookieFor(server)
+    const stream = await openStream(server, cookie)
+    await stream.next((frame) => frame.event !== null, 10_000)
+
+    /** DSH pings every interval so idle intermediaries see traffic; an idle heddle stream now does the same. */
+    const watchedFrom = Date.now()
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1600))
+    const beats = stream.frames.filter((frame) => frame.event === 'heartbeat' && frame.at >= watchedFrom)
+    assert.ok(beats.length >= 3, `an idle stream got ${beats.length} heartbeat frames in 1.6 s at a 300 ms interval`)
+    assert.deepEqual(beats[0].data, { type: 'heartbeat' }, 'the heartbeat is {"type":"heartbeat"}')
+    const gaps = beats.slice(1).map((beat, index) => beat.at - beats[index].at)
+    assert.ok(Math.max(...gaps) < 900, `heartbeats arrive about once per interval (largest gap ${Math.max(...gaps)} ms)`)
+
+    /**
+     * DSH terminates a peer with no activity across two intervals. A subscriber that stops reading while a large
+     * answer is written cannot take its bytes; the server must cut it, and must keep the stream that reads.
+     */
+    const stalled = await stalledSubscriber(server, cookie)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'flood' })
+    const turn = await runTurn(server, cookie, { session: created.json.session, prompt: 'a lot, please' })
+    assert.equal(turn.status, 200, 'the large turn ran')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2500))
+    stalled.socket.resume()
+    const deadline = Date.now() + 8000
+    while (!stalled.ended && Date.now() < deadline) await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+    assert.equal(stalled.ended, true, `the server cut the peer that stopped reading (it had received ${stalled.received} bytes)`)
+    assert.equal(stream.closed, false, 'and kept the stream that reads')
+    await stream.next((frame) => frame.event === 'heartbeat' && frame.at > Date.now() - 200, 2000)
+    stalled.socket.destroy()
     stream.close()
   } finally {
     await server.close()

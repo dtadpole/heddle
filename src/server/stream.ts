@@ -47,3 +47,94 @@ export function readyData(clientId: string, home: string = homedir()): ReadyFram
 export function readyFrame(clientId: string, home: string = homedir()): string {
   return `event: ${READY_EVENT}\ndata: ${JSON.stringify(readyData(clientId, home))}\n\n`
 }
+
+/**
+ * The heartbeat, and the end of a dead peer.
+ *
+ * DSH's Host pings every `websocketHeartbeatIntervalMs` (two seconds by default) so idle intermediaries see
+ * traffic, and terminates a socket with **no activity across two intervals**, where activity includes "a downlink
+ * write that waited in the full local send buffer and then completed", so a congested but live link stays
+ * connected (dsh-api-gateway README). An SSE stream has no Pong to read, so heddle keeps the half of that rule a
+ * one-way stream can observe: a connection whose written bytes have not moved for two intervals while it still
+ * holds unsent data is dead, and is destroyed. A slow but live link keeps moving bytes and is kept.
+ *
+ * The heartbeat is an event rather than a comment because the page watches for it: a stream that goes silent for
+ * two intervals is one the page reconnects (phase B item 3). The Rust server uses the same name, interval and rule.
+ */
+
+/** The event name of the heartbeat frame. */
+export const HEARTBEAT_EVENT = 'heartbeat'
+
+/** DSH's default `websocketHeartbeatIntervalMs`. */
+export const DEFAULT_HEARTBEAT_MS = 2000
+
+/** The heartbeat frame as it goes on the wire. */
+export function heartbeatFrame(): string {
+  return `event: ${HEARTBEAT_EVENT}\ndata: {"type":"heartbeat"}\n\n`
+}
+
+/**
+ * The heartbeat interval in milliseconds: `HEDDLE_WEB_HEARTBEAT_MS` when it is a whole number of at least 50,
+ * DSH's two seconds otherwise. A deployment whose event loop or network can stall longer than this must raise it,
+ * as DSH says of its own setting.
+ */
+export function heartbeatInterval(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.HEDDLE_WEB_HEARTBEAT_MS
+  if (raw === undefined || raw.trim() === '') return DEFAULT_HEARTBEAT_MS
+  const value = Number(raw)
+  return Number.isInteger(value) && value >= 50 ? value : DEFAULT_HEARTBEAT_MS
+}
+
+/**
+ * The parts of a socket the stall rule reads. `net.Socket` has all of them.
+ *
+ * Node's `bytesWritten` counts bytes still queued in the socket's own buffer as written, so a queued heartbeat
+ * would look like progress. The bytes that actually left are `bytesWritten - writableLength`, and that is what the
+ * rule measures (found by the verifier: a paused peer kept growing `bytesWritten` by one heartbeat per interval).
+ */
+export interface WatchedSocket {
+  readonly writableLength: number
+  readonly bytesWritten: number
+  readonly destroyed: boolean
+  destroy(): void
+}
+
+/**
+ * Finds the connections that stopped taking bytes.
+ *
+ * `sweep` is called once per heartbeat. A socket shows **activity** when it has nothing waiting to be sent, or
+ * when the bytes that left it (`bytesWritten - writableLength`) moved since the last sweep. One that has shown no activity for `2 × interval` is
+ * destroyed, which ends its stream and frees what was queued for it.
+ */
+export class StallWatch {
+  private readonly seen = new WeakMap<WatchedSocket, { bytes: number; activeAt: number }>()
+  private readonly intervalMs: number
+
+  constructor(intervalMs: number) {
+    this.intervalMs = intervalMs
+  }
+
+  /** The time after which a socket with no activity is dead: two intervals. */
+  get deadlineMs(): number {
+    return this.intervalMs * 2
+  }
+
+  /** Judge every socket once; returns the ones it destroyed. */
+  sweep(sockets: Iterable<WatchedSocket>, now: number): WatchedSocket[] {
+    const ended: WatchedSocket[] = []
+    for (const socket of sockets) {
+      if (socket.destroyed) continue
+      const last = this.seen.get(socket)
+      const bytes = socket.bytesWritten - socket.writableLength
+      if (last === undefined || socket.writableLength === 0 || bytes !== last.bytes) {
+        this.seen.set(socket, { bytes, activeAt: now })
+        continue
+      }
+      if (now - last.activeAt >= this.deadlineMs) {
+        socket.destroy()
+        ended.push(socket)
+      }
+    }
+    return ended
+  }
+}

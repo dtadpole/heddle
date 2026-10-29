@@ -40,7 +40,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
-import { newClientId, readyFrame, STREAM_OPEN } from './stream.ts'
+import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
 
 /**
  * The Web UI.
@@ -272,6 +272,26 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     socket.on('close', () => sockets.delete(socket))
   })
 
+  /**
+   * The heartbeat: every interval each stream gets a `heartbeat` frame, and every connection that took no bytes for
+   * two intervals while it still had some to send is destroyed (DSH's dead-peer rule, see `stream.ts`). One timer
+   * for the server, unref'd so it never keeps a process alive on its own.
+   */
+  const heartbeatMs = heartbeatInterval()
+  const stalls = new StallWatch(heartbeatMs)
+  const heartbeat = setInterval(() => {
+    const frame = heartbeatFrame()
+    for (const client of subscribers) {
+      try {
+        client.write(frame)
+      } catch {
+        // a client that is already gone leaves through its close listener
+      }
+    }
+    stalls.sweep(sockets, Date.now())
+  }, heartbeatMs)
+  heartbeat.unref()
+
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => resolvePromise())
@@ -298,6 +318,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
+        clearInterval(heartbeat)
         detachApprovals?.()
         for (const client of subscribers) {
           try {

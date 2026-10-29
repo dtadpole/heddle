@@ -34,6 +34,8 @@ pub mod names {
     pub const APPROVAL: &str = "approval";
     /// The opening item of `/api/events`, sent once after the subscriber is registered.
     pub const READY: &str = "ready";
+    /// The heartbeat every `/api/events` subscriber gets once per interval.
+    pub const HEARTBEAT: &str = "heartbeat";
     /// A turn's normal end, on its own response.
     pub const DONE: &str = "done";
     /// A turn that was stopped, on its own response.
@@ -84,6 +86,14 @@ impl SseFrame {
                 host: ReadyHost { home },
             },
         )
+    }
+
+    /// The heartbeat frame, `{"type":"heartbeat"}` — the bytes `src/server/stream.ts` writes.
+    pub fn heartbeat() -> Self {
+        SseFrame {
+            event: names::HEARTBEAT.to_owned(),
+            data: "{\"type\":\"heartbeat\"}".to_owned(),
+        }
     }
 
     /// An `approval` frame for one approval request, as the approval service emitted it.
@@ -137,6 +147,26 @@ pub fn new_client_id() -> String {
 /// on the platforms heddle runs on; empty when it is unset.
 pub fn host_home() -> String {
     std::env::var("HOME").unwrap_or_default()
+}
+
+/// DSH's default `websocketHeartbeatIntervalMs`, two seconds.
+pub const DEFAULT_HEARTBEAT_MS: u64 = 2000;
+
+/// The heartbeat interval a raw `HEDDLE_WEB_HEARTBEAT_MS` value names: a whole number of at least 50 ms, else
+/// DSH's two seconds — the rule `heartbeatInterval` applies in `src/server/stream.ts`.
+pub fn heartbeat_interval_from(raw: Option<&str>) -> std::time::Duration {
+    let millis = raw
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|millis| *millis >= 50)
+        .unwrap_or(DEFAULT_HEARTBEAT_MS);
+    std::time::Duration::from_millis(millis)
+}
+
+/// The heartbeat interval this process uses, from `HEDDLE_WEB_HEARTBEAT_MS`.
+pub fn heartbeat_interval() -> std::time::Duration {
+    heartbeat_interval_from(std::env::var("HEDDLE_WEB_HEARTBEAT_MS").ok().as_deref())
 }
 
 /// The frames of `/api/events`: the opening `ready` frame, then every frame the subscription carries.
@@ -315,6 +345,26 @@ mod tests {
             SseFrame::ready("abc123", "/home/owner").encode(),
             "event: ready\ndata: {\"type\":\"ready\",\"clientId\":\"abc123\",\"host\":{\"home\":\"/home/owner\"}}\n\n"
         );
+    }
+
+    #[test]
+    fn the_heartbeat_frame_writes_the_typescript_bytes() {
+        assert_eq!(
+            SseFrame::heartbeat().encode(),
+            "event: heartbeat\ndata: {\"type\":\"heartbeat\"}\n\n"
+        );
+        // A heartbeat names no session, so a turn's own response (one session's frames) never carries it.
+        assert_eq!(SseFrame::heartbeat().session_id(), None);
+    }
+
+    #[test]
+    fn the_heartbeat_interval_is_two_seconds_unless_a_usable_value_is_named() {
+        use std::time::Duration;
+        assert_eq!(heartbeat_interval_from(None), Duration::from_millis(2000));
+        assert_eq!(heartbeat_interval_from(Some("500")), Duration::from_millis(500));
+        for bad in ["", " ", "soon", "-5", "10", "1.5"] {
+            assert_eq!(heartbeat_interval_from(Some(bad)), Duration::from_millis(2000), "{bad:?}");
+        }
     }
 
     #[test]

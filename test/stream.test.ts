@@ -2,7 +2,19 @@ import assert from 'node:assert/strict'
 import { homedir } from 'node:os'
 import { test } from 'node:test'
 
-import { newClientId, READY_EVENT, readyData, readyFrame, STREAM_OPEN } from '../src/server/stream.ts'
+import {
+  DEFAULT_HEARTBEAT_MS,
+  HEARTBEAT_EVENT,
+  heartbeatFrame,
+  heartbeatInterval,
+  newClientId,
+  READY_EVENT,
+  readyData,
+  readyFrame,
+  StallWatch,
+  STREAM_OPEN,
+  type WatchedSocket,
+} from '../src/server/stream.ts'
 
 /** Parse one SSE frame block into its event name and JSON data. */
 function parseFrame(block: string): { event: string; data: unknown } {
@@ -39,4 +51,91 @@ test('every stream gets its own client id, 16 random bytes in hex', () => {
   const ids = new Set(Array.from({ length: 64 }, () => newClientId()))
   assert.equal(ids.size, 64, 'no two streams share an id')
   for (const id of ids) assert.match(id, /^[0-9a-f]{32}$/)
+})
+
+test('the heartbeat is an event the page can watch, and the Rust server writes the same bytes', () => {
+  const frame = heartbeatFrame()
+  assert.equal(frame, 'event: heartbeat\ndata: {"type":"heartbeat"}\n\n')
+  assert.equal(parseFrame(frame).event, HEARTBEAT_EVENT)
+})
+
+test("the heartbeat interval is DSH's two seconds unless HEDDLE_WEB_HEARTBEAT_MS names a usable one", () => {
+  assert.equal(DEFAULT_HEARTBEAT_MS, 2000)
+  assert.equal(heartbeatInterval({}), 2000)
+  assert.equal(heartbeatInterval({ HEDDLE_WEB_HEARTBEAT_MS: '500' }), 500)
+  for (const bad of ['', ' ', 'soon', '-5', '10', '1.5']) {
+    assert.equal(heartbeatInterval({ HEDDLE_WEB_HEARTBEAT_MS: bad }), 2000, `'${bad}' falls back to the default`)
+  }
+})
+
+/**
+ * A socket double with Node's accounting: `written` bytes have left, `waiting` are still queued, and
+ * `bytesWritten` counts both, as `net.Socket` does.
+ */
+function socket(waiting: number, written = 0): WatchedSocket & { waiting: number; written: number } {
+  return {
+    waiting,
+    written,
+    destroyed: false,
+    get writableLength() {
+      return this.waiting
+    },
+    get bytesWritten() {
+      return this.written + this.waiting
+    },
+    destroy() {
+      ;(this as { destroyed: boolean }).destroyed = true
+    },
+  }
+}
+
+test('a connection with unsent bytes that stop moving for two intervals is destroyed', () => {
+  const watch = new StallWatch(1000)
+  assert.equal(watch.deadlineMs, 2000)
+  const dead = socket(4096, 100)
+  watch.sweep([dead], 0)
+  assert.deepEqual(watch.sweep([dead], 1000), [], 'one interval without progress is not yet dead')
+  assert.equal(dead.destroyed, false)
+  assert.deepEqual(watch.sweep([dead], 2000), [dead], 'two intervals without progress are')
+  assert.equal(dead.destroyed, true)
+  assert.deepEqual(watch.sweep([dead], 3000), [], 'and a destroyed socket is judged no more')
+})
+
+test('a slow but live link keeps moving bytes and is kept, as DSH keeps a congested link', () => {
+  const watch = new StallWatch(1000)
+  const slow = socket(65536, 0)
+  for (let tick = 0; tick <= 10; tick += 1) {
+    slow.written += 512 // a trickle, but progress
+    assert.deepEqual(watch.sweep([slow], tick * 1000), [])
+  }
+  assert.equal(slow.destroyed, false)
+})
+
+test('an idle connection with nothing to send is never dead, however long it waits', () => {
+  const watch = new StallWatch(1000)
+  const idle = socket(0, 42)
+  for (let tick = 0; tick <= 10; tick += 1) assert.deepEqual(watch.sweep([idle], tick * 10_000), [])
+  assert.equal(idle.destroyed, false)
+})
+
+test('a stalled connection that drains in time is active again, and its clock restarts', () => {
+  const watch = new StallWatch(1000)
+  const link = socket(4096, 0)
+  watch.sweep([link], 0)
+  watch.sweep([link], 1500)
+  link.waiting = 0 // the buffer emptied: activity
+  watch.sweep([link], 1900)
+  link.waiting = 8192 // queued again, no progress since
+  assert.deepEqual(watch.sweep([link], 3000), [], 'the deadline counts from the last activity, not the first stall')
+  assert.deepEqual(watch.sweep([link], 3900), [link])
+})
+
+test('bytes queued behind a stalled peer are not progress: a heartbeat a minute does not keep it alive', () => {
+  const watch = new StallWatch(1000)
+  const paused = socket(4096, 100)
+  watch.sweep([paused], 0)
+  paused.waiting += 40 // a heartbeat queued: Node's bytesWritten grows, nothing left the socket
+  assert.deepEqual(watch.sweep([paused], 1000), [])
+  paused.waiting += 40
+  assert.deepEqual(watch.sweep([paused], 2000), [paused], 'still dead after two intervals')
 })
