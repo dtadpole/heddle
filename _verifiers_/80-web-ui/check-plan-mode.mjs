@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
@@ -263,3 +264,86 @@ test('exit_plan_mode refuses, saying why, when no review channel exists, and the
     server.close()
   }
 })
+
+const KEY_CODES = { Enter: 13 }
+const FIELD = 'document.querySelector("#prompt textarea")'
+
+async function press(browser, key) {
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: KEY_CODES[key], ...(key === 'Enter' ? { text: '\r' } : {}) })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: KEY_CODES[key] })
+}
+
+async function typeInto(browser, text) {
+  await browser.evaluate(`(() => { const field = ${FIELD}; field.focus(); field.value = ''; field.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+  await browser.send('Input.insertText', { text })
+}
+
+async function chipState(browser) {
+  return JSON.parse(
+    await browser.evaluate(`JSON.stringify((() => {
+      const chips = [...document.querySelectorAll('#prompt-tools .mode-chip')]
+      const chip = chips[0]
+      return {
+        count: chips.length,
+        label: chip?.textContent.trim() ?? null,
+        title: chip?.title ?? null,
+        aria: chip?.getAttribute('aria-label') ?? null,
+        afterAccess: chip !== undefined && chip.previousElementSibling?.id === 'access',
+        placeholder: ${FIELD}.placeholder,
+      }
+    })())`),
+  )
+}
+
+test("the composer shows DSH's Plan chip and placeholder in plan mode, keeps them across a reload, and the chip turns it off", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('chip', [{ text: 'here is how I would plan it' }])
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    const show = async () => {
+      await browser.goto(server.url)
+      await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
+      await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
+      await browser.waitFor(`${FIELD} !== null`, 10_000)
+    }
+    await show()
+    assert.equal((await chipState(browser)).count, 0, 'no chip in the default mode')
+
+    await typeInto(browser, '/plan')
+    await press(browser, 'Enter')
+    await browser.waitFor('document.querySelector("#prompt-tools .mode-chip") !== null', 15_000)
+    let chip = await chipState(browser)
+    assert.deepEqual(
+      { count: chip.count, label: chip.label, title: chip.title, aria: chip.aria, afterAccess: chip.afterAccess },
+      { count: 1, label: 'Plan', title: 'Plan mode on — click to turn off (/plan off)', aria: 'Plan mode on, press to turn off', afterAccess: true },
+    )
+    assert.equal(chip.placeholder, 'describe your task to generate plan')
+    assert.deepEqual((await api(server.url, cookie, `/api/sessions/${encodeURIComponent(id)}/plan`)).body, { session: id, active: true })
+
+    await show()
+    await browser.waitFor('document.querySelector("#prompt-tools .mode-chip") !== null', 15_000)
+    assert.equal((await chipState(browser)).count, 1, 'a reload shows the chip again, from the session')
+
+    await browser.evaluate('document.querySelector("#prompt-tools .mode-chip").click()')
+    await browser.waitFor('document.querySelector("#prompt-tools .mode-chip") === null', 15_000)
+    chip = await chipState(browser)
+    assert.equal(chip.placeholder, 'Message or run a task, / commands', 'the default placeholder is back')
+    assert.deepEqual((await api(server.url, cookie, `/api/sessions/${encodeURIComponent(id)}/plan`)).body, { session: id, active: false })
+
+    // `/plan <words>`: plan mode on, and the words reach the model as a message, with the policy.
+    await typeInto(browser, '/plan design the release checklist')
+    await press(browser, 'Enter')
+    await browser.waitFor('document.getElementById("log").innerText.includes("here is how I would plan it")', 20_000)
+    const body = server.provider.bodies.at(-1)
+    assert.ok(JSON.stringify(body.messages).includes('design the release checklist'), 'the words went to the model')
+    assert.ok(systemText(body).includes(POLICY_OPENING), 'in plan mode')
+    assert.equal((await chipState(browser)).count, 1)
+  } finally {
+    await browser.close()
+    server.close()
+  }
+})
+
