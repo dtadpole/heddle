@@ -240,3 +240,24 @@ export class EventLog {
     return this.kept.filter((frame) => frame.seq > seq).map((frame) => frame.text)
   }
 }
+
+/**
+ * The replay without questions that no longer wait.
+ *
+ * DSH replays a pending approval or question after a reconnect, never one that was settled meanwhile; replaying an
+ * answered `approval` frame would put a stale card back on the page until something closed it again. A replayed
+ * `approval` frame is kept only while its question is in `waiting` (the approval service's pending ids). Every other
+ * frame, `approval-settled` included, is kept as it is.
+ */
+export function withoutSettledApprovals(frames: readonly string[], waiting: ReadonlySet<string>): string[] {
+  return frames.filter((text) => {
+    if (!/^event: approval$/m.test(text)) return true
+    const data = /^data: (.*)$/m.exec(text)?.[1] ?? ''
+    try {
+      const id = (JSON.parse(data) as { id?: unknown }).id
+      return typeof id === 'string' && waiting.has(id)
+    } catch {
+      return false
+    }
+  })
+}

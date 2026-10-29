@@ -873,7 +873,20 @@ async fn events_route(
         .map(str::to_owned)
         .or_else(|| query.get("cursor").cloned())
         .filter(|cursor| !cursor.is_empty());
-    let follow = state.events().subscribe_from(presented.as_deref());
+    let mut follow = state.events().subscribe_from(presented.as_deref());
+    // A question answered while the client was away is not put back on its page: only waiting ones replay.
+    let waiting: std::collections::HashSet<String> = state
+        .harness()
+        .approvals
+        .as_ref()
+        .map(|approvals| approvals.pending_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    follow.replay = follow
+        .replay
+        .map(|frames| stream::without_settled_approvals(frames, &waiting));
     sse_response(stream::follow_frames(
         follow,
         presented.is_some(),
