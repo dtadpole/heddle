@@ -184,7 +184,10 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
-    for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
+    // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
+    // publish already does for the same event (phase B item 3).
+    const line = log.record('schedule', '{}')
+    for (const client of subscribers) client.write(line)
   })
 
   /**
