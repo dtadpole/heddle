@@ -505,6 +505,23 @@ mod tests {
     }
 
     #[test]
+    fn a_steer_queued_while_the_answer_streams_does_not_split_the_answer() {
+        let events = vec![
+            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}),
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "hel"}}),
+            json!({"type": "agent/inbox/spliced", "target": "next-step", "start": 0, "inserted": [{"id": "inbox-1", "role": "user", "content": [{"type": "text", "text": "also"}]}]}),
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "lo"}}),
+            json!({"type": "assistant/completed", "text": "hello"}),
+        ];
+        let turns = transcript_turns(&events);
+        assert_eq!(kinds(&turns), vec![TurnKind::User, TurnKind::Assistant]);
+        assert_eq!(
+            turns[1].text, "hello",
+            "one answer row, and the pending steer is not a row"
+        );
+    }
+
+    #[test]
     fn an_exchange_is_user_then_one_answer_from_its_deltas() {
         let events = vec![
             json!({"type": "session/created"}),
