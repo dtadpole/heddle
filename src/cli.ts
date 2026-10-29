@@ -432,10 +432,14 @@ function describeTree(node: TreeNode): string[] {
  * prints exactly what it did.
  */
 async function bootFromArgs(args: Args, options: { readonly machineOutput?: boolean } = {}) {
+  return boot({ ...bootOptions(args), ...(options.machineOutput === true ? { logLevel: 0 } : {}) })
+}
+
+/** The layers and overrides a command line boots, which the settings surface must judge writes against. */
+function bootOptions(args: Args) {
   const layers = baseLayer(args)
-  return boot({
+  return {
     configDir: process.cwd(),
-    ...(options.machineOutput === true ? { logLevel: 0 } : {}),
     ...(args.profile !== undefined ? { profile: args.profile } : {}),
     ...(layers.base !== undefined ? { base: layers.base } : {}),
     patches: [...layers.patches],
@@ -460,7 +464,7 @@ async function bootFromArgs(args: Args, options: { readonly machineOutput?: bool
           ],
         }
       : {}),
-  })
+  }
 }
 
 function hasProfile(args: Args): boolean {
@@ -503,7 +507,9 @@ async function runWeb(args: Args): Promise<void> {
       return
     }
 
+    const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
+      settings: settingsServiceFor(bootOptions(args)),
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
