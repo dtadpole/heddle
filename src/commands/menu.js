@@ -14,6 +14,18 @@
 /** The line rule, the host's own (`src/commands/registry.ts`). */
 const COMMAND_LINE = /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/
 
+/**
+ * The commands whose runs show the person's line as a `Command input` bubble before the run's row. DSH's
+ * dsh-client-ui-goal registers its projection for `/goal` alone (`goalCommandInputDefinition` matches a `command/run`
+ * named `goal`), so a `/goal` stays visible as something the person said, live and after a reload.
+ */
+const INPUT_BUBBLE_COMMANDS = new Set(['goal'])
+
+/** The line a run's bubble shows: `/name` and the recorded raw remainder, trailing whitespace removed (DSH's `goalCommandText`). */
+export function commandInputText(name, args) {
+  return `/${name}${(args ?? '').trimEnd()}`
+}
+
 /** DSH's empty-query sections and their order. Unlisted names follow in their section, by name. */
 const SECTION_ORDER = { add: ['file', 'goal', 'plan', 'feedback'], commands: ['compact', 'permission', 'model', 'export'] }
 const SECTION_TITLES = { add: 'Add', commands: 'Commands' }
@@ -131,6 +143,12 @@ const STYLE = `
 .hc-command .hc-text { margin-top: 4px; white-space: pre-wrap; color: var(--chat-secondary, #cfd3d6); }
 .hc-command[data-state="error"] { border-color: #b4483f; }
 .hc-command[data-state="error"] .hc-state { color: #e5786e; }
+.hc-input { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 100%; margin: 8px 0 0; }
+.hc-input .hc-input-stack { min-width: 0; max-width: min(calc(var(--chat-content-width, 748px) * .702), 82%); display: flex; flex-direction: column; align-items: flex-end; }
+.hc-input .hc-input-bubble { max-width: 100%; width: fit-content; padding: 10px 16px; border-radius: 20px; background: var(--chat-bubble, #2c2c2e);
+  color: var(--chat-text, #f9fafb); font-size: 14px; line-height: 22px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hc-input .hc-chip { display: inline-block; padding: 0 6px; border-radius: 6px; background: var(--hover, #3a3a3c); font-family: var(--mono, ui-monospace);
+  font-size: 13px; line-height: 20px; vertical-align: baseline; cursor: default; }
 `
 
 /**
@@ -398,7 +416,10 @@ export function install(api) {
         api.sendAsPrompt(text, attachments)
         return
       }
-      draw({ type: 'command/run', commandId: body.commandId, name: body.name })
+      // A command that shows its line as a bubble records that line (DSH's raw remainder), so the bubble drawn now is
+      // the one a reload draws from the log.
+      const rawInput = INPUT_BUBBLE_COMMANDS.has(body.name) ? text.slice(COMMAND_LINE.exec(text)?.[0].length ?? text.length) : undefined
+      draw({ type: 'command/run', commandId: body.commandId, name: body.name, ...(rawInput !== undefined ? { args: rawInput } : {}) })
       draw({ type: 'command/done', commandId: body.commandId, kind: body.kind, ...(body.text !== undefined ? { text: body.text } : {}) })
       // `/plan <words>`: the mode is on, and the words go to the model as the ordinary message DSH steers in, with the
       // files the line carried.
@@ -521,6 +542,43 @@ export function install(api) {
     return row
   }
 
+  /**
+   * The `Command input` bubble a run shows just before its row: DSH's `GoalCommandInputView` — a right-aligned
+   * user-style bubble (`role="group"`, `aria-label="Command input"`, `data-command-input`) whose leading `/name` is a
+   * command chip that does nothing when clicked, the rest plain text, with no time, copy or branch actions. It is
+   * built from the run's `command/run`, the same way live and from history, so a reload rebuilds it.
+   */
+  function bubbleFor(row, commandId, name, args) {
+    let bubble = [...document.querySelectorAll('[data-command-input]')].find((element) => element.dataset.commandId === commandId)
+    if (bubble === undefined) {
+      bubble = document.createElement('div')
+      bubble.className = 'hc-input'
+      bubble.dataset.commandInput = ''
+      bubble.dataset.commandId = commandId
+      bubble.setAttribute('role', 'group')
+      bubble.setAttribute('aria-label', 'Command input')
+      const stack = document.createElement('div')
+      stack.className = 'hc-input-stack'
+      const body = document.createElement('div')
+      body.className = 'hc-input-bubble'
+      stack.append(body)
+      bubble.append(stack)
+    }
+    if (bubble.nextElementSibling !== row) row.before(bubble)
+    const text = commandInputText(name, args)
+    const body = bubble.querySelector('.hc-input-bubble')
+    if (body.textContent !== text) {
+      const token = `/${name}`
+      const chip = document.createElement('span')
+      chip.className = 'hc-chip'
+      chip.dataset.command = name
+      chip.title = token
+      chip.textContent = token
+      body.replaceChildren(chip, document.createTextNode(text.slice(token.length)))
+    }
+    return bubble
+  }
+
   /** Draw a live `command/run` or `command/done` event; repeats of one event change nothing. */
   function draw(event) {
     if (event.type === 'plan/mode') {
@@ -532,6 +590,7 @@ export function install(api) {
     if (event.type === 'command/run') {
       const row = rowFor(event.commandId, event.name)
       if (typeof event.args === 'string') row.querySelector('.hc-args').textContent = event.args.trim()
+      if (INPUT_BUBBLE_COMMANDS.has(event.name) && row.isConnected) bubbleFor(row, event.commandId, event.name, event.args)
       return
     }
     if (event.type === 'command/done') {

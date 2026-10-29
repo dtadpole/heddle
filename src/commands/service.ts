@@ -11,11 +11,10 @@ import {
   compactCommand,
   exportCommand,
   feedbackCommand,
-  goalCommand,
   permissionCommand,
   type CompactionOutcome,
-  type GoalHost,
 } from './builtins.ts'
+import { goalCommand, type GoalHost } from './goal.ts'
 import type { CommandRouteHost } from './http.ts'
 import { CommandRegistry, type CommandLog } from './registry.ts'
 
@@ -40,6 +39,8 @@ export class CommandService extends Service {
     this.log = { append: (handle, event) => store.append(handle, event) }
     this.routes = { registry: this.registry, log: this.log, open: (id) => store.open(id) }
 
+    // `/goal` is developer-nine's (goal.ts). It gets no follow-up sink yet: nothing here can start the turn that
+    // carries a goal objective's attachments (the TODO in goal.ts).
     this.registry.register(goalCommand(goalHost(ctx)))
     this.registry.register(
       compactCommand({ compactNow: (handle) => compactNow(ctx, handle) }),

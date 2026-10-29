@@ -1,11 +1,11 @@
 ---
 title: Commands
 created: 2026-10-29T12:05:41Z
-modified: 2026-10-29T12:05:41Z
-version: 0.2.0
+modified: 2026-10-29T15:45:00Z
+version: 0.3.0
 description: The host's slash commands — the registry, the line parser, the built-in commands and the two routes the composer's menu uses.
 grounded_in:
-  - source: the DSH package's dsh-commands, dsh-command-compact, dsh-command-goal, dsh-command-feedback, dsh-permission-presets, dsh-session-log-export and dsh-client-ui-commands, read 2026-10-29
+  - source: the DSH package's dsh-commands, dsh-command-compact, dsh-command-goal, dsh-command-feedback, dsh-permission-presets, dsh-session-log-export, dsh-client-ui-commands and dsh-client-ui-goal (its goal-command-input projection and GoalCommandInputView), read 2026-10-29
   - source: _projects_/heddle/_designs_/dsh-parity results-developer-twelve.md (C78-C89) and results-developer-six.md (R-developer-six-5)
 ---
 
@@ -47,6 +47,10 @@ permission, model, export); a typed one ranks prefixes first, then ordered subse
 command that takes input. ↑/↓ wrap, Enter or Tab pick, Escape or Shift+Tab close and leave that token alone. A command
 that takes input becomes `/name ` with DSH's hint; one that takes none runs at once. A run's row is drawn from the
 `command/run` and `command/done` events, live and — through the transcript's `command` turns — after a reload.
+A `/goal` run also shows the person's line just before its row, as DSH's dsh-client-ui-goal does: a right-aligned
+`Command input` bubble (`div[data-command-input][role=group][aria-label="Command input"]`) reading `/goal` plus the
+recorded remainder with trailing whitespace removed, the `/goal` token a command chip that does nothing when clicked,
+no time, copy or branch actions — built from `command/run`, so a reload rebuilds it.
 
 One deliberate difference from DSH's web client: a registered command's name always reaches the host, so
 `/compact now` gets the host's usage sentence instead of being sent to the model as a prompt.
