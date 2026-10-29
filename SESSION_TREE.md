@@ -188,8 +188,9 @@ reason: a control that removes something must not sit a pixel away from the one 
 the eye should find the controls in one place rather than hunting a glyph that is sometimes left of
 the name and sometimes right of it.
 
-**Actions live behind the menu, never on the row.** A workspace root offers *Rename…* and
-*Unregister*; an instance offers *New session here* and, once it has a conversation, *Rename
+**Actions live behind the menu, never on the row.** A workspace root offers *New session*, *Rename* and
+*Delete workspace* (DSH's names and dialogs since 29 Oct: Rename refuses another workspace's name, Delete asks first
+and keeps the folder and the sessions, which move to the root above or to Ungrouped); an instance offers *New session here* and, once it has a conversation, *Rename
 conversation…*; a type folder, a plain folder and a file offer nothing yet and therefore draw no menu
 rather than an empty one. A rename keeps the path and changes only the label — for a workspace that is
 the record's `title`, for a conversation the meta record's `title`, which is why the append-only log is
@@ -295,7 +296,10 @@ not need a browser.
 | `GET /api/tree?path=<abs>` | one level under `<abs>`; `400` when the path is outside every root |
 | `GET /api/file?path=<abs>` | a text file's content; `400` outside every root, `404` when it is not a file, `415` when it is not UTF-8 text |
 | `POST /api/folders/session` `{folder, new?}` | the folder's current session, created when absent; `new` starts another |
-| `PATCH /api/workspaces/<id\|path>` `{title}` | retitle a root; `400` on an empty name |
+| `POST /api/workspaces` `{path, name?}` | register an existing absolute folder; `created: false` when it already is one; `400` for a missing, relative, absent or file path |
+| `PATCH /api/workspaces/<id\|path>` `{title}` | retitle a root; `400` on an empty name, `409 workspace/name-conflict` on another workspace's name, a no-op on its own |
+| `DELETE /api/workspaces/<id\|path>` | remove the registration only; its sessions move to the root above (`adoptedBy`) or to Ungrouped; `404` when unknown (the CLI's `workspace remove` still refuses that case without `--force`) |
+| `GET /api/directories?path=<abs>`, `POST /api/directories` `{parent, name}` | the page's folder chooser: one level of folders (the home when no path), one new child folder; DSH's browse picker |
 | `POST /api/sessions/<id>/title` `{title}` | retitle a conversation; the log is untouched |
 | `GET /api/sessions`, `/api/sessions/<id>`, `/api/events`, `/api/turn` | unchanged |
 

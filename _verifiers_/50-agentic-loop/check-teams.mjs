@@ -180,7 +180,16 @@ test('a Lead spawns, delegates, tasks, messages and answers — and the team sur
     assert.equal(leadEvents.filter((event) => event.type === 'team/message/delivered').length, 1)
     assert.ok(leadEvents.some((event) => isUser(event, 'Lead: do the team work')), 'the Lead prompt is durable')
 
-    const childEvents = readTranscript(join(root, childId))
+    // The teammate answers the mailed message in its own turn, which can land after the Lead's turn has returned
+    // (seen under memory pressure); read its transcript until that answer is there, as the delivery is waited for.
+    const childEvents = await waitFor(() => {
+      try {
+        const events = readTranscript(join(root, childId))
+        return events.some((event) => JSON.stringify(event).includes('alpha reports')) ? events : undefined
+      } catch {
+        return undefined
+      }
+    }, 15_000, "the teammate's answer to the mailed message")
     assert.ok(childEvents.some((event) => isUser(event, 'write the thing')), 'the teammate got the spawn prompt')
     assert.ok(childEvents.some((event) => isUser(event, 'the board is clear')), 'and the mailed message')
     assert.ok(

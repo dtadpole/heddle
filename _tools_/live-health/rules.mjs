@@ -457,6 +457,30 @@ export function expectedSeatLabel(choice) {
     : `Select model, current ${choice.modelTitle}, reasoning effort ${choice.effortName}`
 }
 
+/**
+ * Whether the deployment moved during the pass: its checkout's head or built page, read again at the
+ * end, differs from the start. Measured 2026-10-29 11:08Z: a redeploy landed inside a pass, which
+ * read aefbd9c's build at the start, then loaded 551c0a4's page and failed the marker. Null when
+ * nothing moved or a reading is missing.
+ */
+export function deploymentMove(start, end) {
+  if (!start || !end) return null
+  const headMoved = Boolean(start.head && end.head && start.head !== end.head)
+  const markerMoved = Boolean(start.marker && end.marker && start.marker !== end.marker)
+  if (!headMoved && !markerMoved) return null
+  return { fromHead: start.head?.slice(0, 12) ?? null, toHead: end.head?.slice(0, 12) ?? null, fromMarker: start.marker ?? null, toMarker: end.marker ?? null }
+}
+
+/**
+ * A check that failed while the deployment moved under it cannot be decided against either build: it
+ * is unjudged, with the move named. The next pass judges the new build whole, so a real fault in the
+ * new build still fails one pass later.
+ */
+export function acrossMove(check, move) {
+  if (move === null || move === undefined || check?.verdict !== 'fail') return check
+  return { ...check, verdict: 'unjudged', detail: `the deployment moved during the pass (${move.fromHead} -> ${move.toHead}), so this cannot be decided: ${check.detail}` }
+}
+
 /** How a selection reads in a detail line: `endpoint/model` and its effort when one is sent. */
 export function modelLabel(selection) {
   if (selection?.endpoint === undefined) return 'no model'
