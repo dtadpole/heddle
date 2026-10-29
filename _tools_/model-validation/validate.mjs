@@ -5,8 +5,9 @@
  *   npm run validate:endpoints
  *   node _tools_/model-validation/validate.mjs --endpoint meta-codex --model gpt-6-luna
  *
- * For each endpoint/model of the three formats — Claude's publisher stream, Codex's Responses stream, DeepSeek's
- * Chat Completions stream — it drives the real adapter and measures the three interactions a person uses:
+ * For each endpoint/model of the three families — Claude (the publisher stream or Anthropic's own Messages API),
+ * Codex's Responses stream, DeepSeek's Chat Completions stream — it drives the real adapter and measures the three
+ * interactions a person uses:
  *
  * 1. **streaming** — the answer arrives as several text deltas before the turn completes;
  * 2. **reasoning** — every declared level is accepted by the route (a level the route rejects is a value a person

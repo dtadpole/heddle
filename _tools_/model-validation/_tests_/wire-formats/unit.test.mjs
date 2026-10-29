@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { repoRoot } from '../../../verify-runner/lib.mjs'
 
 /**
- * The three wire formats, exercised against local doubles.
+ * The wire formats, exercised against local doubles — the three families, with the Claude family's two envelopes.
  *
  * The live validation spends real calls per configured model; this suite is its offline counterpart and runs in
  * any checkout. One double per format answers with the event shape that format actually streams — reasoning,
@@ -105,6 +105,27 @@ test('the Anthropic publisher format streams text, thinking and a tool use', asy
   ])
   try {
     judge(await collect({ name: 'claude', kind: 'anthropic-vertex', baseUrl: server.baseUrl, model: 'm', project: 'p', region: 'global', maxOutputTokens: 64 }), 'claude')
+  } finally {
+    await server.close()
+  }
+})
+
+test('Anthropic’s own Messages format streams text, thinking and a tool use', async () => {
+  const server = await double([
+    `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 0 } } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'thinking' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'one ' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'two' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'toolu_1', name: 'probe_echo', input: {} } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"value":' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '"hello"}' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ])
+  try {
+    judge(await collect({ name: 'claude-messages', kind: 'anthropic-messages', baseUrl: server.baseUrl, model: 'm', maxOutputTokens: 64 }), 'claude-messages')
   } finally {
     await server.close()
   }

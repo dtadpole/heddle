@@ -1,6 +1,6 @@
 ---
 title: Model validation
-version: 1.0.0
+version: 1.1.0
 description: drives every model this machine has configured through the real adapter and records whether streaming, its declared reasoning levels and tool calls work, beside a fingerprint of the configuration, so a new endpoint or model type is gated on a validation that exercised it.
 grounded_in:
   - source: owner statement 2026-10-18 asking for verification of all endpoints against the three API types (Claude, Codex, DeepSeek), covering streaming, reasoning and tool calls, and for that check whenever a new endpoint or model type is configured
@@ -16,7 +16,7 @@ endpoint nobody called is an endpoint nobody knows works.
 
 | Format | Kinds | Streaming | Reasoning | Tool call |
 |---|---|---|---|---|
-| claude | `anthropic-vertex` | publisher `streamRawPredict` SSE → ≥2 text deltas and a `done` chunk | every declared level sent as adaptive thinking + `output_config.effort`; the route must accept it, **and the summarized thinking must actually arrive** (measured: adaptive thinking without a summarized display streams one empty delta, so the page has nothing to show) | a streamed `tool_use` call to `probe_echo` |
+| claude | `anthropic-vertex`, `anthropic-messages` | publisher `streamRawPredict` SSE, or Anthropic's `POST {baseUrl}/messages` SSE → ≥2 text deltas and a `done` chunk | every declared level sent as summarized thinking — on the publisher route adaptive thinking + `output_config.effort`; on the Messages route the same for an effort string, or `thinking.budget_tokens` for a number; the route must accept it, **and the summarized thinking must actually arrive** (measured: adaptive thinking without a summarized display streams one empty delta, so the page has nothing to show) | a streamed `tool_use` call to `probe_echo` |
 | codex | `openai-responses` | Responses SSE (`response.output_text.delta`) → ≥2 deltas and completion | every declared level sent as `reasoning.effort`, **and the summarized reasoning requested with `reasoning.summary: 'auto'` must arrive** for a reasoning-configured endpoint (three attempts, because a route may not summarize every response) | a streamed `function_call` to `probe_echo` |
 | deepseek | `openai-chat` | Chat Completions SSE → ≥2 deltas and a `done` chunk | every declared level sent as `reasoning_effort` | a streamed `tool_calls` entry to `probe_echo` |
 
@@ -102,6 +102,6 @@ keep output tiny. The verifier spends nothing.
 fingerprint sensitivity (including "a credential is not in the fingerprint"), the route's minimum output tokens,
 and the judgement the verifier applies.
 [`_tests_/formats/unit.test.mjs`](_tests_/formats/unit.test.mjs) — one local double per wire format (Chat
-Completions, Responses, Anthropic publisher) answering with reasoning, text and a tool call, driving the real
+Completions, Responses, Anthropic publisher, Anthropic Messages) answering with reasoning, text and a tool call, driving the real
 adapter. That is the offline counterpart of the live matrix and runs in any checkout. Neither suite uses a network
 or a browser.
