@@ -10363,6 +10363,66 @@ document.addEventListener('click', closeMenus)
  */
 Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
 
+/* session-rules:begin */
+/**
+ * Which sessions the sidebar lists, which one a page opens at startup, and which open session may be written to — DSH's
+ * rules for subagent children and for the startup selection, kept pure (no DOM, no fetch, no page state) so
+ * `test/session-rules.test.ts` loads this block out of the page and judges it in Node, as the workspace tree's is.
+ */
+const SessionRules = (() => {
+  /** Where the page remembers the open session across a reload — DSH persists its selection as `dsh.sessions.current`. */
+  const CURRENT_KEY = 'heddle.session.current.v1'
+
+  /**
+   * A subagent child's mode, DSH's `address.mode` (dsh-client-ui-subagent `selectReadOnlySubagent`, `lib/client.js:944`):
+   * `'one-shot'` for a delegated child, because heddle's `delegate` runs it for one task and settles it, so no follow-up
+   * can reach it; `'continuable'` for a teammate, whose `teamId` names its Lead, because DSH's teammates are continuable
+   * children (`_context_/dsh-mechanisms/dsh-agent-teams.md`); `null` for a session that is no subagent's.
+   */
+  function subagentMode(meta) {
+    if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent') return null
+    return typeof meta.teamId === 'string' && meta.teamId.length > 0 ? 'continuable' : 'one-shot'
+  }
+
+  /**
+   * The sessions the sidebar may list, out of `/api/sessions`: every one that is not a subagent's child. DSH's
+   * `sessionVisible` drops `origin: 'subagent'` before any other rule (dsh-client-ui-workspace `lib/client.js:964-965`),
+   * and its tree, its flat list (`deriveFlat`, `:1146`) and its search (`deriveSearchResults`, `:1185`, `:1200`) all ask
+   * it — a child is reached from its parent, not from the sidebar.
+   */
+  function sidebarSessions(sessions) {
+    return (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && meta.origin !== 'subagent')
+  }
+
+  /**
+   * The session a page opens when it starts — DSH's `restoreSelection` (`lib/client.js:1605-1628`): the saved selection
+   * when the store still lists it, a subagent child included, because DSH restores a saved child's address too
+   * (`:1607`); not when it is archived, because DSH clears an archived current (`clearArchivedCurrent`, `:1638`).
+   * Without a usable saved one it is the first session `/api/sessions` lists that the sidebar shows and the archive does
+   * not hold — heddle's newest-session start, which never lands on a hidden child. `null` when there is none.
+   */
+  function startupSession(sessions, saved) {
+    const metas = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string')
+    if (typeof saved === 'string' && saved.length > 0) {
+      const remembered = metas.find((meta) => meta.id === saved)
+      if (remembered !== undefined && remembered.archived !== true) return remembered.id
+    }
+    const newest = sidebarSessions(metas).find((meta) => meta.archived !== true)
+    return newest === undefined ? null : newest.id
+  }
+
+  /**
+   * Whether the composer is DSH's read-only record for this session: a one-shot child only. A continuable child keeps
+   * Send and Stop (`selectReadOnlySubagent` answers `null` for it while its parent is available, `lib/client.js:949`).
+   */
+  function composerReadOnly(meta) {
+    return subagentMode(meta) === 'one-shot'
+  }
+
+  return { CURRENT_KEY, subagentMode, sidebarSessions, startupSession, composerReadOnly }
+})()
+/* session-rules:end */
+
 /* workspace-tree:begin */
 /**
  * The workspace tree's derivation — DSH's workspace browser (`dsh-client-ui-workspace`, `tree.ts`) under heddle's rules.
@@ -10562,66 +10622,6 @@ const WorkspaceTree = (() => {
   return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
 })()
 /* workspace-tree:end */
-
-/* session-rules:begin */
-/**
- * Which sessions the sidebar lists, which one a page opens at startup, and which open session may be written to — DSH's
- * rules for subagent children and for the startup selection, kept pure (no DOM, no fetch, no page state) so
- * `test/session-rules.test.ts` loads this block out of the page and judges it in Node, as the workspace tree's is.
- */
-const SessionRules = (() => {
-  /** Where the page remembers the open session across a reload — DSH persists its selection as `dsh.sessions.current`. */
-  const CURRENT_KEY = 'heddle.session.current.v1'
-
-  /**
-   * A subagent child's mode, DSH's `address.mode` (dsh-client-ui-subagent `selectReadOnlySubagent`, `lib/client.js:944`):
-   * `'one-shot'` for a delegated child, because heddle's `delegate` runs it for one task and settles it, so no follow-up
-   * can reach it; `'continuable'` for a teammate, whose `teamId` names its Lead, because DSH's teammates are continuable
-   * children (`_context_/dsh-mechanisms/dsh-agent-teams.md`); `null` for a session that is no subagent's.
-   */
-  function subagentMode(meta) {
-    if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent') return null
-    return typeof meta.teamId === 'string' && meta.teamId.length > 0 ? 'continuable' : 'one-shot'
-  }
-
-  /**
-   * The sessions the sidebar may list, out of `/api/sessions`: every one that is not a subagent's child. DSH's
-   * `sessionVisible` drops `origin: 'subagent'` before any other rule (dsh-client-ui-workspace `lib/client.js:964-965`),
-   * and its tree, its flat list (`deriveFlat`, `:1146`) and its search (`deriveSearchResults`, `:1185`, `:1200`) all ask
-   * it — a child is reached from its parent, not from the sidebar.
-   */
-  function sidebarSessions(sessions) {
-    return (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && meta.origin !== 'subagent')
-  }
-
-  /**
-   * The session a page opens when it starts — DSH's `restoreSelection` (`lib/client.js:1605-1628`): the saved selection
-   * when the store still lists it, a subagent child included, because DSH restores a saved child's address too
-   * (`:1607`); not when it is archived, because DSH clears an archived current (`clearArchivedCurrent`, `:1638`).
-   * Without a usable saved one it is the first session `/api/sessions` lists that the sidebar shows and the archive does
-   * not hold — heddle's newest-session start, which never lands on a hidden child. `null` when there is none.
-   */
-  function startupSession(sessions, saved) {
-    const metas = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string')
-    if (typeof saved === 'string' && saved.length > 0) {
-      const remembered = metas.find((meta) => meta.id === saved)
-      if (remembered !== undefined && remembered.archived !== true) return remembered.id
-    }
-    const newest = sidebarSessions(metas).find((meta) => meta.archived !== true)
-    return newest === undefined ? null : newest.id
-  }
-
-  /**
-   * Whether the composer is DSH's read-only record for this session: a one-shot child only. A continuable child keeps
-   * Send and Stop (`selectReadOnlySubagent` answers `null` for it while its parent is available, `lib/client.js:949`).
-   */
-  function composerReadOnly(meta) {
-    return subagentMode(meta) === 'one-shot'
-  }
-
-  return { CURRENT_KEY, subagentMode, sidebarSessions, startupSession, composerReadOnly }
-})()
-/* session-rules:end */
 
 /**
  * The page's state for the workspace tree: the groups the last render drew, each group's watermark, and the definition
