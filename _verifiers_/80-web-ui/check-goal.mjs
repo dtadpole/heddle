@@ -412,6 +412,84 @@ test('an armed goal continues by itself, round by round, and blocks at its cap',
   }
 })
 
+test('a goal round is drawn as a notice the harness wrote, not as a person\'s message', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'browser')) return
+  /**
+   * DSH (C73 in the parity inventory): a non-human turn trigger stays an independent, bordered notice on a neutral
+   * background. A goal round is a user message the harness wrote, with `source = { kind: 'goal', round, ... }`; the
+   * transcript carries that as `trigger`, and the page draws "Goal round N" where a person's bubble would be - on a
+   * reload and live alike - while the person's own message stays a bubble.
+   */
+  const server = await startServer('notice', [{ text: 'person turn answered' }, { text: 'round one work' }, { text: 'round two work' }, { text: 'extra' }])
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const first = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a person wrote this', folder: server.work, session }),
+    })
+    await first.text()
+    const browser = await openBrowser({ width: 1280, height: 900 })
+    try {
+      await browser.goto(server.url)
+      await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+      await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+      await browser.waitFor('document.getElementById("log").innerText.includes("person turn answered")', 10_000)
+      // Created with the session open, so the rounds arrive on the live stream.
+      await api(server.url, cookie, '/api/goal', { method: 'POST', body: JSON.stringify({ session, action: 'create', objective: 'walk two rounds and stop', max_goal_rounds: 2 }) })
+      assert.ok(
+        await browser.waitFor('document.querySelectorAll("#log .turn.user[data-trigger=\\"goal\\"]").length >= 2', 20_000),
+        'both rounds appear live as goal notices',
+      )
+      // Let the driver finish both rounds before the live picture is read.
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if ((await api(server.url, cookie, `/api/goal?session=${encodeURIComponent(session)}`)).body.goal?.phase === 'blocked') break
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      const read = () =>
+        browser.evaluate(`JSON.stringify([...document.querySelectorAll('#log .turn.user')].map((row) => ({
+          trigger: row.dataset.trigger ?? null,
+          label: row.querySelector('.trigger-label')?.textContent ?? null,
+          bubble: row.querySelector('.bubble') !== null,
+          bordered: row.querySelector('.trigger-notice') !== null && getComputedStyle(row.querySelector('.trigger-notice')).borderTopStyle === 'solid',
+          text: row.dataset.copyText ?? '',
+        })))`).then(JSON.parse)
+      const live = await read()
+      const rounds = live.filter((row) => row.trigger === 'goal')
+      assert.ok(live.every((row) => row.trigger === 'goal' || !/Round: \d\/2/.test(row.text)), `no round is drawn as a person's bubble\nlive: ${JSON.stringify(live).slice(0, 600)}`)
+      assert.deepEqual([...new Set(rounds.map((row) => row.label))], ['Goal round 1', 'Goal round 2'], `each round is a numbered notice\nlive: ${JSON.stringify(live).slice(0, 600)}`)
+      assert.ok(rounds.every((row) => !row.bubble && row.bordered && /Round: \d\/2/.test(row.text)), 'a bordered notice that still carries the round prompt')
+      const person = live.filter((row) => row.trigger === null)
+      assert.ok(person.length >= 1 && person.every((row) => row.bubble) && person.some((row) => row.text.includes('a person wrote this')), `and the person\u2019s own message stays a bubble\nlive: ${JSON.stringify(live).slice(0, 600)}`)
+
+      const record = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+      const users = (record.body.turns ?? []).filter((turn) => turn.kind === 'user')
+      assert.deepEqual(users.map((turn) => turn.trigger?.round ?? null), [null, 1, 2], 'the stored transcript names each round\'s trigger')
+      assert.ok(users.slice(1).every((turn) => turn.trigger.kind === 'goal' && typeof turn.trigger.goalId === 'string'))
+
+      await browser.goto(server.url)
+      await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+      // A reload reopens the session the page remembers; its row is clicked only when it did not.
+      if (!(await browser.waitFor('document.querySelectorAll("#log .turn.user").length === 3', 5_000))) {
+        await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row') !== null`, 10_000)
+        await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+      }
+      assert.ok(await browser.waitFor('document.querySelectorAll("#log .turn.user").length === 3', 10_000), 'the reloaded session draws its three user rows')
+      assert.deepEqual((await read()).map((row) => [row.trigger, row.label, row.bubble]), [[null, null, true], ['goal', 'Goal round 1', false], ['goal', 'Goal round 2', false]], 'a reload draws the person\u2019s bubble and the two numbered notices')
+    } finally {
+      await browser.close()
+    }
+  } finally {
+    await server.close()
+  }
+})
+
 test('an active goal is visible in the chat window, live, without a reload', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'browser')) return
