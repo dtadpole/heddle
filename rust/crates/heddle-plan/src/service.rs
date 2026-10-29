@@ -385,6 +385,7 @@ mod tests {
                 fixture.store.as_ref() as &dyn CommandLog,
                 &fixture.handle,
                 line,
+                Vec::new(),
             )
             .await
             .unwrap()

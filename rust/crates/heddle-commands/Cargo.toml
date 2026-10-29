@@ -17,12 +17,14 @@ futures.workspace = true
 heddle-context.workspace = true
 # `/goal`: the goal service's create, show, edit, pause, resume and clear.
 heddle-goal.workspace = true
-# `/compact`: the model service's default endpoint, when the session records none.
+# `/compact`: the model service's default endpoint, when the session records none; an attached image's media type.
 heddle-llm.workspace = true
 # `/permission`: the mode vocabulary and its ladder.
 heddle-sandbox.workspace = true
 # The session log every run writes `command/run` and `command/done` to.
 heddle-session.workspace = true
+# A command line's attachments: the reader a turn uses (`read_attachments`) over the upload directory.
+heddle-web-files.workspace = true
 serde.workspace = true
 # `preserve_order`: an answer and an event keep the TypeScript build's key order, as `JSON.stringify` writes them.
 serde_json = { workspace = true, features = ["preserve_order"] }

@@ -55,6 +55,20 @@ impl Fixture {
     pub fn events(&self) -> Events {
         self.store.read(&self.handle).expect("the log reads")
     }
+
+    /// The upload directory under the fixture's heddle home (`<root>/home/uploads`), as the binary derives it.
+    pub fn upload_dir(&self) -> PathBuf {
+        heddle_web_files::uploads::upload_directory(&self.root.join("home"))
+    }
+
+    /// Store one file in the upload directory and answer its path, as `POST /api/uploads` would.
+    pub fn upload(&self, leaf: &str, bytes: &[u8]) -> String {
+        let directory = self.upload_dir();
+        std::fs::create_dir_all(&directory).expect("the upload directory is created");
+        let path = directory.join(leaf);
+        std::fs::write(&path, bytes).expect("the upload is written");
+        path.display().to_string()
+    }
 }
 
 impl Drop for Fixture {

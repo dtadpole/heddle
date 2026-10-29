@@ -137,11 +137,12 @@ const STYLE = `
  * Install the menu over the composer and answer the page's three hand-over points.
  *
  * `api` is what the page lends: `field` (the textarea), `anchor` (what the menu sits above), `sessionId()` (the
- * session the composer is attached to, or null), `ensureSession()` (start one when there is none), `sendAsPrompt(text)`
- * (the page's ordinary send, for a line the host does not recognise), `addRow(node)` (append to the transcript),
- * `notice(text)` (say something went wrong), and optionally `openFilePicker()`, `openModelMenu()`,
- * `openAccessMenu()`, `setModeChip(chip | null)` and `setPlaceholder(text | null)` (the page's `window.heddlePage`
- * affordances).
+ * session the composer is attached to, or null), `ensureSession()` (start one when there is none),
+ * `sendAsPrompt(text, attachments)` (the page's ordinary send, for a line the host does not recognise and for the words a
+ * `prompt` action hands on, each with the files the line carried), `addRow(node)` (append to the transcript),
+ * `notice(text)` (say something went wrong), `pendingAttachments()` and `takeAttachments()` (the composer's files), and
+ * optionally `openFilePicker()`, `openModelMenu()`, `openAccessMenu()`, `setModeChip(chip | null)` and
+ * `setPlaceholder(text | null)` (the page's `window.heddlePage` affordances).
  */
 export function install(api) {
   const field = api.field
@@ -366,6 +367,18 @@ export function install(api) {
       entry.run()
       return
     }
+    // Files in the composer travel only with a command that takes them (DSH's /goal and /plan); any other command
+    // refuses them before anything runs, and the draft and the files stay where they are.
+    const named = COMMAND_LINE.exec(text)?.[1]
+    const command = catalog.find((candidate) => candidate.name === named)
+    const pending = typeof api.pendingAttachments === 'function' ? api.pendingAttachments() : 0
+    if (pending > 0 && command?.input?.attachments !== true) {
+      if (field.value.trim() === '') field.value = text
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      api.notice?.(`/${named} does not accept attachments; remove them first`)
+      return
+    }
+    const attachments = pending > 0 && typeof api.takeAttachments === 'function' ? api.takeAttachments() : []
     try {
       let id = api.sessionId()
       if (id === null && typeof api.ensureSession === 'function') id = await api.ensureSession()
@@ -374,19 +387,20 @@ export function install(api) {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ line: text }),
+        body: JSON.stringify({ line: text, ...(attachments.length > 0 ? { attachments } : {}) }),
       })
       const body = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(body.error ?? `the command answered ${response.status}`)
       if (body.matched !== true) {
-        api.sendAsPrompt(text)
+        api.sendAsPrompt(text, attachments)
         return
       }
       draw({ type: 'command/run', commandId: body.commandId, name: body.name })
       draw({ type: 'command/done', commandId: body.commandId, kind: body.kind, ...(body.text !== undefined ? { text: body.text } : {}) })
-      // `/plan <words>`: the mode is on, and the words go to the model as the ordinary message DSH steers in.
+      // `/plan <words>`: the mode is on, and the words go to the model as the ordinary message DSH steers in, with the
+      // files the line carried.
       if (body.kind === 'success' && body.action?.kind === 'prompt' && typeof body.action.text === 'string') {
-        api.sendAsPrompt(body.action.text)
+        api.sendAsPrompt(body.action.text, attachments)
       }
       if (body.kind === 'success' && body.action?.kind === 'download' && typeof body.action.href === 'string') {
         const link = document.createElement('a')
@@ -509,7 +523,7 @@ export function install(api) {
     if (typeof event.commandId !== 'string') return
     if (event.type === 'command/run') {
       const row = rowFor(event.commandId, event.name)
-      if (typeof event.args === 'string') row.querySelector('.hc-args').textContent = event.args
+      if (typeof event.args === 'string') row.querySelector('.hc-args').textContent = event.args.trim()
       return
     }
     if (event.type === 'command/done') {

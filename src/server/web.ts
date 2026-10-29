@@ -15,7 +15,7 @@ import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
-import { MAX_UPLOAD_BYTES, saveUpload, uploadDirectory } from './uploads.ts'
+import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
@@ -32,6 +32,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -174,6 +175,11 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     for (const client of subscribers) {
       client.write(line)
     }
+  })
+
+  // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
+  ctx.on('schedule/changed', () => {
+    for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
   })
 
   /**
@@ -575,6 +581,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
       return
     }
+    /**
+     * An upload is served only to the session whose log references it, as DSH's `session/attachment` authorizes a
+     * read against that session's events. A request that names no session, an unknown one, or one whose log does not
+     * carry this leaf is answered the same `404`, so the route does not say which uploads exist.
+     */
+    const asking = url.searchParams.get('session') ?? ''
+    const owner = /^session-[0-9a-f-]{36}$/i.test(asking) ? ctx.session.store.open(asking) : null
+    if (owner === null || !uploadReferencedBy(ctx.session.events(owner), leaf)) {
+      respond(response, 404, 'text/plain', `${UPLOAD_NOT_REFERENCED}\n`, FILE_ANSWER_HEADERS)
+      return
+    }
     try {
       const directory = uploadDirectory()
       const wanted = join(directory, leaf)
@@ -855,6 +872,9 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Errors carry the goal service's own stable code next to the sentence, so a client can distinguish "the
    * goal moved while you were looking" (409) from "no goal is current" (404) without parsing prose.
    */
+  // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
+  if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
     if (goals === undefined) {
@@ -1738,7 +1758,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * never has to ask per turn. The live path (a turn that just ended) asks `/api/markdown` for the one
            * answer it has, and both go through `renderMarkdown`, so there is one renderer and one allow-list.
            */
-          turns: transcriptTurns(events).map((turn) =>
+          turns: scopeAttachmentUrls(transcriptTurns(events), id).map((turn) =>
             turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
           ),
           /**
@@ -2464,6 +2484,22 @@ function respond(
 }
 
 /** The page. One file, no build step, and no framework — the same choice DSH makes. */
+/**
+ * The transcript's attachment addresses for one session: each card's `url` names the session it is read for, because
+ * the upload route serves a file only to a session whose log references it (DSH's `session/attachment`).
+ */
+export function scopeAttachmentUrls<T extends { readonly attachments?: readonly TurnAttachment[] }>(
+  turns: readonly T[],
+  session: string,
+): T[] {
+  const query = `session=${encodeURIComponent(session)}`
+  return turns.map((turn) =>
+    Array.isArray(turn.attachments) && turn.attachments.length > 0
+      ? { ...turn, attachments: turn.attachments.map((card) => ({ ...card, url: `${card.url}${card.url.includes('?') ? '&' : '?'}${query}` })) }
+      : turn,
+  )
+}
+
 /**
  * The files one message carries, as transcript cards.
  *

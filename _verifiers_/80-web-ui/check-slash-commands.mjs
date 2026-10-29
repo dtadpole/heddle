@@ -173,7 +173,7 @@ test('a command line runs on the host, is recorded in the log, and never reaches
     const done = events.find((event) => event.type === 'command/done')
     assert.ok(run !== undefined, 'the log records command/run')
     assert.equal(run.name, 'goal')
-    assert.equal(run.args, 'ship the parity table')
+    assert.equal(run.args, ' ship the parity table', "the raw remainder, as DSH records it")
     assert.ok(done !== undefined && done.commandId === run.commandId, 'and the matching command/done')
     assert.equal(done.kind, 'success')
     assert.ok(events.some((event) => event.type === 'goal/change'), 'the goal change itself is in the log')

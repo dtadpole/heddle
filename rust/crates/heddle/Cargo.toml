@@ -28,6 +28,7 @@ heddle-llm.workspace = true
 heddle-plan = { path = "../heddle-plan" }
 heddle-goal.workspace = true
 heddle-sandbox.workspace = true
+heddle-schedule.workspace = true
 heddle-server.workspace = true
 heddle-session.workspace = true
 heddle-team = { workspace = true, features = ["compose"] }

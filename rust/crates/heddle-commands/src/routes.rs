@@ -6,16 +6,21 @@
 //! |---|---|
 //! | `GET /commands/menu.js` | `200 text/javascript; charset=utf-8` — the composer's slash menu the page imports, `src/commands/menu.js` embedded at compile time (one file serves both builds, as `heddle-server` embeds `page.html`) |
 //! | `GET /api/commands` | `200 {"commands": [...]}` — the registered commands, as [`CommandRegistry::list`](crate::CommandRegistry::list) shapes them |
-//! | `POST /api/sessions/{id}/commands`, body `{"line": "..."}` | `200 {"matched": false}` for a line that is not a registered command (nothing written), else `200 {"matched": true, commandId, name, kind, text?, action?, seq}` — a handler's refusal is `kind: "error"` with status 200, because the command ran and its row says so |
+//! | `POST /api/sessions/{id}/commands`, body `{"line": "...", "attachments"?: [paths]}` | `200 {"matched": false}` for a line that is not a registered command (nothing written), else `200 {"matched": true, commandId, name, kind, text?, action?, seq}` — a handler's refusal is `kind: "error"` with status 200, because the command ran and its row says so |
 //! | … an id that is not `session-<uuid>` | `400 {"error": "not a session id"}` |
 //! | … an id no session has | `404 {"error": "no session <id>"}` |
 //! | … a body over 64 KiB + 1 KiB | `413 {"error": "a command line is at most 65536 bytes"}` |
 //! | … a body that is not a JSON object with a string `line` | `400 {"error": "the body must be JSON with a string \"line\""}` |
+//! | … `attachments` the turn's reader refuses (not a list, a path outside the upload directory, a file gone) | `400 {"error": "<the reader's sentence>"}` |
+//! | … attachments sent to a command that does not accept them | `400 {"error": "/<name> does not accept attachments; remove them first"}`, nothing written |
 //!
-//! Every JSON answer, the refusals included, is `JSON.stringify(value, null, 2)` plus a newline, as
-//! `application/json` with `cache-control: no-store` — `http.ts`'s one `json` helper. The checks are in that
-//! order: the id, the session, then the body. The server mounts these behind its door, after the token
-//! check, like every other `/api` route; a wrong method falls through to its `404`.
+//! `attachments` is the same list of uploaded paths a turn takes, read by the same reader
+//! ([`Commands::read_attachments`]) into the parts a user message records. Every JSON answer, the refusals
+//! included, is `JSON.stringify(value, null, 2)` plus a newline, as `application/json` with
+//! `cache-control: no-store` — `http.ts`'s one `json` helper. The checks are in that order: the id, the session,
+//! the body, the attachments (read before the line is judged, so an unreadable list is refused even for a line
+//! that is no command), then the command's own refusal. The server mounts these behind its door, after the
+//! token check, like every other `/api` route; a wrong method falls through to its `404`.
 
 use std::sync::Arc;
 
@@ -30,6 +35,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::registry::CommandError;
 use crate::service::Commands;
 use crate::text;
 
@@ -126,9 +132,16 @@ async fn run_command(
             "the body must be JSON with a string \"line\"",
         );
     };
-    match host.execute(&handle, line).await {
+    let attachments =
+        match host.read_attachments(body.as_ref().and_then(|body| body.get("attachments"))) {
+            Ok(attachments) => attachments,
+            Err(error) => return refuse(StatusCode::BAD_REQUEST, &error.to_string()),
+        };
+    match host.execute(&handle, line, attachments).await {
+        // Attachments sent to a command that takes none: refused before anything was written.
+        Err(CommandError::Input(message)) => refuse(StatusCode::BAD_REQUEST, &message),
         // The session log refused an append: the TypeScript server's catch-all answers a 500 for a throw.
-        Err(message) => refuse(StatusCode::INTERNAL_SERVER_ERROR, &message),
+        Err(CommandError::Log(message)) => refuse(StatusCode::INTERNAL_SERVER_ERROR, &message),
         Ok(None) => json_pretty(StatusCode::OK, &json!({ "matched": false })),
         Ok(Some(execution)) => {
             let result = &execution.result;
@@ -192,18 +205,24 @@ mod tests {
 
     use super::*;
     use crate::builtins::export_command;
-    use crate::registry::CommandRegistry;
+    use crate::registry::{CommandDefinition, CommandInput, CommandRegistry, CommandResult};
     use crate::test_support::{Fixture, body_text, call};
-    use heddle_session::SessionService;
+    use heddle_session::{ContentPart, SessionService};
 
     /// The two routes merged into a caller's router the way the server merges them: anything they do not
     /// claim — another path, a wrong method — is left to the caller's fallback.
     fn app(fixture: &Fixture) -> Router {
         let registry = CommandRegistry::new();
         registry.register(export_command()).unwrap();
+        app_over(fixture, registry)
+    }
+
+    /// [`app`] over a registry the test filled, reading attachments from the fixture's upload directory.
+    fn app_over(fixture: &Fixture, registry: CommandRegistry) -> Router {
         let host = Commands::with_registry(
             Arc::new(SessionService::from_store(fixture.store.clone())),
             registry,
+            fixture.upload_dir(),
         );
         let teapot = || async { (StatusCode::IM_A_TEAPOT, "not mine\n") };
         Router::new()
@@ -378,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_prompt_action_is_answered_for_the_page_to_send_as_a_message() {
-        use crate::registry::{CommandAction, CommandDefinition, CommandResult};
+        use crate::registry::CommandAction;
         let fixture = Fixture::new("routes-prompt");
         let registry = CommandRegistry::new();
         registry
@@ -392,6 +411,7 @@ mod tests {
         let host = Commands::with_registry(
             Arc::new(SessionService::from_store(fixture.store.clone())),
             registry,
+            fixture.upload_dir(),
         );
         let response = call(
             routes(Arc::new(host)),
@@ -427,6 +447,103 @@ mod tests {
                 "action",
                 "seq"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn attachments_reach_a_command_that_accepts_them_and_any_other_is_a_400_that_writes_nothing()
+     {
+        let fixture = Fixture::new("routes-attachments");
+        let registry = CommandRegistry::new();
+        registry.register(export_command()).unwrap();
+        registry
+            .register(
+                CommandDefinition::sync("takes", "accepts files", |context| {
+                    let parts: Vec<String> = context
+                        .attachments
+                        .iter()
+                        .map(|part| match part {
+                            ContentPart::Image(image) => format!("image {}", image.name),
+                            ContentPart::File(file) => format!("file {}", file.name),
+                            other => format!("{other:?}"),
+                        })
+                        .collect();
+                    Ok(CommandResult::success_text(parts.join(", ")))
+                })
+                .input(CommandInput {
+                    hint: "<text>".to_owned(),
+                    attachments: Some(true),
+                }),
+            )
+            .unwrap();
+        let app = app_over(&fixture, registry);
+        let id = fixture.handle.id.clone();
+        let shot = fixture.upload("2026-10-29T00-00-00-000Z-shot.png", b"abc");
+        let note = fixture.upload("notes.txt", b"hello");
+        let post = |body: Value| {
+            let app = app.clone();
+            let path = post_path(&id);
+            async move { call(app, Method::POST, &path, Some(&body.to_string())).await }
+        };
+
+        let taken = post(json!({"line": "/takes look", "attachments": [shot, note]})).await;
+        assert_eq!(taken.status(), StatusCode::OK);
+        let answer = json_of(taken).await;
+        assert_eq!(answer["matched"], json!(true));
+        assert_eq!(
+            answer["text"],
+            json!("image shot.png, file notes.txt"),
+            "the files reach the handler as the parts a user message records"
+        );
+
+        let before = fixture.events().len();
+        let refused = post(json!({"line": "/export", "attachments": [note]})).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(refused.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(refused.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            body_text(refused).await,
+            "{\n  \"error\": \"/export does not accept attachments; remove them first\"\n}\n"
+        );
+        let not_a_list = post(json!({"line": "/export", "attachments": "nope"})).await;
+        assert_eq!(not_a_list.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(not_a_list).await,
+            "{\n  \"error\": \"attachments must be an array of paths\"\n}\n"
+        );
+        let gone = post(json!({"line": "/export", "attachments": ["/no/such/upload.txt"]})).await;
+        assert_eq!(gone.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_of(gone).await,
+            json!({"error": "the attached file no longer exists: /no/such/upload.txt"})
+        );
+        let unread = post(json!({"line": "just a message", "attachments": {"a": 1}})).await;
+        assert_eq!(
+            unread.status(),
+            StatusCode::BAD_REQUEST,
+            "the list is read before the line is judged, as http.ts reads it"
+        );
+        assert_eq!(
+            fixture.events().len(),
+            before,
+            "a refused line writes nothing"
+        );
+
+        for attachments in [Value::Null, json!([])] {
+            let response = post(json!({"line": "/export", "attachments": attachments})).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{attachments} is no attachments"
+            );
+            assert_eq!(json_of(response).await["matched"], json!(true));
+        }
+        let prompt = post(json!({"line": "just a message", "attachments": [note]})).await;
+        assert_eq!(prompt.status(), StatusCode::OK);
+        assert_eq!(
+            body_text(prompt).await,
+            "{\n  \"matched\": false\n}\n",
+            "a prompt with files is no command: the page sends both on as a turn"
         );
     }
 
