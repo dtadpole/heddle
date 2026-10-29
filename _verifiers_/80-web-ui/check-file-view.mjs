@@ -342,3 +342,61 @@ test('an SVG opened directly runs no script and cannot reach the API, while the 
     await server.close()
   }
 })
+
+test('a file named beyond ASCII downloads whole under its real name, with only ASCII in its disposition', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-2 (P1) and developer-two-3, measured on 8082 and 3097 on 2026-10-29: the raw route and
+   * the upload route wrote a download's own name into `content-disposition`. The TypeScript server's writeHead threw
+   * on `说明.txt` part-way and then wrote a 404 over the started 200, still declaring the file's length; `café.txt`
+   * went out as a raw Latin-1 byte, and the Rust binary sent `说明.txt` as raw UTF-8. A header must be visible ASCII;
+   * the real name travels in `filename*=UTF-8''…` (RFC 6266, RFC 5987) beside an ASCII fallback.
+   */
+  const server = await startServer('unicode-names')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const files = [['说明.txt', '第一行\n'], ['café.txt', 'x\n'], ['notes.txt', 'plain\n']]
+    for (const [name, text] of files) writeFileSync(join(server.work, name), text)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    /** Read one download, turning a broken answer (a body that never matches its length) into a failed assertion. */
+    const download = async (what, path, expected) => {
+      let response
+      let body
+      try {
+        response = await fetch(new URL(path, server.url), { headers: { cookie } })
+        body = Buffer.from(await response.arrayBuffer())
+      } catch (error) {
+        assert.fail(`${what}: the answer could not be read whole (${error.cause?.code ?? error.message})`)
+      }
+      assert.equal(response.status, 200, `${what} answers 200 (${response.status}: ${body.toString('utf8').slice(0, 40)})`)
+      assert.equal(body.toString('utf8'), expected, `${what}: the body is the whole file`)
+      assert.equal(response.headers.get('content-length'), String(Buffer.byteLength(expected)), `${what}: the length it declares is the file's`)
+      const disposition = response.headers.get('content-disposition') ?? ''
+      assert.match(disposition, /^attachment; filename="[\x20-\x7e]*"/, `${what}: an attachment with an ASCII filename (${JSON.stringify(disposition)})`)
+      assert.match(disposition, /^[\x20-\x7e]*$/, `${what}: only visible ASCII in the header (${JSON.stringify(disposition)})`)
+      const encoded = /filename\*=UTF-8''([^;]*)$/.exec(disposition)?.[1]
+      return encoded === undefined ? /filename="([^"]*)"/.exec(disposition)?.[1] : decodeURIComponent(encoded)
+    }
+    for (const [name, text] of files) {
+      const named = await download(`the raw route for ${name}`, `/api/raw?path=${encodeURIComponent(join(server.work, name))}`, text)
+      assert.equal(named, name, `the raw route's disposition names ${name} as it is`)
+    }
+    // The upload route serves a stored file through the same answer; it is read for the session that sent it.
+    const stored = await fetch(new URL(`/api/uploads?name=${encodeURIComponent('说明.txt')}`, server.url), { method: 'POST', headers: { cookie }, body: '第一行\n' })
+    const storedPath = String((await stored.json()).path ?? '')
+    const leaf = storedPath.split('/').pop()
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'the notes', folder: server.work, attachments: [storedPath] }),
+    })
+    const turnText = await turn.text()
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(turnText)?.[1]
+    assert.ok(session !== undefined, `the turn that sends the upload names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
+    const named = await download(`the upload route for ${leaf}`, `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, '第一行\n')
+    assert.equal(named, leaf, `the upload route's disposition names the stored file ${leaf} as it is`)
+  } finally {
+    await server.close()
+  }
+})
