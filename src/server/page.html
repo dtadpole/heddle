@@ -5391,6 +5391,7 @@ async function showSession(id) {
   updateStatusBar()
   current = id
   paintEmptyState()
+  paintDocumentTitle()
   /** Opening a session is reading it: its finished turn is no longer unread (DSH clears `completionUnread` here). */
   if (completionUnread.delete(id)) paintRunningMarks()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
@@ -5423,6 +5424,7 @@ async function showSession(id) {
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
+      paintDocumentTitle()
       applySessionAccess(null)
       return
     }
@@ -5472,12 +5474,28 @@ async function showSession(id) {
   await refreshTodo()
 }
 
+/**
+ * The browser tab follows the open session, as DSH's `DocumentTitle` (`dsh-client-ui-layout`) does: `<title> — Heddle`
+ * while a session with a title is open, the product name alone otherwise. The tab said `Heddle` whatever was open, so
+ * several tabs could not be told apart (DSH parity R-developer-seven-4).
+ */
+const PRODUCT_TITLE = 'Heddle'
+let titledSessions = []
+
+function paintDocumentTitle() {
+  const meta = current === null ? undefined : titledSessions.find((entry) => entry !== null && typeof entry === 'object' && entry.id === current)
+  const title = typeof meta?.title === 'string' && meta.title.trim().length > 0 ? meta.title.trim() : undefined
+  document.title = title === undefined ? PRODUCT_TITLE : `${title} — ${PRODUCT_TITLE}`
+}
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
   const response = await fetch('/api/sessions')
   if (!response.ok) return
   const sessions = await response.json()
+  if (Array.isArray(sessions)) titledSessions = sessions
+  paintDocumentTitle()
   /**
    * The server's `running` flag is the authority: a turn whose end this page never saw — a failed turn, a reload
    * mid-turn, a dropped stream — must not leave a session looking active, and a turn already running when the page

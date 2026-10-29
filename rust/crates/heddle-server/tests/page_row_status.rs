@@ -45,3 +45,17 @@ fn the_page_keeps_the_waiting_and_unread_sets() {
         "opening a session reads it"
     );
 }
+
+/// The tab follows the open session, as DSH's `DocumentTitle` (`dsh-client-ui-layout`) does: `<title> — Heddle`, or the
+/// product name alone (DSH parity R-developer-seven-4). Executed by `test/page-document-title.test.ts`.
+#[test]
+fn the_tab_title_follows_the_open_session() {
+    assert!(PAGE_SOURCE.contains("const PRODUCT_TITLE = 'Heddle'"));
+    assert!(PAGE_SOURCE.contains(
+        "document.title = title === undefined ? PRODUCT_TITLE : `${title} — ${PRODUCT_TITLE}`"
+    ));
+    assert!(
+        PAGE_SOURCE.contains("if (Array.isArray(sessions)) titledSessions = sessions"),
+        "the title is repainted from each list read, so a rename shows"
+    );
+}
