@@ -241,16 +241,27 @@ test('a hand-made browser.lock2 holds the integrator slot', (t) => {
   assert.equal(take(root, 'integrator-one').status, 75)
 })
 
-test('no new holder while memory is short: free under 25% or swap at or over 7168M', (t) => {
+test('no new holder while memory is short: free under 25%, or swap at or over the 7680M backstop (D-061)', (t) => {
   const root = sandbox(t)
   const low = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '24' })
   assert.equal(low.status, 75)
-  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-060\)/)
-  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '7168' })
+  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-061\)/)
+  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '7680' })
   assert.equal(swap.status, 75)
-  assert.match(swap.out, /no new holder: swap 7168M >= 7168M \(D-051\)/)
-  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_SWAP_MB: '7100' }).status, 0)
-  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_SWAP_MB: '7200' }).out, /no new holder, swap 7200M >= 7168M/)
+  assert.match(swap.out, /no new holder: swap 7680M >= 7680M \(D-061 backstop\)/)
+  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_SWAP_MB: '7700' }).out, /no new holder, swap 7700M >= 7680M/)
+  const sticky = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_SWAP_MB: '7679' })
+  assert.equal(sticky.status, 0, 'sticky swap under the backstop with enough free memory admits: the old 7168M line is gone')
+})
+
+test('browser-cap can move the memory lines without a code change', (t) => {
+  const root = sandbox(t)
+  cap(root, '1 min-free=50 swap-stop=7000')
+  const free = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '44' })
+  assert.match(free.out, /memory free 44% < 50%/)
+  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_SWAP_MB: '7100' })
+  assert.match(swap.out, /swap 7100M >= 7000M/)
+  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_SWAP_MB: '6999' }).status, 0)
 })
 
 test('forcing a release with two holders names the slot; a holder over a lowered cap is shown and released', (t) => {
