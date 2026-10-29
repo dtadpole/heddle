@@ -25,6 +25,7 @@ heddle-context.workspace = true
 heddle-events.workspace = true
 heddle-llm.workspace = true
 heddle-goal.workspace = true
+heddle-questions.workspace = true
 heddle-sandbox.workspace = true
 heddle-schedule.workspace = true
 heddle-server.workspace = true
