@@ -19,7 +19,7 @@
 //! | [`sse`] | `llm/adapters.ts` | the incremental `text/event-stream` parser |
 //! | [`http`] | `llm/http.ts` | the one HTTP client every adapter and the model list share |
 //! | [`adapter`] | `llm/adapters.ts` | the [`Adapter`] trait, `adapter_for`, the stream fold driver |
-//! | [`chat`], [`responses`], [`anthropic`], [`scripted`] | `llm/adapters.ts` | one module per wire shape |
+//! | [`chat`], [`responses`], [`messages`], [`anthropic`], [`scripted`] | `llm/adapters.ts` | one module per wire shape (`messages` is `anthropic-messages`, which `heddle-config` keeps as `EndpointKind::Other`) |
 //! | [`attachments`] | `llm/attachments.ts` | what a provider is sent for an attached image or file |
 //! | [`model_info`] | `llm/model-info.ts` | the provider's model list: context window and input modalities |
 //! | [`service`] | `llm/service.ts`, `plugins/model.ts` | [`ModelService`] and the `model/*` hook seam |
@@ -43,6 +43,7 @@ pub mod chat;
 pub mod command;
 pub mod error;
 pub mod http;
+pub mod messages;
 pub mod model_info;
 pub mod printer;
 pub mod responses;
