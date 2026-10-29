@@ -637,6 +637,8 @@
    * 12px of padding-right; each button is 28×28 with its glyph at 15px.
    */
   .turn.user { align-self: flex-end; max-width: 100%; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  /* A steer the running turn has not taken yet (the session inbox): drawn where it will land, but quieter. */
+  .turn.user[data-chat-pending] { opacity: .6; }
   .turn.user .bubble {
     max-width: 100%; width: fit-content; padding: 10px 16px;
     border: 0; border-radius: 20px;
@@ -3594,15 +3596,61 @@ async function renderSettledAnswers() {
  */
 function lastTurnRow() {
   for (let node = log.lastElementChild; node !== null; node = node.previousElementSibling) {
-    if (!node.hasAttribute('data-chat-running')) return node
+    if (!node.hasAttribute('data-chat-running') && !node.hasAttribute('data-chat-pending')) return node
   }
   return null
 }
 
-/** Keep the running row after every row that arrives while a turn runs: it is the *last* thing, by definition. */
+/**
+ * Keep the running row after every row that arrives while a turn runs: it is the *last* thing, by definition.
+ * Pending steers sit just above it, after every written row, because that is where the loop will write them.
+ */
 function keepRunningLast() {
+  const pending = [...log.querySelectorAll('[data-chat-pending]')]
+  if (pending.length > 0 && pending[pending.length - 1] !== log.lastElementChild) for (const row of pending) log.append(row)
   const running = log.querySelector('[data-chat-running]')
   if (running !== null && running !== log.lastElementChild) log.append(running)
+}
+
+/**
+ * Steers the running turn has not taken yet: the session's next-step inbox (R-developer-two-5).
+ *
+ * The steer route queues a message instead of writing it. The loop writes it at its next step boundary, which
+ * is after any tool result still due, and a stop keeps it until the next turn. DSH's chat draws those
+ * `next-step` items at the foot of the conversation (its `pendingInputs`), so a person sees the message they
+ * steered at once. This list follows the same `agent/inbox/spliced` events the server folds: the view's
+ * `inbox` on load, then each splice as it streams. A claim removes the rows just before the written message
+ * arrives as an ordinary user row.
+ */
+let pendingSteers = []
+
+function applyInboxSplice(event) {
+  if (event.target !== 'next-step' || typeof event.start !== 'number') return
+  const removed = typeof event.removedCount === 'number' ? event.removedCount : 0
+  const inserted = Array.isArray(event.inserted) ? event.inserted : []
+  pendingSteers = [...pendingSteers.slice(0, event.start), ...inserted, ...pendingSteers.slice(event.start + removed)]
+  renderPendingSteers()
+}
+
+function renderPendingSteers() {
+  for (const row of log.querySelectorAll('[data-chat-pending]')) row.remove()
+  for (const item of pendingSteers) {
+    const text = messageContentText(item.content ?? [])
+    if (text === '') continue
+    const node = document.createElement('div')
+    node.className = 'turn user'
+    node.dataset.kind = 'user'
+    node.dataset.state = 'pending'
+    node.dataset.chatPending = ''
+    node.title = 'Steered; the running turn takes it at its next step'
+    const bubble = document.createElement('div')
+    bubble.className = 'bubble'
+    bubble.textContent = text
+    node.append(bubble)
+    log.append(node)
+  }
+  keepRunningLast()
+  followChatTail()
 }
 
 /** DSH's `formatRunDuration`: compact units, hours and minutes only once the run reaches them. */
@@ -5377,6 +5425,7 @@ async function showSession(id) {
    * the only thing that ever wrote to it was the live stream and those events had already happened.
    */
   log.replaceChildren()
+  pendingSteers = []
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
     if (!response.ok) {
@@ -5430,6 +5479,9 @@ async function showSession(id) {
         log.append(note)
       }
     }
+    /** What a person steered that the turn has not taken yet, at the foot of the conversation. */
+    pendingSteers = Array.isArray(body.inbox?.['next-step']) ? body.inbox['next-step'] : []
+    renderPendingSteers()
     followChatTail(true)
   } catch (error) {
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
@@ -5674,6 +5726,8 @@ events.addEventListener('session', (message) => {
         state: 'running',
       })
     }
+  } else if (event.type === 'agent/inbox/spliced') {
+    applyInboxSplice(event)
   } else if (event.type === 'message' && event.message.role === 'user') {
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
