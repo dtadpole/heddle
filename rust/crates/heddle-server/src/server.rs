@@ -119,6 +119,9 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/approvals/{id}"),
     ("GET", "/api/goal"),
     ("POST", "/api/goal"),
+    ("GET", "/api/questions"),
+    ("POST", "/api/questions/{id}"),
+    ("POST", "/api/questions/{id}/hold"),
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
@@ -447,6 +450,9 @@ impl ServerBuilder {
             .route("/api/approvals", get(list_approvals))
             .route("/api/approvals/{id}", post(answer_approval))
             .route("/api/goal", get(get_goal).post(post_goal))
+            .route("/api/questions", get(get_questions))
+            .route("/api/questions/{id}", post(answer_question))
+            .route("/api/questions/{id}/hold", post(hold_question))
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
@@ -1810,6 +1816,54 @@ async fn get_goal(
     }
     let goal = goals.get(&session);
     respond::json(StatusCode::OK, &json!({"session": session, "goal": goal}))
+}
+
+/// `GET /api/questions?session=<id>[&all=1]`: the session's answerable questions (`ask_user_question`).
+async fn get_questions(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let all = query.get("all").is_some_and(|value| value == "1");
+    let (status, body) = questions.get(query.get("session").map(String::as_str), all);
+    respond::raw_json(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), body)
+}
+
+/// `POST /api/questions/<id>`: one answer batch. A late answer to a session whose turn is running is appended as
+/// the user message, as a steer is; otherwise the body hands it back for the page to send as a turn.
+async fn answer_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, false, body)
+}
+
+/// `POST /api/questions/<id>/hold`: Take time on a timed wait.
+async fn hold_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, true, body)
+}
+
+fn question_post(state: &AppState, id: &str, hold: bool, body: JsonBody) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let runs = state.runs();
+    let running = |session: &str| runs.is_running(session);
+    let (status, text, steer) = questions.post(id, hold, &Value::Object(body.0), &running);
+    if let Some((session, message)) = steer {
+        let _ = state
+            .harness()
+            .sessions
+            .user_content(&session, vec![json!({"type": "text", "text": message})]);
+    }
+    respond::raw_json(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), text)
 }
 
 async fn get_todo(
