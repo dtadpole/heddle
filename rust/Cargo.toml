@@ -19,6 +19,7 @@ members = [
     "crates/heddle-web-composer",
     "crates/heddle-web-files",
     "crates/heddle-commands",
+    "crates/heddle-plan",
 ]
 
 [workspace.package]

@@ -25,6 +25,7 @@ heddle-config.workspace = true
 heddle-context.workspace = true
 heddle-events.workspace = true
 heddle-llm.workspace = true
+heddle-plan = { path = "../heddle-plan" }
 heddle-goal.workspace = true
 heddle-sandbox.workspace = true
 heddle-server.workspace = true

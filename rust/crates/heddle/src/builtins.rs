@@ -63,6 +63,8 @@ pub enum Builtin {
     Tools,
     /// `src/commands/service.ts`: the slash-command layer (developer-three).
     Commands,
+    /// `src/plan/service.ts`: plan mode (developer-three).
+    Plan,
 }
 
 /// One built-in: the module it stands for, the crate that implements it, and its service wiring.
@@ -257,6 +259,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         &["session"],
         "heddle-commands",
     ),
+    spec(
+        Builtin::Plan,
+        "plan/service",
+        "plan",
+        "plan",
+        Some("plan"),
+        &["session", "commands", "tools"],
+        "heddle-plan",
+    ),
 ];
 
 const fn spec(
@@ -441,6 +452,7 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Commands) => {
                 Some(Box::new(crate::adapters::CommandsComponent))
             }
+            ComponentRef::Builtin(Builtin::Plan) => Some(Box::new(crate::adapters::PlanComponent)),
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),
@@ -554,6 +566,82 @@ mod tests {
             assert!(
                 BUILTINS.iter().any(|entry| entry.module == module),
                 "no built-in for src/{module}.ts"
+            );
+        }
+    }
+
+    /// The binary resolves every row of the default profile to a built-in, so a row it has no adapter for fails
+    /// every CLI turn ("nothing answers for …"). This boots `heddle.patch.yml` as it is, through this catalog, in a
+    /// scratch home, and asks that no row failed and none is left pending.
+    #[test]
+    fn the_default_profile_boots_with_every_row_active() {
+        let home = scratch("default-profile");
+        let profile = home.join("profiles").join("dev");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join("cordis.yml"), "[]\n").expect("the base layer");
+        std::fs::write(
+            profile.join("heddle.patch.yml"),
+            include_str!("../../../../heddle.patch.yml"),
+        )
+        .expect("the default profile's rows");
+        let env = Env::from_pairs([
+            ("HEDDLE_HOME", home.to_string_lossy().into_owned()),
+            ("HOME", home.to_string_lossy().into_owned()),
+        ]);
+        let options = crate::boot::BootOptions {
+            layers: heddle_config::LayerOptions {
+                profile: Some("dev".to_owned()),
+                ..heddle_config::LayerOptions::default()
+            },
+            overrides: Vec::new(),
+            target: "heddle".to_owned(),
+            env: env.clone(),
+        };
+        let boot = crate::boot::boot(&options, &BuiltinCatalog::new(env, home.clone()))
+            .expect("the default profile composes");
+        let ids: Vec<&str> = boot.entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert!(
+            ids.len() >= 16,
+            "the default profile names its rows: {ids:?}"
+        );
+        let unhealthy: Vec<String> = boot
+            .entries
+            .iter()
+            .filter(|entry| entry.state != crate::boot::FiberState::Active)
+            .map(|entry| {
+                format!(
+                    "{} is {}: {}",
+                    entry.id,
+                    entry.state.name(),
+                    entry.error.as_deref().unwrap_or("waiting")
+                )
+            })
+            .collect();
+        assert!(unhealthy.is_empty(), "{unhealthy:#?}");
+        // Every row that provides a service provided it: `plan` and `commands` among them when the profile has them.
+        for entry in BUILTINS {
+            if let (Some(provided), true) = (entry.provides, ids.contains(&entry.bare)) {
+                assert!(
+                    boot.services.provides(provided),
+                    "{} provides {provided}",
+                    entry.bare
+                );
+            }
+        }
+        boot.dispose();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn every_builtin_has_an_adapter_in_the_binarys_catalog() {
+        let catalog = BuiltinCatalog::default();
+        for entry in BUILTINS {
+            assert!(
+                catalog
+                    .component(&ComponentRef::Builtin(entry.builtin))
+                    .is_some(),
+                "{:?} has no adapter",
+                entry.builtin
             );
         }
     }
