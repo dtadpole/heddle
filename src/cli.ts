@@ -421,8 +421,13 @@ function describeTree(node: TreeNode): string[] {
 
 /** Boot from the default profile or from the flags. **/
 async function bootFromArgs(args: Args) {
+  return boot(bootOptions(args))
+}
+
+/** The layers and overrides a command line boots, which the settings surface must judge writes against. */
+function bootOptions(args: Args) {
   const layers = baseLayer(args)
-  return boot({
+  return {
     configDir: process.cwd(),
     ...(args.profile !== undefined ? { profile: args.profile } : {}),
     ...(layers.base !== undefined ? { base: layers.base } : {}),
@@ -448,7 +453,7 @@ async function bootFromArgs(args: Args) {
           ],
         }
       : {}),
-  })
+  }
 }
 
 function hasProfile(args: Args): boolean {
@@ -491,7 +496,9 @@ async function runWeb(args: Args): Promise<void> {
       return
     }
 
+    const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
+      settings: settingsServiceFor(bootOptions(args)),
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
