@@ -37,8 +37,9 @@ pub trait Adapter: Send + Sync {
     fn stream(&self, request: GenerateRequest) -> ChunkStream;
 }
 
-/// The adapter for an endpoint's declared kind (`adapterFor`). An [`crate::EndpointKind::Other`] kind is refused
-/// with `UNKNOWN_KIND`.
+/// The adapter for an endpoint's declared kind (`adapterFor`). `heddle-config` keeps a kind it has no variant for as
+/// [`crate::EndpointKind::Other`]; `anthropic-messages` is spoken here ([`crate::messages`]) and any other such kind is
+/// refused with `UNKNOWN_KIND`.
 pub fn adapter_for(endpoint: EndpointConfig) -> Result<Arc<dyn Adapter>, ModelError> {
     let adapter: Arc<dyn Adapter> = match endpoint.kind {
         heddle_config::EndpointKind::OpenaiChat => {
@@ -52,6 +53,11 @@ pub fn adapter_for(endpoint: EndpointConfig) -> Result<Arc<dyn Adapter>, ModelEr
         }
         heddle_config::EndpointKind::Scripted => {
             Arc::new(crate::scripted::ScriptedAdapter::new(endpoint))
+        }
+        heddle_config::EndpointKind::Other(ref kind)
+            if kind == crate::messages::ANTHROPIC_MESSAGES =>
+        {
+            Arc::new(crate::messages::AnthropicMessagesAdapter::new(endpoint))
         }
         heddle_config::EndpointKind::Other(ref kind) => {
             return Err(ModelError::new(
@@ -298,6 +304,7 @@ mod tests {
             EndpointKind::OpenaiChat,
             EndpointKind::OpenaiResponses,
             EndpointKind::AnthropicVertex,
+            EndpointKind::parse("anthropic-messages"),
         ] {
             let adapter = adapter_for(EndpointConfig {
                 kind: kind.clone(),

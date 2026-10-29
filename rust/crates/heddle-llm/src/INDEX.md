@@ -1,8 +1,8 @@
 ---
 title: The heddle-llm sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:21:53Z
-version: 0.5.0
+modified: 2026-10-29T09:52:29Z
+version: 0.6.0
 description: The sources of the heddle-llm crate, one module per TypeScript concern, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -24,7 +24,8 @@ Unit tests sit in `#[cfg(test)]` modules beside the code.
 | [`adapter.rs`](adapter.rs) | `llm/adapters.ts` | the `Adapter` trait and the fold driver |
 | [`chat.rs`](chat.rs) | `llm/adapters.ts` | Chat Completions: request builder, message mapping, fold |
 | [`responses.rs`](responses.rs) | `llm/adapters.ts` | Responses: request builder, input list, finish reason, fold |
-| [`anthropic.rs`](anthropic.rs) | `llm/adapters.ts` | Anthropic publisher route: call builder, message mapping, fold |
+| [`messages.rs`](messages.rs) | `llm/adapters.ts` | Anthropic's Messages API (`anthropic-messages`, kept by `heddle-config` as `EndpointKind::Other`): call builder, thinking form, JSON answer, adapter |
+| [`anthropic.rs`](anthropic.rs) | `llm/adapters.ts` | Anthropic publisher route: call builder, message mapping, the fold both Anthropic kinds share |
 | [`scripted.rs`](scripted.rs) | `llm/adapters.ts` | the offline scripted endpoint |
 | [`attachments.rs`](attachments.rs) | `llm/attachments.ts` | file handles, image placeholders, the request image budget |
 | [`model_info.rs`](model_info.rs) | `llm/model-info.ts` | the provider's model list: context window and input modalities |
