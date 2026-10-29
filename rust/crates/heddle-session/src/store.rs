@@ -9,7 +9,14 @@
 //!   sits in the file unread.
 //! - **A process that has opened a session reads it from memory.** The file is decoded once; every
 //!   later read, count and derivation is served from that fold, and the surface is cached by event count.
-//!   A second process appending to the same session would not be seen — heddle runs one per session.
+//! - **One process writes a session at a time.** The first append takes a writer lock beside the log
+//!   ([`lock_path`]: `<id>.lock`, or `session.lock` in an old-layout directory, holding the holder's pid and
+//!   a newline — the TypeScript build's file, byte for byte) and keeps it until [`SessionStore::release`] or
+//!   the store is dropped. Another process's append is refused with [`SessionError::AlreadyOwned`], DSH's
+//!   `session "<id>" is already owned by an active write handle`; a lock whose holder is dead is taken over.
+//!   Taking the lock drops the fold, so the first write re-reads what a previous holder appended. Without
+//!   it, a `heddle web` server and a `heddle --resume <id> --turn` each appended from their own count and
+//!   the log held the same seqs twice (R-developer-eight-27).
 //! - **Two layouts are read, one is written**: `<root>/<workspace-key>/<id>.v2.jsonl.zstd` + `<id>.json`
 //!   for a new session; `<root>/<id>/{session.v2.jsonl.zstd|session.jsonl, meta.json}` for an old one,
 //!   which keeps the shape and the format it was born with.
@@ -22,8 +29,9 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::Duration;
 
 use heddle_config::{Env, expand_home, heddle_home};
 use serde::Serialize;
@@ -98,6 +106,184 @@ pub fn transcript_in(dir: &str) -> String {
         .into_owned()
 }
 
+/// Where a session's writer lock is: `<id>.lock` beside its log, or `session.lock` inside an old-layout
+/// session directory — DSH's `session.lock`, named the way this layout names everything else of one
+/// session. The TypeScript store (`lockPath`) uses the same path and the same contents.
+pub fn lock_path(handle: &SessionHandle) -> String {
+    let legacy = Path::new(&handle.meta)
+        .file_name()
+        .is_some_and(|name| name == "meta.json");
+    let name = if legacy {
+        "session.lock".to_string()
+    } else {
+        format!("{}.lock", handle.id)
+    };
+    Path::new(&handle.dir)
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// How long a lock file with no pid in it is taken to be one being written rather than debris: the holder
+/// creates the file and writes its pid in the next call.
+const UNWRITTEN_LOCK_GRACE: Duration = Duration::from_secs(5);
+
+/// The lock files this process holds, and how many stores in it hold each; the last to let go removes it.
+static HELD_BY_PROCESS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
+
+/// The pid a lock file names: decimal digits, surrounding whitespace ignored, above zero.
+fn lock_holder(text: &str) -> Option<u32> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse::<u32>().ok().filter(|pid| *pid > 0)
+}
+
+/// Whether a process with this pid exists. A process this user may not signal exists, and when the
+/// answer cannot be had the holder is taken to be alive: a live writer is never expropriated.
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+/// Whether a process with this pid exists. A process this user may not signal exists, and when the
+/// answer cannot be had the holder is taken to be alive: a live writer is never expropriated.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_alive(pid: u32) -> bool {
+    // `kill -0` is what Node's `process.kill(pid, 0)` asks; the crate forbids the unsafe a direct call needs.
+    match std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        Ok(output) => {
+            output.status.success()
+                || String::from_utf8_lossy(&output.stderr).contains("not permitted")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Whether a process with this pid exists, asked of `tasklist`; alive when the answer cannot be had.
+#[cfg(not(unix))]
+fn process_alive(pid: u32) -> bool {
+    match std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).contains(&format!(" {pid} ")),
+        Err(_) => true,
+    }
+}
+
+/// Remove a lock file only if it still names this process, so letting go never removes another's lock.
+fn remove_own_lock(path: &Path) {
+    if let Ok(text) = std::fs::read_to_string(path)
+        && lock_holder(&text) == Some(std::process::id())
+    {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Take a session's writer lock for this process, or fail with [`SessionError::AlreadyOwned`].
+///
+/// DSH arbitrates with a kernel `flock(2)` on `session.lock`; the TypeScript build cannot take one without a
+/// native addon, so both builds share a lock file created exclusively and naming its holder's pid. What flock
+/// gives for free is supplied by hand: a holder that died without letting go leaves a file naming a pid that no
+/// longer exists, and that lock is removed and taken rather than blocking the session forever. A live holder is
+/// never expropriated: there is no expiry that could let a stalled writer's resumed appends tear the log.
+fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
+    let mut held = HELD_BY_PROCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(count) = held.get_mut(path) {
+        *count += 1;
+        return Ok(());
+    }
+    let own = std::process::id();
+    let shown = path.to_string_lossy().into_owned();
+    let refused = |pid: Option<u32>| SessionError::AlreadyOwned {
+        id: id.to_string(),
+        pid,
+    };
+    for _ in 0..3 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(format!("{own}\n").as_bytes()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(path);
+                    return Err(SessionError::io(shown, error));
+                }
+                held.insert(path.to_path_buf(), 1);
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(SessionError::io(shown, error)),
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(SessionError::io(shown, error)),
+        };
+        let holder = lock_holder(&text);
+        if holder == Some(own) {
+            held.insert(path.to_path_buf(), 1);
+            return Ok(());
+        }
+        if let Some(pid) = holder
+            && process_alive(pid)
+        {
+            return Err(refused(Some(pid)));
+        }
+        if holder.is_none() {
+            // A modification time in the future reads as young, as `Date.now() - mtimeMs` does.
+            let young = std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .map(|modified| {
+                    modified
+                        .elapsed()
+                        .map(|age| age < UNWRITTEN_LOCK_GRACE)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(false);
+            if young {
+                return Err(refused(None));
+            }
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(SessionError::io(shown, error)),
+        }
+    }
+    Err(refused(None))
+}
+
+/// Let go of one store's hold on a lock; the last hold in this process removes the file.
+fn release_writer_lock(path: &Path) {
+    let mut held = HELD_BY_PROCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match held.get_mut(path) {
+        None => return,
+        Some(count) if *count > 1 => {
+            *count -= 1;
+            return;
+        }
+        Some(_) => {}
+    }
+    held.remove(path);
+    remove_own_lock(path);
+}
+
 /// The meter sections of one request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ModelRequestBreakdown {
@@ -160,6 +346,19 @@ struct StoreState {
     loaded: HashMap<String, Loaded>,
     /// Folded surfaces, keyed by session and the log length they were folded at.
     surface_cache: HashMap<String, (usize, Arc<SurfaceState>)>,
+    /// The sessions this store holds the writer lock for, and where each lock is.
+    held: HashMap<String, PathBuf>,
+}
+
+impl Drop for SessionStore {
+    /// A store that goes away lets go of every session it holds, so the next process may write them.
+    fn drop(&mut self) {
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for path in state.held.values() {
+            release_writer_lock(path);
+        }
+        state.held.clear();
+    }
 }
 
 impl std::fmt::Debug for SessionStore {
@@ -569,6 +768,8 @@ impl SessionStore {
     ) -> Result<Arc<SessionEvent>, SessionError> {
         let written = {
             let mut state = self.state.lock().expect("the store lock is never poisoned");
+            // Before anything is read for the write: taking the lock is what makes the seq the file's next one.
+            self.claim_locked(&mut state, handle)?;
             self.load_locked(&mut state, handle)?;
             self.append_locked(&mut state, handle, event, options)?
         };
@@ -586,6 +787,58 @@ impl SessionStore {
             listener(handle, &written);
         }
         Ok(written)
+    }
+
+    /// Take this session's writer lock, or fail with [`SessionError::AlreadyOwned`] while another process
+    /// holds it.
+    ///
+    /// [`SessionStore::append`] calls it, so a caller only needs it to be refused **before** doing anything
+    /// else. Taking the lock drops this store's fold of the session: the previous holder may have appended
+    /// and let go since it was read, and a write counted from a stale fold is the duplicate seq this lock
+    /// exists to prevent. Holding it again is free.
+    pub fn claim(&self, handle: &SessionHandle) -> Result<(), SessionError> {
+        let mut state = self.state.lock().expect("the store lock is never poisoned");
+        self.claim_locked(&mut state, handle)
+    }
+
+    /// Whether this store holds the session's writer lock.
+    pub fn holds(&self, handle: &SessionHandle) -> bool {
+        self.state
+            .lock()
+            .expect("the store lock is never poisoned")
+            .held
+            .contains_key(&handle.id)
+    }
+
+    /// Let go of the session's writer lock, so another process may write it. Nothing has to call this:
+    /// dropping the store lets go of every lock, and a lock whose holder died is taken over by the next
+    /// writer. A later append takes the lock again.
+    pub fn release(&self, handle: &SessionHandle) {
+        let path = self
+            .state
+            .lock()
+            .expect("the store lock is never poisoned")
+            .held
+            .remove(&handle.id);
+        if let Some(path) = path {
+            release_writer_lock(&path);
+        }
+    }
+
+    fn claim_locked(
+        &self,
+        state: &mut StoreState,
+        handle: &SessionHandle,
+    ) -> Result<(), SessionError> {
+        if state.held.contains_key(&handle.id) {
+            return Ok(());
+        }
+        let path = PathBuf::from(lock_path(handle));
+        acquire_writer_lock(&path, &handle.id)?;
+        state.held.insert(handle.id.clone(), path);
+        state.loaded.remove(&handle.id);
+        state.surface_cache.remove(&handle.id);
+        Ok(())
     }
 
     /// Append with the lock already held, and without touching the meta or the listener.
@@ -658,18 +911,35 @@ impl SessionStore {
         if state.loaded.contains_key(&handle.id) {
             return Ok(());
         }
-        let bytes = std::fs::read(&handle.transcript).unwrap_or_default();
-        let decoded = decode_transcript(&bytes);
+        let mut bytes = std::fs::read(&handle.transcript).unwrap_or_default();
+        let mut decoded = decode_transcript(&bytes);
+        let torn = bytes.len() > decoded.readable_bytes;
 
         // A torn tail is cut off before anything is appended. What is dropped is a frame that was never
         // written whole, so no event that existed as an event is lost.
-        let dropped = bytes.len().saturating_sub(decoded.readable_bytes);
-        if dropped > 0
-            && let Ok(file) = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&handle.transcript)
-        {
-            let _ = file.set_len(decoded.readable_bytes as u64);
+        //
+        // Only the session's writer cuts. A half frame at the end of a session another process holds may be
+        // that process's append in progress, so a reader that cannot take the lock reads the whole frames and
+        // leaves the file alone; one that can re-reads under the lock before it cuts, because the frame may
+        // have been finished by the holder it just replaced.
+        let mut dropped = 0;
+        if torn {
+            match self.claim_locked(state, handle) {
+                Ok(()) => {
+                    bytes = std::fs::read(&handle.transcript).unwrap_or_default();
+                    decoded = decode_transcript(&bytes);
+                    dropped = bytes.len().saturating_sub(decoded.readable_bytes);
+                    if dropped > 0
+                        && let Ok(file) = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&handle.transcript)
+                    {
+                        let _ = file.set_len(decoded.readable_bytes as u64);
+                    }
+                }
+                Err(SessionError::AlreadyOwned { .. }) => {}
+                Err(error) => return Err(error),
+            }
         }
 
         let mut events = Vec::with_capacity(decoded.lines.len());
@@ -686,7 +956,7 @@ impl SessionStore {
             }
         }
         let framed = decoded.format == TranscriptFormat::ZstdFrames
-            || ((dropped > 0 || decoded.lines.is_empty()) && is_framed(&handle.transcript));
+            || ((torn || decoded.lines.is_empty()) && is_framed(&handle.transcript));
         state.loaded.insert(
             handle.id.clone(),
             Loaded {
@@ -1880,6 +2150,160 @@ mod tests {
         assert_eq!(decoded.frames, 101);
         assert!(!decoded.torn);
         assert_eq!(decoded.readable_bytes, store.bytes(&handle).len());
+    }
+
+    /// R-developer-eight-27: a `heddle web` server held a session while `heddle --resume <id> --turn` appended
+    /// to it from another process, and the log got seqs 14-19 twice. The other process here is a real one,
+    /// named in the lock file exactly as either build writes it (`<pid>\n`), and its append is written to the
+    /// log the way its store would write it.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_process_cannot_append_while_the_holder_lives_and_takes_over_once_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap().to_string();
+        let handle = {
+            let first = SessionStore::new(&root, &Env::default());
+            let handle = first
+                .create(CreateOptions {
+                    cwd: Some("/home/me/work".to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+            first
+                .message(&handle, user("remember the word loom"))
+                .unwrap();
+            handle
+        };
+        let lock = Path::new(&handle.dir).join(format!("{}.lock", handle.id));
+
+        // The other process: alive, and named in the session's lock file.
+        let mut holder = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a second process");
+        std::fs::write(&lock, format!("{}\n", holder.id())).unwrap();
+
+        // This process reads the session first, so its fold is loaded before the holder writes again.
+        let store = SessionStore::new(&root, &Env::default());
+        let reopened = store.open(&handle.id).expect("the session is on disk");
+        assert_eq!(store.read(&reopened).unwrap().len(), 2);
+
+        // The holder appends seq 2, as its own store would.
+        let theirs = SessionEvent {
+            seq: 2,
+            at: iso_now(),
+            kind: "test/holder".to_string(),
+            fields: Map::new(),
+        };
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .unwrap()
+            .write_all(&encode_frame(&format!("{}\n", theirs.to_line())))
+            .unwrap();
+        let before = store.bytes(&reopened);
+
+        // The defect: this append used to succeed with seq 2, a seq the holder had already written.
+        let refused = store.append(
+            &reopened,
+            NewEvent::new("test/intruder"),
+            AppendOptions::default(),
+        );
+        let message = refused
+            .expect_err("a second writer is refused while the holder is alive")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "session \"{}\" is already owned by an active write handle (process {})",
+                handle.id,
+                holder.id()
+            )
+        );
+        assert_eq!(
+            store.bytes(&reopened),
+            before,
+            "and the refusal wrote nothing to the log"
+        );
+
+        // The holder dies without letting go: its lock names a pid that no longer exists.
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        let taken = store
+            .append(
+                &reopened,
+                NewEvent::new("test/successor"),
+                AppendOptions::default(),
+            )
+            .expect("a lock whose holder is gone does not block the next writer");
+        assert_eq!(
+            taken.seq, 3,
+            "the successor continues after the holder's last event, not from its own stale count"
+        );
+        let seqs: Vec<u64> = decode_transcript(&store.bytes(&reopened))
+            .lines
+            .iter()
+            .map(|line| SessionEvent::from_line(line).unwrap().seq)
+            .collect();
+        assert_eq!(seqs, vec![0, 1, 2, 3], "no seq is written twice");
+        assert_eq!(
+            store
+                .read(&reopened)
+                .unwrap()
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "session/created",
+                "message",
+                "test/holder",
+                "test/successor"
+            ],
+            "and this process now sees the history the file holds"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            format!("{}\n", std::process::id()),
+            "the stale lock was replaced by one naming this process"
+        );
+    }
+
+    #[test]
+    fn the_lock_is_a_file_beside_the_log_naming_its_holder_and_letting_go_removes_it() {
+        let (_dir, store) = store();
+        let handle = store.create(CreateOptions::default()).unwrap();
+        let lock = Path::new(&handle.dir).join(format!("{}.lock", handle.id));
+        assert_eq!(lock_path(&handle), lock.to_string_lossy());
+        assert!(store.holds(&handle), "the first append took the lock");
+        // The TypeScript build's contents, byte for byte: the holder's pid and a newline.
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            format!("{}\n", std::process::id())
+        );
+        store.release(&handle);
+        assert!(!store.holds(&handle));
+        assert!(!lock.exists(), "letting go removes the lock");
+
+        // A later append takes it again, and a store that goes away lets go of what it held.
+        store
+            .append(
+                &handle,
+                NewEvent::new("turn/completed"),
+                AppendOptions::default(),
+            )
+            .unwrap();
+        assert!(lock.exists());
+        drop(store);
+        assert!(!lock.exists(), "dropping the store let go");
+
+        // An old-layout session keeps DSH's own name inside its directory.
+        let legacy = SessionHandle {
+            id: "session-old".to_string(),
+            dir: "/tmp/sessions/session-old".to_string(),
+            transcript: "/tmp/sessions/session-old/session.jsonl".to_string(),
+            meta: "/tmp/sessions/session-old/meta.json".to_string(),
+        };
+        assert_eq!(lock_path(&legacy), "/tmp/sessions/session-old/session.lock");
     }
 
     #[test]

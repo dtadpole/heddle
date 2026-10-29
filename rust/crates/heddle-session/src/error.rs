@@ -103,9 +103,29 @@ pub enum SessionError {
     /// `could not name a session for <base>: a hundred already exist for that minute`
     #[error("could not name a session for {base}: a hundred already exist for that minute")]
     NamesExhausted { base: String },
+    /// A write refused because another process holds the session's writer lock (`SessionOwnedError` in the
+    /// TypeScript build): DSH's `SessionAlreadyOwnedError` sentence, with the holder's pid in brackets when
+    /// the lock names one. `session "<id>" is already owned by an active write handle (process <pid>)`
+    #[error("session \"{id}\" is already owned by an active write handle{}", holder_suffix(.pid))]
+    AlreadyOwned { id: String, pid: Option<u32> },
+}
+
+/// ` (process <pid>)` when the lock named its holder, nothing otherwise.
+fn holder_suffix(pid: &Option<u32>) -> String {
+    pid.map(|pid| format!(" (process {pid})"))
+        .unwrap_or_default()
 }
 
 impl SessionError {
+    /// The code DSH's session controller answers a held session with (`session/writer-held`), for
+    /// [`SessionError::AlreadyOwned`]; `None` for every other error.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            SessionError::AlreadyOwned { .. } => Some("session/writer-held"),
+            _ => None,
+        }
+    }
+
     /// Wrap an I/O failure with the path it happened on.
     pub fn io(path: impl Into<String>, source: std::io::Error) -> Self {
         SessionError::Io {
