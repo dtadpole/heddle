@@ -270,8 +270,22 @@ test('every answer of the raw and upload routes is sandboxed and never sniffed, 
     ]
     const uploaded = await headersOf('/api/uploads?name=evil.svg', { method: 'POST', body: HOSTILE_SVG })
     assert.equal(uploaded.status, 200, `the upload was stored (${uploaded.status})`)
-    const leaf = String(JSON.parse(uploaded.body).path ?? '').split('/').pop()
-    cases.push(['an uploaded SVG', `/api/uploads/${encodeURIComponent(leaf)}`, 200])
+    const stored = String(JSON.parse(uploaded.body).path ?? '')
+    const leaf = stored.split('/').pop()
+    /**
+     * An upload is read only for a session whose log references it (R-developer-two-10, DSH's session/attachment), so
+     * a turn sends the SVG first; the served answer and the refusal for no session are both sandboxed and unsniffed.
+     */
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'the logo', folder: server.work, attachments: [stored] }),
+    })
+    const turnText = await turn.text()
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(turnText)?.[1]
+    assert.ok(session !== undefined, `the turn that sends the SVG names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
+    cases.push(['an uploaded SVG, read for the session that sent it', `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, 200])
+    cases.push(['an uploaded SVG read for no session', `/api/uploads/${encodeURIComponent(leaf)}`, 404])
     for (const [what, path, status] of cases) {
       const answer = await headersOf(path)
       assert.equal(answer.status, status, `${what} answers ${status} (${answer.status})`)

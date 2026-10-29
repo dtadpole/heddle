@@ -279,6 +279,21 @@ fn edited_files(writes: &[NotedWrite]) -> Vec<EditedFile> {
     files
 }
 
+/// The transcript's attachment addresses for one session (`web.ts`'s `scopeAttachmentUrls`): each card's `url` names
+/// the session it is read for, because the upload route serves a file only to a session whose log references it
+/// (DSH's `session/attachment`).
+pub fn scope_attachment_urls(turns: &mut [ChatTurn], session: &str) {
+    let query = format!("session={}", encode_component(session));
+    for turn in turns.iter_mut() {
+        if let Some(attachments) = turn.attachments.as_mut() {
+            for card in attachments.iter_mut() {
+                let joint = if card.url.contains('?') { '&' } else { '?' };
+                card.url = format!("{}{joint}{query}", card.url);
+            }
+        }
+    }
+}
+
 /// Fold a session's recorded events into the turns the page renders.
 pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut turns: Vec<ChatTurn> = Vec::new();
@@ -840,6 +855,27 @@ mod tests {
         assert_eq!(attachments[1].name, "notes.txt");
         assert_eq!(attachments[1].mime_type, "application/octet-stream");
         assert_eq!(attachments[1].bytes, 0);
+    }
+
+    #[test]
+    fn a_transcript_names_its_session_in_every_attachment_address() {
+        let session = "session-00000000-0000-4000-8000-000000000001";
+        let mut turns = transcript_turns(&[json!({
+            "type": "message",
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "path": "/h/uploads/a b.png", "name": "a b.png", "bytes": 3}
+            ]}
+        })]);
+        scope_attachment_urls(&mut turns, session);
+        let cards = turns[0]
+            .attachments
+            .as_ref()
+            .expect("the user turn's cards");
+        assert_eq!(
+            cards[0].url,
+            format!("/api/uploads/a%20b.png?session={session}")
+        );
     }
 
     #[test]

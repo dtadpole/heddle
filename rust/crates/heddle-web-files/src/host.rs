@@ -62,6 +62,13 @@ pub trait FilesHost: Send + Sync + 'static {
 
     /// Read a file's text for the panel — the session tree's `readFileText`.
     fn read_file_text(&self, path: &Path) -> Result<FileReading, FileReadError>;
+
+    /// A session's logged events, which `GET /api/uploads/{leaf}` reads to authorize a read: an upload is served only
+    /// to a session whose log references it (DSH's `session/attachment`). `None` when no session has this id. The
+    /// default knows no session, so a host that does not answer serves no upload.
+    fn session_events(&self, _id: &str) -> Option<Vec<serde_json::Value>> {
+        None
+    }
 }
 
 #[cfg(test)]

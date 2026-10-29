@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentsOf, FILE_ANSWER_HEADERS, inlineContentType, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentsOf, FILE_ANSWER_HEADERS, inlineContentType, markedPage, pageAccess, tokenFormPage, transcriptTurns, abortSession, scopeAttachmentUrls , } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -499,4 +499,21 @@ test('a stream artifact of blank lines between tokens is not prose', () => {
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: '第二段。' } },
   ])
   assert.equal(legit.find((turn) => turn.kind === 'assistant')?.text, '第一段。\n\n第二段。')
+})
+
+test('a transcript names its session in every attachment address, and leaves other turns alone', () => {
+  const session = 'session-00000000-0000-4000-8000-000000000001'
+  const turns = scopeAttachmentUrls(
+    [
+      { kind: 'user', text: 'look', attachments: attachmentsOf([{ type: 'image', path: '/h/uploads/a b.png', name: 'a b.png', bytes: 3 }]) },
+      { kind: 'assistant', text: 'seen' },
+      { kind: 'user', text: 'plain', attachments: [] },
+    ],
+    session,
+  )
+  const [first, second, third] = turns
+  assert.ok(first !== undefined && second !== undefined && third !== undefined, 'every turn comes back')
+  assert.equal(first.attachments?.[0]?.url, `/api/uploads/a%20b.png?session=${session}`, 'the card is read for this session')
+  assert.equal('attachments' in second, false, 'a turn without attachments is unchanged')
+  assert.deepEqual(third.attachments, [], 'and an empty list stays empty')
 })

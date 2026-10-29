@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T11:50:12Z
-version: 0.8.0
+modified: 2026-10-29T12:56:06Z
+version: 0.8.1
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -45,6 +45,7 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `validate` | `ComponentCatalog` (trait), `SchemaLookup`, `StaticCatalog`, `ComponentManifest`, `ManifestCatalog`, `read_component_manifest`, `ValidationResult`, `validate_rows` | `validate.ts`; the manifest catalog is the part-0 shape for outside components |
 | `local` | `LocalConfig` (`endpoint_patches`), `LocalConfigLocation`, `local_config_candidates`, `read_local_config` | `src/local-config.ts` |
 | `model_row` | `model_row_endpoints`, `ModelRowEndpoints` (`endpoints`, `nominated`, `local`), `nominated_default` — the model row's endpoint list and the endpoint an unnamed caller gets: the row's `default`, else the machine file's, kept only when it names a listed endpoint | `src/plugins/model.ts` |
+| `retry` | `RetryPolicy` (`key`, `local_delay_ms`, `plan`), `RetryMode`, `RetryFailure`, `RetryPlan`, `resolve_retry_policy`, `retry_failure_code`, `parse_retry_after`, the `DEFAULT_*` constants and `MAX_TIMER_DELAY_MS` — an endpoint's `retryPolicy` (DSH's provider-owned policy: `normal`, 5 retries of `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`; or `always`) and the decision for one failed request: bounded exponential backoff with symmetric jitter, a `Retry-After` within `maxDelayMs` replacing it; the loop that executes it is `heddle-agent`'s | `src/config/retry.ts` (DSH's `dsh-llm` retry policy, `dsh-llm-retry`) |
 | `endpoints` | `EndpointConfig` (catalogue methods), `EndpointPatch`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel(s)`, `ReasoningValue`, `default_endpoints`, `environment_override`, `merge_endpoint`, `read_key_file`, `materialize_key`, `resolve_endpoints`, `describe_endpoint(s)`, `EndpointsView`, `selection_problem`, `config_paths` | `src/endpoints.ts`, `src/llm/types.ts` |
 | `command` | `ConfigCommand`, `ConfigArgs`, `CommandContext`, `run` — `heddle profiles` and `heddle config [--json] [--origins] [--validate]`, output and exit codes | `runConfigCommand` |
 | `settings` | `settings_target`, `describe_settings`, `plan_settings_write`, `commit_settings_write`, `SettingsService` (`new`, `describe`, `write`), `handle_settings_request` and `SettingsResponse`, `SettingsView`, `SettingsNamespace`, `SecretSlot`, `SettingsWrite`, `SettingsPathOp`, `SettingsError` (`code`, `message`), `SettingsRevisions`, `PlannedWrite`, `is_secret_key`, `SETTINGS_BEGIN`, `SETTINGS_END` — the active profile's patch as a writable surface | `src/config/settings.ts` (DSH's `dsh-settings` over `dsh-config-editor`) |
