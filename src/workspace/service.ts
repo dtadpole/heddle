@@ -66,6 +66,19 @@ export interface WorkspaceStoreShape {
   readonly workspaces: Record<string, WorkspaceRecord>
 }
 
+/**
+ * A rename to a name another workspace already carries — DSH's `workspace/name-conflict`, which the route answers
+ * `409`. The message is DSH's own sentence, so the page can show it as it comes.
+ */
+export class WorkspaceNameConflict extends Error {
+  readonly code = 'workspace/name-conflict'
+  readonly title: string
+  constructor(title: string) {
+    super(`A workspace named “${title}” already exists.`)
+    this.title = title
+  }
+}
+
 /** What `add` reports: the record, and whether this call is what created it. */
 export interface WorkspaceAddition {
   readonly record: WorkspaceRecord
@@ -260,6 +273,15 @@ export class WorkspaceService extends Service {
     const shape = this.read()
     const record = this.find(idOrPath)
     if (record === undefined) return undefined
+    /**
+     * DSH's two rename rules: confirming the name a workspace already has changes nothing, and a name another
+     * workspace a person chose already carries is refused (`workspace/name-conflict`). Adopted (`auto`) roots are not
+     * counted: the tree never draws them as workspaces, so a clash with one would be a refusal nobody could see the
+     * reason for.
+     */
+    if (trimmed === record.title) return record
+    const clash = Object.values(shape.workspaces).find((entry) => entry.id !== record.id && entry.origin !== 'auto' && entry.title === trimmed)
+    if (clash !== undefined) throw new WorkspaceNameConflict(trimmed)
     const updated: WorkspaceRecord = { ...record, title: trimmed, updatedAt: new Date().toISOString() }
     shape.workspaces[record.id] = updated
     this.write(shape)

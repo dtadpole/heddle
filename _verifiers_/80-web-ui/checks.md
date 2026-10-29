@@ -35,10 +35,12 @@ grounded_in:
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.
-- [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's two workspace controls: registering
-  a folder over the API the button posts to, the refusals that keep the controls honest, the split
-  between a chosen root and one adopted because a session ran in it, and a browser clicking both
-  controls.
+- [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's workspace controls, add, rename and delete, at
+  DSH parity: registering a folder over the API the dialog posts to, the refusals that keep the controls honest
+  (a rename to another workspace's name is `409 workspace/name-conflict`), delete removing the registration while its
+  sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
+  folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
+  workspace* and *Delete workspace* dialogs end to end.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,

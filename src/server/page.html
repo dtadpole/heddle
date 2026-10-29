@@ -1878,6 +1878,67 @@
   #access-enable { background: var(--text); color: #0f1115; border: 0; }
   #access-enable:disabled { opacity: .45; cursor: default; }
   /**
+   * The three workspace dialogs — DSH's *Select Workspace Directory* (its browse picker), *Rename workspace* and
+   * *Delete workspace*. Native `<dialog>`s like Settings, so Escape, focus containment and the backdrop are the
+   * platform's; the card is the access gate's (surface, 16px radius, right-aligned actions).
+   */
+  .ws-dialog {
+    width: min(92vw, 440px); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
+    background: var(--surface); color: var(--text); box-shadow: var(--shadow-menu);
+  }
+  .ws-dialog.wide { width: min(94vw, 600px); }
+  .ws-dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  .ws-dialog .ws-head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+  .ws-dialog h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .ws-dialog .ws-close {
+    flex: none; width: 24px; height: 24px; padding: 0; font-size: 16px; line-height: 1;
+    color: var(--text-2); background: none; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  .ws-dialog .ws-close:hover { background: var(--hover); color: var(--text); }
+  .ws-dialog .ws-desc { margin: .8rem 0 0; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  .ws-dialog input[type='text'] {
+    box-sizing: border-box; width: 100%; height: 36px; margin-top: .9rem; padding: 0 .7rem; font: inherit; font-size: 14px;
+    color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; outline: none;
+  }
+  .ws-dialog input[type='text']:focus { border-color: var(--accent); }
+  .ws-dialog .ws-error { margin: .6rem 0 0; font-size: 13px; line-height: 1.4; color: #ff7b72; }
+  .ws-dialog .ws-status { margin: .6rem 0 0; font-size: 13px; color: var(--text-2); }
+  .ws-dialog .ws-actions { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; margin-top: 1.2rem; }
+  .ws-dialog .ws-actions .ws-spacer { flex: 1; }
+  .ws-dialog .ws-actions button, .ws-dialog .ws-path-row button, .ws-dialog .ws-new-row button {
+    height: 36px; padding: 0 .9rem; font: inherit; font-size: 14px; border-radius: 12px; cursor: pointer;
+    background: none; color: var(--text); border: 1px solid var(--border);
+  }
+  .ws-dialog .ws-actions button:hover:not(:disabled), .ws-dialog .ws-path-row button:hover, .ws-dialog .ws-new-row button:hover { background: var(--hover); }
+  .ws-dialog .ws-actions button.ws-primary { background: var(--text); color: #0f1115; border: 0; }
+  .ws-dialog .ws-actions button.ws-danger { color: #ff7b72; border-color: color-mix(in oklab, #ff7b72 45%, var(--border)); }
+  .ws-dialog .ws-actions button:disabled { opacity: .45; cursor: default; }
+  /** Rows, not the page's column `form`: the field and its button share one line. */
+  .ws-dialog .ws-path-row, .ws-dialog .ws-new-row { display: flex; flex-direction: row; gap: .5rem; align-items: center; margin-top: .9rem; }
+  .ws-dialog .ws-new-row[hidden] { display: none; }
+  .ws-dialog .ws-path-row input[type='text'], .ws-dialog .ws-new-row input[type='text'] { flex: 1 1 auto; min-width: 0; margin-top: 0; font-family: var(--mono); font-size: 13px; }
+  .ws-dialog .ws-path-row button, .ws-dialog .ws-new-row button { flex: none; }
+  #workspace-picker-crumbs { display: flex; flex-wrap: wrap; gap: 2px; margin-top: .7rem; font-size: 12px; color: var(--text-3); }
+  #workspace-picker-crumbs button { padding: 1px 4px; font: inherit; color: var(--text-2); background: none; border: 0; border-radius: 4px; cursor: pointer; }
+  #workspace-picker-crumbs button:hover { background: var(--hover); color: var(--text); }
+  #workspace-picker-crumbs .sep { color: var(--text-3); }
+  #workspace-picker-list {
+    list-style: none; margin: .5rem 0 0; padding: 4px; height: min(44vh, 320px); overflow: auto;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+  }
+  #workspace-picker-list li { margin: 0; }
+  #workspace-picker-list button {
+    display: flex; align-items: center; gap: .5rem; width: 100%; padding: .35rem .5rem; font: inherit; font-size: 13px;
+    text-align: left; color: var(--text); background: none; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  #workspace-picker-list button:hover, #workspace-picker-list button:focus-visible { background: var(--hover); outline: none; }
+  #workspace-picker-list button[data-hidden='true'] { color: var(--text-3); }
+  #workspace-picker-list .empty { padding: .5rem; font-size: 13px; color: var(--text-3); }
+  #workspace-picker-list svg { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.2; }
+  .ws-dialog .ws-meta { display: flex; justify-content: space-between; gap: 1rem; margin-top: .5rem; font-size: 12px; color: var(--text-3); }
+  .ws-dialog .ws-meta label { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
+  .menu button[data-danger='true'] { color: #ff7b72; }
+  /**
    * The approval card, DSH's own shape: amber border, a warm surface, the question in the reading size and the two
    * actions right-aligned. It sits flush above the composer because that is where the person is already looking.
    */
@@ -2894,6 +2955,64 @@
       <ul id="settings-workspaces"></ul>
     </section>
     <p id="settings-note" class="meta">Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.</p>
+  </div>
+</dialog>
+<!--
+  The workspace dialogs, DSH's three: Add workspace opens *Select Workspace Directory* — its browse picker, which lists
+  the host's folders through `GET /api/directories` and works from any browser, because a page reached through the gate
+  or the public edge cannot see a dialog the server opens on its own screen — then Rename workspace and Delete workspace.
+-->
+<dialog id="workspace-picker" class="ws-dialog wide" aria-labelledby="workspace-picker-title">
+  <div class="ws-head">
+    <h2 id="workspace-picker-title">Select Workspace Directory</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <form id="workspace-picker-form" class="ws-path-row">
+    <input type="text" id="workspace-picker-path" aria-label="Folder path" spellcheck="false" autocomplete="off">
+    <button type="submit" id="workspace-picker-go">Go</button>
+  </form>
+  <nav id="workspace-picker-crumbs" aria-label="Folder location"></nav>
+  <ul id="workspace-picker-list" aria-label="Folders"></ul>
+  <div class="ws-meta">
+    <label><input type="checkbox" id="workspace-picker-hidden"> Show hidden folders</label>
+    <span id="workspace-picker-truncated" hidden>Only the first 1,000 folders are listed.</span>
+  </div>
+  <form id="workspace-picker-new" class="ws-new-row" hidden>
+    <input type="text" id="workspace-picker-new-name" aria-label="New folder name" placeholder="New folder name" spellcheck="false" autocomplete="off">
+    <button type="submit" id="workspace-picker-new-create">Create</button>
+  </form>
+  <p id="workspace-picker-error" class="ws-error" role="alert" hidden></p>
+  <div class="ws-actions">
+    <button type="button" id="workspace-picker-new-folder">New folder</button>
+    <button type="button" id="workspace-picker-native" hidden>System dialog…</button>
+    <span class="ws-spacer"></span>
+    <button type="button" data-ws-close>Cancel</button>
+    <button type="button" id="workspace-picker-add" class="ws-primary">Add workspace</button>
+  </div>
+</dialog>
+<dialog id="workspace-rename" class="ws-dialog" aria-labelledby="workspace-rename-title">
+  <div class="ws-head">
+    <h2 id="workspace-rename-title">Rename workspace</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <input type="text" id="workspace-rename-input" aria-label="Workspace name" spellcheck="false" autocomplete="off">
+  <p id="workspace-rename-error" class="ws-error" role="alert" hidden></p>
+  <div class="ws-actions">
+    <button type="button" data-ws-close>Cancel</button>
+    <button type="button" id="workspace-rename-confirm" class="ws-primary" disabled>Rename</button>
+  </div>
+</dialog>
+<dialog id="workspace-delete" class="ws-dialog" aria-labelledby="workspace-delete-title">
+  <div class="ws-head">
+    <h2 id="workspace-delete-title">Delete workspace</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <p id="workspace-delete-desc" class="ws-desc"></p>
+  <p id="workspace-delete-status" class="ws-status" role="status" hidden>Deleting workspace…</p>
+  <p id="workspace-delete-error" class="ws-error" role="alert" hidden></p>
+  <div class="ws-actions">
+    <button type="button" data-ws-close>Cancel</button>
+    <button type="button" id="workspace-delete-confirm" class="ws-danger">Delete workspace</button>
   </div>
 </dialog>
 <script type="module">
@@ -9010,6 +9129,7 @@ function kindIcon(kind, open = false) {
     fork: 'M5 2.5v6a3 3 0 0 0 3 3h3M10 8.5l2.5 2.5L10 13.5M13.5 2.5v3a2.5 2.5 0 0 1-2.5 2.5H8',
     download: 'M8 2v8M4.5 6.5L8 10l3.5-3.5M2.5 13.5h11',
     unregister: 'M4.5 4.5l7 7M11.5 4.5l-7 7',
+    trash: 'M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9M6.8 7v4M9.2 7v4',
     tree: 'M2.5 3.5h4v3h-4zM9.5 9.5h4v3h-4zM4.5 6.5v5h5',
     list: 'M3 4h10M3 8h10M3 12h10',
     workspace: 'M2.5 3h3.5l1 1.2h6.5v3H2.5zM2.5 9.3h11v3.7h-11z',
@@ -9470,44 +9590,21 @@ function menuItemsFor(node) {
       glyph: 'plus',
       run: () => startSessionAt(node),
     })
-    items.push({
-      label: 'Rename…',
-      glyph: 'rename',
-      run: async () => {
-        const title = window.prompt('Rename this workspace', node.label)
-        if (title === null) return
-        const response = await fetch('/api/workspaces/' + encodeURIComponent(node.path), {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ title }),
-        })
-        const body = await response.json().catch(() => ({}))
-        if (!response.ok) {
-          setNote(body.error ?? 'could not rename that workspace')
-          return
-        }
-        setNote('')
-        await renderTree()
-      },
-    })
     /**
-     * A refusal is shown rather than swallowed: `bootstrap` re-registers any folder that still has
-     * sessions and no root above it, so "removed" and "gone" are different answers and the second one is
-     * not available.
+     * DSH's workspace menu, by its own names: `Rename` opens the Rename workspace dialog and `Delete workspace` (in
+     * red) asks first, saying what is kept. Both dialogs are the page's own rather than `window.prompt`, so a refusal
+     * — a name another workspace has — is shown where the name is typed.
      */
     items.push({
-      label: 'Unregister',
-      glyph: 'unregister',
-      run: async () => {
-        const response = await fetch('/api/workspaces/' + encodeURIComponent(node.path), { method: 'DELETE' })
-        if (!response.ok) {
-          const body = await response.json().catch(() => ({}))
-          setNote(body.error ?? 'could not unregister that workspace')
-          return
-        }
-        setNote('')
-        await renderTree()
-      },
+      label: 'Rename',
+      glyph: 'rename',
+      run: () => openRenameWorkspace(node),
+    })
+    items.push({
+      label: 'Delete workspace',
+      glyph: 'trash',
+      danger: true,
+      run: () => openDeleteWorkspace(node),
     })
   }
   if (node.kind === 'session' && node.session) {
@@ -10027,6 +10124,8 @@ function menuButton(node, items, options = {}) {
     label.className = 'menu-label'
     label.textContent = item.label
     entry.append(label)
+    /** DSH draws a destructive item (Delete workspace) in red, so it reads as different before it is read. */
+    if (item.danger === true) entry.dataset.danger = 'true'
     entry.onclick = async (event) => {
       event.stopPropagation()
       closeMenus()
@@ -11177,37 +11276,385 @@ document.getElementById('session-more').append(
   menuButton({ label: 'this session' }, [{ label: 'Download session log', glyph: 'download', run: downloadSessionLog }], { label: 'More actions' }),
 )
 document.getElementById('view-options').append(menuButton({ label: 'view options' }, viewOptionItems()))
-document.getElementById('add-workspace').onclick = async () => {
-  let path = null
+/**
+ * The three workspace acts, DSH's way: Add workspace, Rename, Delete workspace — each a dialog of the page's own.
+ *
+ * **Add** is DSH's browse picker (*Select Workspace Directory*): one folder level at a time from `GET /api/directories`,
+ * crumbs back to the root, a typed path, *Show hidden folders*, *New folder*, and *Add workspace* registering the folder
+ * on screen. It replaced asking the server for the operating system's dialog, which opens on the **server's** screen:
+ * measured on 29 Oct, a page reached through the gate or the public edge waited on a dialog nobody could see. DSH
+ * makes the same choice whenever the page may be remote; the native dialog is still offered (*System dialog…*) when
+ * the page itself is on this machine. A new workspace is expanded and selected, and the composer aims at it, so the
+ * next prompt — or its `+` — starts a session there.
+ */
+const workspacePicker = document.getElementById('workspace-picker')
+const workspaceRename = document.getElementById('workspace-rename')
+const workspaceDelete = document.getElementById('workspace-delete')
+for (const dialog of [workspacePicker, workspaceRename, workspaceDelete]) {
+  for (const close of dialog.querySelectorAll('[data-ws-close]')) close.addEventListener('click', () => dialog.close())
+  dialog.addEventListener('click', (clickEvent) => {
+    if (clickEvent.target === dialog) dialog.close()
+  })
+}
+
+/** Show, or clear, the sentence a dialog's alert line carries. */
+function dialogError(id, text) {
+  const line = document.getElementById(id)
+  line.textContent = text ?? ''
+  line.hidden = text === undefined || text === null || text === ''
+}
+
+/** The registered workspaces as the server has them now; `[]` when it cannot say. */
+async function currentWorkspaces() {
   try {
-    const picked = await fetch('/api/workspaces/pick', { method: 'POST' })
-    const body = await picked.json().catch(() => ({}))
-    if (picked.ok) {
-      if (body.kind === 'cancelled') return
-      if (typeof body.path === 'string' && body.path.length > 0) path = body.path
-    } else {
-      setNote(body.error ?? 'this host has no folder dialog')
-      path = prompt('Folder to register as a workspace root')
-    }
+    const response = await fetch('/api/workspaces')
+    if (!response.ok) return []
+    return (await response.json()).workspaces ?? []
   } catch (error) {
-    // The route is unreachable, which is a host problem rather than a canvas problem: type it instead.
-    setNote('could not open a folder dialog: ' + (error && error.message))
-    path = prompt('Folder to register as a workspace root')
+    return []
   }
-  if (path === null || path.trim() === '') return
+}
+
+let pickerListing = null
+let pickerBusy = false
+
+/** Whether the page is open on this machine, which is when the server's own dialog is one a person can see. */
+function pageIsLocal() {
+  return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(window.location.hostname)
+}
+
+function folderGlyph() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('aria-hidden', 'true')
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  path.setAttribute('d', FOLDER_PATH)
+  svg.append(path)
+  return svg
+}
+
+/** Draw one listing: the path field, the crumbs, and the folders (hidden ones only when asked for). */
+function drawPickerListing() {
+  const listing = pickerListing
+  const list = document.getElementById('workspace-picker-list')
+  const crumbs = document.getElementById('workspace-picker-crumbs')
+  if (listing === null) {
+    list.replaceChildren()
+    crumbs.replaceChildren()
+    return
+  }
+  document.getElementById('workspace-picker-path').value = listing.path
+  const trail = []
+  for (const [index, crumb] of (listing.crumbs ?? []).entries()) {
+    if (index > 1) {
+      const sep = document.createElement('span')
+      sep.className = 'sep'
+      sep.textContent = '/'
+      trail.push(sep)
+    }
+    const jump = document.createElement('button')
+    jump.type = 'button'
+    jump.textContent = crumb.name
+    jump.title = crumb.path
+    jump.addEventListener('click', () => void browseTo(crumb.path))
+    trail.push(jump)
+  }
+  crumbs.replaceChildren(...trail)
+  const showHidden = document.getElementById('workspace-picker-hidden').checked
+  const rows = []
+  if (listing.parent !== null && listing.parent !== undefined) {
+    const up = document.createElement('button')
+    up.type = 'button'
+    up.dataset.path = listing.parent
+    up.append(folderGlyph(), '..')
+    up.addEventListener('click', () => void browseTo(listing.parent))
+    const item = document.createElement('li')
+    item.append(up)
+    rows.push(item)
+  }
+  for (const entry of listing.entries ?? []) {
+    if (entry.hidden && !showHidden) continue
+    const enter = document.createElement('button')
+    enter.type = 'button'
+    enter.dataset.path = entry.path
+    enter.dataset.hidden = String(entry.hidden === true)
+    enter.append(folderGlyph(), entry.name)
+    enter.addEventListener('click', () => void browseTo(entry.path))
+    const item = document.createElement('li')
+    item.append(enter)
+    rows.push(item)
+  }
+  if ((listing.entries ?? []).filter((entry) => showHidden || !entry.hidden).length === 0) {
+    const empty = document.createElement('li')
+    empty.className = 'empty'
+    empty.textContent = 'No folders here'
+    rows.push(empty)
+  }
+  list.replaceChildren(...rows)
+  list.scrollTop = 0
+  document.getElementById('workspace-picker-truncated').hidden = listing.truncated !== true
+}
+
+/** List one folder; a refusal stays on the folder already shown and says why. */
+async function browseTo(path) {
+  dialogError('workspace-picker-error', '')
+  const query = path === undefined || path === null ? '' : '?path=' + encodeURIComponent(path)
+  try {
+    const response = await fetch('/api/directories' + query)
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      dialogError('workspace-picker-error', body.error ?? 'could not open that folder')
+      if (pickerListing !== null) document.getElementById('workspace-picker-path').value = pickerListing.path
+      return false
+    }
+    pickerListing = body
+    drawPickerListing()
+    return true
+  } catch (error) {
+    dialogError('workspace-picker-error', 'could not open that folder: ' + (error && error.message))
+    return false
+  }
+}
+
+/** Register a folder, then show it: the tree redrawn, the new workspace open and selected, the composer aimed at it. */
+async function adoptWorkspace(path) {
   const response = await fetch('/api/workspaces', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path: path.trim() }),
+    body: JSON.stringify({ path }),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) return body.error ?? 'could not register that folder'
+  const added = typeof body.record?.path === 'string' ? body.record.path : path
+  activeFolder = added
+  expanded.add(added)
+  rememberExpanded()
+  await renderTree()
+  chooseSelected(added)
+  const row = Array.from(treeList.querySelectorAll('.row')).find((entry) => entry.dataset.path === added)
+  row?.scrollIntoView({ block: 'nearest' })
+  return null
+}
+
+async function openWorkspacePicker() {
+  pickerBusy = false
+  dialogError('workspace-picker-error', '')
+  document.getElementById('workspace-picker-new').hidden = true
+  document.getElementById('workspace-picker-new-name').value = ''
+  document.getElementById('workspace-picker-native').hidden = !pageIsLocal()
+  document.getElementById('workspace-picker-add').disabled = false
+  /** Emptied until the listing arrives, so nothing on screen is a folder from the last time it was open. */
+  document.getElementById('workspace-picker-list').replaceChildren()
+  if (!workspacePicker.open) workspacePicker.showModal()
+  /** It opens where the last one was left, else at the home folder, as DSH's does. */
+  const opened = await browseTo(pickerListing?.path)
+  if (!opened && pickerListing !== null) await browseTo(undefined)
+  document.getElementById('workspace-picker-path').focus()
+}
+
+document.getElementById('add-workspace').onclick = () => void openWorkspacePicker()
+document.getElementById('workspace-picker-hidden').addEventListener('change', () => drawPickerListing())
+document.getElementById('workspace-picker-form').addEventListener('submit', (submitEvent) => {
+  submitEvent.preventDefault()
+  const typed = document.getElementById('workspace-picker-path').value.trim()
+  if (typed !== '') void browseTo(typed)
+})
+document.getElementById('workspace-picker-new-folder').addEventListener('click', () => {
+  const row = document.getElementById('workspace-picker-new')
+  row.hidden = !row.hidden
+  if (!row.hidden) document.getElementById('workspace-picker-new-name').focus()
+})
+document.getElementById('workspace-picker-new').addEventListener('submit', async (submitEvent) => {
+  submitEvent.preventDefault()
+  if (pickerListing === null) return
+  const name = document.getElementById('workspace-picker-new-name').value.trim()
+  if (name === '') return
+  const response = await fetch('/api/directories', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ parent: pickerListing.path, name }),
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
-    setNote(body.error ?? 'could not register that folder')
+    dialogError('workspace-picker-error', body.error ?? 'could not create that folder')
     return
   }
-  setNote('')
-  await renderTree()
+  document.getElementById('workspace-picker-new').hidden = true
+  document.getElementById('workspace-picker-new-name').value = ''
+  await browseTo(body.path)
+})
+document.getElementById('workspace-picker-add').addEventListener('click', async () => {
+  if (pickerBusy) return
+  /** The folder on screen, or a path typed but not yet opened — the server judges either. */
+  const typed = document.getElementById('workspace-picker-path').value.trim()
+  const path = typed !== '' ? typed : pickerListing?.path
+  if (path === undefined || path === '') return
+  pickerBusy = true
+  const add = document.getElementById('workspace-picker-add')
+  add.disabled = true
+  try {
+    const refusal = await adoptWorkspace(path)
+    if (refusal !== null) {
+      dialogError('workspace-picker-error', refusal)
+      return
+    }
+    workspacePicker.close()
+  } finally {
+    pickerBusy = false
+    add.disabled = false
+  }
+})
+document.getElementById('workspace-picker-native').addEventListener('click', async () => {
+  if (pickerBusy) return
+  pickerBusy = true
+  try {
+    const picked = await fetch('/api/workspaces/pick', { method: 'POST' })
+    const body = await picked.json().catch(() => ({}))
+    if (!picked.ok) {
+      dialogError('workspace-picker-error', body.error ?? 'this host has no folder dialog')
+      return
+    }
+    if (body.kind !== 'picked' || typeof body.path !== 'string') return
+    await browseTo(body.path)
+  } catch (error) {
+    dialogError('workspace-picker-error', 'could not open a folder dialog: ' + (error && error.message))
+  } finally {
+    pickerBusy = false
+  }
+})
+
+/**
+ * Rename workspace — DSH's dialog: the field starts with the name on screen, *Rename* stays disabled while the name is
+ * blank, unchanged, or another workspace's (said under the field, DSH's sentence), and Enter confirms. The server
+ * applies the same rules (`409 workspace/name-conflict`), and its refusal is shown in the same place.
+ */
+let renameTarget = null
+async function openRenameWorkspace(node) {
+  const workspaces = await currentWorkspaces()
+  const own = workspaces.find((workspace) => workspace.path === node.path)
+  renameTarget = {
+    path: node.path,
+    stored: own?.title ?? node.label,
+    others: workspaces.filter((workspace) => workspace.path !== node.path && workspace.origin !== 'auto').map((workspace) => workspace.title),
+    busy: false,
+  }
+  const input = document.getElementById('workspace-rename-input')
+  input.value = renameTarget.stored
+  dialogError('workspace-rename-error', '')
+  refreshRename()
+  if (!workspaceRename.open) workspaceRename.showModal()
+  input.focus()
+  input.select()
 }
+function refreshRename() {
+  if (renameTarget === null) return
+  const trimmed = document.getElementById('workspace-rename-input').value.trim()
+  const duplicate = trimmed !== '' && trimmed !== renameTarget.stored && renameTarget.others.includes(trimmed)
+  dialogError('workspace-rename-error', duplicate ? `A workspace named “${trimmed}” already exists.` : '')
+  document.getElementById('workspace-rename-confirm').disabled = renameTarget.busy || trimmed === '' || trimmed === renameTarget.stored || duplicate
+}
+/**
+ * The target is replaced on every open and read only while the dialog is open. It is deliberately not cleared from the
+ * dialog's `close` event: that event is queued, and measured on 29 Oct a Cancel's late `close` landed after the next
+ * open had set the new target, so the confirm button did nothing.
+ */
+async function confirmRename() {
+  const button = document.getElementById('workspace-rename-confirm')
+  refreshRename()
+  if (renameTarget === null || !workspaceRename.open || button.disabled) return
+  const title = document.getElementById('workspace-rename-input').value.trim()
+  renameTarget.busy = true
+  button.disabled = true
+  try {
+    const response = await fetch('/api/workspaces/' + encodeURIComponent(renameTarget.path), {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title }),
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      renameTarget.busy = false
+      dialogError('workspace-rename-error', body.error ?? 'could not rename that workspace')
+      button.disabled = false
+      return
+    }
+    renameTarget = null
+    workspaceRename.close()
+    await renderTree()
+  } catch (error) {
+    if (renameTarget !== null) renameTarget.busy = false
+    dialogError('workspace-rename-error', 'could not rename that workspace: ' + (error && error.message))
+    button.disabled = false
+  }
+}
+document.getElementById('workspace-rename-input').addEventListener('input', () => refreshRename())
+document.getElementById('workspace-rename-input').addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key === 'Enter' && !keyEvent.isComposing) {
+    keyEvent.preventDefault()
+    void confirmRename()
+  }
+})
+document.getElementById('workspace-rename-confirm').addEventListener('click', () => void confirmRename())
+
+/**
+ * Delete workspace — DSH's confirmation, with its retention sentence: the registration goes, the folder and the session
+ * logs stay, and the sessions show under the nearest workspace above it (heddle nests workspaces by path) or under
+ * Ungrouped. Nothing is refused: the server removes the registration even when sessions remain.
+ */
+let deleteTarget = null
+async function openDeleteWorkspace(node) {
+  const workspaces = await currentWorkspaces()
+  const own = workspaces.find((workspace) => workspace.path === node.path)
+  /** The nearest workspace a person chose above this one, which is where its sessions will show. */
+  let above = own?.parent ?? null
+  let heir = null
+  while (above !== null) {
+    const candidate = workspaces.find((workspace) => workspace.id === above)
+    if (candidate === undefined) break
+    if (candidate.origin !== 'auto') {
+      heir = candidate
+      break
+    }
+    above = candidate.parent ?? null
+  }
+  const name = own?.title ?? node.label
+  deleteTarget = { path: node.path, busy: false }
+  document.getElementById('workspace-delete-desc').textContent =
+    `This removes “${name}” from the workspace list. The folder and session logs will be kept. ` +
+    (heir === null ? 'Its sessions will appear under Ungrouped.' : `Its sessions will appear under “${heir.title}”.`)
+  document.getElementById('workspace-delete-status').hidden = true
+  dialogError('workspace-delete-error', '')
+  document.getElementById('workspace-delete-confirm').disabled = false
+  if (!workspaceDelete.open) workspaceDelete.showModal()
+}
+document.getElementById('workspace-delete-confirm').addEventListener('click', async () => {
+  if (deleteTarget === null || !workspaceDelete.open || deleteTarget.busy) return
+  const button = document.getElementById('workspace-delete-confirm')
+  deleteTarget.busy = true
+  button.disabled = true
+  document.getElementById('workspace-delete-status').hidden = false
+  dialogError('workspace-delete-error', '')
+  try {
+    const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.path), { method: 'DELETE' })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      deleteTarget.busy = false
+      button.disabled = false
+      document.getElementById('workspace-delete-status').hidden = true
+      dialogError('workspace-delete-error', body.error ?? 'could not delete that workspace')
+      return
+    }
+    if (activeFolder === deleteTarget.path) activeFolder = null
+    deleteTarget = null
+    workspaceDelete.close()
+    await renderTree()
+  } catch (error) {
+    if (deleteTarget !== null) deleteTarget.busy = false
+    button.disabled = false
+    document.getElementById('workspace-delete-status').hidden = true
+    dialogError('workspace-delete-error', 'could not delete that workspace: ' + (error && error.message))
+  }
+})
 
 /**
  * The page starts with what the composer needs, in the order it needs it.

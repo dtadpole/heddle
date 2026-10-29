@@ -31,6 +31,7 @@
 
 pub mod attachments;
 pub mod code;
+pub mod directories;
 pub mod docs;
 pub mod highlight;
 pub mod host;
