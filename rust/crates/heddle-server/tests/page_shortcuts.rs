@@ -93,3 +93,13 @@ fn the_keyboard_reference_is_one_dialog() {
     assert!(PAGE_SOURCE.contains("<h2 id=\"shortcut-reference-title\">Keyboard shortcuts</h2>"));
     assert!(PAGE_SOURCE.contains("function shortcutReferenceRows(query, mac)"));
 }
+
+/// A person can record, remove and restore a binding, kept per device in `heddle.keybindings.v1` as DSH keeps
+/// `dsh.keybindings.v1` (DSH parity R-developer-seven-12). Executed by `test/page-shortcuts.test.ts`.
+#[test]
+fn bindings_are_recorded_as_overrides() {
+    assert!(PAGE_SOURCE.contains("const KEYBINDINGS_KEY = 'heddle.keybindings.v1'"));
+    assert!(PAGE_SOURCE.contains("function effectiveShortcuts(defaults, overrides)"));
+    assert!(PAGE_SOURCE.contains("shortcutFor(event, { afterDeadKey: shortcutAfterDeadKey, table: activeShortcuts })"));
+    assert!(PAGE_SOURCE.contains("<button type=\"button\" id=\"shortcut-restore-all\">"));
+}

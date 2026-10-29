@@ -1891,6 +1891,15 @@
   #shortcut-reference-list .group { margin: 12px 0 4px; color: var(--muted); font-size: 12px; }
   #shortcut-reference-list .shortcut-row { display: flex; align-items: center; justify-content: space-between; height: 42px; gap: 12px; }
   #shortcut-reference-list .shortcut-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #shortcut-reference-list .shortcut-row:not([data-fixed]) { cursor: pointer; border-radius: 8px; padding: 0 8px; margin: 0 -8px; }
+  #shortcut-reference-list .shortcut-row:not([data-fixed]):hover, #shortcut-reference-list .shortcut-row:not([data-fixed]):focus-visible { background: var(--hover, color-mix(in oklab, var(--text) 6%, transparent)); }
+  #shortcut-reference-list .shortcut-row .row-actions { display: flex; align-items: center; gap: 6px; }
+  #shortcut-reference-list .shortcut-row .row-actions button { font-size: 12px; padding: 2px 6px; }
+  #shortcut-reference-list kbd[data-recording] { border: 1px solid var(--muted); color: var(--muted); }
+  #shortcut-reference-list kbd[data-error] { border-color: #e5484d; }
+  #shortcut-reference-status { min-height: 1.2em; margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  #shortcut-reference-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  #shortcut-restore-confirm:not([hidden]) { display: flex; align-items: center; gap: 8px; }
   #shortcut-reference-list kbd { font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px; background: var(--surface-2, var(--surface)); }
   .ws-dialog {
     width: min(92vw, 440px); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
@@ -2953,6 +2962,15 @@
   </div>
   <input type="search" id="shortcut-reference-search" aria-label="Search shortcuts" placeholder="Search by action or key" spellcheck="false" autocomplete="off">
   <div id="shortcut-reference-list" role="list"></div>
+  <p id="shortcut-reference-status" role="status" aria-live="polite"></p>
+  <div id="shortcut-reference-foot">
+    <button type="button" id="shortcut-restore-all">Restore all defaults <span id="shortcut-override-count" hidden></span></button>
+    <div id="shortcut-restore-confirm" hidden>
+      <span>Restore every shortcut to its default?</span>
+      <button type="button" id="shortcut-restore-cancel">Cancel</button>
+      <button type="button" id="shortcut-restore-ok" class="ws-primary">Restore</button>
+    </div>
+  </div>
 </dialog>
 <dialog id="settings-dialog" aria-labelledby="settings-title">
   <header id="settings-head">
@@ -10158,7 +10176,7 @@ function shortcutFor(event, options = {}) {
   if (!primary || other) return null
   const code = typeof event.code === 'string' ? event.code : ''
   if (event.key === 'Dead' && !(mac && code === 'KeyN' && event.altKey && !event.shiftKey)) return null
-  for (const shortcut of SESSION_SHORTCUTS) {
+  for (const shortcut of options.table ?? SESSION_SHORTCUTS) {
     if (code !== '' ? code !== shortcut.code : String(event.key).toLowerCase() !== shortcut.key) continue
     if (Boolean(shortcut.alt) !== event.altKey) continue
     if (Boolean(shortcut.shift) !== event.shiftKey) continue
@@ -10192,7 +10210,7 @@ function selectedNode() {
  * nothing is indistinguishable from a key that is not bound.
  */
 document.addEventListener('keydown', (event) => {
-  const action = shortcutFor(event, { afterDeadKey: shortcutAfterDeadKey })
+  const action = shortcutFor(event, { afterDeadKey: shortcutAfterDeadKey, table: activeShortcuts })
   shortcutAfterDeadKey = event.key === 'Dead' && action === null
   if (action === null) return
   event.preventDefault()
@@ -10265,7 +10283,7 @@ const FIXED_INPUT_ACTIONS = [
   { label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
 ]
 function chordText(shortcut, mac) {
-  const glyph = shortcut.code === 'Comma' ? ',' : shortcut.code === 'Slash' ? '/' : shortcut.code.replace(/^Key/, '')
+  const glyph = keyForCode(shortcut.code).toUpperCase()
   if (mac) return `${shortcut.alt ? '⌥' : ''}${shortcut.shift ? '⇧' : ''}⌘${glyph}`
   return ['Ctrl', shortcut.alt ? 'Alt' : null, shortcut.shift ? 'Shift' : null, glyph].filter((part) => part !== null).join('+')
 }
@@ -10279,13 +10297,13 @@ function subsequenceMatch(text, query) {
   }
   return true
 }
-function shortcutReferenceRows(query, mac) {
+function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides = {}) {
   const rows = []
   for (const action of Object.keys(SHORTCUT_LABELS)) {
-    const shortcut = SESSION_SHORTCUTS.find((entry) => entry.action === action)
+    const shortcut = table.find((entry) => entry.action === action)
     const [label, alias] = SHORTCUT_LABELS[action]
     const keys = shortcut === undefined ? 'No shortcut' : chordText(shortcut, mac)
-    rows.push({ group: 'Commands', label, alias, keys, fixed: false })
+    rows.push({ group: 'Commands', label, alias, keys, fixed: false, action, bound: shortcut !== undefined, overridden: Object.prototype.hasOwnProperty.call(overrides, action) })
   }
   for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: 'Message input', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
   const wanted = String(query ?? '').trim()
@@ -10295,7 +10313,8 @@ function renderShortcutReference() {
   const list = document.getElementById('shortcut-reference-list')
   list.replaceChildren()
   let group = null
-  for (const row of shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC)) {
+  const rows = shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC, activeShortcuts, keybindings.overrides)
+  for (const row of rows) {
     if (row.group !== group) {
       group = row.group
       const heading = document.createElement('div')
@@ -10312,10 +10331,260 @@ function renderShortcutReference() {
     label.textContent = row.label
     const keys = document.createElement('kbd')
     keys.textContent = row.keys
-    item.append(label, keys)
+    if (row.fixed) {
+      item.append(label, keys)
+      list.append(item)
+      continue
+    }
+    /** An application row records a new chord when clicked (DSH); its inline actions do not start recording. */
+    item.dataset.action = row.action
+    item.tabIndex = 0
+    if (recordingAction === row.action) {
+      keys.dataset.recording = 'true'
+      keys.textContent = recordingError === null ? 'Press a shortcut…' : 'Try another'
+      if (recordingError !== null) keys.dataset.error = 'true'
+    }
+    const actions = document.createElement('span')
+    actions.className = 'row-actions'
+    if (keybindings.readable && row.bound && recordingAction !== row.action) {
+      const remove = document.createElement('button')
+      remove.type = 'button'
+      remove.dataset.bindingAction = 'remove'
+      remove.textContent = 'Remove'
+      actions.append(remove)
+    }
+    if (keybindings.readable && row.overridden && recordingAction !== row.action) {
+      const restore = document.createElement('button')
+      restore.type = 'button'
+      restore.dataset.bindingAction = 'restore'
+      restore.textContent = 'Restore default'
+      actions.append(restore)
+    }
+    actions.append(keys)
+    item.append(label, actions)
     list.append(item)
   }
+  const count = Object.keys(keybindings.overrides).length
+  const counter = document.getElementById('shortcut-override-count')
+  counter.textContent = `(${count})`
+  counter.hidden = count === 0
+  document.getElementById('shortcut-restore-all').disabled = count === 0 || !keybindings.readable
 }
+/**
+ * Bindings a person chose, DSH's way (`dsh-client-shortcuts`, `dsh-client-ui-shortcuts`): only overrides are kept, per
+ * device, in this origin's localStorage under `heddle.keybindings.v1` (DSH's Web document is `dsh.keybindings.v1`). A
+ * missing command inherits its default, `null` clears its binding, and Restore default removes the override; explicit
+ * overrides displace a default they collide with, and explicit overrides that collide with each other are all off. A
+ * document this page cannot read leaves the defaults active and editing off, and nothing overwrites it. The chords were
+ * fixed in the page (DSH parity R-developer-seven-12, row S41).
+ */
+const KEYBINDINGS_KEY = 'heddle.keybindings.v1'
+const RECORDABLE_CODE = /^(Key[A-Z]|Digit[0-9]|Comma|Period|Slash|Semicolon|Quote|BracketLeft|BracketRight|Backslash|Minus|Equal|Backquote)$/
+function keyForCode(code) {
+  const named = { Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']', Backslash: '\\', Minus: '-', Equal: '=', Backquote: '`' }
+  if (Object.prototype.hasOwnProperty.call(named, code)) return named[code]
+  return String(code).replace(/^Key|^Digit/, '').toLowerCase()
+}
+function parseKeybindings(raw) {
+  if (raw === null || raw === undefined) return { readable: true, overrides: {} }
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || parsed.version !== 1) return { readable: false, overrides: {} }
+    if (parsed.overrides === null || typeof parsed.overrides !== 'object' || Array.isArray(parsed.overrides)) return { readable: false, overrides: {} }
+    const overrides = {}
+    for (const [action, value] of Object.entries(parsed.overrides)) {
+      if (value === null) overrides[action] = null
+      else if (typeof value === 'object' && typeof value.code === 'string' && RECORDABLE_CODE.test(value.code)) {
+        overrides[action] = { code: value.code, alt: value.alt === true, shift: value.shift === true }
+      }
+    }
+    return { readable: true, overrides }
+  } catch {
+    return { readable: false, overrides: {} }
+  }
+}
+function sameChord(a, b) {
+  return a.code === b.code && Boolean(a.alt) === Boolean(b.alt) && Boolean(a.shift) === Boolean(b.shift)
+}
+function effectiveShortcuts(defaults, overrides) {
+  const explicit = defaults
+    .filter((entry) => overrides[entry.action] !== undefined && overrides[entry.action] !== null)
+    .map((entry) => ({ ...overrides[entry.action], key: keyForCode(overrides[entry.action].code), action: entry.action }))
+  const live = explicit.filter((entry) => !explicit.some((other) => other !== entry && sameChord(other, entry)))
+  const table = []
+  for (const entry of defaults) {
+    const override = overrides[entry.action]
+    if (override === null) continue
+    if (override !== undefined) {
+      const mine = live.find((candidate) => candidate.action === entry.action)
+      if (mine !== undefined) table.push(mine)
+      continue
+    }
+    if (explicit.some((candidate) => sameChord(candidate, entry))) continue
+    table.push(entry)
+  }
+  return table
+}
+/** What a key press means while a row records: still waiting, a refusal, or a chord. */
+function recordedChord(event, mac) {
+  if (['Meta', 'Control', 'Alt', 'Shift', 'AltGraph', 'CapsLock', 'OS'].includes(event.key)) return { pending: true }
+  const primary = mac ? event.metaKey : event.ctrlKey
+  const other = mac ? event.ctrlKey : event.metaKey
+  if (!primary || other) return { error: mac ? 'A shortcut starts with ⌘.' : 'A shortcut starts with Ctrl.' }
+  if (!RECORDABLE_CODE.test(event.code)) return { error: 'That key cannot be part of a shortcut.' }
+  /** A dead key never fires a chord (accent input stays protected), so it is not recorded either, except ⌥⌘N on a Mac. */
+  if (event.key === 'Dead' && !(mac && event.code === 'KeyN' && event.altKey === true && event.shiftKey !== true)) {
+    return { error: 'That key starts an accent on this keyboard; choose another.' }
+  }
+  return { chord: { code: event.code, alt: event.altKey === true, shift: event.shiftKey === true } }
+}
+function bindingConflict(chord, action, table) {
+  return table.find((entry) => entry.action !== action && sameChord(entry, chord))?.action ?? null
+}
+function readStoredKeybindings() {
+  try {
+    return parseKeybindings(localStorage.getItem(KEYBINDINGS_KEY))
+  } catch {
+    return { readable: false, overrides: {} }
+  }
+}
+let keybindings = readStoredKeybindings()
+let activeShortcuts = effectiveShortcuts(SESSION_SHORTCUTS, keybindings.overrides)
+let recordingAction = null
+let recordingError = null
+function shortcutStatus(text) {
+  document.getElementById('shortcut-reference-status').textContent = text
+}
+function unreadableNotice() {
+  return `Keyboard shortcuts could not be read from this browser's storage (${KEYBINDINGS_KEY}); the defaults are active and editing is off until it is repaired.`
+}
+function writeKeybindings(overrides, done) {
+  if (!keybindings.readable) {
+    shortcutStatus(unreadableNotice())
+    return false
+  }
+  try {
+    localStorage.setItem(KEYBINDINGS_KEY, JSON.stringify({ version: 1, overrides }))
+  } catch (error) {
+    shortcutStatus(`The shortcut was not saved: ${(error && error.message) || error}`)
+    return false
+  }
+  keybindings = { readable: true, overrides }
+  activeShortcuts = effectiveShortcuts(SESSION_SHORTCUTS, overrides)
+  shortcutStatus(done)
+  return true
+}
+function startRecording(action) {
+  if (!keybindings.readable) {
+    shortcutStatus(unreadableNotice())
+    return
+  }
+  recordingAction = action
+  recordingError = null
+  shortcutStatus(`Recording a shortcut for ${SHORTCUT_LABELS[action][0]}. Escape cancels.`)
+  renderShortcutReference()
+  shortcutReference.querySelector(`.shortcut-row[data-action="${action}"]`)?.focus()
+}
+function stopRecording(message) {
+  const action = recordingAction
+  recordingAction = null
+  recordingError = null
+  if (message !== undefined) shortcutStatus(message)
+  renderShortcutReference()
+  if (action !== null) shortcutReference.querySelector(`.shortcut-row[data-action="${action}"]`)?.focus()
+}
+shortcutReference.addEventListener(
+  'keydown',
+  (event) => {
+    if (recordingAction === null) {
+      const row = event.target instanceof Element ? event.target.closest('.shortcut-row[data-action]') : null
+      if (row !== null && event.target === row && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault()
+        startRecording(row.dataset.action)
+      }
+      return
+    }
+    if (event.key === 'Tab') {
+      stopRecording('Recording cancelled.')
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+      stopRecording('Recording cancelled.')
+      return
+    }
+    if (event.repeat) return
+    const result = recordedChord(event, SHORTCUTS_ON_MAC)
+    if (result.pending) return
+    const label = SHORTCUT_LABELS[recordingAction][0]
+    if (result.error !== undefined) {
+      recordingError = result.error
+      shortcutStatus(result.error)
+      renderShortcutReference()
+      return
+    }
+    const holder = bindingConflict(result.chord, recordingAction, activeShortcuts)
+    if (holder !== null) {
+      recordingError = 'taken'
+      shortcutStatus(`${chordText(result.chord, SHORTCUTS_ON_MAC)} is already ${SHORTCUT_LABELS[holder][0]}.`)
+      renderShortcutReference()
+      return
+    }
+    const overrides = { ...keybindings.overrides, [recordingAction]: result.chord }
+    if (writeKeybindings(overrides, `${label} is now ${chordText(result.chord, SHORTCUTS_ON_MAC)}.`)) stopRecording()
+  },
+  true,
+)
+/** Escape while recording cancels the recording, not the dialog. */
+shortcutReference.addEventListener('cancel', (event) => {
+  if (recordingAction === null) return
+  event.preventDefault()
+  stopRecording('Recording cancelled.')
+})
+document.getElementById('shortcut-reference-list').addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null
+  const row = target?.closest('.shortcut-row[data-action]')
+  if (row === null || row === undefined) return
+  const action = row.dataset.action
+  const label = SHORTCUT_LABELS[action][0]
+  const button = target.closest('button[data-binding-action]')
+  if (button !== null) {
+    const overrides = { ...keybindings.overrides }
+    if (button.dataset.bindingAction === 'remove') {
+      overrides[action] = null
+      writeKeybindings(overrides, `${label} has no shortcut now.`)
+    } else {
+      delete overrides[action]
+      writeKeybindings(overrides, `${label} is back to its default.`)
+    }
+    renderShortcutReference()
+    return
+  }
+  if (recordingAction !== action) startRecording(action)
+})
+document.getElementById('shortcut-restore-all').addEventListener('click', () => {
+  document.getElementById('shortcut-restore-confirm').hidden = false
+  document.getElementById('shortcut-restore-cancel').focus()
+})
+document.getElementById('shortcut-restore-cancel').addEventListener('click', () => {
+  document.getElementById('shortcut-restore-confirm').hidden = true
+  document.getElementById('shortcut-restore-all').focus()
+})
+document.getElementById('shortcut-restore-ok').addEventListener('click', () => {
+  document.getElementById('shortcut-restore-confirm').hidden = true
+  writeKeybindings({}, 'Every shortcut is back to its default.')
+  renderShortcutReference()
+  document.getElementById('shortcut-restore-all').focus()
+})
+/** Another tab that changes the bindings changes them here too. */
+window.addEventListener('storage', (event) => {
+  if (event.key !== KEYBINDINGS_KEY) return
+  keybindings = readStoredKeybindings()
+  activeShortcuts = effectiveShortcuts(SESSION_SHORTCUTS, keybindings.overrides)
+  if (shortcutReference.open) renderShortcutReference()
+})
+
 function toggleShortcutReference() {
   if (shortcutReference.open) {
     shortcutReference.close()
@@ -10325,12 +10594,20 @@ function toggleShortcutReference() {
   if (front !== null && front.id !== 'settings-dialog') return
   const search = document.getElementById('shortcut-reference-search')
   search.value = ''
+  recordingAction = null
+  recordingError = null
+  document.getElementById('shortcut-restore-confirm').hidden = true
+  shortcutStatus(keybindings.readable ? '' : unreadableNotice())
   renderShortcutReference()
   shortcutReference.showModal()
   search.focus()
 }
 document.getElementById('shortcut-reference-search').addEventListener('input', renderShortcutReference)
-shortcutReference.querySelector('[data-ws-close]').addEventListener('click', () => shortcutReference.close())
+shortcutReference.querySelector('[data-ws-close]').addEventListener('click', () => {
+  recordingAction = null
+  recordingError = null
+  shortcutReference.close()
+})
 
 /**
  * Two independent Escape presses stop the running turn, DSH's fixed action (`dsh-client-ui-conversation`: "two

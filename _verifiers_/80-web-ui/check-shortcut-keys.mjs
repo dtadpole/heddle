@@ -252,6 +252,57 @@ test('the session shortcuts fire on the physical key, with the key values the br
       assert.equal(await browser.evaluate(`document.getElementById('shortcut-reference').open`), false, 'the same chord closes it')
     })
 
+    await t.test('a recorded binding replaces the default, survives a reload, and Restore default brings the default back', async () => {
+      /** Option+J is ∆ on a US Mac layout, not a dead key, so the chord can fire there. */
+      const recorded = { code: 'KeyJ', macKey: '∆', key: 'j', keyCode: 74, alt: true }
+      const renameOpened = async () => {
+        const opened = await browser.evaluate(`!!document.getElementById('session-rename')?.open || window.__askedFor !== null`)
+        await browser.evaluate(`(() => { document.getElementById('session-rename')?.close(); window.__askedFor = null; return true })()`)
+        return opened
+      }
+      const selectTarget = async () => {
+        await browser.waitFor(`!!document.querySelector('#tree li[data-session-id="${target}"] > .row')`)
+        await browser.evaluate(`document.querySelector('#tree li[data-session-id="${target}"] > .row').click()`)
+        await settle()
+      }
+      const stubPrompt = () => browser.evaluate(`(() => { window.__askedFor = null; window.prompt = (message) => { window.__askedFor = message; return null }; return true })()`)
+      await stubPrompt()
+      await press(browser, CHORDS.reference, { onMac })
+      await settle(400)
+      await browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="rename"]').click()`)
+      await settle(200)
+      await press(browser, recorded, { onMac })
+      await settle(300)
+      const shown = await browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="rename"] kbd').textContent`)
+      assert.equal(shown, onMac ? '⌥⌘J' : 'Ctrl+Alt+J', 'the row shows the recorded chord')
+      assert.match(await browser.evaluate(`localStorage.getItem('heddle.keybindings.v1') ?? ''`), /"rename":\{"code":"KeyJ","alt":true,"shift":false\}/, 'stored as an override')
+      await browser.evaluate(`document.querySelector('#shortcut-reference [data-ws-close]').click()`)
+      await selectTarget()
+      await press(browser, recorded, { onMac })
+      await settle(500)
+      assert.equal(await renameOpened(), true, 'the recorded chord renames')
+      await press(browser, CHORDS.rename, { onMac })
+      await settle(500)
+      assert.equal(await renameOpened(), false, 'the default chord no longer does')
+      await browser.goto(server.url)
+      await browser.waitFor(`document.body.dataset.ready === 'true'`)
+      await stubPrompt()
+      await selectTarget()
+      await press(browser, recorded, { onMac })
+      await settle(500)
+      assert.equal(await renameOpened(), true, 'after a reload the recorded chord still renames')
+      await press(browser, CHORDS.reference, { onMac })
+      await settle(400)
+      await browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="rename"] button[data-binding-action="restore"]').click()`)
+      await settle(200)
+      await browser.evaluate(`document.querySelector('#shortcut-reference [data-ws-close]').click()`)
+      await selectTarget()
+      await press(browser, CHORDS.rename, { onMac })
+      await settle(500)
+      assert.equal(await renameOpened(), true, 'Restore default brings Mod+Alt+G back')
+      assert.equal(await browser.evaluate(`localStorage.getItem('heddle.keybindings.v1')`), '{"version":1,"overrides":{}}', 'and leaves no override')
+    })
+
     await t.test('two Escape presses within 500 ms stop the running turn; one press does not', async () => {
       const running = async () => (await sessions(browser)).find((s) => s.id === target)?.running === true
       const escape = async () => {

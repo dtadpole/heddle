@@ -103,7 +103,7 @@ test('an event with no physical code falls back to the character, and a code alw
 
 test('the listener tracks dead keys and leaves held repeats unrun', () => {
   /** Removal detectors for the two pieces of state the pure matcher cannot hold. */
-  assert.match(page, /shortcutFor\(event, \{ afterDeadKey: shortcutAfterDeadKey \}\)/, 'the listener passes the dead-key state')
+  assert.match(page, /shortcutFor\(event, \{ afterDeadKey: shortcutAfterDeadKey, table: activeShortcuts \}\)/, 'the listener passes the dead-key state and the active bindings')
   assert.match(page, /shortcutAfterDeadKey = event\.key === 'Dead' && action === null/, 'and keeps it')
   assert.match(page, /if \(event\.repeat\) return/, 'a repeat is taken and not run')
 })
@@ -152,7 +152,7 @@ test('two Escape presses within 500 ms stop the running turn, as DSH does', () =
 test('Mod+/ opens DSH\'s keyboard reference: every command in product order, then the fixed input actions', () => {
   /** `dsh-client-ui-shortcuts`: one dialog, ordered commands with their chords, read-only input actions (S40). */
   assert.equal(shortcutFor(keydown({ code: 'Slash', key: '/', metaKey: true }), mac), 'shortcuts-reference')
-  const pieces = ['SESSION_SHORTCUTS', 'SHORTCUT_LABELS', 'FIXED_INPUT_ACTIONS', 'function chordText', 'function subsequenceMatch', 'function shortcutReferenceRows']
+  const pieces = ['SESSION_SHORTCUTS', 'SHORTCUT_LABELS', 'FIXED_INPUT_ACTIONS', 'function keyForCode', 'function chordText', 'function subsequenceMatch', 'function shortcutReferenceRows']
   const take = (start: string) => {
     const at = page.indexOf(start === 'SESSION_SHORTCUTS' ? 'const SESSION_SHORTCUTS' : start.startsWith('function') ? start : `const ${start}`)
     assert.ok(at !== -1, `${start} is in the page`)
@@ -171,4 +171,61 @@ test('Mod+/ opens DSH\'s keyboard reference: every command in product order, the
   assert.deepEqual(plain.byAlias.map((row) => row.label), ['Open settings'], 'an English alias finds it by subsequence')
   assert.match(page, /if \(front !== null && front\.id !== 'settings-dialog'\) return/, 'it opens over Settings or nothing else')
   assert.match(page, /if \(shortcutReference\.open\) return\n\s+void showSettings\(\)/, 'and Settings stays put while it is in front')
+})
+
+test('bindings a person records are kept as overrides, DSH\'s way (S41)', () => {
+  /**
+   * `dsh-client-shortcuts`: only overrides are stored, per device (Web: this origin's localStorage); a missing command
+   * inherits its default, `null` clears it, restoring removes the override; explicit overrides displace a colliding
+   * default and colliding explicit overrides are all off; an unreadable document disables editing.
+   */
+  const take = (name: string) => {
+    const at = page.indexOf(name.startsWith('function') ? name : `const ${name}`)
+    assert.ok(at !== -1, `${name} is in the page`)
+    const close = name.startsWith('function') ? '\n}\n' : name === 'SESSION_SHORTCUTS' ? '\n]\n' : '\n'
+    return page.slice(at, page.indexOf(close, at) + close.length)
+  }
+  const source = ['SESSION_SHORTCUTS', 'RECORDABLE_CODE', 'function keyForCode', 'function parseKeybindings', 'function sameChord', 'function effectiveShortcuts', 'function recordedChord', 'function bindingConflict']
+    .map(take)
+    .join('\n')
+  const api = runInNewContext(`${source}\n({ parseKeybindings, effectiveShortcuts, recordedChord, bindingConflict, SESSION_SHORTCUTS })`) as {
+    parseKeybindings: (raw: string | null) => { readable: boolean; overrides: Record<string, unknown> }
+    effectiveShortcuts: (defaults: unknown[], overrides: Record<string, unknown>) => Array<{ code: string; alt?: boolean; shift?: boolean; action: string }>
+    recordedChord: (event: Record<string, unknown>, mac: boolean) => Record<string, unknown>
+    bindingConflict: (chord: unknown, action: string, table: unknown[]) => string | null
+    SESSION_SHORTCUTS: unknown[]
+  }
+  const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+  assert.deepEqual(plain(api.parseKeybindings(null)), { readable: true, overrides: {} }, 'nothing stored: defaults')
+  assert.deepEqual(plain(api.parseKeybindings('{"version":1,"overrides":{"rename":{"code":"KeyE","alt":true},"fork":null,"bad":{"code":"F5"}}}')), {
+    readable: true,
+    overrides: { rename: { code: 'KeyE', alt: true, shift: false }, fork: null },
+  }, 'a chord, a removal, and an entry that is not a recordable key dropped')
+  assert.equal(api.parseKeybindings('{"version":2,"overrides":{}}').readable, false, 'a newer document is not read')
+  assert.equal(api.parseKeybindings('not json').readable, false, 'a damaged document is not read')
+
+  const table = (overrides: Record<string, unknown>) => plain(api.effectiveShortcuts(api.SESSION_SHORTCUTS, overrides))
+  const actionFor = (rows: Array<{ code: string; alt?: boolean; action: string }>, code: string, alt: boolean) =>
+    rows.find((row) => row.code === code && Boolean(row.alt) === alt)?.action ?? null
+  assert.equal(actionFor(table({ rename: { code: 'KeyE', alt: true } }), 'KeyE', true), 'rename', 'an override takes effect')
+  assert.equal(actionFor(table({ rename: { code: 'KeyE', alt: true } }), 'KeyG', true), null, 'and the default chord is free')
+  assert.ok(!table({ fork: null }).some((row) => row.action === 'fork'), 'null clears the binding')
+  const displaced = table({ rename: { code: 'KeyA', alt: true } })
+  assert.equal(actionFor(displaced, 'KeyA', true), 'rename', 'an explicit override displaces the default it collides with')
+  assert.ok(!displaced.some((row) => row.action === 'archive'), 'so archive loses Mod+Alt+A')
+  const clash = table({ rename: { code: 'KeyE', alt: true }, fork: { code: 'KeyE', alt: true } })
+  assert.ok(!clash.some((row) => row.action === 'rename' || row.action === 'fork'), 'colliding explicit overrides are both off')
+
+  assert.deepEqual(plain(api.recordedChord({ key: 'Meta', metaKey: true }, true)), { pending: true }, 'a modifier alone waits')
+  assert.match(String(api.recordedChord({ key: 'e', code: 'KeyE' }, true).error), /⌘/, 'a chord starts with Mod')
+  assert.deepEqual(plain(api.recordedChord({ key: 'Dead', code: 'KeyN', metaKey: true, altKey: true }, true)), { chord: { code: 'KeyN', alt: true, shift: false } }, 'Option+Command+N reported as a dead key records')
+  assert.ok(api.recordedChord({ key: 'F5', code: 'F5', ctrlKey: true }, false).error, 'a key outside letters, digits and punctuation is refused')
+  assert.match(String(api.recordedChord({ key: 'Dead', code: 'KeyE', metaKey: true, altKey: true }, true).error), /accent/, 'a dead key other than ⌥⌘N is refused, since it would never fire')
+  assert.equal(api.bindingConflict({ code: 'KeyK', alt: true }, 'rename', api.SESSION_SHORTCUTS), 'search', 'a taken chord names its command')
+  assert.equal(api.bindingConflict({ code: 'KeyG', alt: true }, 'rename', api.SESSION_SHORTCUTS), null, 'a command does not collide with itself')
+
+  assert.match(page, /const KEYBINDINGS_KEY = 'heddle\.keybindings\.v1'/, 'stored per origin, as DSH\'s dsh.keybindings.v1')
+  assert.match(page, /window\.addEventListener\('storage', \(event\) => \{\n\s+if \(event\.key !== KEYBINDINGS_KEY\) return/, 'another tab\'s change applies here')
+  assert.match(page, /if \(!keybindings\.readable\) \{\n\s+shortcutStatus\(unreadableNotice\(\)\)\n\s+return false/, 'an unreadable store is never overwritten')
 })
