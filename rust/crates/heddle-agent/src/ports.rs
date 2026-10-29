@@ -147,6 +147,20 @@ pub trait SessionPort: Send + Sync {
         kind: &str,
         fields: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), PortError>;
+
+    /// Write what waits in the session's next-step inbox into the conversation, at a step boundary, and
+    /// answer how many messages were claimed (`heddle_session::inbox`, DSH's `ReactLoopInbox.claim`).
+    ///
+    /// A steer is queued there rather than written, so it reaches the conversation after the result of the
+    /// tool call it arrived during. A session with no inbox claims nothing, which is the default.
+    fn claim_pending_input(&self, _session: &SessionHandle) -> Result<usize, PortError> {
+        Ok(0)
+    }
+
+    /// Whether a message waits in the session's next-step inbox. The loop asks before it ends a turn.
+    fn has_pending_input(&self, _session: &SessionHandle) -> bool {
+        false
+    }
 }
 
 /// The context service, narrowed to the three questions a turn asks.
