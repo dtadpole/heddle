@@ -2152,10 +2152,52 @@ mod tests {
         harness
     }
 
+    /// A folder a test made under the system temp dir, removed when it is dropped.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// The temp folders of the test running on this thread. The harness runs each test on its own thread, and a
+        /// thread's locals are dropped when it ends, after a panic's unwinding too, so a failing test cleans up as a
+        /// passing one does. Before, every run left its `heddle-server-test-*` folders in TMPDIR (1,218 counted).
+        static TEMP_FOLDERS: std::cell::RefCell<Vec<TempFolder>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A secret path in a folder of its own, owned by the calling test: labels are unique per test, so no two
+    /// running tests share a folder, and the folder goes when the test's thread ends.
     fn temp_secret(label: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("heddle-server-test-{label}-{}", std::process::id()))
-            .join("web-secret")
+        let folder = std::env::temp_dir().join(format!("heddle-server-test-{label}-{}", std::process::id()));
+        TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
+        folder.join("web-secret")
+    }
+
+    #[test]
+    fn a_tests_temp_folder_is_removed_when_its_thread_ends() {
+        let folder = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe");
+            let folder = secret.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(&secret, "s").unwrap();
+            assert!(folder.exists());
+            folder
+        })
+        .join()
+        .unwrap();
+        assert!(!folder.exists(), "the folder went with the thread that made it");
+        let panicked = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe-panic");
+            std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+            panic!("a failing test");
+        })
+        .join();
+        assert!(panicked.is_err());
+        let folder = std::env::temp_dir().join(format!("heddle-server-test-cleanup-probe-panic-{}", std::process::id()));
+        assert!(!folder.exists(), "and a panicking test cleans up too");
     }
 
     fn app(label: &str) -> (Router, AppState) {
