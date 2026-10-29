@@ -139,7 +139,8 @@ const STYLE = `
  * `api` is what the page lends: `field` (the textarea), `anchor` (what the menu sits above), `sessionId()` (the
  * session the composer is attached to, or null), `ensureSession()` (start one when there is none), `sendAsPrompt(text)`
  * (the page's ordinary send, for a line the host does not recognise), `addRow(node)` (append to the transcript),
- * `notice(text)` (say something went wrong), and optionally `openFilePicker()` and `openModelMenu()`.
+ * `notice(text)` (say something went wrong), and optionally `openFilePicker()`, `openModelMenu()` and
+ * `openAccessMenu()` (the page's `window.heddleComposer` affordances).
  */
 export function install(api) {
   const field = api.field
@@ -302,6 +303,13 @@ export function install(api) {
       row.run()
       return
     }
+    // DSH opens the access chip's presets for /permission picked from the menu; typed with a preset it runs.
+    if (row.name === 'permission' && typeof api.openAccessMenu === 'function') {
+      replaceToken('')
+      close()
+      api.openAccessMenu()
+      return
+    }
     if (row.input !== undefined) {
       replaceToken(`/${row.name} `)
       close()
@@ -403,7 +411,7 @@ export function install(api) {
     }
     const placed = holder !== undefined
     row = placed ? holder : document.createElement('div')
-    row.className = 'turn hc-command'
+    row.className = 'turn command hc-command'
     row.dataset.kind = 'command'
     row.dataset.commandId = commandId
     row.dataset.state = 'running'
