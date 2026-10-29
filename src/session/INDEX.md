@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.3.0
+version: 1.4.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -32,6 +32,11 @@ The log also carries the session's **inbox** ([`inbox.ts`](inbox.ts)): what a pe
 turn that the turn has not taken yet. It is DSH's agent inbox, recorded with DSH's `agent/inbox/spliced` event.
 A steer is queued in the next-step list, the loop writes it at its next step boundary (after any tool result
 still due), a stop keeps it, and the next turn writes it before its own prompt (R-developer-two-5).
+
+[`activity.ts`](activity.ts) names the **running work** a plain archive is refused for, in DSH's
+`workspace/session-activity` shape: the session's own turn, and its running subagent descendants found by
+lineage (parent plus subagent origin, any depth). The Web route's `409` carries it and the page's
+stop-and-archive dialog lists it (R-developer-eight-13). DSH's jobs and reminders have no runtime here yet.
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
