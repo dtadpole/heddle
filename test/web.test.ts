@@ -144,6 +144,19 @@ test('a completed turn is not read as well as its deltas, or every answer would 
   assert.equal(turns.length, 2, 'the user line and the answer, and nothing else')
 })
 
+test('a steer queued while the answer streams does not split the answer, and is not a row until it is written', () => {
+  /** A steer is an inbox splice until the loop claims it (R-developer-two-5); it may land between two deltas. */
+  const events = [
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ask' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'the ' } },
+    { type: 'agent/inbox/spliced', target: 'next-step', start: 0, inserted: [{ id: 'inbox-1', role: 'user', content: [{ type: 'text', text: 'also' }] }] },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'answer' } },
+    { type: 'assistant/completed', text: 'the answer' },
+  ]
+  const turns = transcriptTurns(events)
+  assert.deepEqual(turns.map((turn) => [turn.kind, turn.text]), [['user', 'ask'], ['assistant', 'the answer']])
+})
+
 test('a tool result is a tool turn, and an error result is marked denied', () => {
   const turns = transcriptTurns([
     { type: 'message', message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'output' }] } },
