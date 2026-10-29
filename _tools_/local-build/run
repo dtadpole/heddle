@@ -328,4 +328,9 @@ while :; do
     wait "$cargo_pid" || rc=$?
     kill -0 "$cargo_pid" 2>/dev/null || break
 done
+# After a successful build, drop the superseded heddle artifacts it left in target/*/deps (deps-sweep.md).
+# A failed or skipped sweep never changes the build's status.
+if [ "$rc" = 0 ] && [ "${LOCAL_BUILD_DEPS_SWEEP:-1}" != 0 ]; then
+    node "$(dirname "$0")/deps-sweep.mjs" --quiet --after-build -- "$@" >&2 || true
+fi
 exit "$rc"
