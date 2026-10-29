@@ -929,6 +929,25 @@ impl Component for TodoComponent {
     }
 }
 
+/// `src/commands/service.ts`: the slash-command layer. The row is what turns it on, as `ctx.get('commands')` does in
+/// `web.ts`; the routes themselves are built by `web.rs` once every service a command drives has started.
+pub struct CommandsComponent;
+
+impl Component for CommandsComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        services.provide("commands", Arc::new(heddle_commands::CommandsRow));
+        Ok(())
+    }
+}
+
 /// `src/plugins/todo-tool.ts`: `todo_write` and `todo_read` in the registry.
 pub struct TodoToolComponent;
 

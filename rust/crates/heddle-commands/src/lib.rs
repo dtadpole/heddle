@@ -61,6 +61,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/commands"),
 ];
 
+/// The profile's `commands` row, as the binary's boot provides it: its presence is what turns the routes on, the way
+/// the TypeScript server hands over only when `ctx.get('commands')` exists. The commands themselves are built by
+/// [`router`]'s caller once the services they drive have started.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommandsRow;
+
 /// The command routes, ready to be merged into the server's router.
 ///
 /// The returned router has its state applied, so it merges into any `Router<()>`. It carries no

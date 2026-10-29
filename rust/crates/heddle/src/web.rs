@@ -321,7 +321,14 @@ fn page_routers(
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
-    routers.push(heddle_commands::router(commands_host(boot, &host)));
+    // Only when the profile loads the `commands` row, as `web.ts` hands over only when `ctx.get('commands')` exists.
+    if boot
+        .services
+        .get::<Arc<heddle_commands::CommandsRow>>("commands")
+        .is_some()
+    {
+        routers.push(heddle_commands::router(commands_host(boot, &host)));
+    }
     routers
 }
 

@@ -61,6 +61,8 @@ pub enum Builtin {
     Team,
     /// `src/plugins/tools.ts`.
     Tools,
+    /// `src/commands/service.ts`: the slash-command layer (developer-three).
+    Commands,
 }
 
 /// One built-in: the module it stands for, the crate that implements it, and its service wiring.
@@ -246,6 +248,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         &["approvals", "sandbox", "session"],
         "heddle-tools",
     ),
+    spec(
+        Builtin::Commands,
+        "commands/service",
+        "commands",
+        "commands",
+        Some("commands"),
+        &["session"],
+        "heddle-commands",
+    ),
 ];
 
 const fn spec(
@@ -427,6 +438,9 @@ impl Catalog for BuiltinCatalog {
                 Some(Box::new(crate::adapters::GoalDriverComponent))
             }
             ComponentRef::Builtin(Builtin::Team) => Some(Box::new(crate::adapters::TeamComponent)),
+            ComponentRef::Builtin(Builtin::Commands) => {
+                Some(Box::new(crate::adapters::CommandsComponent))
+            }
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),
