@@ -786,6 +786,11 @@ impl heddle_goal::SessionLog for StoreLog {
     ) -> Result<Value, heddle_goal::LogError> {
         StoreLog::append(self, session, event).map_err(heddle_goal::LogError)
     }
+
+    /// The session's record, so the goal tools see `delegationDepth`: a delegated session is never a direct human turn.
+    fn meta(&self, session: &str) -> Option<Value> {
+        self.sessions.meta(session).map(|meta| meta.to_value())
+    }
 }
 
 /// The session service a row injects, or the sentence naming it.
@@ -948,7 +953,8 @@ impl Component for TodoComponent {
     }
 }
 
-/// `src/plugins/todo-tool.ts`: `todo_write` and `todo_read` in the registry.
+/// `src/plugins/todo-tool.ts`: `todo_write` in the registry, DSH's one todo tool, under the row's required
+/// `allowParallelInProgress`.
 pub struct TodoToolComponent;
 
 impl Component for TodoToolComponent {
@@ -956,27 +962,28 @@ impl Component for TodoToolComponent {
         vec!["todo".to_owned(), "tools".to_owned()]
     }
 
+    /// The plugin's `Config`: an object that must hold the boolean `allowParallelInProgress`, the crate's schema.
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        heddle_config::Schema::from_json(heddle_todo::tool::todo_tool_config_schema()).ok()
     }
 
-    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // The setting is required with no default: a row without it fails to load, as Cordis refuses the
+        // TypeScript plugin's row against its `Config`, before anything is registered.
+        let config = heddle_todo::tool::TodoToolConfig::from_row(config)
+            .map_err(|error| format!("todo-tool: {error}"))?;
         let todo = services
             .get::<Arc<heddle_todo::TodoService>>("todo")
             .ok_or_else(|| "todo-tool: the todo service is not provided".to_owned())?;
         let registry = services
             .get::<Arc<heddle_tools::ToolRegistry>>("tools")
             .ok_or_else(|| "todo-tool: the tool registry is not provided".to_owned())?;
-        for spec in heddle_todo::tool::todo_tool_specs() {
-            let name = spec.name.clone();
+        // One spec, `todo_write`: there is no read tool, as in DSH.
+        for spec in heddle_todo::tool::todo_tool_specs(&config) {
             let todo = Arc::clone(&todo);
             let spec = serde_json::to_value(&spec).map_err(|error| error.to_string())?;
             register_answering(&registry, spec, move |session, args| {
-                let answer = if name == "todo_read" {
-                    heddle_todo::tool::run_todo_read(&todo, session)
-                } else {
-                    heddle_todo::tool::run_todo_write(&todo, session, args)
-                };
+                let answer = heddle_todo::tool::run_todo_write(&todo, &config, session, args);
                 serde_json::to_value(answer).unwrap_or(Value::Null)
             })?;
         }
@@ -1935,7 +1942,7 @@ mod tests {
             ("approvals", json!({})),
             ("tools", json!({})),
             ("todo", json!({})),
-            ("todo-tool", json!({})),
+            ("todo-tool", json!({ "allowParallelInProgress": true })),
             ("goal", json!({})),
             ("goal-tool", json!({})),
             ("turns", json!({})),
@@ -1976,7 +1983,6 @@ mod tests {
             "list_dir",
             "bash",
             "todo_write",
-            "todo_read",
             "create_goal",
             "get_goal",
             "update_goal",
@@ -1989,6 +1995,10 @@ mod tests {
                 "{expected} in {names:?}"
             );
         }
+        assert!(
+            !names.contains(&"todo_read".to_owned()),
+            "no todo_read, as in DSH: {names:?}"
+        );
         assert!(services.goal().is_some());
         assert!(services.provides("turns"));
         assert!(
@@ -2004,6 +2014,150 @@ mod tests {
             .expect("the greeting service");
         assert_eq!(greeting.greet("heddle"), "hello, heddle?");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `(first, second)` pairs: a failed entry's id and name, or a tool's name and description.
+    type Pairs = Vec<(String, String)>;
+
+    /// The rows the todo tool needs, then a `todo-tool` row with `config` (`None` writes none), loaded
+    /// through the boot: the failed entries and the `todo_*` tools the registry then offers, with their
+    /// descriptions.
+    fn load_todo_tool(config: Option<Value>) -> (Pairs, Pairs) {
+        use crate::builtins::BuiltinCatalog;
+        let home = scratch("todo-tool");
+        let row = |id: &str, name: &str, config: Option<Value>| heddle_config::ComposedRow {
+            row: heddle_config::EntryRow {
+                id: Some(id.to_owned()),
+                name: name.to_owned(),
+                config,
+                ..heddle_config::EntryRow::default()
+            },
+            position: 0,
+            fields: Vec::new(),
+        };
+        let rows = vec![
+            row(
+                "session",
+                "./src/plugins/session.ts",
+                Some(json!({ "root": home.join("sessions") })),
+            ),
+            row("sandbox", "./src/sandbox/service.ts", None),
+            row("approvals", "./src/approvals/service.ts", None),
+            row("tools", "./src/plugins/tools.ts", None),
+            row("todo", "./src/todo/service.ts", None),
+            row("todo-tool", "./src/plugins/todo-tool.ts", config),
+        ];
+        let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+        let boot = crate::boot::load(rows, std::path::Path::new("/repo"), &catalog);
+        let failed = crate::boot::failed_entries(&boot);
+        let tools: Pairs = boot
+            .services
+            .tools()
+            .expect("ctx.tools")
+            .describe()
+            .iter()
+            .filter_map(|tool| {
+                let name = tool["name"].as_str()?;
+                name.starts_with("todo_").then(|| {
+                    (
+                        name.to_owned(),
+                        tool["description"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&home);
+        (failed, tools)
+    }
+
+    #[test]
+    fn a_todo_tool_row_without_the_setting_fails_to_load() {
+        let failed_row = vec![(
+            "todo-tool".to_owned(),
+            "./src/plugins/todo-tool.ts".to_owned(),
+        )];
+        for (config, why) in [
+            (None, "a row with no config fails"),
+            (Some(Value::Null), "a row with a null config fails"),
+            (Some(json!({})), "a row without the setting fails"),
+            (
+                Some(json!({ "allowParallelInProgress": "yes" })),
+                "a non-boolean fails",
+            ),
+        ] {
+            let (failed, tools) = load_todo_tool(config);
+            assert_eq!(failed, failed_row, "{why}");
+            assert!(tools.is_empty(), "{why}: nothing registered, {tools:?}");
+        }
+        for allow in [true, false] {
+            let (failed, tools) = load_todo_tool(Some(json!({ "allowParallelInProgress": allow })));
+            assert!(failed.is_empty(), "{allow}: {failed:?}");
+            assert_eq!(
+                tools,
+                vec![(
+                    "todo_write".to_owned(),
+                    heddle_todo::tool::describe_todo_write(allow)
+                )],
+                "todo_write alone, its description the clause the setting selects"
+            );
+        }
+    }
+
+    #[test]
+    fn a_todo_tool_start_without_the_setting_says_what_is_missing() {
+        let error = TodoToolComponent
+            .start(&json!({}), &mut Services::new())
+            .expect_err("the setting is required");
+        assert_eq!(
+            error,
+            "todo-tool: the todo tool requires allowParallelInProgress, a boolean with no default",
+            "the setting is read before the services it injects"
+        );
+    }
+
+    #[test]
+    fn the_todo_tool_row_schema_requires_the_boolean() {
+        let schema = TodoToolComponent
+            .schema()
+            .expect("the todo-tool row declares its schema");
+        assert_eq!(
+            schema
+                .check(&json!({}))
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["allowParallelInProgress is required"],
+            "config --validate names the missing setting"
+        );
+        assert_eq!(
+            schema
+                .check(&json!({ "allowParallelInProgress": "yes" }))
+                .len(),
+            1
+        );
+        assert!(
+            schema
+                .check(&json!({ "allowParallelInProgress": true }))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_shipped_profile_sets_allow_parallel_in_progress_true_as_every_dsh_preset_ships() {
+        let profile = include_str!("../../../../heddle.patch.yml");
+        let start = profile
+            .find("- id: todo-tool\n")
+            .expect("the profile mounts the todo tool");
+        let block: String = profile[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| line.starts_with("      "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(
+            block.contains("config:\n        allowParallelInProgress: true\n"),
+            "{block}"
+        );
     }
 
     #[test]
