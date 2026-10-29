@@ -43,6 +43,7 @@
  *   _tools_/live-health/probe.mjs --json --pin        # append the pass to the pinned JSONL
  *   _tools_/live-health/probe.mjs --no-turn           # judge the page, do not spend a turn
  *   _tools_/live-health/probe.mjs --deployment-conversation   # 8082 also gets a follow-up, same page
+ *   _tools_/live-health/probe.mjs --real-model=deepseek-official/deepseek-flash   # the real turn's model (D-052 default)
  *   _tools_/live-health/probe.mjs --log=~/.heddle/web.log --deploy=~/heddle-live
  *
  * Exit: 0 when every judged check passes, 1 when one fails or the address does not answer (a live
@@ -69,7 +70,11 @@ import {
   markerVerdict,
   outageHop,
   parseArguments,
+  expectedSeatLabel,
   fixtureOnly,
+  modelLabel,
+  REAL_MODEL,
+  realModelChoice,
   previewTurnVerdict,
   previewVerdict,
   sharedSessions,
@@ -116,6 +121,15 @@ const PREVIEW_TURN = options['no-preview-turn'] !== true
  * scheduled pass still spends one deployment turn.
  */
 const DEPLOYMENT_CONVERSATION = options['deployment-conversation'] === true
+/**
+ * The model a real-model turn names (D-052): `--real-model=<endpoint>/<model>` overrides the decided
+ * `deepseek-official/deepseek-flash`. A target that configures only the offline fixture still gets the
+ * fixture turn; any other gets one minimal turn on this model at its lowest effort, never another model.
+ */
+const WANT_MODEL = (() => {
+  const named = typeof options['real-model'] === 'string' ? options['real-model'].split('/') : null
+  return named !== null && named.length === 2 && named[0] && named[1] ? { endpoint: named[0], model: named[1] } : REAL_MODEL
+})()
 
 /** The browser is a child of this pass, but its session outlives it: that is the tool's design. */
 process.env.HEDDLE_BROWSER_SESSION = SESSION
@@ -677,6 +691,86 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       reused = 'selection'
     }
     if (reused !== 'new') await new Promise((done) => setTimeout(done, 400))
+    const sessionNote = { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null }
+    /**
+     * Which turn this target gets (the coordinator's D-052 decision, 2026-10-29). With only the offline
+     * fixture configured, the fixture turn as before. Otherwise one minimal real turn: the monitor's own
+     * session is switched onto WANT_MODEL at its lowest effort through the page's own selection
+     * function before the prompt goes, and a model that cannot be had fails the turn - no other model is
+     * ever tried. Endpoints are read by kind only (public-hygiene).
+     */
+    const catalogue = (await callTool(
+      'evaluate_script',
+      { pageId, function: `(async () => { try { return await (await fetch('/api/endpoints')).json() } catch { return null } })` },
+      15_000,
+    ))?.value ?? null
+    const kinds = Array.isArray(catalogue?.endpoints) ? catalogue.endpoints.map((item) => ({ kind: item?.kind ?? null })) : null
+    const mode = fixtureOnly(kinds) ? 'fixture' : 'real'
+    let selection = null
+    if (mode === 'real') {
+      const choice = realModelChoice(catalogue, WANT_MODEL)
+      if (choice.ok !== true) {
+        return { mode, selection: choice, session: sessionNote, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
+      }
+      /**
+       * The page's script is a module, so its selection functions are not reachable from outside: the
+       * choice is made the way a person makes it, through the model seat's own menu (Model row, the
+       * model under its endpoint's heading, then the Effort row and the level). Each choice is recorded
+       * on the session by the page itself. The seat's accessible name afterwards is the proof.
+       */
+      const want = { endpoint: choice.endpoint, model: choice.model, modelTitle: choice.modelTitle, effortName: choice.effortName }
+      const driven = (await callTool(
+        'evaluate_script',
+        {
+          pageId,
+          function: `(async () => {
+            const want = ${JSON.stringify(want)}
+            const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+            const trigger = document.getElementById('model-trigger')
+            const menu = document.getElementById('model-menu')
+            if (trigger === null || menu === null) return { ok: false, reason: 'the page has no model seat' }
+            const idle = async () => { for (let i = 0; i < 80; i += 1) { if (trigger.getAttribute('aria-busy') !== 'true') return true; await sleep(100) } return false }
+            const open = async () => { if (menu.hidden) { trigger.click(); await sleep(200) } }
+            const close = async () => { if (!menu.hidden) { trigger.click(); await sleep(150) } }
+            const cell = (label) => [...menu.querySelectorAll('.model-cell')].find((node) => node.querySelector('.cell-label')?.textContent === label) ?? null
+            await open()
+            const modelRow = cell('Model')
+            if (modelRow !== null) { modelRow.click(); await sleep(200) }
+            const groups = menu.querySelector('.model-groups')
+            if (groups === null) { await close(); return { ok: false, reason: 'the model list did not open' } }
+            let inGroup = false
+            let option = null
+            for (const node of groups.children) {
+              if (node.classList.contains('model-group-heading')) { inGroup = node.textContent === want.endpoint; continue }
+              if (inGroup && node.classList.contains('model-option') && node.title === want.modelTitle) { option = node; break }
+            }
+            if (option === null) { await close(); return { ok: false, reason: want.endpoint + '/' + want.model + ' is not offered in the model menu' } }
+            if (option.getAttribute('aria-checked') === 'true') await close()
+            else { option.click(); await sleep(200); await idle(); await close() }
+            if (want.effortName !== null) {
+              await open()
+              const effortRow = cell('Effort')
+              if (effortRow === null) { await close(); return { ok: false, reason: 'the model menu offers no effort row for ' + want.endpoint + '/' + want.model } }
+              effortRow.click()
+              await sleep(200)
+              const level = [...menu.querySelectorAll('.model-option')].find((node) => node.title === want.effortName) ?? null
+              if (level === null) { await close(); return { ok: false, reason: 'effort ' + want.effortName + ' is not offered' } }
+              if (level.getAttribute('aria-checked') === 'true') await close()
+              else { level.click(); await sleep(200); await idle(); await close() }
+            }
+            return { ok: true, seat: trigger.getAttribute('aria-label') }
+          })`,
+        },
+        30_000,
+      ))?.value ?? null
+      const expected = expectedSeatLabel(choice)
+      const held = driven?.ok === true && driven.seat === expected
+      selection = held
+        ? choice
+        : { ...choice, ok: false, reason: driven?.ok === true ? `the model seat reads '${driven.seat}', not '${expected}'` : (driven?.reason ?? `the session could not be switched onto ${modelLabel(choice)}`) }
+      if (!held) return { mode, selection, session: sessionNote, verdict: 'fail', detail: `no real turn was sent: ${selection.reason}` }
+      await new Promise((done) => setTimeout(done, 300))
+    }
     // Re-read the page after selecting, so the turn's baseline is the selected session's own.
     const before = (await factsOf(pageId)) ?? beforeSession
     if (before === null || typeof before.assistantTurns !== 'number' || typeof before.userTurns !== 'number') {
@@ -698,7 +792,8 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
       15_000,
     ))?.value
     await callTool('click_at', { pageId, x: Math.round(box.x), y: Math.round(box.y) }, 15_000)
-    const prompt = `live health check ${new Date().toISOString()}`
+    // One line either way; a real model is asked for the shortest answer so a pass costs next to nothing.
+    const prompt = mode === 'real' ? `live health check ${new Date().toISOString()}: reply with one word` : `live health check ${new Date().toISOString()}`
     await callTool('type_text', { pageId, text: prompt, submitKey: 'Enter' }, 20_000)
 
     const startedAt = Date.now()
@@ -757,8 +852,10 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true } = {})
           ? { ...streamed, verdict: 'unjudged', detail: `${streamed.detail}; but the server's session list did not show where it landed` }
           : streamed
     return {
+      mode,
+      selection,
       prompt,
-      session: { reused: reused === 'tree' || reused === 'selection', via: reused, title: healthSession?.title ?? null },
+      session: sessionNote,
       landing,
       userAppeared,
       assistantAppeared,
@@ -903,18 +1000,24 @@ async function previewTurn(launch, gate) {
      * the same page, judged like the first. Before that it is pending and nothing more is sent.
      */
     let conversation = conversationVerdict({ gate, first: judged })
-    if (gate?.open === true && judged.verdict === 'pass') {
+    if (turn.mode === 'real') {
+      // One real turn per target per pass (D-052): the follow-up would be a second paid call.
+      conversation = { verdict: 'not-sent', detail: 'one real turn per pass (D-052), so no follow-up is sent' }
+    } else if (gate?.open === true && judged.verdict === 'pass') {
       const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
       const second = judgedPreviewTurn(followUp)
       const sameSession = followUp.session?.title !== null && followUp.session?.title === turn.session?.title && followUp.landing?.landed === 'own'
       conversation = { ...conversationVerdict({ gate, first: judged, second, sameSession }), followUp: { landing: followUp.landing ?? null, answerHead: followUp.answerHead ?? null } }
     }
     return {
+      mode: turn.mode ?? null,
+      selection: turn.selection ?? null,
       conversation: { built: gate?.built ?? null, ...conversation },
       session: turn.session ?? null,
       landing: turn.landing ?? null,
       userAppeared: turn.userAppeared ?? null,
       assistantAppeared: turn.assistantAppeared ?? null,
+      firstDeltaMs: turn.firstDeltaMs ?? null,
       settledMs: turn.settledMs ?? null,
       answerHead: turn.answerHead ?? null,
       verdict: judged.verdict,
@@ -980,9 +1083,8 @@ async function judgePreview() {
       ? { verdict: 'unjudged', detail: 'the preview turn is paused (--no-preview-turn) until its session store is separated from the deployment' }
       : shared !== 0
         ? { verdict: 'unjudged', detail: `the preview's sessions are not separate from the deployment's (${shared ?? 'unreadable'} shared), so no turn was sent` }
-        : !fixtureOnly(kinds)
-      ? { verdict: 'unjudged', detail: 'an endpoint other than the offline fixture is configured, so no turn was spent' }
-      : await previewTurn(launch, conversationGate())
+        : // The turn reads the preview's own catalogue: a fixture turn, or one real turn (D-052).
+          await previewTurn(launch, conversationGate())
   const judged = previewVerdict({ tokenStatus: token.status, endpointsStatus: endpoints.status, treeStatus: tree.status, turn, shared, conversation: turn.conversation })
   return {
     origin,

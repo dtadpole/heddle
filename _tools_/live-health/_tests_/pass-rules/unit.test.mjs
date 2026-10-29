@@ -22,6 +22,11 @@ import {
   looksLikeProxyError,
   FIXTURE_PREFIX,
   fixtureOnly,
+  expectedSeatLabel,
+  lowestEffort,
+  modelLabel,
+  REAL_MODEL,
+  realModelChoice,
   markerVerdict,
   outageHop,
   previewTurnVerdict,
@@ -246,6 +251,59 @@ test('a preview turn passes only when it completed with the fixture answer', () 
   assert.equal(previewTurnVerdict({ ...done, assistantAppeared: false }).verdict, 'fail')
   assert.equal(previewTurnVerdict({ ...done, settled: false }).verdict, 'fail')
   assert.match(previewTurnVerdict({ ...done, answerHead: 'Hello! How can I help?' }).detail, /not the fixture/)
+})
+
+test('a real-model turn (D-052) is judged on completion, never on its wording', () => {
+  const selection = { ok: true, endpoint: 'deepseek-official', model: 'deepseek-flash', effort: 'low' }
+  const done = { mode: 'real', selection, userAppeared: true, assistantAppeared: true, settled: true, settledMs: 900, answerHead: 'OK' }
+  assert.equal(previewTurnVerdict(done).verdict, 'pass')
+  assert.match(previewTurnVerdict(done).detail, /a real turn completed \(deepseek-official\/deepseek-flash, effort low, settled at 900ms\)/)
+  assert.equal(previewTurnVerdict({ ...done, answerHead: 'Hello! How can I help?' }).verdict, 'pass', 'any wording passes')
+  assert.equal(previewTurnVerdict({ ...done, settled: false }).verdict, 'fail')
+  assert.equal(previewTurnVerdict({ ...done, assistantAppeared: false }).verdict, 'fail')
+  const missing = previewTurnVerdict({ ...done, selection: { ok: false, reason: 'deepseek-official/deepseek-flash is not configured' } })
+  assert.equal(missing.verdict, 'fail', 'a model that cannot be selected fails; no other model is tried')
+  assert.match(missing.detail, /not configured/)
+})
+
+test('the lowest effort is the least common level declared, else the first, else none', () => {
+  assert.equal(lowestEffort([{ id: 'high' }, { id: 'low' }, { id: 'medium' }]), 'low')
+  assert.equal(lowestEffort([{ id: 'medium' }, { id: 'minimal' }]), 'minimal')
+  assert.equal(lowestEffort([{ id: 'fast' }, { id: 'deep' }]), 'fast', 'unknown names keep the catalogue order')
+  assert.equal(lowestEffort([]), null)
+  assert.equal(lowestEffort(undefined), null)
+})
+
+test('the real model is chosen from the catalogue at its lowest effort, or the reason it cannot be', () => {
+  const catalogue = {
+    endpoints: [
+      { name: 'scripted', kind: 'scripted' },
+      { name: 'deepseek-official', kind: 'openai-chat', models: [{ id: 'deepseek-pro' }, { id: 'deepseek-flash', reasoning: { levels: [{ id: 'high' }, { id: 'low' }] } }] },
+    ],
+  }
+  assert.deepEqual(realModelChoice(catalogue), { ok: true, endpoint: 'deepseek-official', model: 'deepseek-flash', effort: 'low', modelTitle: 'deepseek-flash', effortName: 'low' })
+  const named = { endpoints: [{ name: 'deepseek-official', models: [{ id: 'deepseek-flash', name: 'DeepSeek Flash', reasoning: { levels: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } }] }] }
+  const choice = realModelChoice(named)
+  assert.equal(choice.modelTitle, 'DeepSeek Flash')
+  assert.equal(choice.effortName, 'Low')
+  assert.equal(expectedSeatLabel(choice), 'Select model, current DeepSeek Flash, reasoning effort Low')
+  assert.equal(expectedSeatLabel({ ...choice, effortName: null }), 'Select model, current DeepSeek Flash')
+  assert.deepEqual(REAL_MODEL, { endpoint: 'deepseek-official', model: 'deepseek-flash' })
+  const endpointWide = { endpoints: [{ name: 'deepseek-official', kind: 'openai-chat', model: 'deepseek-flash', reasoning: { levels: [{ id: 'medium' }] } }] }
+  assert.equal(realModelChoice(endpointWide).effort, 'medium', "the endpoint's levels apply when the model declares none")
+  assert.equal(realModelChoice({ endpoints: [{ name: 'deepseek-official', models: [{ id: 'deepseek-flash' }] }] }).effort, null)
+  assert.match(realModelChoice({ endpoints: [{ name: 'other', kind: 'openai-chat' }] }).reason, /deepseek-official is not configured/)
+  assert.match(realModelChoice({ endpoints: [{ name: 'deepseek-official', models: [{ id: 'deepseek-pro' }] }] }).reason, /deepseek-official\/deepseek-flash is not configured/)
+  assert.equal(realModelChoice(null).ok, false)
+  assert.equal(modelLabel({ endpoint: 'e', model: 'm', effort: null }), 'e/m')
+})
+
+test("one real turn per pass: a conversation that is not sent is recorded, never judged", () => {
+  const ok = { tokenStatus: 303, endpointsStatus: 200, treeStatus: 200, turn: { verdict: 'pass', mode: 'real' }, shared: 0 }
+  const judged = previewVerdict({ ...ok, conversation: { verdict: 'not-sent', detail: 'one real turn per pass' } })
+  assert.equal(judged.verdict, 'pass')
+  assert.equal(judged.checks.conversation, undefined)
+  assert.match(judged.detail, /a real turn completed/)
 })
 
 test("the preview's verdict needs 303, 200, 200 and a completed turn; an unspent turn leaves it unjudged", () => {
