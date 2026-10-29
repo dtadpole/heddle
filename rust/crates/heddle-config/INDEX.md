@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T09:42:21Z
+modified: 2026-10-29T09:52:35Z
 version: 0.7.0
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -330,6 +330,7 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-23 | lane `ddc5e2b` (`web`'s default endpoint falls back to the first endpoint, as TypeScript does — the part-70 follow-up turn's 400) | `HEDDLE_BIN=<debug build of exactly ddc5e2b> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1. Main `e69f552` and `c1d59f5` carry the same code (measured: no non-Markdown change under `rust/` since) |
 | 2026-10-23 | lane `65dae73` (`web` leaves goal edges to the boot's goal-driver row) | `HEDDLE_BIN=<debug build of exactly 65dae73> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1 |
 | 2026-10-29 | this branch's `model_row` commit on main `92a9955` (`heddle.json`'s `default` nominated, D-052 gap c), alone and with the offered `adapters.rs` call-site patch | `HEDDLE_BIN=<release build of the branch> sh _verifiers_/05-config-system/verify.sh --json` and its lane gate; the same with a debug build of the branch plus the patch; `--turn` and `GET /api/endpoints` against a machine file nominating an endpoint that sorts after the first | 10/10, verdict 0, lane gate green, both builds. Unnamed turn: main's adapter took the first endpoint by name, the patched binary and the TypeScript build both took the nominated one (the same sentence from each). `/api/endpoints` over the machine file's shape, credentials stripped: `default` `null` on main's adapter, the nominated endpoint patched |
+| 2026-10-29 | lane `54bf9da4`, now main `2858e60` (this crate's `model_row` commits, without the call-site patch) | the backend lane written as a baseline from a debug build of main `92a9955`, then `lane.mjs --baseline` with `54bf9da4` built in the same tree (the binary checked to carry the change: a numeric `default` is read as absent, where main refuses the file); 05's `verify.sh` with the same binary | 10/10, verdict 0. Backend lane 111 pass, 5 fail, 1 unjudged; against the baseline 1 newly passing, 0 regressed. The newly passing check is part 10's real-backend request, unjudged in main's run because the live endpoint did not answer: the network, not this change. Part 10's default-endpoint check passes even without the call-site patch, because its default (`chosen`) sorts before `first`; with the default renamed to sort last it fails on `54bf9da4` and passes with the patch |
 
 ## Known differences from the TypeScript build
 
