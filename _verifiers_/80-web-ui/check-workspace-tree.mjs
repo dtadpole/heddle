@@ -239,3 +239,113 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     fixture.close()
   }
 })
+
+/**
+ * The sidebar search is DSH's local session search (C14). Read from DSH's own source: `deriveSearchResults`
+ * (dsh-client-ui-workspace `lib/client.js:1169`) matches the query, trimmed and lower-cased, as a substring of the session's
+ * **title or its workspace's name** — never its id — and lists the hits newest first, at most `searchResultLimit` = 20
+ * (dsh-api-session-controller `lib/client.js:357`, `:3797`), with `Showing the first 20 results. Narrow your search.` under
+ * them when more matched and `No matching sessions` when none did (`lib/client.js:4909-4910`). Choosing a hit
+ * (`openSearchResult`, `:3664`) clears the query, opens the session, and reveals its row in the tree: its workspace
+ * expanded, the watermark raised to reach it, scrolled into view (`:2269`, `:3081`, `:2830`).
+ */
+test('the sidebar search finds a title or a workspace name, lists twenty at most, and a chosen hit is opened and revealed', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('tree-search')
+  const root = fixtureDir('tree-search-repo')
+  const other = fixtureDir('tree-search-other')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const register = async (path) => {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      return added.body.record
+    }
+    const repo = await register(root)
+    const elsewhere = await register(other)
+    /** Twenty-two names sharing one word — two more than DSH lists — written oldest first so newest-first has one answer. */
+    for (let index = 1; index <= 22; index += 1) {
+      const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root, title: `Capword item ${index}` }) })
+      assert.equal(made.status, 200, `created session ${index} (${JSON.stringify(made.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+    }
+    const weekly = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: other, title: 'weekly sync' }) })
+    assert.equal(weekly.status, 200)
+    const weeklyId = weekly.body.session
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor('document.querySelectorAll(\'#tree li[data-kind="session"]\').length > 0', 15_000)
+
+    /** Type a query the way a person does, and read what the list shows once it has answered. */
+    const searchFor = async (query) => {
+      await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+      await new Promise((done) => setTimeout(done, 600))
+      return JSON.parse(await browser.evaluate(`JSON.stringify({
+        treeHidden: document.getElementById('tree').hidden,
+        hits: [...document.querySelectorAll('#search-results .hit')].map((hit) => ({ title: hit.querySelector('.hit-title').textContent, where: hit.querySelector('.hit-workspace').textContent })),
+        note: document.getElementById('search-note').hidden ? null : document.getElementById('search-note').textContent,
+        more: document.getElementById('search-more') === null || document.getElementById('search-more').hidden ? null : document.getElementById('search-more').textContent,
+      })`))
+    }
+
+    const capped = await searchFor('CAPWORD')
+    assert.equal(capped.treeHidden, true, 'a query replaces the tree')
+    assert.equal(capped.hits.length, 20, `twenty of the twenty-two matches are listed\nsaw: ${capped.hits.length}`)
+    assert.deepEqual(capped.hits.slice(0, 2).map((hit) => hit.title), ['Capword item 22', 'Capword item 21'], 'newest first, whatever the case of the query')
+    assert.ok(capped.hits.every((hit) => hit.where.startsWith(repo.title)), `each hit names its workspace\nsaw: ${JSON.stringify(capped.hits[0])}`)
+    assert.equal(capped.more, 'Showing the first 20 results. Narrow your search.', 'and the list says it stopped at twenty')
+
+    const byWorkspace = await searchFor(elsewhere.title.toUpperCase())
+    assert.deepEqual(byWorkspace.hits.map((hit) => hit.title), ['weekly sync'], `a workspace name finds the session in it\nsaw: ${JSON.stringify(byWorkspace)}`)
+    assert.equal(byWorkspace.more, null, 'with no overflow line under one hit')
+
+    const byId = await searchFor(String(weeklyId).slice(0, 20))
+    assert.deepEqual(byId.hits, [], `an id is not a name\nsaw: ${JSON.stringify(byId)}`)
+    assert.equal(byId.note, 'No matching sessions', 'and an empty answer says so in DSH\'s words')
+
+    /** A hit in the folded workspace: choosing it clears the search, opens the session, and draws its row selected. */
+    await searchFor(elsewhere.title)
+    await browser.evaluate(`[...document.querySelectorAll('#search-results .hit')].find((hit) => hit.querySelector('.hit-title').textContent === 'weekly sync').click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent.includes('weekly sync')`, 10_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][aria-selected="true"]') !== null`, 10_000).catch(() => false)
+
+    /** A row that is shown is selected, inside the scrolling list's box, and the search is gone. */
+    const revealed = (title) => browser.evaluate(`JSON.stringify((() => {
+      const field = document.getElementById('session-search')
+      const li = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((item) => item.querySelector(':scope > .row .label')?.textContent === ${JSON.stringify(title)})
+      const scroller = document.getElementById('workspace-scroll').getBoundingClientRect()
+      const box = li?.querySelector(':scope > .row').getBoundingClientRect()
+      return {
+        query: field.value,
+        resultsHidden: document.getElementById('search-results').hidden,
+        treeHidden: document.getElementById('tree').hidden,
+        rowDrawn: li !== undefined,
+        selected: li?.getAttribute('aria-selected') ?? null,
+        inView: box === undefined ? null : box.top >= scroller.top - 1 && box.bottom <= scroller.bottom + 1,
+      }
+    })())`).then((text) => JSON.parse(text))
+    const weeklyRow = await revealed('weekly sync')
+    assert.deepEqual(weeklyRow, { query: '', resultsHidden: true, treeHidden: false, rowDrawn: true, selected: 'true', inView: true }, `the folded workspace opened to the chosen row\nsaw: ${JSON.stringify(weeklyRow)}`)
+
+    /** The oldest of twenty-two sits past the five-row watermark: the reveal raises it so the row is drawn, and scrolls to it. */
+    await searchFor('capword item 1')
+    await browser.evaluate(`[...document.querySelectorAll('#search-results .hit')].find((hit) => hit.querySelector('.hit-title').textContent === 'Capword item 1').click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent.includes('Capword item 1')`, 10_000)
+    await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="session"][aria-selected="true"]')].some((li) => li.textContent.includes('Capword item 1'))`, 10_000).catch(() => false)
+    const deepRow = await revealed('Capword item 1')
+    assert.deepEqual(deepRow, { query: '', resultsHidden: true, treeHidden: false, rowDrawn: true, selected: 'true', inView: true }, `the row past the watermark is drawn and scrolled to\nsaw: ${JSON.stringify(deepRow)}`)
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root, other]) removeDir(dir)
+  }
+})

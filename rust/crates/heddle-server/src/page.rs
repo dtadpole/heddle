@@ -156,6 +156,19 @@ mod tests {
     }
 
     #[test]
+    fn the_served_page_carries_dshs_session_search() {
+        // C14, in the document this binary embeds: DSH's title-or-workspace search with its 20-row bound
+        // (dsh-api-session-controller `SESSION_SEARCH_RESULT_LIMIT`), its two status lines, and the reveal of a
+        // chosen hit. The derivation itself is judged in `test/workspace-tree.test.ts`.
+        let served = page();
+        assert!(served.contains("const SEARCH_LIMIT = 20"));
+        assert!(served.contains("Narrow your search."));
+        assert!(served.contains("No matching sessions"));
+        assert!(served.contains("id=\"search-more\""));
+        assert!(served.contains("async function revealSession(id)"));
+    }
+
+    #[test]
     fn page_access_tells_missing_from_stale() {
         assert_eq!(
             page_access(true, false),
