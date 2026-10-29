@@ -67,7 +67,10 @@ function startServer(label, stepsFor) {
   })
 }
 
-/** X's turn is denied, asks to widen, and waits for the answer; after it, X ends and Y's own turn answers. */
+/**
+ * Every turn (the scripted endpoint starts each at the first step) is denied, asks to widen, waits for the answer, and
+ * then ends.
+ */
 const steps = (outsidePath) => [
   { toolCall: { name: 'bash', arguments: { command: `echo outside > ${JSON.stringify(outsidePath)}` } } },
   {
@@ -77,7 +80,6 @@ const steps = (outsidePath) => [
     },
   },
   { text: 'x is done' },
-  { text: 'y is done' },
 ]
 
 function call(browser, method, path, body) {
@@ -151,9 +153,28 @@ test('a row shows a waiting approval and an unseen finished turn, as DSH does', 
     })
 
     await t.test('a turn that finishes in the open session is not unread', async () => {
-      await call(browser, 'POST', '/api/turn', { session: x, prompt: 'answer while open' })
-      await new Promise((resolve) => setTimeout(resolve, 800))
-      assert.notEqual((await rowState(browser, x))?.state, 'done')
+      /**
+       * The scripted endpoint starts every turn at the first step, so this turn asks for the same approval; it is
+       * answered here, and the turn ends while X is the open session.
+       */
+      void call(browser, 'POST', '/api/turn', { session: x, prompt: 'answer while open' })
+      let request
+      const askBy = Date.now() + 10_000
+      while (request === undefined && Date.now() < askBy) {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        request = ((await call(browser, 'GET', '/api/approvals')).json?.requests ?? []).find((entry) => entry.session === x)
+      }
+      assert.ok(request, 'the turn in the open session reached its approval')
+      assert.equal((await call(browser, 'POST', `/api/approvals/${encodeURIComponent(request.id)}`, { outcome: 'rejected' })).status, 200)
+      const endBy = Date.now() + 10_000
+      let meta
+      do {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        meta = ((await call(browser, 'GET', '/api/sessions')).json ?? []).find((entry) => entry.id === x)
+      } while ((meta?.running === true || (meta?.turns ?? 0) < 2) && Date.now() < endBy)
+      assert.equal(meta?.running, false, 'the turn ended')
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      assert.notEqual((await rowState(browser, x))?.state, 'done', 'a turn that ends in the open session is not unread')
     })
   } finally {
     await browser.close()
