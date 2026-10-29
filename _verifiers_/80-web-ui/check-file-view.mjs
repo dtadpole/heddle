@@ -328,3 +328,83 @@ test('an SVG opened directly runs no script and cannot reach the API, while the 
     await server.close()
   }
 })
+
+/**
+ * An HTML file's preview loads its relative stylesheet through `/api/raw`, and a browser refuses a stylesheet whose
+ * type is not `text/css` in a standards-mode document. Measured 2026-10-29 (DSH parity R-developer-twelve-14): the
+ * route served `.css` as a download type, so every preview showed unstyled. A stylesheet runs no script, so it may be
+ * inline; a page or a script must still never be.
+ */
+const STYLED_PAGE = '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Styled</h1><script>window.__ran = true; document.title = "RAN"</script></body></html>\n'
+const STYLESHEET = 'h1 { color: rgb(255, 0, 0); }\n'
+
+test('the raw route serves a stylesheet inline as CSS, and a page or a script only as a download', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('raw-types')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'style.css'), STYLESHEET)
+    writeFileSync(join(server.work, 'page.html'), STYLED_PAGE)
+    writeFileSync(join(server.work, 'app.js'), 'window.__ran = true\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const raw = async (name) => {
+      const response = await fetch(new URL(`/api/raw?path=${encodeURIComponent(join(server.work, name))}`, server.url), { headers: { cookie } })
+      await response.arrayBuffer()
+      return { status: response.status, type: response.headers.get('content-type'), disposition: response.headers.get('content-disposition') }
+    }
+    const css = await raw('style.css')
+    assert.equal(css.status, 200)
+    assert.match(String(css.type), /^text\/css\b/, `a stylesheet is served as CSS (${css.type})`)
+    assert.equal(css.disposition, 'inline', 'and inline, so a document can apply it')
+    for (const name of ['page.html', 'app.js']) {
+      const answer = await raw(name)
+      assert.equal(answer.type, 'application/octet-stream', `${name} is never served as something a browser runs (${answer.type})`)
+      assert.match(String(answer.disposition), /^attachment;/, `${name} is offered as a download`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('an HTML preview applies its relative stylesheet and does not run its script', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('styled-page')
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'style.css'), STYLESHEET)
+    writeFileSync(join(server.work, 'page.html'), STYLED_PAGE)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#tree .row')).some((row) => row.dataset.path.endsWith('page.html'))`, 10_000),
+      'the page is in the tree',
+    )
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .row')).find((row) => row.dataset.path.endsWith('page.html')).click()`)
+    assert.ok(
+      await browser.waitFor(`(() => {
+        const frame = document.querySelector('#file iframe')
+        const h1 = frame && frame.contentDocument && frame.contentDocument.querySelector('h1')
+        return !!h1 && getComputedStyle(h1).color === 'rgb(255, 0, 0)'
+      })()`, 10_000).catch(() => false),
+      'the preview applies the page\'s relative stylesheet (its h1 turns red)',
+    )
+    const inert = await browser.evaluate(`(() => {
+      const frame = document.querySelector('#file iframe')
+      return { frameRan: frame.contentWindow.__ran === true, frameTitle: frame.contentDocument.title, pageRan: window.__ran === true }
+    })()`)
+    assert.deepEqual(inert, { frameRan: false, frameTitle: '', pageRan: false }, 'and the page\'s script does not run')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

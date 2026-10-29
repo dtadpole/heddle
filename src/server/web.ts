@@ -2429,14 +2429,22 @@ export const FILE_ANSWER_HEADERS: Readonly<Record<string, string>> = {
   'x-content-type-options': 'nosniff',
 }
 
-function inlineContentType(path: string): string | null {
+/**
+ * The type a document may embed inline, by lower-cased extension, or `null` for a download.
+ *
+ * A stylesheet is on the list because an HTML preview's `<link rel="stylesheet">` is rewritten to this route, and a
+ * browser **refuses a stylesheet whose type is not `text/css`** in a standards-mode document: measured 2026-10-29
+ * (DSH parity R-developer-twelve-14), a preview's relative CSS never applied because it arrived as a download type.
+ * CSS runs no script, so serving it inline adds nothing a viewed file could execute.
+ */
+export function inlineContentType(path: string): string | null {
   const extension = extname(path).toLowerCase()
   const known: Readonly<Record<string, string>> = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
     '.webp': 'image/webp', '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon',
     '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg',
     '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.woff': 'font/woff', '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf',
+    '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf', '.css': 'text/css; charset=utf-8',
   }
   return known[extension] ?? null
 }
