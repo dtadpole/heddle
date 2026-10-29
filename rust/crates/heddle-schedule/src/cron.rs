@@ -104,7 +104,9 @@ fn digit_value(text: &str) -> Option<u64> {
 
 fn field_value(text: &str, spec: &FieldSpec) -> Result<u32, ScheduleInputError> {
     match digit_value(text) {
-        Some(value) if value >= u64::from(spec.min) && value <= u64::from(spec.max) => Ok(value as u32),
+        Some(value) if value >= u64::from(spec.min) && value <= u64::from(spec.max) => {
+            Ok(value as u32)
+        }
         _ => Err(ScheduleInputError::rule(format!(
             "cron.expression {} field value {text} is outside {}-{}.",
             spec.name, spec.min, spec.max
@@ -211,9 +213,9 @@ fn fold(spec: &FieldSpec, values: BTreeSet<u32>) -> Vec<u32> {
 
 /// The shortest list spelling of an ascending value set, never `*`-led.
 fn encode_field(values: &[u32]) -> Result<String, ScheduleLogError> {
-    let first = *values
-        .first()
-        .ok_or_else(|| ScheduleLogError::new("cron field encoding requires a non-empty value set"))?;
+    let first = *values.first().ok_or_else(|| {
+        ScheduleLogError::new("cron field encoding requires a non-empty value set")
+    })?;
     if values.len() == 1 {
         return Ok(first.to_string());
     }
@@ -265,7 +267,9 @@ fn encode_star_field(values: &[u32], spec: &FieldSpec) -> Result<String, Schedul
     let mut best: Option<(u32, Vec<u32>)> = None;
     for step in 1..=(spec.max - spec.min + 1) {
         let walk = star_walk(spec, step);
-        let longer = best.as_ref().is_none_or(|(_, current)| walk.len() > current.len());
+        let longer = best
+            .as_ref()
+            .is_none_or(|(_, current)| walk.len() > current.len());
         if longer && walk.iter().all(|value| present.contains(value)) {
             best = Some((step, walk));
         }
@@ -398,9 +402,18 @@ mod tests {
 
     #[test]
     fn the_expression_must_be_a_trimmed_non_empty_string_of_exactly_five_fields() {
-        refuses(json!(""), "cron.expression must be a non-empty trimmed string.");
-        refuses(json!(" * * * * *"), "cron.expression must be a non-empty trimmed string.");
-        refuses(json!(5), "cron.expression must be a non-empty trimmed string.");
+        refuses(
+            json!(""),
+            "cron.expression must be a non-empty trimmed string.",
+        );
+        refuses(
+            json!(" * * * * *"),
+            "cron.expression must be a non-empty trimmed string.",
+        );
+        refuses(
+            json!(5),
+            "cron.expression must be a non-empty trimmed string.",
+        );
         let five = "cron.expression must contain exactly five whitespace-separated fields: minute hour day-of-month month day-of-week.";
         refuses(json!("* * * *"), five);
         refuses(json!("0 * * * * *"), five);
@@ -408,19 +421,58 @@ mod tests {
 
     #[test]
     fn each_field_element_error_names_the_field_and_the_element() {
-        refuses(json!("MON * * * *"), "cron.expression minute field element \"MON\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.");
-        refuses(json!("* L * * *"), "cron.expression hour field element \"L\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.");
-        refuses(json!("* * * * 5/2"), "cron.expression day-of-week field element \"5/2\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.");
-        refuses(json!("*/x * * * *"), "cron.expression minute field element \"*/x\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.");
-        refuses(json!("60 * * * *"), "cron.expression minute field value 60 is outside 0-59.");
-        refuses(json!("* 24 * * *"), "cron.expression hour field value 24 is outside 0-23.");
-        refuses(json!("* * 0 * *"), "cron.expression day-of-month field value 0 is outside 1-31.");
-        refuses(json!("* * * 13 *"), "cron.expression month field value 13 is outside 1-12.");
-        refuses(json!("* * * * 8"), "cron.expression day-of-week field value 8 is outside 0-7.");
-        refuses(json!("*/0 * * * *"), "cron.expression minute field step must be a positive integer.");
-        refuses(json!("1-5/0 * * * *"), "cron.expression minute field step must be a positive integer.");
-        refuses(json!("5-1 * * * *"), "cron.expression minute field range 5-1 is inverted.");
-        refuses(json!("1,,2 * * * *"), "cron.expression minute field must not contain an empty list element.");
+        refuses(
+            json!("MON * * * *"),
+            "cron.expression minute field element \"MON\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.",
+        );
+        refuses(
+            json!("* L * * *"),
+            "cron.expression hour field element \"L\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.",
+        );
+        refuses(
+            json!("* * * * 5/2"),
+            "cron.expression day-of-week field element \"5/2\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.",
+        );
+        refuses(
+            json!("*/x * * * *"),
+            "cron.expression minute field element \"*/x\" must be *, a value, a-b, */n, a-b/n, or a comma-separated list of those.",
+        );
+        refuses(
+            json!("60 * * * *"),
+            "cron.expression minute field value 60 is outside 0-59.",
+        );
+        refuses(
+            json!("* 24 * * *"),
+            "cron.expression hour field value 24 is outside 0-23.",
+        );
+        refuses(
+            json!("* * 0 * *"),
+            "cron.expression day-of-month field value 0 is outside 1-31.",
+        );
+        refuses(
+            json!("* * * 13 *"),
+            "cron.expression month field value 13 is outside 1-12.",
+        );
+        refuses(
+            json!("* * * * 8"),
+            "cron.expression day-of-week field value 8 is outside 0-7.",
+        );
+        refuses(
+            json!("*/0 * * * *"),
+            "cron.expression minute field step must be a positive integer.",
+        );
+        refuses(
+            json!("1-5/0 * * * *"),
+            "cron.expression minute field step must be a positive integer.",
+        );
+        refuses(
+            json!("5-1 * * * *"),
+            "cron.expression minute field range 5-1 is inverted.",
+        );
+        refuses(
+            json!("1,,2 * * * *"),
+            "cron.expression minute field must not contain an empty list element.",
+        );
     }
 
     #[test]
@@ -445,8 +497,16 @@ mod tests {
             ("0  9   * * 1", "0 9 * * 1"),
         ];
         for (input, canonical) in cases {
-            assert_eq!(canonicalize_cron_expression(input).unwrap(), canonical, "{input}");
-            assert_eq!(canonicalize_cron_expression(canonical).unwrap(), canonical, "{canonical} is a fixed point");
+            assert_eq!(
+                canonicalize_cron_expression(input).unwrap(),
+                canonical,
+                "{input}"
+            );
+            assert_eq!(
+                canonicalize_cron_expression(canonical).unwrap(),
+                canonical,
+                "{canonical} is a fixed point"
+            );
         }
     }
 
@@ -477,18 +537,39 @@ mod tests {
         let monday = PlainDate::new(2026, 10, 26);
         let other_day = PlainDate::new(2026, 10, 28);
         let either = parse_cron_expression("0 9 1 * 1").unwrap();
-        assert!(either.date_matches(first_of_month), "day 1 matches although it is not a Monday");
-        assert!(either.date_matches(monday), "a Monday matches although it is not day 1");
+        assert!(
+            either.date_matches(first_of_month),
+            "day 1 matches although it is not a Monday"
+        );
+        assert!(
+            either.date_matches(monday),
+            "a Monday matches although it is not day 1"
+        );
         assert!(!either.date_matches(other_day));
         let mondays = parse_cron_expression("0 9 * * 1").unwrap();
-        assert!(!mondays.date_matches(first_of_month), "a bare star degrades the AND to the other field");
+        assert!(
+            !mondays.date_matches(first_of_month),
+            "a bare star degrades the AND to the other field"
+        );
         assert!(mondays.date_matches(monday));
         let stepped = parse_cron_expression("0 9 */2 * 1").unwrap();
-        assert!(!stepped.date_matches(monday), "a stepped star is a star: AND");
-        assert!(stepped.date_matches(PlainDate::new(2026, 10, 5)), "day 5 is odd and a Monday");
+        assert!(
+            !stepped.date_matches(monday),
+            "a stepped star is a star: AND"
+        );
+        assert!(
+            stepped.date_matches(PlainDate::new(2026, 10, 5)),
+            "day 5 is odd and a Monday"
+        );
         let months = parse_cron_expression("0 9 1 3 1").unwrap();
-        assert!(!months.date_matches(first_of_month), "the month must match first");
+        assert!(
+            !months.date_matches(first_of_month),
+            "the month must match first"
+        );
         let sunday = parse_cron_expression("0 9 * * 7").unwrap();
-        assert!(sunday.date_matches(PlainDate::new(2026, 11, 1)), "7 means Sunday");
+        assert!(
+            sunday.date_matches(PlainDate::new(2026, 11, 1)),
+            "7 means Sunday"
+        );
     }
 }

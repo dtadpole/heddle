@@ -307,7 +307,10 @@ impl HistoryResult {
                     "earlierRecordsUnavailable".into(),
                     Value::from(*earlier_records_unavailable),
                 );
-                map.insert("earlierRecordsPruned".into(), Value::from(*earlier_records_pruned));
+                map.insert(
+                    "earlierRecordsPruned".into(),
+                    Value::from(*earlier_records_pruned),
+                );
                 map.insert("retention".into(), retention.to_value());
                 if let Some(cursor) = next_before {
                     map.insert("nextBefore".into(), Value::from(cursor.clone()));
@@ -343,18 +346,20 @@ pub trait ScheduleDriverHandle: Send + Sync {
 
 /// The delivery history a task without one exposes: only its last receipt, with earlier records unavailable.
 pub fn delivery_history_of(task: &ScheduleTask) -> DeliveryHistory {
-    task.delivery_history.clone().unwrap_or_else(|| DeliveryHistory {
-        records: task
-            .last_delivery
-            .iter()
-            .map(|receipt| DeliveryRecord {
-                receipt: receipt.clone(),
-                prompt: None,
-            })
-            .collect(),
-        earlier_records_unavailable: true,
-        earlier_records_pruned: None,
-    })
+    task.delivery_history
+        .clone()
+        .unwrap_or_else(|| DeliveryHistory {
+            records: task
+                .last_delivery
+                .iter()
+                .map(|receipt| DeliveryRecord {
+                    receipt: receipt.clone(),
+                    prompt: None,
+                })
+                .collect(),
+            earlier_records_unavailable: true,
+            earlier_records_pruned: None,
+        })
 }
 
 /// Append one acknowledged delivery and prune (SVC:1445-1461): keep records delivered within the window before
@@ -370,7 +375,8 @@ pub fn append_delivery(
         receipt: receipt.clone(),
         prompt: Some(task.record.prompt.clone()),
     });
-    let delivered = |record: &DeliveryRecord| parse_instant(&record.receipt.delivered_at).unwrap_or(i64::MIN);
+    let delivered =
+        |record: &DeliveryRecord| parse_instant(&record.receipt.delivered_at).unwrap_or(i64::MIN);
     let floor = delivered(appended.last().expect("one was appended")) - bounds.days * DAY_MS;
     let within: Vec<DeliveryRecord> = appended
         .iter()
@@ -424,7 +430,9 @@ pub(crate) struct Ticket<'a> {
 
 impl Fifo {
     fn state(&self) -> std::sync::MutexGuard<'_, FifoState> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// A place at the back of the queue, or `None` once the queue is stopping.
@@ -513,7 +521,12 @@ impl ScheduleService {
     /// Open the store; a corrupt file is an error here, which is what refuses startup.
     pub fn new(options: ScheduleServiceOptions) -> Result<Self, OpenError> {
         let retention = ScheduleRetention {
-            days: bounded(options.retention_days, DEFAULT_DELIVERY_HISTORY_DAYS, 3650, "deliveryHistoryDays")?,
+            days: bounded(
+                options.retention_days,
+                DEFAULT_DELIVERY_HISTORY_DAYS,
+                3650,
+                "deliveryHistoryDays",
+            )?,
             records: bounded(
                 options.retention_records,
                 DEFAULT_DELIVERY_HISTORY_RECORDS,
@@ -602,10 +615,17 @@ impl ScheduleService {
                 "Exactly one reminder selector is required.",
             ))
         };
-        let selectors = ["at", "after_seconds", "every_seconds", "daily", "weekly", "cron"]
-            .iter()
-            .filter(|key| request.contains_key(**key))
-            .count();
+        let selectors = [
+            "at",
+            "after_seconds",
+            "every_seconds",
+            "daily",
+            "weekly",
+            "cron",
+        ]
+        .iter()
+        .filter(|key| request.contains_key(**key))
+        .count();
         if selectors > 1 {
             return Err(selector_error());
         }
@@ -686,7 +706,8 @@ impl ScheduleService {
             },
         };
         let start = end.saturating_sub(request.limit as usize);
-        let records: Vec<DeliveryRecord> = history.records[start..end].iter().rev().cloned().collect();
+        let records: Vec<DeliveryRecord> =
+            history.records[start..end].iter().rev().cloned().collect();
         let next_before = records
             .last()
             .filter(|_| start > 0)
@@ -846,7 +867,10 @@ impl ScheduleService {
 
     /// Bind the delivery driver every committed management write asks to drive.
     pub fn attach_driver(&self, driver: Weak<dyn ScheduleDriverHandle>) {
-        *self.driver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        *self
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
     }
 
     fn driver(&self) -> Option<Arc<dyn ScheduleDriverHandle>> {
@@ -887,7 +911,10 @@ impl ScheduleService {
     }
 
     /// [`serialize`](Self::serialize) for asynchronous work, which holds the queue until it settles.
-    pub fn serialize_async<'a, T, F, Fut>(&'a self, work: F) -> BoxFuture<'a, Result<T, ServiceError>>
+    pub fn serialize_async<'a, T, F, Fut>(
+        &'a self,
+        work: F,
+    ) -> BoxFuture<'a, Result<T, ServiceError>>
     where
         T: Send + 'a,
         F: FnOnce() -> Fut + Send + 'a,
@@ -927,7 +954,9 @@ impl ScheduleService {
             .collect();
         for listener in listeners {
             if let Err(error) = listener() {
-                self.warn(&format!("schedule: schedule/changed listener failed: {error}"));
+                self.warn(&format!(
+                    "schedule: schedule/changed listener failed: {error}"
+                ));
             }
         }
     }
@@ -970,16 +999,23 @@ pub(crate) mod tests {
         let mut options = ScheduleServiceOptions::new(file);
         let reading = Arc::clone(clock);
         options.now = Some(Arc::new(move || reading.load(Ordering::SeqCst)));
-        options.new_id = Some(Arc::new(move || format!("schedule-{}", ids.fetch_add(1, Ordering::SeqCst) + 1)));
+        options.new_id = Some(Arc::new(move || {
+            format!("schedule-{}", ids.fetch_add(1, Ordering::SeqCst) + 1)
+        }));
         options
     }
 
-    pub(crate) fn setup_with(label: &str, adjust: impl FnOnce(&mut ScheduleServiceOptions)) -> Setup {
+    pub(crate) fn setup_with(
+        label: &str,
+        adjust: impl FnOnce(&mut ScheduleServiceOptions),
+    ) -> Setup {
         let clock = Arc::new(AtomicI64::new(T0));
         let mut options = options(label, &clock);
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&warnings);
-        options.warn = Some(Arc::new(move |message: &str| sink.lock().unwrap().push(message.to_owned())));
+        options.warn = Some(Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_owned())
+        }));
         adjust(&mut options);
         let file = options.file.clone();
         let service = Arc::new(ScheduleService::new(options).unwrap());
@@ -1029,7 +1065,10 @@ pub(crate) mod tests {
             record.to_value(),
             json!({"id": "schedule-1", "kind": "daily", "title": "Daily review", "prompt": "Review", "time": "23:00:00.000", "timeZone": "Asia/Shanghai", "scheduledAt": "2026-10-29T15:00:00.000Z"})
         );
-        assert_eq!(ScheduleStore::open(&setup.file).unwrap().entries(), [ScheduleTask::new("session-1", record)]);
+        assert_eq!(
+            ScheduleStore::open(&setup.file).unwrap().entries(),
+            [ScheduleTask::new("session-1", record)]
+        );
         assert_eq!(setup.changes.load(Ordering::SeqCst), 1);
         assert_eq!(setup.drives.drives.load(Ordering::SeqCst), 1);
     }
@@ -1038,23 +1077,64 @@ pub(crate) mod tests {
     async fn create_needs_exactly_one_selector_and_validates_before_it_queues() {
         let setup = setup_with("svc-selector", |_| ());
         let service = &setup.service;
-        input_error(service.create("s", &args(json!({"prompt": "p", "title": "t"})), None).await, "invalid_selector", "Exactly one reminder selector is required.");
+        input_error(
+            service
+                .create("s", &args(json!({"prompt": "p", "title": "t"})), None)
+                .await,
+            "invalid_selector",
+            "Exactly one reminder selector is required.",
+        );
         input_error(service.create("s", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60, "every_seconds": 60})), None).await, "invalid_selector", "Exactly one reminder selector is required.");
-        input_error(service.create("s", &args(json!({"prompt": "p", "title": " ", "after_seconds": 60})), None).await, "invalid_prompt", "title is required and must be non-empty after trimming.");
-        input_error(service.create("s", &args(json!({"prompt": "p", "title": "t", "at": "2026-10-29T11:00:00Z"})), None).await, "not_future", "The scheduled time must be strictly in the future.");
-        assert_eq!(setup.changes.load(Ordering::SeqCst), 0, "nothing was committed");
+        input_error(
+            service
+                .create(
+                    "s",
+                    &args(json!({"prompt": "p", "title": " ", "after_seconds": 60})),
+                    None,
+                )
+                .await,
+            "invalid_prompt",
+            "title is required and must be non-empty after trimming.",
+        );
+        input_error(
+            service
+                .create(
+                    "s",
+                    &args(json!({"prompt": "p", "title": "t", "at": "2026-10-29T11:00:00Z"})),
+                    None,
+                )
+                .await,
+            "not_future",
+            "The scheduled time must be strictly in the future.",
+        );
+        assert_eq!(
+            setup.changes.load(Ordering::SeqCst),
+            0,
+            "nothing was committed"
+        );
     }
 
     #[tokio::test]
     async fn create_samples_its_clock_before_queueing_update_samples_inside_the_queue() {
         let setup = setup_with("svc-clock", |_| ());
         let service = &setup.service;
-        let first = service.create("s", &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})), None).await.unwrap();
+        let first = service
+            .create(
+                "s",
+                &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
         let (release, held) = tokio::sync::oneshot::channel::<()>();
         let blocker = service.serialize_async(move || async move {
             let _ = held.await;
         });
-        let created = service.create("s", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), None);
+        let created = service.create(
+            "s",
+            &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+            None,
+        );
         let updated = service.update(
             UpdateRequest {
                 session_id: "s".into(),
@@ -1069,11 +1149,19 @@ pub(crate) mod tests {
         setup.clock.store(T0 + 30_000, Ordering::SeqCst);
         release.send(()).unwrap();
         let (_, created, updated) = tokio::join!(blocker, created, updated);
-        assert_eq!(created.unwrap().scheduled_at, "2026-10-29T12:01:00.000Z", "anchored at the request");
-        let UpdateResult::Resolved(UpdateResolution::Record { record, .. }) = updated.unwrap() else {
+        assert_eq!(
+            created.unwrap().scheduled_at,
+            "2026-10-29T12:01:00.000Z",
+            "anchored at the request"
+        );
+        let UpdateResult::Resolved(UpdateResolution::Record { record, .. }) = updated.unwrap()
+        else {
             panic!("a record");
         };
-        assert_eq!(record.scheduled_at, "2026-10-29T12:02:30.000Z", "anchored at the save, T0 + 30s + 120s");
+        assert_eq!(
+            record.scheduled_at, "2026-10-29T12:02:30.000Z",
+            "anchored at the save, T0 + 30s + 120s"
+        );
     }
 
     #[tokio::test]
@@ -1086,45 +1174,133 @@ pub(crate) mod tests {
             let _ = held.await;
         });
         let a = service.serialize(|| seen.lock().unwrap().push(service.tasks().len()));
-        let b = service.create("s", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), None);
+        let b = service.create(
+            "s",
+            &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+            None,
+        );
         let c = service.serialize(|| seen.lock().unwrap().push(service.tasks().len()));
         release.send(()).unwrap();
         let (_, a, b, c) = tokio::join!(blocker, c, b, a);
         assert!(a.is_ok() && b.is_ok() && c.is_ok());
-        assert_eq!(*seen.lock().unwrap(), [0, 1], "work queued before the create sees no row; after it, the row");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [0, 1],
+            "work queued before the create sees no row; after it, the row"
+        );
     }
 
     #[tokio::test]
     async fn list_is_the_sessions_active_rows_catalog_is_every_row_sorted_by_target_then_id() {
         let setup = setup_with("svc-list", |_| ());
         let service = &setup.service;
-        let later = service.create("s1", &args(json!({"prompt": "p", "title": "later", "after_seconds": 600})), None).await.unwrap();
-        let sooner = service.create("s1", &args(json!({"prompt": "p", "title": "sooner", "after_seconds": 60})), None).await.unwrap();
-        let other = service.create("s2", &args(json!({"prompt": "p", "title": "other", "after_seconds": 60})), None).await.unwrap();
-        let ids = |records: Vec<ScheduleRecord>| records.into_iter().map(|record| record.id).collect::<Vec<_>>();
-        assert_eq!(ids(service.list("s1")), [later.id.clone(), sooner.id.clone()]);
+        let later = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "later", "after_seconds": 600})),
+                None,
+            )
+            .await
+            .unwrap();
+        let sooner = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "sooner", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
+        let other = service
+            .create(
+                "s2",
+                &args(json!({"prompt": "p", "title": "other", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
+        let ids = |records: Vec<ScheduleRecord>| {
+            records
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(service.list("s1")),
+            [later.id.clone(), sooner.id.clone()]
+        );
         let catalog: Vec<Value> = service.catalog().iter().map(catalog_entry).collect();
-        let catalog_ids: Vec<&str> = catalog.iter().map(|entry| entry["id"].as_str().unwrap()).collect();
-        assert_eq!(catalog_ids, [sooner.id.as_str(), other.id.as_str(), later.id.as_str()], "equal targets order by id");
+        let catalog_ids: Vec<&str> = catalog
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            catalog_ids,
+            [sooner.id.as_str(), other.id.as_str(), later.id.as_str()],
+            "equal targets order by id"
+        );
         let keys: Vec<&String> = catalog[0].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["id", "kind", "title", "prompt", "afterSeconds", "scheduledAt", "sessionId", "status"]);
-        let receipt = DeliveryReceipt { scheduled_at: sooner.scheduled_at.clone(), delivered_at: "2026-10-29T12:01:00.000Z".into(), message_id: "message-1".into() };
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "kind",
+                "title",
+                "prompt",
+                "afterSeconds",
+                "scheduledAt",
+                "sessionId",
+                "status"
+            ]
+        );
+        let receipt = DeliveryReceipt {
+            scheduled_at: sooner.scheduled_at.clone(),
+            delivered_at: "2026-10-29T12:01:00.000Z".into(),
+            message_id: "message-1".into(),
+        };
         service
             .commit_delivery(ScheduleTask {
                 session_id: "s1".into(),
                 record: sooner.clone(),
                 status: TaskStatus::Inactive,
                 last_delivery: Some(receipt.clone()),
-                delivery_history: Some(DeliveryHistory { records: vec![DeliveryRecord { receipt, prompt: Some("p".into()) }], earlier_records_unavailable: false, earlier_records_pruned: None }),
+                delivery_history: Some(DeliveryHistory {
+                    records: vec![DeliveryRecord {
+                        receipt,
+                        prompt: Some("p".into()),
+                    }],
+                    earlier_records_unavailable: false,
+                    earlier_records_pruned: None,
+                }),
             })
             .unwrap();
-        assert_eq!(ids(service.list("s1")), std::slice::from_ref(&later.id), "an inactive row leaves the list");
-        let inactive = service.catalog().into_iter().find(|task| task.record.id == sooner.id).unwrap();
-        assert_eq!(inactive.status, TaskStatus::Inactive, "and stays in the catalog");
-        assert_eq!(catalog_entry(&inactive)["lastDelivery"]["messageId"], "message-1");
+        assert_eq!(
+            ids(service.list("s1")),
+            std::slice::from_ref(&later.id),
+            "an inactive row leaves the list"
+        );
+        let inactive = service
+            .catalog()
+            .into_iter()
+            .find(|task| task.record.id == sooner.id)
+            .unwrap();
+        assert_eq!(
+            inactive.status,
+            TaskStatus::Inactive,
+            "and stays in the catalog"
+        );
+        assert_eq!(
+            catalog_entry(&inactive)["lastDelivery"]["messageId"],
+            "message-1"
+        );
     }
 
-    fn request(session: &str, id: &str, expected: Value, title: Option<&str>, change: Option<Value>) -> UpdateRequest {
+    fn request(
+        session: &str,
+        id: &str,
+        expected: Value,
+        title: Option<&str>,
+        change: Option<Value>,
+    ) -> UpdateRequest {
         UpdateRequest {
             session_id: session.into(),
             id: id.into(),
@@ -1139,40 +1315,155 @@ pub(crate) mod tests {
     async fn update_conflict_not_found_and_ended() {
         let setup = setup_with("svc-cas", |_| ());
         let service = &setup.service;
-        let record = service.create("s1", &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})), None).await.unwrap();
+        let record = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
         let before = setup.changes.load(Ordering::SeqCst);
         let mut stale = record.to_value();
         stale["prompt"] = json!("stale");
         let value = |result: Result<UpdateResult, ServiceError>| result.unwrap().to_value();
-        assert_eq!(value(service.update(request("s1", &record.id, stale, Some("new"), None), None).await), json!({"id": record.id, "updated": false, "code": "schedule_conflict"}));
-        assert_eq!(value(service.update(request("s2", &record.id, record.to_value(), Some("new"), None), None).await), json!({"id": record.id, "updated": false, "code": "schedule_not_found"}));
-        assert_eq!(value(service.update(request("s1", "schedule-x", record.to_value(), Some("new"), None), None).await), json!({"id": "schedule-x", "updated": false, "code": "schedule_not_found"}));
-        assert_eq!(setup.changes.load(Ordering::SeqCst), before, "no miss writes anything");
+        assert_eq!(
+            value(
+                service
+                    .update(request("s1", &record.id, stale, Some("new"), None), None)
+                    .await
+            ),
+            json!({"id": record.id, "updated": false, "code": "schedule_conflict"})
+        );
+        assert_eq!(
+            value(
+                service
+                    .update(
+                        request("s2", &record.id, record.to_value(), Some("new"), None),
+                        None
+                    )
+                    .await
+            ),
+            json!({"id": record.id, "updated": false, "code": "schedule_not_found"})
+        );
+        assert_eq!(
+            value(
+                service
+                    .update(
+                        request("s1", "schedule-x", record.to_value(), Some("new"), None),
+                        None
+                    )
+                    .await
+            ),
+            json!({"id": "schedule-x", "updated": false, "code": "schedule_not_found"})
+        );
+        assert_eq!(
+            setup.changes.load(Ordering::SeqCst),
+            before,
+            "no miss writes anything"
+        );
         let task = service.tasks().remove(0);
-        service.commit_delivery(ScheduleTask { status: TaskStatus::Inactive, ..task }).unwrap();
-        assert_eq!(value(service.update(request("s1", &record.id, record.to_value(), Some("new"), None), None).await), json!({"id": record.id, "updated": false, "code": "schedule_ended"}));
+        service
+            .commit_delivery(ScheduleTask {
+                status: TaskStatus::Inactive,
+                ..task
+            })
+            .unwrap();
+        assert_eq!(
+            value(
+                service
+                    .update(
+                        request("s1", &record.id, record.to_value(), Some("new"), None),
+                        None
+                    )
+                    .await
+            ),
+            json!({"id": record.id, "updated": false, "code": "schedule_ended"})
+        );
     }
 
     #[tokio::test]
     async fn update_a_committed_change_is_persisted_and_announced_a_no_op_writes_nothing() {
         let setup = setup_with("svc-update", |_| ());
         let service = &setup.service;
-        let record = service.create("s1", &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})), None).await.unwrap();
-        let (changes, drives) = (setup.changes.load(Ordering::SeqCst), setup.drives.drives.load(Ordering::SeqCst));
-        let noop = service.update(request("s1", &record.id, record.to_value(), None, Some(json!({"kind": "every", "every_seconds": 60}))), None).await.unwrap();
-        assert_eq!(noop, UpdateResult::Resolved(UpdateResolution::Record { id: record.id.clone(), updated: false, record: record.clone() }));
+        let record = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
+        let (changes, drives) = (
+            setup.changes.load(Ordering::SeqCst),
+            setup.drives.drives.load(Ordering::SeqCst),
+        );
+        let noop = service
+            .update(
+                request(
+                    "s1",
+                    &record.id,
+                    record.to_value(),
+                    None,
+                    Some(json!({"kind": "every", "every_seconds": 60})),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            noop,
+            UpdateResult::Resolved(UpdateResolution::Record {
+                id: record.id.clone(),
+                updated: false,
+                record: record.clone()
+            })
+        );
         assert_eq!(setup.changes.load(Ordering::SeqCst), changes);
-        let UpdateResult::Resolved(UpdateResolution::Record { updated: true, record: titled, .. }) =
-            service.update(request("s1", &record.id, record.to_value(), Some("Renamed"), None), None).await.unwrap()
+        let UpdateResult::Resolved(UpdateResolution::Record {
+            updated: true,
+            record: titled,
+            ..
+        }) = service
+            .update(
+                request("s1", &record.id, record.to_value(), Some("Renamed"), None),
+                None,
+            )
+            .await
+            .unwrap()
         else {
             panic!("an update");
         };
-        assert_eq!(titled.scheduled_at, record.scheduled_at, "a title alone keeps the target");
-        assert_eq!(ScheduleStore::open(&setup.file).unwrap().get(&record.id).unwrap().record.title, "Renamed");
+        assert_eq!(
+            titled.scheduled_at, record.scheduled_at,
+            "a title alone keeps the target"
+        );
+        assert_eq!(
+            ScheduleStore::open(&setup.file)
+                .unwrap()
+                .get(&record.id)
+                .unwrap()
+                .record
+                .title,
+            "Renamed"
+        );
         assert_eq!(setup.changes.load(Ordering::SeqCst), changes + 1);
         assert_eq!(setup.drives.drives.load(Ordering::SeqCst), drives + 1);
         assert_eq!(
-            service.update(request("s1", &record.id, titled.to_value(), None, Some(json!({"kind": "every"}))), None).await.unwrap().to_value(),
+            service
+                .update(
+                    request(
+                        "s1",
+                        &record.id,
+                        titled.to_value(),
+                        None,
+                        Some(json!({"kind": "every"}))
+                    ),
+                    None
+                )
+                .await
+                .unwrap()
+                .to_value(),
             json!({"code": "invalid_rule", "message": "Timing change must contain exactly kind and its matching timing selector."})
         );
     }
@@ -1182,22 +1473,50 @@ pub(crate) mod tests {
         let delegated = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
         let reading = Arc::clone(&delegated);
         let setup = setup_with("svc-subagent", move |options| {
-            options.is_delegated = Some(Arc::new(move |id: &str| reading.lock().unwrap().contains(id)));
+            options.is_delegated = Some(Arc::new(move |id: &str| {
+                reading.lock().unwrap().contains(id)
+            }));
         });
         let service = &setup.service;
-        let record = service.create("child", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), None).await.unwrap();
+        let record = service
+            .create(
+                "child",
+                &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
         delegated.lock().unwrap().insert("child".into());
         input_error(
-            service.create("child", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), None).await,
+            service
+                .create(
+                    "child",
+                    &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+                    None,
+                )
+                .await,
             "subagent_session",
             SUBAGENT_TARGET_MESSAGE,
         );
         assert_eq!(
-            service.update(request("child", &record.id, record.to_value(), Some("x"), None), None).await.unwrap().to_value(),
+            service
+                .update(
+                    request("child", &record.id, record.to_value(), Some("x"), None),
+                    None
+                )
+                .await
+                .unwrap()
+                .to_value(),
             json!({"code": "subagent_session", "message": SUBAGENT_TARGET_MESSAGE})
         );
         assert_eq!(service.list("child").len(), 1);
-        assert_eq!(service.delete("child", &record.id, None).await.unwrap(), DeleteResult { id: record.id, deleted: true });
+        assert_eq!(
+            service.delete("child", &record.id, None).await.unwrap(),
+            DeleteResult {
+                id: record.id,
+                deleted: true
+            }
+        );
     }
 
     #[tokio::test]
@@ -1205,7 +1524,14 @@ pub(crate) mod tests {
         let setup = setup_with("svc-abort", |_| ());
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let result = setup.service.create("s", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), Some(cancel)).await;
+        let result = setup
+            .service
+            .create(
+                "s",
+                &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+                Some(cancel),
+            )
+            .await;
         assert_eq!(result, Err(ServiceError::Aborted));
         assert!(setup.service.tasks().is_empty());
         assert_eq!(setup.changes.load(Ordering::SeqCst), 0);
@@ -1215,16 +1541,61 @@ pub(crate) mod tests {
     async fn delete_removes_the_row_and_its_history_from_any_state() {
         let setup = setup_with("svc-delete", |_| ());
         let service = &setup.service;
-        let record = service.create("s1", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), None).await.unwrap();
-        assert_eq!(service.delete("s2", &record.id, None).await.unwrap().to_value(), json!({"id": record.id, "deleted": false, "code": "schedule_not_found"}));
-        let task = service.tasks().remove(0);
-        service.commit_delivery(ScheduleTask { status: TaskStatus::Inactive, ..task }).unwrap();
-        assert_eq!(service.delete("s1", &record.id, None).await.unwrap(), DeleteResult { id: record.id.clone(), deleted: true });
-        let history = service.history(&HistoryRequest { session_id: "s1".into(), id: record.id.clone(), limit: 10, before: None }).unwrap();
-        assert_eq!(history.to_value(), json!({"id": record.id, "code": "schedule_not_found"}));
+        let record = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            serde_json::to_string(&service.delete("s1", &record.id, None).await.unwrap().to_value()).unwrap(),
-            format!("{{\"id\":\"{}\",\"deleted\":false,\"code\":\"schedule_not_found\"}}", record.id)
+            service
+                .delete("s2", &record.id, None)
+                .await
+                .unwrap()
+                .to_value(),
+            json!({"id": record.id, "deleted": false, "code": "schedule_not_found"})
+        );
+        let task = service.tasks().remove(0);
+        service
+            .commit_delivery(ScheduleTask {
+                status: TaskStatus::Inactive,
+                ..task
+            })
+            .unwrap();
+        assert_eq!(
+            service.delete("s1", &record.id, None).await.unwrap(),
+            DeleteResult {
+                id: record.id.clone(),
+                deleted: true
+            }
+        );
+        let history = service
+            .history(&HistoryRequest {
+                session_id: "s1".into(),
+                id: record.id.clone(),
+                limit: 10,
+                before: None,
+            })
+            .unwrap();
+        assert_eq!(
+            history.to_value(),
+            json!({"id": record.id, "code": "schedule_not_found"})
+        );
+        assert_eq!(
+            serde_json::to_string(
+                &service
+                    .delete("s1", &record.id, None)
+                    .await
+                    .unwrap()
+                    .to_value()
+            )
+            .unwrap(),
+            format!(
+                "{{\"id\":\"{}\",\"deleted\":false,\"code\":\"schedule_not_found\"}}",
+                record.id
+            )
         );
     }
 
@@ -1232,19 +1603,48 @@ pub(crate) mod tests {
     async fn the_archive_stop_removes_only_that_sessions_active_rows() {
         let setup = setup_with("svc-stop", |_| ());
         let service = &setup.service;
-        service.create("s1", &args(json!({"prompt": "p", "title": "a", "after_seconds": 60})), None).await.unwrap();
-        let kept = service.create("s2", &args(json!({"prompt": "p", "title": "b", "after_seconds": 60})), None).await.unwrap();
+        service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "a", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
+        let kept = service
+            .create(
+                "s2",
+                &args(json!({"prompt": "p", "title": "b", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
         service.stop_session_tasks("s1").await.unwrap();
-        assert_eq!(service.tasks().into_iter().map(|task| task.record.id).collect::<Vec<_>>(), [kept.id]);
+        assert_eq!(
+            service
+                .tasks()
+                .into_iter()
+                .map(|task| task.record.id)
+                .collect::<Vec<_>>(),
+            [kept.id]
+        );
     }
 
     /// A task whose history holds `count` deliveries, one minute apart, ending at `end`.
     fn with_history(service: &ScheduleService, id: &str, count: i64, end: i64) {
-        let task = service.tasks().into_iter().find(|task| task.record.id == id).unwrap();
+        let task = service
+            .tasks()
+            .into_iter()
+            .find(|task| task.record.id == id)
+            .unwrap();
         let mut current = task.clone();
         for index in 0..count {
             let delivered_at = crate::time::format_instant(end - (count - 1 - index) * 60_000);
-            let receipt = DeliveryReceipt { scheduled_at: task.record.scheduled_at.clone(), delivered_at, message_id: format!("message-{index}") };
+            let receipt = DeliveryReceipt {
+                scheduled_at: task.record.scheduled_at.clone(),
+                delivered_at,
+                message_id: format!("message-{index}"),
+            };
             let (last, history) = append_delivery(&current, receipt, service.retention());
             current.last_delivery = Some(last);
             current.delivery_history = Some(history);
@@ -1253,35 +1653,96 @@ pub(crate) mod tests {
     }
 
     fn page(result: HistoryResult) -> (Vec<String>, bool, bool, Option<String>) {
-        let HistoryResult::Page { records, earlier_records_unavailable, earlier_records_pruned, next_before, .. } = result else {
+        let HistoryResult::Page {
+            records,
+            earlier_records_unavailable,
+            earlier_records_pruned,
+            next_before,
+            ..
+        } = result
+        else {
             panic!("a page");
         };
-        (records.into_iter().map(|record| record.receipt.message_id).collect(), earlier_records_unavailable, earlier_records_pruned, next_before)
+        (
+            records
+                .into_iter()
+                .map(|record| record.receipt.message_id)
+                .collect(),
+            earlier_records_unavailable,
+            earlier_records_pruned,
+            next_before,
+        )
     }
 
     #[tokio::test]
     async fn history_newest_first_an_exclusive_cursor_next_before_and_lookup_misses() {
         let setup = setup_with("svc-history", |_| ());
         let service = &setup.service;
-        let record = service.create("s1", &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})), None).await.unwrap();
+        let record = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
         let ask = |limit: i64, before: Option<&str>, session: &str| {
-            service.history(&HistoryRequest { session_id: session.into(), id: record.id.clone(), limit, before: before.map(str::to_owned) })
+            service.history(&HistoryRequest {
+                session_id: session.into(),
+                id: record.id.clone(),
+                limit,
+                before: before.map(str::to_owned),
+            })
         };
         for limit in [0, 101] {
             let error = ask(limit, None, "s1").unwrap_err();
-            assert_eq!((error.code.as_str(), error.message.as_str()), ("invalid_rule", "Delivery history limit must be a safe integer from 1 through 100."));
+            assert_eq!(
+                (error.code.as_str(), error.message.as_str()),
+                (
+                    "invalid_rule",
+                    "Delivery history limit must be a safe integer from 1 through 100."
+                )
+            );
         }
         with_history(service, &record.id, 5, T0);
         let first = ask(2, None, "s1").unwrap();
-        assert!(matches!(&first, HistoryResult::Page { retention, .. } if *retention == ScheduleRetention { days: 30, records: 200 }));
-        assert_eq!(page(first), (vec!["message-4".to_owned(), "message-3".to_owned()], false, false, Some("message-3".to_owned())));
-        assert_eq!(page(ask(2, Some("message-3"), "s1").unwrap()).0, ["message-2", "message-1"]);
+        assert!(
+            matches!(&first, HistoryResult::Page { retention, .. } if *retention == ScheduleRetention { days: 30, records: 200 })
+        );
+        assert_eq!(
+            page(first),
+            (
+                vec!["message-4".to_owned(), "message-3".to_owned()],
+                false,
+                false,
+                Some("message-3".to_owned())
+            )
+        );
+        assert_eq!(
+            page(ask(2, Some("message-3"), "s1").unwrap()).0,
+            ["message-2", "message-1"]
+        );
         let last = ask(2, Some("message-1"), "s1").unwrap();
-        let keys: Vec<String> = last.to_value()["records"][0].as_object().unwrap().keys().cloned().collect();
+        let keys: Vec<String> = last.to_value()["records"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         assert_eq!(keys, ["scheduledAt", "deliveredAt", "messageId", "prompt"]);
-        assert_eq!(page(last), (vec!["message-0".to_owned()], false, false, None), "the first page has no older cursor");
-        assert_eq!(ask(2, Some("message-x"), "s1").unwrap().to_value(), json!({"id": record.id, "code": "delivery_cursor_not_found"}));
-        assert_eq!(ask(2, None, "s2").unwrap().to_value(), json!({"id": record.id, "code": "schedule_not_found"}));
+        assert_eq!(
+            page(last),
+            (vec!["message-0".to_owned()], false, false, None),
+            "the first page has no older cursor"
+        );
+        assert_eq!(
+            ask(2, Some("message-x"), "s1").unwrap().to_value(),
+            json!({"id": record.id, "code": "delivery_cursor_not_found"})
+        );
+        assert_eq!(
+            ask(2, None, "s2").unwrap().to_value(),
+            json!({"id": record.id, "code": "schedule_not_found"})
+        );
     }
 
     #[tokio::test]
@@ -1291,40 +1752,125 @@ pub(crate) mod tests {
             options.retention_records = Some(3);
         });
         let service = &setup.service;
-        let record = service.create("s1", &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})), None).await.unwrap();
-        let ask = || service.history(&HistoryRequest { session_id: "s1".into(), id: record.id.clone(), limit: 100, before: None }).unwrap();
+        let record = service
+            .create(
+                "s1",
+                &args(json!({"prompt": "p", "title": "t", "every_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
+        let ask = || {
+            service
+                .history(&HistoryRequest {
+                    session_id: "s1".into(),
+                    id: record.id.clone(),
+                    limit: 100,
+                    before: None,
+                })
+                .unwrap()
+        };
         with_history(service, &record.id, 3, T0);
         let (records, _, pruned, _) = page(ask());
         assert_eq!((records.len(), pruned), (3, false));
         with_history(service, &record.id, 1, T0 + 60_000);
         let (records, unavailable, pruned, _) = page(ask());
-        assert_eq!((records.len(), unavailable, pruned), (3, true, true), "the cap keeps the last three");
+        assert_eq!(
+            (records.len(), unavailable, pruned),
+            (3, true, true),
+            "the cap keeps the last three"
+        );
 
         let task = service.tasks().remove(0);
-        let receipt = |delivered: i64, id: &str| DeliveryReceipt { scheduled_at: task.record.scheduled_at.clone(), delivered_at: crate::time::format_instant(delivered), message_id: id.into() };
-        let (_, pruned) = append_delivery(&task, receipt(T0 + 2 * DAY_MS, "late"), ScheduleRetention { days: 1, records: 10 });
-        assert_eq!(pruned.records.iter().map(|one| one.receipt.message_id.as_str()).collect::<Vec<_>>(), ["late"], "older than the window goes");
-        let legacy = ScheduleTask { session_id: "s".into(), record: task.record.clone(), status: TaskStatus::Active, last_delivery: Some(receipt(T0, "old")), delivery_history: None };
-        let (_, from_legacy) = append_delivery(&legacy, receipt(T0 + 1000, "new"), ScheduleRetention { days: 30, records: 200 });
-        assert!(from_legacy.earlier_records_unavailable, "a row without history exposes only its last delivery");
-        assert_eq!(from_legacy.records.iter().map(|one| one.receipt.message_id.as_str()).collect::<Vec<_>>(), ["old", "new"]);
+        let receipt = |delivered: i64, id: &str| DeliveryReceipt {
+            scheduled_at: task.record.scheduled_at.clone(),
+            delivered_at: crate::time::format_instant(delivered),
+            message_id: id.into(),
+        };
+        let (_, pruned) = append_delivery(
+            &task,
+            receipt(T0 + 2 * DAY_MS, "late"),
+            ScheduleRetention {
+                days: 1,
+                records: 10,
+            },
+        );
+        assert_eq!(
+            pruned
+                .records
+                .iter()
+                .map(|one| one.receipt.message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["late"],
+            "older than the window goes"
+        );
+        let legacy = ScheduleTask {
+            session_id: "s".into(),
+            record: task.record.clone(),
+            status: TaskStatus::Active,
+            last_delivery: Some(receipt(T0, "old")),
+            delivery_history: None,
+        };
+        let (_, from_legacy) = append_delivery(
+            &legacy,
+            receipt(T0 + 1000, "new"),
+            ScheduleRetention {
+                days: 30,
+                records: 200,
+            },
+        );
+        assert!(
+            from_legacy.earlier_records_unavailable,
+            "a row without history exposes only its last delivery"
+        );
+        assert_eq!(
+            from_legacy
+                .records
+                .iter()
+                .map(|one| one.receipt.message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["old", "new"]
+        );
     }
 
     #[tokio::test]
-    async fn retention_bounds_are_checked_a_failing_listener_is_contained_a_stopped_service_refuses_work() {
+    async fn retention_bounds_are_checked_a_failing_listener_is_contained_a_stopped_service_refuses_work()
+     {
         let clock = Arc::new(AtomicI64::new(T0));
         let mut bad = options("svc-bounds", &clock);
         bad.retention_days = Some(0);
-        assert_eq!(ScheduleService::new(bad).err().unwrap().to_string(), "deliveryHistoryDays must be an integer from 1 through 3650");
+        assert_eq!(
+            ScheduleService::new(bad).err().unwrap().to_string(),
+            "deliveryHistoryDays must be an integer from 1 through 3650"
+        );
         let mut bad = options("svc-bounds", &clock);
         bad.retention_records = Some(10_001);
-        assert_eq!(ScheduleService::new(bad).err().unwrap().to_string(), "deliveryHistoryRecords must be an integer from 1 through 10000");
+        assert_eq!(
+            ScheduleService::new(bad).err().unwrap().to_string(),
+            "deliveryHistoryRecords must be an integer from 1 through 10000"
+        );
         let setup = setup_with("svc-listener", |_| ());
-        setup.service.on_change(Arc::new(|| Err("Error: listener broke".to_owned())));
-        setup.service.create("s", &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})), None).await.unwrap();
-        assert_eq!(*setup.warnings.lock().unwrap(), ["schedule: schedule/changed listener failed: Error: listener broke"]);
+        setup
+            .service
+            .on_change(Arc::new(|| Err("Error: listener broke".to_owned())));
+        setup
+            .service
+            .create(
+                "s",
+                &args(json!({"prompt": "p", "title": "t", "after_seconds": 60})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *setup.warnings.lock().unwrap(),
+            ["schedule: schedule/changed listener failed: Error: listener broke"]
+        );
         setup.service.dispose().await;
         let refused = setup.service.serialize(|| 1).await;
-        assert_eq!(refused.unwrap_err().to_string(), "Schedule service is stopping");
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "Schedule service is stopping"
+        );
     }
 }

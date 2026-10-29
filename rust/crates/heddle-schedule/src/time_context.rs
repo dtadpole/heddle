@@ -13,7 +13,9 @@
 
 use std::collections::BTreeSet;
 
-use heddle_session::{AppendOptions, NewEvent, SessionEvent, SessionHandle, SessionStore, SurfaceOp};
+use heddle_session::{
+    AppendOptions, NewEvent, SessionEvent, SessionHandle, SessionStore, SurfaceOp,
+};
 use serde_json::{Map, Value, json};
 
 use crate::time::{canonicalize_time_zone, local_date, local_time, offset_at, parse_instant};
@@ -178,7 +180,11 @@ pub fn derive_browser_time_zone(events: &[LogEvent<'_>]) -> BrowserTimeZone {
         };
         let from_person = source.get("kind").and_then(Value::as_str) == Some("user")
             && source.get("rpcId").is_some_and(Value::is_string);
-        let Some(zone) = source.get("clientTimeZone").and_then(Value::as_str).filter(|_| from_person) else {
+        let Some(zone) = source
+            .get("clientTimeZone")
+            .and_then(Value::as_str)
+            .filter(|_| from_person)
+        else {
             continue;
         };
         if canonicalize_time_zone(zone).is_ok_and(|canonical| canonical == zone) {
@@ -245,8 +251,13 @@ pub fn process_time_zone() -> String {
 }
 
 /// The reading this step should carry, or `None` when the last one is recent enough (TC:215-228).
-pub fn time_context_reading(events: &[LogEvent<'_>], options: &TimeContextOptions) -> Result<Option<String>, String> {
-    let interval = options.refresh_interval_ms.unwrap_or(DEFAULT_REFRESH_INTERVAL_MS);
+pub fn time_context_reading(
+    events: &[LogEvent<'_>],
+    options: &TimeContextOptions,
+) -> Result<Option<String>, String> {
+    let interval = options
+        .refresh_interval_ms
+        .unwrap_or(DEFAULT_REFRESH_INTERVAL_MS);
     if interval < 0 || !crate::js::is_safe(interval) {
         return Err(format!(
             "time-context: refreshIntervalMs must be a non-negative safe integer, got {interval}"
@@ -265,13 +276,22 @@ pub fn time_context_reading(events: &[LogEvent<'_>], options: &TimeContextOption
     } else {
         state.last_turn_injection_time
     };
-    let turn = 1 + events.iter().filter(|event| is_turn_end(event.kind)).count();
+    let turn = 1 + events
+        .iter()
+        .filter(|event| is_turn_end(event.kind))
+        .count();
     let browser = derive_browser_time_zone(events);
     let zone = match &browser {
         BrowserTimeZone::Resolved(zone) => zone.clone(),
-        _ => options.fallback_time_zone.clone().unwrap_or_else(process_time_zone),
+        _ => options
+            .fallback_time_zone
+            .clone()
+            .unwrap_or_else(process_time_zone),
     };
-    let elapsed = previous.map_or_else(|| "unavailable".to_owned(), |previous| format_duration(options.now - previous));
+    let elapsed = previous.map_or_else(
+        || "unavailable".to_owned(),
+        |previous| format_duration(options.now - previous),
+    );
     let baseline = if options.step == 1 {
         "model-visible message"
     } else {
@@ -304,7 +324,10 @@ pub fn record_time_context(
     fallback_time_zone: Option<String>,
 ) -> Result<bool, String> {
     let events = store.read(handle).map_err(|error| error.to_string())?;
-    let views: Vec<LogEvent<'_>> = events.iter().map(|event| LogEvent::of_session(event)).collect();
+    let views: Vec<LogEvent<'_>> = events
+        .iter()
+        .map(|event| LogEvent::of_session(event))
+        .collect();
     let options = TimeContextOptions {
         step,
         now: now.unwrap_or_else(system_now),
@@ -360,7 +383,11 @@ mod tests {
     }
 
     fn user(at: i64, source: Value) -> Value {
-        event("message", at, json!({"message": {"role": "user", "content": [{"type": "text", "text": "hi"}], "source": source}}))
+        event(
+            "message",
+            at,
+            json!({"message": {"role": "user", "content": [{"type": "text", "text": "hi"}], "source": source}}),
+        )
     }
 
     fn plain_user(at: i64) -> Value {
@@ -368,11 +395,19 @@ mod tests {
     }
 
     fn assistant(at: i64) -> Value {
-        event("message", at, json!({"message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}}))
+        event(
+            "message",
+            at,
+            json!({"message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}}),
+        )
     }
 
     fn reading(at: i64) -> Value {
-        event("context/note", at, json!({"message": {"role": "user", "content": [{"type": "text", "text": "r"}], "source": {"kind": "time-context", "form": "snapshot"}}, "origin": "time-context"}))
+        event(
+            "context/note",
+            at,
+            json!({"message": {"role": "user", "content": [{"type": "text", "text": "r"}], "source": {"kind": "time-context", "form": "snapshot"}}, "origin": "time-context"}),
+        )
     }
 
     fn turn_end(at: i64) -> Value {
@@ -383,10 +418,21 @@ mod tests {
         events.iter().map(LogEvent::of_value).collect()
     }
 
-    fn read(events: &[Value], step: u32, now: i64, interval: Option<i64>, fallback: Option<&str>) -> Option<String> {
+    fn read(
+        events: &[Value],
+        step: u32,
+        now: i64,
+        interval: Option<i64>,
+        fallback: Option<&str>,
+    ) -> Option<String> {
         time_context_reading(
             &views(events),
-            &TimeContextOptions { step, now, refresh_interval_ms: interval, fallback_time_zone: fallback.map(str::to_owned) },
+            &TimeContextOptions {
+                step,
+                now,
+                refresh_interval_ms: interval,
+                fallback_time_zone: fallback.map(str::to_owned),
+            },
         )
         .unwrap()
     }
@@ -398,15 +444,29 @@ mod tests {
         assert_eq!(format_duration(65_000), "1m 5s");
         assert_eq!(format_duration(3_600_000), "1h 0s");
         assert_eq!(format_duration(90_061_000), "1d 1h 1m 1s");
-        assert_eq!(format_duration(-5_000), "0s", "a negative elapsed time reads as zero");
+        assert_eq!(
+            format_duration(-5_000),
+            "0s",
+            "a negative elapsed time reads as zero"
+        );
     }
 
     #[test]
     fn the_timestamp_carries_local_fields_the_long_numeric_offset_and_the_zone_in_brackets() {
         assert_eq!(format_instant(T0), "2026-10-29T11:30:16.000Z");
-        assert_eq!(format_timestamp(T0, "America/Los_Angeles"), "2026-10-29T04:30:16-07:00[America/Los_Angeles]");
-        assert_eq!(format_timestamp(T0, "Asia/Shanghai"), "2026-10-29T19:30:16+08:00[Asia/Shanghai]");
-        assert_eq!(format_timestamp(T0, "UTC"), "2026-10-29T11:30:16+00:00[UTC]", "GMT reads as +00:00");
+        assert_eq!(
+            format_timestamp(T0, "America/Los_Angeles"),
+            "2026-10-29T04:30:16-07:00[America/Los_Angeles]"
+        );
+        assert_eq!(
+            format_timestamp(T0, "Asia/Shanghai"),
+            "2026-10-29T19:30:16+08:00[Asia/Shanghai]"
+        );
+        assert_eq!(
+            format_timestamp(T0, "UTC"),
+            "2026-10-29T11:30:16+00:00[UTC]",
+            "GMT reads as +00:00"
+        );
     }
 
     #[test]
@@ -416,55 +476,121 @@ mod tests {
             "Browser time zone for this request: Asia/Shanghai. Interpret otherwise-unqualified dates and times in this zone."
         );
         assert_eq!(
-            render_browser_time_zone(&BrowserTimeZone::Mixed(vec!["Asia/Shanghai".into(), "Europe/Paris".into()])),
+            render_browser_time_zone(&BrowserTimeZone::Mixed(vec![
+                "Asia/Shanghai".into(),
+                "Europe/Paris".into()
+            ])),
             "Browser time zone for this request: mixed [\"Asia/Shanghai\",\"Europe/Paris\"]. Ask the user to clarify otherwise-unqualified dates and times."
         );
-        assert_eq!(render_browser_time_zone(&BrowserTimeZone::Missing), UNAVAILABLE);
+        assert_eq!(
+            render_browser_time_zone(&BrowserTimeZone::Missing),
+            UNAVAILABLE
+        );
     }
 
     #[test]
     fn the_browser_zone_comes_from_the_open_turn_person_entered_messages_only() {
         let rpc = |zone: &str| json!({"kind": "user", "rpcId": "rpc-1", "clientTimeZone": zone});
-        assert_eq!(derive_browser_time_zone(&views(&[plain_user(T0)])), BrowserTimeZone::Missing, "a message without a zone says nothing");
-        assert_eq!(derive_browser_time_zone(&views(&[user(T0, rpc("Asia/Shanghai"))])), BrowserTimeZone::Resolved("Asia/Shanghai".into()));
         assert_eq!(
-            derive_browser_time_zone(&views(&[user(T0, rpc("Europe/Paris")), user(T0, rpc("Asia/Shanghai"))])),
+            derive_browser_time_zone(&views(&[plain_user(T0)])),
+            BrowserTimeZone::Missing,
+            "a message without a zone says nothing"
+        );
+        assert_eq!(
+            derive_browser_time_zone(&views(&[user(T0, rpc("Asia/Shanghai"))])),
+            BrowserTimeZone::Resolved("Asia/Shanghai".into())
+        );
+        assert_eq!(
+            derive_browser_time_zone(&views(&[
+                user(T0, rpc("Europe/Paris")),
+                user(T0, rpc("Asia/Shanghai"))
+            ])),
             BrowserTimeZone::Mixed(vec!["Asia/Shanghai".into(), "Europe/Paris".into()])
         );
         assert_eq!(
-            derive_browser_time_zone(&views(&[user(T0, rpc("Europe/Paris")), turn_end(T0), user(T0, rpc("Asia/Shanghai"))])),
+            derive_browser_time_zone(&views(&[
+                user(T0, rpc("Europe/Paris")),
+                turn_end(T0),
+                user(T0, rpc("Asia/Shanghai"))
+            ])),
             BrowserTimeZone::Resolved("Asia/Shanghai".into()),
             "an ended turn does not count"
         );
-        assert_eq!(derive_browser_time_zone(&views(&[user(T0, rpc("asia/shanghai"))])), BrowserTimeZone::Missing, "a non-canonical zone is ignored");
+        assert_eq!(
+            derive_browser_time_zone(&views(&[user(T0, rpc("asia/shanghai"))])),
+            BrowserTimeZone::Missing,
+            "a non-canonical zone is ignored"
+        );
     }
 
     #[test]
     fn the_fold_recovers_dsh_three_baselines_and_a_turn_end_clears_only_the_per_turn_one() {
         assert_eq!(fold_time_context(&[]), TimeContextState::default());
         let events = vec![plain_user(T0), assistant(T0 + 1000), reading(T0 + 2000)];
-        let all = TimeContextState { last_message_time: Some(T0 + 2000), last_injection_time: Some(T0 + 2000), last_turn_injection_time: Some(T0 + 2000) };
+        let all = TimeContextState {
+            last_message_time: Some(T0 + 2000),
+            last_injection_time: Some(T0 + 2000),
+            last_turn_injection_time: Some(T0 + 2000),
+        };
         assert_eq!(fold_time_context(&views(&events)), all);
         let mut ended = events.clone();
         ended.push(turn_end(T0 + 3000));
-        assert_eq!(fold_time_context(&views(&ended)), TimeContextState { last_turn_injection_time: None, ..all });
+        assert_eq!(
+            fold_time_context(&views(&ended)),
+            TimeContextState {
+                last_turn_injection_time: None,
+                ..all
+            }
+        );
         let mut with_system = events.clone();
-        with_system.push(event("context/note", T0 + 4000, json!({"message": {"role": "system", "content": []}})));
-        assert_eq!(fold_time_context(&views(&with_system)).last_message_time, Some(T0 + 2000), "a note the model does not read is not a message");
+        with_system.push(event(
+            "context/note",
+            T0 + 4000,
+            json!({"message": {"role": "system", "content": []}}),
+        ));
+        assert_eq!(
+            fold_time_context(&views(&with_system)).last_message_time,
+            Some(T0 + 2000),
+            "a note the model does not read is not a message"
+        );
     }
 
     #[test]
-    fn the_first_step_of_a_turn_reads_dsh_full_text_counting_from_the_latest_model_visible_message() {
+    fn the_first_step_of_a_turn_reads_dsh_full_text_counting_from_the_latest_model_visible_message()
+    {
         assert_eq!(
-            read(&[plain_user(T0)], 1, T0 + 65_000, None, Some("Asia/Shanghai")).unwrap(),
-            format!("Time sampled while preparing turn 1, step 1: 2026-10-29T19:31:21+08:00[Asia/Shanghai]\n{UNAVAILABLE}\nElapsed since the preceding model-visible message: 1m 5s.")
+            read(
+                &[plain_user(T0)],
+                1,
+                T0 + 65_000,
+                None,
+                Some("Asia/Shanghai")
+            )
+            .unwrap(),
+            format!(
+                "Time sampled while preparing turn 1, step 1: 2026-10-29T19:31:21+08:00[Asia/Shanghai]\n{UNAVAILABLE}\nElapsed since the preceding model-visible message: 1m 5s."
+            )
         );
-        assert!(read(&[], 1, T0, None, Some("UTC")).unwrap().ends_with("Elapsed since the preceding model-visible message: unavailable."));
+        assert!(
+            read(&[], 1, T0, None, Some("UTC"))
+                .unwrap()
+                .ends_with("Elapsed since the preceding model-visible message: unavailable.")
+        );
     }
 
     #[test]
     fn a_resolved_browser_zone_chooses_the_timestamp_zone_over_the_fallback() {
-        let text = read(&[user(T0, json!({"kind": "user", "rpcId": "rpc-1", "clientTimeZone": "Asia/Shanghai"}))], 1, T0, None, Some("UTC")).unwrap();
+        let text = read(
+            &[user(
+                T0,
+                json!({"kind": "user", "rpcId": "rpc-1", "clientTimeZone": "Asia/Shanghai"}),
+            )],
+            1,
+            T0,
+            None,
+            Some("UTC"),
+        )
+        .unwrap();
         assert!(text.contains(": 2026-10-29T19:30:16+08:00[Asia/Shanghai]\nBrowser time zone for this request: Asia/Shanghai."), "{text}");
     }
 
@@ -473,44 +599,109 @@ mod tests {
         assert_eq!(DEFAULT_REFRESH_INTERVAL_MS, 600_000);
         let events = [plain_user(T0), reading(T0)];
         assert_eq!(read(&events, 1, T0 + 599_999, None, Some("UTC")), None);
-        assert!(read(&events, 1, T0 + 600_000, None, Some("UTC")).is_some(), "at the interval a new reading is due");
-        assert!(read(&events, 1, T0 + 1000, Some(0), Some("UTC")).is_some(), "an interval of 0 reads on every step");
-        assert!(read(&events, 1, T0 - 1000, None, Some("UTC")).is_some(), "a reading from the future does not suppress one");
-        let refused = time_context_reading(&views(&events), &TimeContextOptions { step: 1, now: T0, refresh_interval_ms: Some(-1), fallback_time_zone: None });
-        assert!(refused.unwrap_err().contains("refreshIntervalMs must be a non-negative safe integer"));
+        assert!(
+            read(&events, 1, T0 + 600_000, None, Some("UTC")).is_some(),
+            "at the interval a new reading is due"
+        );
+        assert!(
+            read(&events, 1, T0 + 1000, Some(0), Some("UTC")).is_some(),
+            "an interval of 0 reads on every step"
+        );
+        assert!(
+            read(&events, 1, T0 - 1000, None, Some("UTC")).is_some(),
+            "a reading from the future does not suppress one"
+        );
+        let refused = time_context_reading(
+            &views(&events),
+            &TimeContextOptions {
+                step: 1,
+                now: T0,
+                refresh_interval_ms: Some(-1),
+                fallback_time_zone: None,
+            },
+        );
+        assert!(
+            refused
+                .unwrap_err()
+                .contains("refreshIntervalMs must be a non-negative safe integer")
+        );
     }
 
     #[test]
-    fn later_steps_count_from_the_turns_latest_reading_and_the_turn_number_follows_the_ended_turns() {
+    fn later_steps_count_from_the_turns_latest_reading_and_the_turn_number_follows_the_ended_turns()
+    {
         let in_turn = [plain_user(T0), reading(T0)];
         let text = read(&in_turn, 2, T0 + 700_000, None, Some("UTC")).unwrap();
-        assert!(text.starts_with("Time sampled while preparing turn 1, step 2: "), "{text}");
-        assert!(text.ends_with("\nElapsed since the preceding step context: 11m 40s."), "{text}");
-        let two_ended = [plain_user(T0), reading(T0), turn_end(T0 + 1), plain_user(T0 + 2), turn_end(T0 + 3), plain_user(T0 + 4)];
+        assert!(
+            text.starts_with("Time sampled while preparing turn 1, step 2: "),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\nElapsed since the preceding step context: 11m 40s."),
+            "{text}"
+        );
+        let two_ended = [
+            plain_user(T0),
+            reading(T0),
+            turn_end(T0 + 1),
+            plain_user(T0 + 2),
+            turn_end(T0 + 3),
+            plain_user(T0 + 4),
+        ];
         let text = read(&two_ended, 2, T0 + 700_000, None, Some("UTC")).unwrap();
-        assert!(text.starts_with("Time sampled while preparing turn 3, step 2: "), "{text}");
-        assert!(text.ends_with("step context: unavailable."), "a new turn has no reading of its own yet: {text}");
+        assert!(
+            text.starts_with("Time sampled while preparing turn 3, step 2: "),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("step context: unavailable."),
+            "a new turn has no reading of its own yet: {text}"
+        );
     }
 
     #[test]
-    fn record_time_context_appends_one_model_visible_note_with_dsh_source_then_waits_out_the_interval() {
+    fn record_time_context_appends_one_model_visible_note_with_dsh_source_then_waits_out_the_interval()
+     {
         let root = crate::store::tests::scratch("time-context");
         let store = SessionStore::new(&root.display().to_string(), &heddle_config::Env::default());
         let handle = store
-            .create(heddle_session::CreateOptions { cwd: Some(root.display().to_string()), ..Default::default() })
+            .create(heddle_session::CreateOptions {
+                cwd: Some(root.display().to_string()),
+                ..Default::default()
+            })
             .unwrap();
-        assert_eq!(record_time_context(&store, &handle, 1, Some(system_now()), Some("UTC".into())), Ok(true));
+        assert_eq!(
+            record_time_context(&store, &handle, 1, Some(system_now()), Some("UTC".into())),
+            Ok(true)
+        );
         let events = store.read(&handle).unwrap();
-        let notes: Vec<&SessionEvent> = events.iter().map(|event| event.as_ref()).filter(|event| event.kind == "context/note").collect();
+        let notes: Vec<&SessionEvent> = events
+            .iter()
+            .map(|event| event.as_ref())
+            .filter(|event| event.kind == "context/note")
+            .collect();
         assert_eq!(notes.len(), 1);
         let message = notes[0].get("message").unwrap();
         let text = message["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("Time sampled while preparing turn 1, step 1: "), "{text}");
-        assert!(text.split('\n').next().unwrap().ends_with("+00:00[UTC]"), "{text}");
+        assert!(
+            text.starts_with("Time sampled while preparing turn 1, step 1: "),
+            "{text}"
+        );
+        assert!(
+            text.split('\n').next().unwrap().ends_with("+00:00[UTC]"),
+            "{text}"
+        );
         assert_eq!(message["role"], "user");
         assert_eq!(notes[0].get("origin"), Some(&json!("time-context")));
-        assert_eq!(message["source"], json!({"kind": "time-context", "form": "snapshot", "sections": [{"name": "time-context", "text": text}]}));
-        assert_eq!(record_time_context(&store, &handle, 2, Some(system_now()), Some("UTC".into())), Ok(false), "a second step inside the interval adds nothing");
+        assert_eq!(
+            message["source"],
+            json!({"kind": "time-context", "form": "snapshot", "sections": [{"name": "time-context", "text": text}]})
+        );
+        assert_eq!(
+            record_time_context(&store, &handle, 2, Some(system_now()), Some("UTC".into())),
+            Ok(false),
+            "a second step inside the interval adds nothing"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

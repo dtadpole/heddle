@@ -82,7 +82,12 @@ pub trait DeliveryHost: Send + Sync {
     /// A cursor into the session's log; every event appended later is at or after it.
     fn cursor(&self, session_id: &str) -> usize;
     /// Start a turn whose user message is `text`, attributed by `source`. Resolves once started, not finished.
-    fn start_turn(&self, session_id: &str, text: &str, source: Value) -> BoxFuture<'static, Result<(), String>>;
+    fn start_turn(
+        &self,
+        session_id: &str,
+        text: &str,
+        source: Value,
+    ) -> BoxFuture<'static, Result<(), String>>;
     /// Find that user message in the session's own log at or after `cursor`: the message id that proves it.
     fn find(&self, session_id: &str, cursor: usize, text: &str) -> Option<String>;
     /// Resolves once the session has no turn in flight, when the host can tell; `None` leaves the wake-up to
@@ -132,7 +137,10 @@ impl DriverTimers for TokioTimers {
         let armed = Arc::clone(&self.armed);
         let task = self.runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            armed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
+            armed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
             callback();
         });
         self.armed
@@ -205,7 +213,11 @@ pub struct DriverOptions {
 
 impl ScheduleDriver {
     /// A driver over `service` and `host`, attached to the service so its committed writes drive.
-    pub fn new(service: Arc<ScheduleService>, host: Arc<dyn DeliveryHost>, options: DriverOptions) -> Arc<Self> {
+    pub fn new(
+        service: Arc<ScheduleService>,
+        host: Arc<dyn DeliveryHost>,
+        options: DriverOptions,
+    ) -> Arc<Self> {
         let runtime = options
             .runtime
             .or_else(|| tokio::runtime::Handle::try_current().ok());
@@ -234,7 +246,9 @@ impl ScheduleDriver {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, DriverState> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Begin delivering: from now on committed writes drive, and the first drive runs at once. Idempotent.
@@ -300,7 +314,10 @@ impl ScheduleDriver {
                 state.requested = false;
             }
             let driver = Arc::clone(&self);
-            let pass = self.service.serialize_async(move || async move { driver.drive().await }).await;
+            let pass = self
+                .service
+                .serialize_async(move || async move { driver.drive().await })
+                .await;
             if let Err(error) = pass {
                 (self.warn)(&format!("schedule: dispatch stopped: Error: {error}"));
                 break;
@@ -373,7 +390,9 @@ impl ScheduleDriver {
             .service
             .tasks()
             .into_iter()
-            .filter(|task| task.status == TaskStatus::Active && task.record.scheduled_ms() <= scan_now)
+            .filter(|task| {
+                task.status == TaskStatus::Active && task.record.scheduled_ms() <= scan_now
+            })
             .collect();
         for task in &due {
             if self.stopping() {
@@ -385,7 +404,9 @@ impl ScheduleDriver {
             let recurring = task.record.is_recurring();
             let group: Vec<ScheduleTask> = if recurring {
                 due.iter()
-                    .filter(|candidate| candidate.session_id == task.session_id && candidate.record.is_recurring())
+                    .filter(|candidate| {
+                        candidate.session_id == task.session_id && candidate.record.is_recurring()
+                    })
                     .cloned()
                     .collect()
             } else {
@@ -413,7 +434,10 @@ impl ScheduleDriver {
                             failed.insert(member.record.id.clone());
                         }
                     }
-                    let ids: Vec<&str> = pending.iter().map(|member| member.record.id.as_str()).collect();
+                    let ids: Vec<&str> = pending
+                        .iter()
+                        .map(|member| member.record.id.as_str())
+                        .collect();
                     (self.warn)(&format!(
                         "schedule: reminders {} were not acknowledged: {error}",
                         serde_json::to_string(&ids).expect("ids serialize")
@@ -476,12 +500,15 @@ impl ScheduleDriver {
         committed: &mut HashSet<String>,
     ) -> Result<GroupOutcome, String> {
         let session = task.session_id.as_str();
-        self.host.resolve(session).map_err(|error| format!("Error: {error}"))?;
+        self.host
+            .resolve(session)
+            .map_err(|error| format!("Error: {error}"))?;
         if self.host.is_busy(session) {
             // Heddle's followup: the reminder becomes the session's next turn, once the one in flight ends.
             let newly = self.state().waiting.insert(session.to_owned());
             if newly
-                && let (Some(idle), Some(runtime)) = (self.host.when_idle(session), self.runtime.clone())
+                && let (Some(idle), Some(runtime)) =
+                    (self.host.when_idle(session), self.runtime.clone())
             {
                 let me = self.me.clone();
                 let session = session.to_owned();
@@ -525,10 +552,9 @@ impl ScheduleDriver {
             .start_turn(session, &text, schedule_source())
             .await
             .map_err(|error| format!("Error: {error}"))?;
-        let message_id = self
-            .host
-            .find(session, cursor, &text)
-            .ok_or_else(|| "Error: Session persistence did not acknowledge the reminder".to_owned())?;
+        let message_id = self.host.find(session, cursor, &text).ok_or_else(|| {
+            "Error: Session persistence did not acknowledge the reminder".to_owned()
+        })?;
         let delivered_at = format_instant(self.service.now());
         let retention = self.service.retention();
         if !recurring {
@@ -649,18 +675,33 @@ mod tests {
         }
 
         fn cursor(&self, session_id: &str) -> usize {
-            self.logs.lock().unwrap().get(session_id).map_or(0, Vec::len)
+            self.logs
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .map_or(0, Vec::len)
         }
 
-        fn start_turn(&self, session_id: &str, text: &str, source: Value) -> BoxFuture<'static, Result<(), String>> {
-            self.started.lock().unwrap().push((session_id.to_owned(), text.to_owned()));
+        fn start_turn(
+            &self,
+            session_id: &str,
+            text: &str,
+            source: Value,
+        ) -> BoxFuture<'static, Result<(), String>> {
+            self.started
+                .lock()
+                .unwrap()
+                .push((session_id.to_owned(), text.to_owned()));
             if !self.drop_writes.load(Ordering::SeqCst) {
                 self.logs
                     .lock()
                     .unwrap()
                     .entry(session_id.to_owned())
                     .or_default()
-                    .push((text.to_owned(), source["kind"].as_str().unwrap_or("").to_owned()));
+                    .push((
+                        text.to_owned(),
+                        source["kind"].as_str().unwrap_or("").to_owned(),
+                    ));
             }
             self.busy.lock().unwrap().insert(session_id.to_owned());
             Box::pin(async { Ok(()) })
@@ -774,14 +815,24 @@ mod tests {
             DriverOptions {
                 timers: Some(timers.clone()),
                 busy_recheck_ms: Some(60_000),
-                warn: Some(Arc::new(move |message: &str| sink.lock().unwrap().push(message.to_owned()))),
+                warn: Some(Arc::new(move |message: &str| {
+                    sink.lock().unwrap().push(message.to_owned())
+                })),
                 runtime: None,
             },
         );
         if start {
             driver.start();
         }
-        Setup { service, clock, host, timers, driver, warnings, changes }
+        Setup {
+            service,
+            clock,
+            host,
+            timers,
+            driver,
+            warnings,
+            changes,
+        }
     }
 
     fn task(record: ScheduleRecord, session: &str) -> ScheduleTask {
@@ -794,13 +845,23 @@ mod tests {
         }
 
         async fn create(&self, session: &str, value: Value) -> ScheduleRecord {
-            self.service.create(session, &args(value), None).await.unwrap()
+            self.service
+                .create(session, &args(value), None)
+                .await
+                .unwrap()
         }
     }
 
     #[test]
     fn the_templates_are_dshs_with_json_escaped_dynamic_fields() {
-        let record = create_after_schedule_record("schedule-1", &json!("say \"hi\"\nthen stop"), &json!(60), T0, &json!("t")).unwrap();
+        let record = create_after_schedule_record(
+            "schedule-1",
+            &json!("say \"hi\"\nthen stop"),
+            &json!(60),
+            T0,
+            &json!("t"),
+        )
+        .unwrap();
         assert_eq!(
             render_reminder_framing(&record),
             "[SCHEDULE REMINDER]\nThis is a scheduled message from the user\nschedule_id_json: \"schedule-1\"\noccurrence_at: 2026-10-29T12:01:00.000Z\nreminder_prompt_json: \"say \\\"hi\\\"\\nthen stop\""
@@ -812,11 +873,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_idle_session_gets_a_turn_with_the_one_shot_template_the_delivery_commits_after_the_proof() {
+    async fn an_idle_session_gets_a_turn_with_the_one_shot_template_the_delivery_commits_after_the_proof()
+     {
         let s = setup("dlv-idle", &[], true);
-        s.create("session-1", json!({"prompt": "check CI", "title": "CI", "after_seconds": 60})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "check CI", "title": "CI", "after_seconds": 60}),
+        )
+        .await;
         s.driver.settled().await;
-        assert_eq!(s.timers.armed(), Some(60_000), "one timer, to the earliest target");
+        assert_eq!(
+            s.timers.armed(),
+            Some(60_000),
+            "one timer, to the earliest target"
+        );
         assert!(s.host.started().is_empty());
         s.at(61_000);
         s.timers.fire();
@@ -826,51 +896,97 @@ mod tests {
             [("session-1".to_owned(), "[SCHEDULE REMINDER]\nThis is a scheduled message from the user\nschedule_id_json: \"schedule-1\"\noccurrence_at: 2026-10-29T12:01:00.000Z\nreminder_prompt_json: \"check CI\"".to_owned())]
         );
         let stored = s.service.tasks().remove(0);
-        assert_eq!(stored.status, TaskStatus::Inactive, "a delivered one-shot becomes inactive");
         assert_eq!(
-            stored.last_delivery.as_ref().map(|receipt| receipt.to_map()),
-            Some(args(json!({"scheduledAt": "2026-10-29T12:01:00.000Z", "deliveredAt": "2026-10-29T12:01:01.000Z", "messageId": "message-session-1-0"})))
+            stored.status,
+            TaskStatus::Inactive,
+            "a delivered one-shot becomes inactive"
+        );
+        assert_eq!(
+            stored
+                .last_delivery
+                .as_ref()
+                .map(|receipt| receipt.to_map()),
+            Some(args(
+                json!({"scheduledAt": "2026-10-29T12:01:00.000Z", "deliveredAt": "2026-10-29T12:01:01.000Z", "messageId": "message-session-1-0"})
+            ))
         );
         assert_eq!(
             stored.delivery_history.unwrap().to_value(),
             json!({"records": [{"scheduledAt": "2026-10-29T12:01:00.000Z", "deliveredAt": "2026-10-29T12:01:01.000Z", "messageId": "message-session-1-0", "prompt": "check CI"}], "earlierRecordsUnavailable": false, "earlierRecordsPruned": false})
         );
-        assert_eq!(s.changes.load(Ordering::SeqCst), 2, "the create and the delivery were each announced");
+        assert_eq!(
+            s.changes.load(Ordering::SeqCst),
+            2,
+            "the create and the delivery were each announced"
+        );
         assert_eq!(s.timers.armed(), None, "nothing active is left to time");
     }
 
     #[tokio::test]
     async fn a_busy_session_waits_for_its_turn_to_end_then_the_reminder_is_its_next_turn() {
         let s = setup("dlv-busy", &[], true);
-        s.create("session-1", json!({"prompt": "p", "title": "t", "after_seconds": 60})).await;
-        s.create("session-2", json!({"prompt": "q", "title": "t", "after_seconds": 600})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "p", "title": "t", "after_seconds": 60}),
+        )
+        .await;
+        s.create(
+            "session-2",
+            json!({"prompt": "q", "title": "t", "after_seconds": 600}),
+        )
+        .await;
         s.driver.settled().await;
         s.host.busy.lock().unwrap().insert("session-1".into());
         s.at(60_000);
         s.timers.fire();
         s.driver.settled().await;
-        assert!(s.host.started().is_empty(), "nothing is written into a running turn");
+        assert!(
+            s.host.started().is_empty(),
+            "nothing is written into a running turn"
+        );
         assert!(s.driver.is_waiting("session-1"));
         assert_eq!(s.service.tasks()[0].status, TaskStatus::Active);
-        assert_eq!(s.timers.armed(), Some(60_000), "only the busy recheck and session-2 remain");
+        assert_eq!(
+            s.timers.armed(),
+            Some(60_000),
+            "only the busy recheck and session-2 remain"
+        );
         s.host.idle("session-2", &s.driver);
-        assert_eq!(s.timers.deferred_count(), 0, "another session ending is not this edge");
+        assert_eq!(
+            s.timers.deferred_count(),
+            0,
+            "another session ending is not this edge"
+        );
         s.at(65_000);
         s.host.idle("session-1", &s.driver);
-        assert!(s.host.started().is_empty(), "the drive is deferred past the turn that is completing");
+        assert!(
+            s.host.started().is_empty(),
+            "the drive is deferred past the turn that is completing"
+        );
         s.timers.flush_deferred();
         s.driver.settled().await;
         assert_eq!(s.host.started().len(), 1);
         assert_eq!(s.host.started()[0].0, "session-1");
         assert_eq!(s.service.tasks()[0].status, TaskStatus::Inactive);
-        assert_eq!(s.service.tasks()[0].last_delivery.as_ref().unwrap().delivered_at, "2026-10-29T12:01:05.000Z");
+        assert_eq!(
+            s.service.tasks()[0]
+                .last_delivery
+                .as_ref()
+                .unwrap()
+                .delivered_at,
+            "2026-10-29T12:01:05.000Z"
+        );
         assert!(!s.driver.is_waiting("session-1"));
     }
 
     #[tokio::test]
     async fn a_waiting_reminder_is_rechecked_when_no_turn_ended_edge_arrives() {
         let s = setup("dlv-recheck", &[], true);
-        s.create("session-1", json!({"prompt": "p", "title": "t", "after_seconds": 60})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "p", "title": "t", "after_seconds": 60}),
+        )
+        .await;
         s.driver.settled().await;
         s.host.busy.lock().unwrap().insert("session-1".into());
         s.at(60_000);
@@ -885,33 +1001,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_delivery_that_cannot_be_proven_is_not_committed_is_logged_and_waits_for_the_next_drive() {
+    async fn a_delivery_that_cannot_be_proven_is_not_committed_is_logged_and_waits_for_the_next_drive()
+     {
         let s = setup("dlv-proof", &[], true);
-        s.create("session-1", json!({"prompt": "p", "title": "t", "after_seconds": 60})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "p", "title": "t", "after_seconds": 60}),
+        )
+        .await;
         s.driver.settled().await;
         s.host.drop_writes.store(true, Ordering::SeqCst);
         s.at(60_000);
         s.timers.fire();
         s.driver.settled().await;
         assert_eq!(s.host.started().len(), 1, "the turn was attempted");
-        assert_eq!(s.service.tasks()[0].status, TaskStatus::Active, "but nothing was committed");
+        assert_eq!(
+            s.service.tasks()[0].status,
+            TaskStatus::Active,
+            "but nothing was committed"
+        );
         assert_eq!(s.service.tasks()[0].last_delivery, None);
         assert_eq!(
             *s.warnings.lock().unwrap(),
-            ["schedule: reminders [\"schedule-1\"] were not acknowledged: Error: Session persistence did not acknowledge the reminder"]
+            [
+                "schedule: reminders [\"schedule-1\"] were not acknowledged: Error: Session persistence did not acknowledge the reminder"
+            ]
         );
-        assert_eq!(s.timers.armed(), None, "a failed reminder is left out of this drive's timer");
+        assert_eq!(
+            s.timers.armed(),
+            None,
+            "a failed reminder is left out of this drive's timer"
+        );
         s.host.drop_writes.store(false, Ordering::SeqCst);
         s.host.busy.lock().unwrap().clear();
-        s.create("session-2", json!({"prompt": "q", "title": "t", "after_seconds": 600})).await;
+        s.create(
+            "session-2",
+            json!({"prompt": "q", "title": "t", "after_seconds": 600}),
+        )
+        .await;
         s.driver.settled().await;
-        assert_eq!(s.service.tasks()[0].status, TaskStatus::Inactive, "any committed write drives again");
+        assert_eq!(
+            s.service.tasks()[0].status,
+            TaskStatus::Inactive,
+            "any committed write drives again"
+        );
     }
 
     #[tokio::test]
     async fn a_missing_session_is_a_warning_and_the_reminder_stays_due() {
         let s = setup("dlv-missing", &[], true);
-        s.create("session-gone", json!({"prompt": "p", "title": "t", "after_seconds": 60})).await;
+        s.create(
+            "session-gone",
+            json!({"prompt": "p", "title": "t", "after_seconds": 60}),
+        )
+        .await;
         s.driver.settled().await;
         s.host.missing.lock().unwrap().insert("session-gone".into());
         s.at(60_000);
@@ -919,7 +1062,9 @@ mod tests {
         s.driver.settled().await;
         assert_eq!(
             *s.warnings.lock().unwrap(),
-            ["schedule: reminders [\"schedule-1\"] were not acknowledged: Error: session \"session-gone\" is not available"]
+            [
+                "schedule: reminders [\"schedule-1\"] were not acknowledged: Error: session \"session-gone\" is not available"
+            ]
         );
         assert_eq!(s.service.tasks()[0].status, TaskStatus::Active);
         assert!(s.host.started().is_empty());
@@ -930,61 +1075,126 @@ mod tests {
             id: id.into(),
             title: "a".into(),
             prompt: prompt.into(),
-            rule: ScheduleRule::Every { every_seconds: seconds },
+            rule: ScheduleRule::Every {
+                every_seconds: seconds,
+            },
             scheduled_at: scheduled_at.into(),
         }
     }
 
     #[tokio::test]
-    async fn after_downtime_recurring_reminders_of_a_session_share_one_batch_with_only_each_latest_occurrence() {
+    async fn after_downtime_recurring_reminders_of_a_session_share_one_batch_with_only_each_latest_occurrence()
+     {
         let seed = [
-            task(every("schedule-a", "ping a", 60, "2026-10-29T12:01:00.000Z"), "session-1"),
-            task(every("schedule-b", "ping b", 120, "2026-10-29T12:02:00.000Z"), "session-1"),
-            task(every("schedule-c", "ping c", 60, "2026-10-29T12:01:00.000Z"), "session-2"),
+            task(
+                every("schedule-a", "ping a", 60, "2026-10-29T12:01:00.000Z"),
+                "session-1",
+            ),
+            task(
+                every("schedule-b", "ping b", 120, "2026-10-29T12:02:00.000Z"),
+                "session-1",
+            ),
+            task(
+                every("schedule-c", "ping c", 60, "2026-10-29T12:01:00.000Z"),
+                "session-2",
+            ),
         ];
         let s = setup("dlv-batch", &seed, false);
         s.at(630_000);
         s.driver.start();
         s.driver.settled().await;
         let started = s.host.started();
-        assert_eq!(started.iter().map(|(session, _)| session.as_str()).collect::<Vec<_>>(), ["session-1", "session-2"], "one message per session");
+        assert_eq!(
+            started
+                .iter()
+                .map(|(session, _)| session.as_str())
+                .collect::<Vec<_>>(),
+            ["session-1", "session-2"],
+            "one message per session"
+        );
         assert_eq!(
             started[0].1,
             "[SCHEDULE REMINDER BATCH]\nThis is a scheduled message from the user\nreminders_json: [{\"schedule_id\":\"schedule-a\",\"occurrence_at\":\"2026-10-29T12:10:00.000Z\",\"reminder_prompt\":\"ping a\"},{\"schedule_id\":\"schedule-b\",\"occurrence_at\":\"2026-10-29T12:10:00.000Z\",\"reminder_prompt\":\"ping b\"}]"
         );
         let tasks = s.service.tasks();
         let (a, b) = (&tasks[0], &tasks[1]);
-        assert_eq!(a.record.scheduled_at, "2026-10-29T12:11:00.000Z", "the next target keeps the fixed-rate phase");
+        assert_eq!(
+            a.record.scheduled_at, "2026-10-29T12:11:00.000Z",
+            "the next target keeps the fixed-rate phase"
+        );
         assert_eq!(b.record.scheduled_at, "2026-10-29T12:12:00.000Z");
         assert_eq!(a.status, TaskStatus::Active);
-        assert_eq!(a.delivery_history.as_ref().unwrap().records.len(), 1, "earlier missed occurrences leave no record");
-        assert_eq!(a.last_delivery.as_ref().unwrap().message_id, b.last_delivery.as_ref().unwrap().message_id, "a batch shares its message id");
-        assert_eq!(a.last_delivery.as_ref().unwrap().scheduled_at, "2026-10-29T12:10:00.000Z");
+        assert_eq!(
+            a.delivery_history.as_ref().unwrap().records.len(),
+            1,
+            "earlier missed occurrences leave no record"
+        );
+        assert_eq!(
+            a.last_delivery.as_ref().unwrap().message_id,
+            b.last_delivery.as_ref().unwrap().message_id,
+            "a batch shares its message id"
+        );
+        assert_eq!(
+            a.last_delivery.as_ref().unwrap().scheduled_at,
+            "2026-10-29T12:10:00.000Z"
+        );
     }
 
     #[tokio::test]
     async fn a_one_shot_is_never_batched_the_second_message_waits_for_the_first_turn() {
-        let one_shot = create_after_schedule_record("schedule-a", &json!("once"), &json!(60), T0, &json!("once")).unwrap();
-        let daily = create_daily_schedule_record("schedule-b", &json!("daily"), &json!({"time": "12:00:30", "time_zone": "UTC"}), T0, &json!("daily")).unwrap();
-        let s = setup("dlv-oneshot", &[task(one_shot, "session-1"), task(daily, "session-1")], false);
+        let one_shot = create_after_schedule_record(
+            "schedule-a",
+            &json!("once"),
+            &json!(60),
+            T0,
+            &json!("once"),
+        )
+        .unwrap();
+        let daily = create_daily_schedule_record(
+            "schedule-b",
+            &json!("daily"),
+            &json!({"time": "12:00:30", "time_zone": "UTC"}),
+            T0,
+            &json!("daily"),
+        )
+        .unwrap();
+        let s = setup(
+            "dlv-oneshot",
+            &[task(one_shot, "session-1"), task(daily, "session-1")],
+            false,
+        );
         s.at(120_000);
         s.driver.start();
         s.driver.settled().await;
         assert_eq!(s.host.started().len(), 1);
         assert!(s.host.started()[0].1.starts_with("[SCHEDULE REMINDER]\n"));
-        assert!(s.driver.is_waiting("session-1"), "the batch waits behind the turn the one-shot started");
+        assert!(
+            s.driver.is_waiting("session-1"),
+            "the batch waits behind the turn the one-shot started"
+        );
         s.host.idle("session-1", &s.driver);
         s.timers.flush_deferred();
         s.driver.settled().await;
         assert_eq!(s.host.started().len(), 2);
-        assert!(s.host.started()[1].1.starts_with("[SCHEDULE REMINDER BATCH]\n"));
-        assert_eq!(s.service.tasks()[1].record.scheduled_at, "2026-10-30T12:00:30.000Z");
+        assert!(
+            s.host.started()[1]
+                .1
+                .starts_with("[SCHEDULE REMINDER BATCH]\n")
+        );
+        assert_eq!(
+            s.service.tasks()[1].record.scheduled_at,
+            "2026-10-30T12:00:30.000Z"
+        );
     }
 
     #[tokio::test]
     async fn the_timer_delay_is_clamped_to_what_a_node_timer_can_hold() {
         let s = setup("dlv-clamp", &[], true);
-        s.create("session-1", json!({"prompt": "p", "title": "t", "at": "2030-01-01T00:00:00Z"})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "p", "title": "t", "at": "2030-01-01T00:00:00Z"}),
+        )
+        .await;
         s.driver.settled().await;
         assert_eq!(s.timers.armed(), Some(MAX_TIMER_DELAY_MS as u64));
     }
@@ -992,11 +1202,22 @@ mod tests {
     #[tokio::test]
     async fn nothing_is_delivered_before_start_and_nothing_after_dispose() {
         let s = setup("dlv-start", &[], false);
-        s.create("session-1", json!({"prompt": "p", "title": "t", "after_seconds": 60})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "p", "title": "t", "after_seconds": 60}),
+        )
+        .await;
         s.at(120_000);
-        s.create("session-1", json!({"prompt": "p", "title": "t", "after_seconds": 60})).await;
+        s.create(
+            "session-1",
+            json!({"prompt": "p", "title": "t", "after_seconds": 60}),
+        )
+        .await;
         s.driver.settled().await;
-        assert!(s.host.started().is_empty(), "writes before start do not drive");
+        assert!(
+            s.host.started().is_empty(),
+            "writes before start do not drive"
+        );
         s.driver.dispose().await;
         s.driver.start();
         s.driver.request_drive();

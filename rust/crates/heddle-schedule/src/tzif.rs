@@ -140,7 +140,10 @@ impl TimeZoneData {
             let rest = &reader.bytes[reader.at..];
             match rest.strip_prefix(b"\n") {
                 Some(text) => {
-                    let end = text.iter().position(|byte| *byte == b'\n').unwrap_or(text.len());
+                    let end = text
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .unwrap_or(text.len());
                     let rule = std::str::from_utf8(&text[..end])
                         .map_err(|_| "the TZif footer is not text".to_owned())?;
                     if rule.is_empty() {
@@ -199,9 +202,7 @@ impl RuleDate {
     fn epoch_day(self, year: i64) -> i64 {
         let january = days_from_civil(year, 1, 1);
         match self {
-            Self::Julian(day) => {
-                january + day - 1 + i64::from(is_leap_year(year) && day >= 60)
-            }
+            Self::Julian(day) => january + day - 1 + i64::from(is_leap_year(year) && day >= 60),
             Self::Ordinal(day) => january + day,
             Self::Month {
                 month,
@@ -317,7 +318,10 @@ impl RuleParser<'_> {
                 let week = self.number()?;
                 self.expect(b'.')?;
                 let weekday = self.number()?;
-                if !(1..=12).contains(&month) || !(1..=5).contains(&week) || !(0..=6).contains(&weekday) {
+                if !(1..=12).contains(&month)
+                    || !(1..=5).contains(&week)
+                    || !(0..=6).contains(&weekday)
+                {
                     return Err("a POSIX TZ month rule is out of range".to_owned());
                 }
                 Ok(RuleDate::Month {
@@ -482,7 +486,11 @@ fn find(dir: &Path, name: &str) -> Option<Zone> {
         let entry = entries
             .iter()
             .find(|entry| entry.as_str() == *segment)
-            .or_else(|| entries.iter().find(|entry| entry.eq_ignore_ascii_case(segment)))?
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|entry| entry.eq_ignore_ascii_case(segment))
+            })?
             .clone();
         current = current.join(&entry);
         let metadata = std::fs::metadata(&current).ok()?;
@@ -502,7 +510,9 @@ mod tests {
     use super::*;
 
     fn zone(name: &str) -> Arc<TimeZoneData> {
-        lookup(name).unwrap_or_else(|| panic!("{name} is in the system database")).1
+        lookup(name)
+            .unwrap_or_else(|| panic!("{name} is in the system database"))
+            .1
     }
 
     #[test]
@@ -516,7 +526,10 @@ mod tests {
         assert_eq!(zone("America/Los_Angeles").offset_at(january), -8 * 3600);
         assert_eq!(zone("Asia/Kolkata").offset_at(july), 5 * 3600 + 1800);
         assert_eq!(zone("Australia/Lord_Howe").offset_at(january), 11 * 3600);
-        assert_eq!(zone("Australia/Lord_Howe").offset_at(july), 10 * 3600 + 1800);
+        assert_eq!(
+            zone("Australia/Lord_Howe").offset_at(july),
+            10 * 3600 + 1800
+        );
     }
 
     #[test]
@@ -527,11 +540,20 @@ mod tests {
         assert_eq!(zone("America/Los_Angeles").offset_at(july), -7 * 3600);
         assert_eq!(zone("America/Los_Angeles").offset_at(january), -8 * 3600);
         let rule = PosixTz::parse("AEST-10AEDT,M10.1.0,M4.1.0/3").unwrap();
-        assert_eq!(rule.offset_at(1_768_478_400), 11 * 3600, "January is summer in Sydney");
-        assert_eq!(rule.offset_at(1_784_116_800), 10 * 3600);
-        assert_eq!(PosixTz::parse("<+0545>-5:45").unwrap().offset_at(0), 5 * 3600 + 45 * 60);
         assert_eq!(
-            PosixTz::parse("EST5EDT,0/0,J365/25").unwrap().offset_at(1_784_116_800),
+            rule.offset_at(1_768_478_400),
+            11 * 3600,
+            "January is summer in Sydney"
+        );
+        assert_eq!(rule.offset_at(1_784_116_800), 10 * 3600);
+        assert_eq!(
+            PosixTz::parse("<+0545>-5:45").unwrap().offset_at(0),
+            5 * 3600 + 45 * 60
+        );
+        assert_eq!(
+            PosixTz::parse("EST5EDT,0/0,J365/25")
+                .unwrap()
+                .offset_at(1_784_116_800),
             -4 * 3600,
             "the all-year daylight trick"
         );
@@ -549,9 +571,15 @@ mod tests {
     #[test]
     fn names_match_case_insensitively_and_answer_the_database_spelling() {
         assert_eq!(lookup("asia/shanghai").unwrap().0, "Asia/Shanghai");
-        assert_eq!(lookup("AMERICA/LOS_ANGELES").unwrap().0, "America/Los_Angeles");
+        assert_eq!(
+            lookup("AMERICA/LOS_ANGELES").unwrap().0,
+            "America/Los_Angeles"
+        );
         assert!(lookup("Mars/Phobos").is_none());
-        assert!(lookup("Asia/../Asia/Shanghai").is_none(), "no path traversal");
+        assert!(
+            lookup("Asia/../Asia/Shanghai").is_none(),
+            "no path traversal"
+        );
         assert!(lookup("Asia").is_none(), "a directory is not a zone");
     }
 

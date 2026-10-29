@@ -19,13 +19,14 @@ pub fn is_js_whitespace(c: char) -> bool {
             | '\u{0020}'
             | '\u{00A0}'
             | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+            | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
@@ -110,7 +111,14 @@ pub fn number(text: &str) -> f64 {
     if body == "Infinity" {
         return sign * f64::INFINITY;
     }
-    for (prefix, radix) in [("0x", 16), ("0X", 16), ("0o", 8), ("0O", 8), ("0b", 2), ("0B", 2)] {
+    for (prefix, radix) in [
+        ("0x", 16),
+        ("0X", 16),
+        ("0o", 8),
+        ("0O", 8),
+        ("0b", 2),
+        ("0B", 2),
+    ] {
         if let Some(digits) = trimmed.strip_prefix(prefix) {
             return match u128::from_str_radix(digits, radix) {
                 Ok(value) if !digits.is_empty() => value as f64,
@@ -141,7 +149,11 @@ mod tests {
     #[test]
     fn trim_and_split_follow_ecmascript_white_space() {
         assert_eq!(trim("\u{FEFF} a \u{3000}"), "a");
-        assert_eq!(trim("\u{0085}a"), "\u{0085}a", "NEL is not ECMAScript white space");
+        assert_eq!(
+            trim("\u{0085}a"),
+            "\u{0085}a",
+            "NEL is not ECMAScript white space"
+        );
         assert_eq!(split_whitespace("0  9\t* * 1"), ["0", "9", "*", "*", "1"]);
         assert_eq!(utf16_len("😀"), 2);
     }
