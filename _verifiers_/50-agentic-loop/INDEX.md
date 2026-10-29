@@ -24,7 +24,10 @@ from configuration, `check-subagents.mjs` judges the delegation boundary: a chil
 session, attributed to its parent, and its final answer returns as the parent's tool result, and
 `check-teams.mjs` judges Agent Teams end to end — a Lead's real turn spawns a teammate, creates and completes a
 shared task, mails the teammate and answers, the team survives a server restart, and boot recovery settles a
-previous process's provisioning members and delivers its queued mail.
+previous process's provisioning members and delivers its queued mail. `check-steer.mjs` judges steering during a tool call
+the way DSH's agent inbox behaves, through `heddle web`: a steer accepted while a `bash` call runs is written
+after the call's result and answered by the same turn, and a steer followed by a stop stays pending in the
+session view's `inbox` until the next turn writes it before its own prompt (R-developer-two-5).
 
 ## Running it
 
