@@ -340,9 +340,15 @@ test("the composer shows DSH's Plan chip and placeholder in plan mode, keeps the
     // `/plan <words>`: plan mode on, and the words reach the model as a message, with the policy.
     await typeInto(browser, '/plan design the release checklist')
     await press(browser, 'Enter')
-    await browser.waitFor('document.getElementById("log").innerText.includes("here is how I would plan it")', 20_000)
-    const body = server.provider.bodies.at(-1)
-    assert.ok(JSON.stringify(body.messages).includes('design the release checklist'), 'the words went to the model')
+    // The claim is what the model received, so read the double: the request that carries the words. (Not the page's
+    // text: another model call, such as a title, may take the double's first reply.)
+    let body
+    const deadline = Date.now() + 20_000
+    while (body === undefined && Date.now() < deadline) {
+      body = server.provider.bodies.find((entry) => JSON.stringify(entry.messages ?? []).includes('design the release checklist'))
+      if (body === undefined) await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    assert.ok(body !== undefined, `the words went to the model (${server.provider.bodies.length} request(s) seen)`)
     assert.ok(systemText(body).includes(POLICY_OPENING), 'in plan mode')
     assert.equal((await chipState(browser)).count, 1)
   } finally {
