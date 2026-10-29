@@ -34,6 +34,9 @@ stops an edit.
 | `/plan <words>` | enter, then the page sends the words as a message (a `prompt` action) | the same |
 | `/plan off` | leave | "Plan mode off." or "Plan mode is already inactive." |
 
+Files in the composer travel with `/plan <words>` to the model. `/plan` with files and no words leaves the files in
+the composer for the next message — DSH sends them as a wordless message, which heddle's turn route does not accept.
+
 heddle appends the mode event at once and every request reads the log, so a change made while a turn runs reaches
 that turn's next model call — DSH's "applies from the next step", without a pending state.
 

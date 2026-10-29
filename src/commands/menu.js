@@ -378,7 +378,10 @@ export function install(api) {
       api.notice?.(`/${named} does not accept attachments; remove them first`)
       return
     }
-    const attachments = pending > 0 && typeof api.takeAttachments === 'function' ? api.takeAttachments() : []
+    // A line with no words after the name leaves the files in the composer: heddle's turn route needs words, so
+    // `/plan` alone could not send them on (DSH sends them as a wordless message), and they stay for the next message.
+    const words = text.trim().slice(1 + (named?.length ?? 0)).trim()
+    const attachments = pending > 0 && words.length > 0 && typeof api.takeAttachments === 'function' ? api.takeAttachments() : []
     try {
       let id = api.sessionId()
       if (id === null && typeof api.ensureSession === 'function') id = await api.ensureSession()
