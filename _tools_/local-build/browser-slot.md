@@ -1,9 +1,9 @@
 ---
 title: Browser slot queue
 created: 2026-10-29T13:08:51Z
-modified: 2026-10-29T13:50:08Z
+modified: 2026-10-29T14:40:05Z
 level: L2
-version: 1.0.0
+version: 1.2.0
 description: How browser-slot shares the team's browser slots fairly. It covers the slot count and the integrator reservation, the queue and tickets, the coordinator's priority turn, the memory gate, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
 status: unverified
 grounded_in:
@@ -36,8 +36,18 @@ right moment, so some seats waited an hour. `browser-slot` serves the seats in t
   It does not hold the slot for a seat that is not asking. It is deleted when that seat takes the slot, and
   ignored once it is 30 minutes old.
 
-**Memory gate (D-060).** No new holder is admitted while `memory_pressure` reports under 25% free, or
-`vm.swapusage` used is at or over 7168M. The seat stays queued, and the exit-75 line says why.
+**A head that does not take.** When a slot has been free for 60 seconds and the first waiter has not taken it,
+for example because it stopped asking or runs an old copy, the next waiter whose gate passes takes it. The head
+keeps first place for the next free slot. `browser.free-since<n>` marks when slot n was first seen free.
+
+**Old copies.** Each copy carries a version and records it in `browser-slot.version`. A copy older than one
+already in use exits 78 with an instruction to sync `_tools_/local-build` from main, and does not renew its
+ticket, so it expires after 5 minutes. `status` shows each waiter's last verdict, the reason it did not take a
+slot.
+
+**Memory gate (D-061).** No new holder is admitted while `memory_pressure` reports under 25% free, the
+primary gate, or `vm.swapusage` used is at or over 7680M, the backstop for sticky macOS swap. The seat stays
+queued, and the exit-75 line says why. `browser-cap` may move the lines (`min-free=25 swap-stop=7680`).
 
 ## Holding and releasing
 
@@ -62,6 +72,7 @@ Once every seat uses the tool, the queue is the only way in.
 | `0` | took, released, already holding, or `status` |
 | `75` | still queued after `--wait`; the ticket is kept, run `take` again |
 | `1` | `release` refused: this seat holds no slot (`--force`, with `--slot n` when two are held, clears one) |
+| `78` | this copy is older than one in use: sync `_tools_/local-build` from main |
 | `64` | usage: a verb or `--seat` missing |
 
 `run` exits with the command's status. Environment for tests: `LOCAL_BUILD_SLOT_ROOT`,

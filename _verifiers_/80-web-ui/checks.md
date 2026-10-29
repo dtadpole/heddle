@@ -18,6 +18,10 @@ grounded_in:
 - [`check-team-view.mjs`](check-team-view.mjs) — a Lead's team as the Web UI shows it: the roster with live status,
   the shared board with its revisions and the mailbox ledger, read from the same `/api/team` projection the
   tools use; and no panel at all for a session with no team.
+- [`check-stream.mjs`](check-stream.mjs) — the live event stream against DSH's `$events` stream: it opens with
+  `{ type: 'ready', clientId, host: { home } }` after its listeners are attached, so a baseline read on `ready`
+  misses no increment; an idle stream gets a heartbeat every interval and a peer that stops reading is cut after
+  two (DSH parity phase B, developer-ten).
 - [`check-session-landing.mjs`](check-session-landing.mjs) — the session a page opens with nothing selected: the
   newest one a person can see, never a newer hidden subagent child (`origin: 'subagent'`), with its row selected
   and its conversation on screen.
