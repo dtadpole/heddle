@@ -1,6 +1,6 @@
 ---
 title: Verifier 16 — Model endpoints
-version: 1.0.0
+version: 1.1.0
 description: every configured model endpoint, in each of the three wire formats, has been validated by real calls for streaming, declared reasoning levels and tool calls, and the record matches the configuration it judges.
 grounded_in:
   - source: owner statement 2026-10-18 asking for verification of all endpoints against the three API types (Claude, Codex, DeepSeek), covering streaming, reasoning and tool calls, and for that check to run whenever a new endpoint or model type is configured
@@ -16,6 +16,7 @@ uses, and the recorded result is for **this** configuration.
 | Wire format | Endpoint kinds | What is exercised through the real adapter |
 |---|---|---|
 | Claude | `anthropic-vertex` | the publisher `streamRawPredict` stream, adaptive-thinking effort, `tool_use` streaming |
+| Claude | `anthropic-messages` | Anthropic's `POST /v1/messages` stream, summarized thinking (adaptive effort or a token budget, as the level's value declares), `tool_use` streaming |
 | Codex | `openai-responses` | the Responses stream, `reasoning.effort`, `function_call` streaming |
 | DeepSeek | `openai-chat` | the Chat Completions stream, `reasoning_effort`, `tool_calls` streaming |
 

@@ -260,10 +260,12 @@ pub trait WorkspaceService: Send + Sync {
     /// Whether a root with this id exists.
     fn find(&self, id: &str) -> bool;
 
-    /// Unregister a root; a refusal (it still holds sessions nobody else can adopt) is answered `409`.
+    /// Unregister a root — the registration only; its folder and sessions stay, and the sessions move to
+    /// the nearest root above it or to Ungrouped (DSH's Delete workspace). An `Err` is answered `409`.
     fn remove(&self, id: &str, sessions: &[SessionMeta]) -> Result<Value, ServiceError>;
 
-    /// Retitle a root. `Ok(None)` is an unknown id; `Err` (an empty title) is answered `400`.
+    /// Retitle a root. `Ok(None)` is an unknown id; `Err` with code `workspace/name-conflict` (another
+    /// workspace carries the title) is answered `409`, any other `Err` (an empty title) `400`.
     fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError>;
 
     /// Make sure the folder a turn ran in has an owner, adopting it when none does.

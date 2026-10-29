@@ -978,6 +978,8 @@ async fn session_view_route(
     let meta = sessions.meta(id.as_str());
     let mode = sessions.effective_mode(id.as_str(), &state.harness().sandbox.default_mode());
     let mut turns = crate::transcript::transcript_turns(&events);
+    // Each card names this session: the upload route serves a file only to a session whose log references it.
+    crate::transcript::scope_attachment_urls(&mut turns, id.as_str());
     if let Some(markdown) = state.harness().markdown.as_ref() {
         for turn in &mut turns {
             if turn.kind == crate::transcript::TurnKind::Assistant {
@@ -1305,6 +1307,9 @@ async fn rename_workspace(
     match workspaces.rename(&id, title) {
         Ok(Some(record)) => respond::json(StatusCode::OK, &record),
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
+        Err(error) if error.code.as_deref() == Some("workspace/name-conflict") => {
+            service_refusal(error, StatusCode::CONFLICT)
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }

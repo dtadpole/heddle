@@ -115,6 +115,10 @@ pub struct RunTurnOptions {
     pub purpose: Option<String>,
     /// The caller's Stop.
     pub cancel: Option<CancellationToken>,
+    /// Answer input already in the log instead of writing `prompt` as a new message: a background child's
+    /// settlement notice that reached a turn which ended before it saw it is in the log once, and the turn that
+    /// answers it must not write it again (`answerPending` in the TypeScript build).
+    pub answer_pending: bool,
 }
 
 impl RunTurnOptions {
@@ -138,6 +142,7 @@ impl RunTurnOptions {
             max_overflow_retries: DEFAULT_MAX_OVERFLOW_RETRIES,
             purpose: None,
             cancel: None,
+            answer_pending: false,
         }
     }
 }
@@ -283,13 +288,24 @@ pub fn begin_turn(runtime: &AgentRuntime, options: RunTurnOptions) -> Result<Beg
     };
     // Counted before the prompt, as the turn's own writes: the completed result reports what it added.
     let started = runtime.session.count(&options.session);
+    // A steer a stopped turn left in the inbox is DSH's next-step input, and DSH's boundary claims next-step
+    // input before the queued prompt, so it is written ahead of this turn's prompt.
+    if let Err(error) = runtime.session.claim_pending_input(&options.session) {
+        if let Some(live) = &live {
+            live.settle();
+        }
+        return Err(TurnError::Port(error));
+    }
     let mut content = vec![ContentPart::text(options.prompt.clone())];
     content.extend(options.attachments.iter().cloned());
-    if let Err(error) =
+    let written = if options.answer_pending {
+        Ok(())
+    } else {
         runtime
             .session
             .user_content(&options.session, content, options.source.clone())
-    {
+    };
+    if let Err(error) = written {
         if let Some(live) = &live {
             live.settle();
         }
@@ -328,12 +344,17 @@ async fn run_turn_body(
         RoundLimit::Rounds(rounds) => rounds,
         RoundLimit::Unbounded => u32::MAX,
     };
-    // Instructions belong to the conversation; tools retain the configured sandbox root.
-    let workspace_root = runtime.tools.sandbox().workspace_root().to_path_buf();
-    let instruction_cwd = runtime
-        .session
-        .folder(session)
-        .unwrap_or_else(|| workspace_root.clone());
+    let sandbox = runtime.tools.sandbox();
+    let folder = runtime.session.folder(session);
+    // The session's folder is where its tools run: the shell's directory, the base of a relative path and the
+    // `workspace-write` boundary (DSH's rule), so a turn in workspace B acts in B and not in the directory the
+    // server was launched from. A root the operator named still applies to every session (`root_for`).
+    let cwd = sandbox.root_for(folder.as_deref());
+    let rooted = sandbox
+        .rooted_at(&cwd)
+        .unwrap_or_else(|| Arc::clone(sandbox));
+    // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
+    let instruction_cwd = folder.unwrap_or_else(|| sandbox.workspace_root().to_path_buf());
 
     let tools = runtime.tools.describe();
     let mut denials: Vec<Denial> = Vec::new();
@@ -353,6 +374,9 @@ async fn run_turn_body(
             ended.push("stopped by the caller".to_owned());
             break;
         }
+        // The step boundary: the previous round's tool results are on disk, so a steer that arrived during
+        // them is written now, after them. A stop is checked first, so a stopped turn leaves its steer pending.
+        runtime.session.claim_pending_input(session)?;
         rounds += 1;
 
         // Keep the runtime-context snapshot current before the round measures what the person has said, so
@@ -360,7 +384,7 @@ async fn run_turn_body(
         let mode = runtime.tools.effective_mode(Some(session));
         let sections = [RuntimeContextSection {
             name: "sandbox:policy".to_owned(),
-            text: runtime.tools.sandbox().policy_statement(mode),
+            text: rooted.policy_statement(mode),
         }];
         runtime.context.record_runtime_context(session, &sections)?;
 
@@ -543,12 +567,15 @@ async fn run_turn_body(
 
         text.push_str(&round_text);
 
-        // A message that arrived while the model was answering is answered by this turn (steering).
+        // A message that arrived while the model was answering is answered by this turn (steering): one that
+        // waits in the inbox (a steer) or one written straight to the log (a teammate's mail). DSH takes
+        // another step when the turn would end with next-step input pending.
         if calls.is_empty()
             && !has_new_input(
                 &input_before,
                 &user_input_seqs(runtime.session.as_ref(), session),
             )
+            && !runtime.session.has_pending_input(session)
         {
             break;
         }
@@ -564,7 +591,7 @@ async fn run_turn_body(
                 )
             } else {
                 let context = ToolContext {
-                    cwd: workspace_root.clone(),
+                    cwd: cwd.clone(),
                     session: Some(session.clone()),
                     cancel: cancel.clone(),
                     log: turn_log(),
@@ -902,6 +929,8 @@ pub(crate) mod tests {
         state: Mutex<SessionState>,
         sources: Mutex<Vec<Option<serde_json::Value>>>,
         fail_user_content: AtomicBool,
+        /// The folder the session was opened in, `None` for a record with none.
+        folder: Mutex<Option<PathBuf>>,
     }
 
     impl RecordingSession {
@@ -909,6 +938,7 @@ pub(crate) mod tests {
             Arc::new(Self {
                 sources: Mutex::new(Vec::new()),
                 fail_user_content: AtomicBool::new(false),
+                folder: Mutex::new(None),
                 state: Mutex::new(SessionState {
                     events: Vec::new(),
                     messages: Vec::new(),
@@ -947,6 +977,10 @@ pub(crate) mod tests {
 
         fn sources(&self) -> Vec<Option<serde_json::Value>> {
             self.sources.lock().unwrap().clone()
+        }
+
+        fn open_in(&self, folder: &str) {
+            *self.folder.lock().unwrap() = Some(PathBuf::from(folder));
         }
 
         fn fail_user_content(&self, fail: bool) {
@@ -1023,7 +1057,7 @@ pub(crate) mod tests {
         }
 
         fn folder(&self, _: &SessionHandle) -> Option<PathBuf> {
-            None
+            self.folder.lock().unwrap().clone()
         }
 
         fn model_request(
@@ -1375,6 +1409,58 @@ pub(crate) mod tests {
             finish_reason: finish_reason.into(),
             usage: None,
         }
+    }
+
+    /// R-developer-eight-10: a turn handed its tools the sandbox's root — the directory the server was launched
+    /// in — as their folder, so a session of workspace B ran its shell elsewhere. DSH runs a session's tools in
+    /// the session's own directory.
+    #[tokio::test]
+    async fn a_turns_tools_run_in_the_sessions_folder() {
+        let session = RecordingSession::new();
+        session.open_in("/workspaces/b");
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "where", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let seen: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&seen);
+        let probe = tool_fn(
+            ToolSpec {
+                name: "where".into(),
+                description: "the folder a call runs in".into(),
+                parameters: serde_json::json!({}),
+            },
+            move |_args, context| {
+                *record.lock().unwrap() = Some(context.cwd.clone());
+                Box::pin(async move { Ok(ToolResult::ok("noted")) })
+            },
+        );
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![probe]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "where am I"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(PathBuf::from("/workspaces/b")),
+            "the tool ran in the session's folder, not the sandbox's root (/w)"
+        );
     }
 
     #[tokio::test]
@@ -1975,8 +2061,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// Records each settlement notice instead of handing it to a parent turn.
+    #[derive(Default)]
+    struct RecordedNotices {
+        seen: Mutex<Vec<(String, crate::SettlementNotice)>>,
+    }
+
+    impl crate::SubagentDeliver for RecordedNotices {
+        fn deliver<'a>(
+            &'a self,
+            parent: &'a SessionHandle,
+            notice: crate::SettlementNotice,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                self.seen.lock().unwrap().push((parent.id.clone(), notice));
+                Ok(())
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn a_delegate_call_in_a_turn_returns_the_child_answer_and_the_turn_continues() {
+    async fn a_delegate_call_in_a_turn_returns_the_start_line_at_once_and_the_child_reports_by_notice()
+     {
         let session = RecordingSession::new();
         let model = ScriptedModel::new(vec![
             Step::Chunks(vec![
@@ -2001,7 +2107,13 @@ pub(crate) mod tests {
                 store: Arc::clone(&store),
             }),
         };
-        let tools = registry_with(subagent_tools(deps, SubagentLimits::default()));
+        let notices = Arc::new(RecordedNotices::default());
+        let service = crate::SubagentService::new(
+            deps,
+            Arc::clone(&notices) as Arc<dyn crate::SubagentDeliver>,
+            SubagentLimits::default(),
+        );
+        let tools = registry_with(subagent_tools(Arc::clone(&service)));
         let runtime = runtime(
             Arc::clone(&model),
             Arc::clone(&session),
@@ -2017,23 +2129,11 @@ pub(crate) mod tests {
         assert_eq!(result.text, "parent done");
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "delegate");
-        let output = &result.tool_calls[0].result.output;
-        assert!(
-            output.contains("child child (depth 1) answered:"),
-            "{output}"
-        );
-        assert!(output.contains("child answer to child task"), "{output}");
         assert_eq!(
-            model.requests().len(),
-            2,
-            "the parent continued with the child's answer"
+            result.tool_calls[0].result.output, "started subagent child",
+            "the result is DSH's start line, not the child's answer"
         );
-        let last = model.requests().pop().unwrap();
-        assert!(last.messages.iter().any(|message| {
-            message.content.iter().any(
-                |part| matches!(part, ContentPart::Text { text } if text.contains("child answer")),
-            )
-        }));
+        assert_eq!(model.requests().len(), 2, "the parent continued at once");
         // The delegation is one tool message in the parent's own log, and the child's log stays its own.
         let tool_messages = session
             .messages()
@@ -2041,6 +2141,20 @@ pub(crate) mod tests {
             .filter(|message| message.role == Role::Tool)
             .count();
         assert_eq!(tool_messages, 1);
+
+        assert_eq!(service.settle(&session_handle().id).await, 1);
+        let seen = notices.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "the child reported back once");
+        assert_eq!(seen[0].0, session_handle().id, "to its parent");
+        assert_eq!(
+            seen[0].1.texts,
+            vec![
+                "Background subagent child finished. It cannot receive follow-up messages."
+                    .to_owned(),
+                "Its closing message:".to_owned(),
+                "child answer to child task".to_owned(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2276,6 +2390,223 @@ pub(crate) mod tests {
         assert_eq!(
             first_user.fields["message"]["content"][0]["text"],
             "write a file then read it"
+        );
+    }
+
+    /// A tool that queues a steer in the session's inbox while it runs, and optionally stops the turn: exactly
+    /// "a steer sent during a tool call" (R-developer-two-5), through the real store and the real port.
+    fn steering_tool(
+        sessions: Arc<heddle_session::SessionService>,
+        handle: SessionHandle,
+        text: &'static str,
+        stop: Option<CancellationToken>,
+    ) -> Arc<dyn Tool> {
+        tool_fn(
+            ToolSpec {
+                name: "slow_tool".into(),
+                description: "stands for a long bash call".into(),
+                parameters: serde_json::json!({}),
+            },
+            move |_args, _ctx| {
+                let sessions = Arc::clone(&sessions);
+                let handle = handle.clone();
+                let stop = stop.clone();
+                Box::pin(async move {
+                    heddle_session::inbox::queue_steer(
+                        sessions.store(),
+                        &handle,
+                        vec![ContentPart::text(text)],
+                        None,
+                    )
+                    .unwrap();
+                    if let Some(stop) = stop {
+                        stop.cancel();
+                    }
+                    Ok(ToolResult::ok("tool finished"))
+                })
+            },
+        )
+    }
+
+    fn real_runtime(
+        sessions: &Arc<heddle_session::SessionService>,
+        steps: serde_json::Value,
+        tools: Vec<Arc<dyn Tool>>,
+    ) -> AgentRuntime {
+        AgentRuntime {
+            model: Arc::new(crate::adapters::LlmModel::new(
+                crate::adapters::tests::scripted_service("steer", steps),
+            )),
+            session: Arc::new(crate::adapters::Sessions::new(Arc::clone(sessions))),
+            context: Arc::new(crate::adapters::tests::SessionMessages {
+                sessions: Arc::clone(sessions),
+            }),
+            tools: registry_with(tools),
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+        }
+    }
+
+    /// The log's messages in order, as `role:text`.
+    fn message_order(
+        sessions: &heddle_session::SessionService,
+        handle: &SessionHandle,
+    ) -> Vec<String> {
+        sessions
+            .events(handle)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "message")
+            .map(|event| {
+                let message = &event.fields["message"];
+                let text: String = message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect();
+                format!("{}:{text}", message["role"].as_str().unwrap())
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_steer_sent_during_a_tool_call_is_written_after_its_result_and_answered_by_the_same_turn()
+     {
+        let sessions = crate::adapters::tests::sessions_at("steer-order");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let runtime = real_runtime(
+            &sessions,
+            serde_json::json!([
+                { "toolCall": { "name": "slow_tool", "arguments": {} } },
+                { "text": "answered after the steer" }
+            ]),
+            vec![steering_tool(
+                Arc::clone(&sessions),
+                handle.clone(),
+                "steered during the tool",
+                None,
+            )],
+        );
+        let result = run_turn(
+            &runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "run the slow tool"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            message_order(&sessions, &handle),
+            [
+                "user:run the slow tool",
+                "tool:tool finished",
+                "user:steered during the tool"
+            ],
+            "the steer follows the call's result, never between the call and its answer"
+        );
+        let events = sessions.events(&handle).unwrap();
+        let steer_seq = events
+            .iter()
+            .find(|event| {
+                event.kind == "message"
+                    && event.fields["message"]["role"] == "user"
+                    && event.fields["message"]["content"][0]["text"] == "steered during the tool"
+            })
+            .unwrap()
+            .seq;
+        let requests: Vec<u64> = events
+            .iter()
+            .filter(|event| event.kind == "model/request")
+            .map(|event| event.seq)
+            .collect();
+        assert!(
+            requests.len() == 2 && requests[1] > steer_seq,
+            "the next model call is asked after the steer is written"
+        );
+        assert_eq!(result.text, "answered after the steer");
+        assert!(
+            heddle_session::inbox::pending_inbox(sessions.store(), &handle)
+                .unwrap()
+                .next_step
+                .is_empty(),
+            "nothing is left pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_tool_call_keeps_the_steer_pending_and_the_next_turn_writes_it_before_its_prompt()
+     {
+        let sessions = crate::adapters::tests::sessions_at("steer-stop");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let stop = CancellationToken::new();
+        let runtime = real_runtime(
+            &sessions,
+            serde_json::json!([
+                { "toolCall": { "name": "slow_tool", "arguments": {} } },
+                { "text": "never asked" }
+            ]),
+            vec![steering_tool(
+                Arc::clone(&sessions),
+                handle.clone(),
+                "steered then stopped",
+                Some(stop.clone()),
+            )],
+        );
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "run then stop");
+        options.cancel = Some(stop);
+        let stopped = run_turn(&runtime, options).await.unwrap();
+        assert!(stopped.ended.contains(&"stopped by the caller".to_owned()));
+        assert!(
+            !message_order(&sessions, &handle).contains(&"user:steered then stopped".to_owned()),
+            "the stopped turn did not write the steer"
+        );
+        let pending = heddle_session::inbox::pending_inbox(sessions.store(), &handle)
+            .unwrap()
+            .next_step;
+        assert_eq!(
+            pending.len(),
+            1,
+            "the steer is still pending after the stop, as DSH keeps it"
+        );
+        assert_eq!(
+            heddle_session::text_of(&pending[0].content),
+            "steered then stopped"
+        );
+
+        // The next turn, with a script that answers at once (rounds count from step 0 again).
+        let next_runtime = real_runtime(
+            &sessions,
+            serde_json::json!([{ "text": "both answered" }]),
+            Vec::new(),
+        );
+        let next = run_turn(
+            &next_runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "the next prompt"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.text, "both answered");
+        assert_eq!(
+            message_order(&sessions, &handle),
+            [
+                "user:run then stop",
+                "tool:tool finished",
+                "user:steered then stopped",
+                "user:the next prompt"
+            ],
+            "the kept steer is written after the stopped call's result and before the next prompt"
+        );
+        assert!(
+            heddle_session::inbox::pending_inbox(sessions.store(), &handle)
+                .unwrap()
+                .next_step
+                .is_empty(),
+            "nothing is left pending"
         );
     }
 

@@ -75,6 +75,22 @@ impl NamedLayer {
         })
     }
 
+    /// The layer `text` would be if it were the contents of `file` (already absolute), named `layer`:
+    /// the settings writer validates a candidate patch file this way before it touches the disk.
+    pub fn from_text(
+        layer: impl Into<String>,
+        file: &Path,
+        text: &str,
+        env: &Env,
+    ) -> Result<Self, ConfigError> {
+        let entries = parse_layer_text(text, file, &[], env)?;
+        Ok(Self {
+            layer: layer.into(),
+            file: file.to_string_lossy().into_owned(),
+            entries,
+        })
+    }
+
     /// The `index`-th in-memory layer (counting from 1), named `override {index}` with the file
     /// [`INLINE_FILE`], as `boot` named the layers it was handed.
     pub fn inline(index: usize, layer: Layer) -> Self {
@@ -118,7 +134,20 @@ fn read_layer_inner(file: &Path, stack: &[PathBuf], env: &Env) -> Result<Vec<Lay
             absolute.display()
         ))
     })?;
-    let Some(document) = load_document(&text, &absolute.display().to_string())? else {
+    parse_layer_text(&text, &absolute, stack, env)
+}
+
+/// The layers in `text`, read as if it were the file `absolute`: problems name that file, and an
+/// `include` resolves against its directory. [`read_layer_inner`] reads the file and lands here; the
+/// settings writer parses a candidate it has not written yet.
+pub(crate) fn parse_layer_text(
+    text: &str,
+    absolute: &Path,
+    stack: &[PathBuf],
+    env: &Env,
+) -> Result<Vec<Layer>, ConfigError> {
+    let absolute = absolute.to_path_buf();
+    let Some(document) = load_document(text, &absolute.display().to_string())? else {
         return Ok(Vec::new());
     };
     // A document that is `null` or `~` is no layers, as `src/config/schema.ts` reads it

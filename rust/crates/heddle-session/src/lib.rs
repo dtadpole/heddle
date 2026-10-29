@@ -37,6 +37,7 @@ pub mod definition;
 pub mod error;
 pub mod event;
 pub mod fsio;
+pub mod inbox;
 pub mod layout;
 pub mod message;
 pub mod meta;
@@ -70,7 +71,7 @@ pub use service::{
 };
 pub use store::{
     EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, SessionStore,
-    TRANSCRIPT_NAME, can_compress, default_session_root, is_framed, log_name, meta_name,
+    TRANSCRIPT_NAME, can_compress, default_session_root, is_framed, lock_path, log_name, meta_name,
     transcript_in,
 };
 pub use surface::{

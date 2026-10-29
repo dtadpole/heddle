@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T09:42:21Z
-version: 0.7.0
+modified: 2026-10-29T12:56:06Z
+version: 0.8.1
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -45,8 +45,22 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `validate` | `ComponentCatalog` (trait), `SchemaLookup`, `StaticCatalog`, `ComponentManifest`, `ManifestCatalog`, `read_component_manifest`, `ValidationResult`, `validate_rows` | `validate.ts`; the manifest catalog is the part-0 shape for outside components |
 | `local` | `LocalConfig` (`endpoint_patches`), `LocalConfigLocation`, `local_config_candidates`, `read_local_config` | `src/local-config.ts` |
 | `model_row` | `model_row_endpoints`, `ModelRowEndpoints` (`endpoints`, `nominated`, `local`), `nominated_default` — the model row's endpoint list and the endpoint an unnamed caller gets: the row's `default`, else the machine file's, kept only when it names a listed endpoint | `src/plugins/model.ts` |
+| `retry` | `RetryPolicy` (`key`, `local_delay_ms`, `plan`), `RetryMode`, `RetryFailure`, `RetryPlan`, `resolve_retry_policy`, `retry_failure_code`, `parse_retry_after`, the `DEFAULT_*` constants and `MAX_TIMER_DELAY_MS` — an endpoint's `retryPolicy` (DSH's provider-owned policy: `normal`, 5 retries of `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`; or `always`) and the decision for one failed request: bounded exponential backoff with symmetric jitter, a `Retry-After` within `maxDelayMs` replacing it; the loop that executes it is `heddle-agent`'s | `src/config/retry.ts` (DSH's `dsh-llm` retry policy, `dsh-llm-retry`) |
 | `endpoints` | `EndpointConfig` (catalogue methods), `EndpointPatch`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel(s)`, `ReasoningValue`, `default_endpoints`, `environment_override`, `merge_endpoint`, `read_key_file`, `materialize_key`, `resolve_endpoints`, `describe_endpoint(s)`, `EndpointsView`, `selection_problem`, `config_paths` | `src/endpoints.ts`, `src/llm/types.ts` |
 | `command` | `ConfigCommand`, `ConfigArgs`, `CommandContext`, `run` — `heddle profiles` and `heddle config [--json] [--origins] [--validate]`, output and exit codes | `runConfigCommand` |
+| `settings` | `settings_target`, `describe_settings`, `plan_settings_write`, `commit_settings_write`, `SettingsService` (`new`, `describe`, `write`), `handle_settings_request` and `SettingsResponse`, `SettingsView`, `SettingsNamespace`, `SecretSlot`, `SettingsWrite`, `SettingsPathOp`, `SettingsError` (`code`, `message`), `SettingsRevisions`, `PlannedWrite`, `is_secret_key`, `SETTINGS_BEGIN`, `SETTINGS_END` — the active profile's patch as a writable surface | `src/config/settings.ts` (DSH's `dsh-settings` over `dsh-config-editor`) |
+
+**Settings.** The active profile's `heddle.patch.yml` is writable from `GET /api/settings`, `GET` and `POST
+/api/settings/{ns}`, as DSH's settings controller allows; `src/config/settings.ts` is the TypeScript twin and the
+two write byte-identical files. The writer owns one block at the end of the file, between `SETTINGS_BEGIN` and
+`SETTINGS_END`, and leaves every other byte alone. Because a heddle patch replaces `config` whole, the block
+restates an entry's complete **raw** config, so an `${ENV}` value stays a reference; an unset restores the value
+beneath the block, and an entry back at its base leaves it. The complete candidate is composed and validated
+before the disk is touched; a stale revision is `settings-conflict` (409), and an invalid value, a row a later
+layer restates or removes, an overlay's own row, a secret, or a run with no profile patch is `settings-rejected`
+(422), each with the file unchanged. `applies` is `restart` until a change can apply to the running tree. The
+binary mounts the routes behind the door (`web.rs`, `settings_router`); `05-config-system/check-settings.mjs`
+judges them through `HEDDLE_BIN`.
 
 ### Who reads what
 
@@ -54,15 +68,15 @@ Measured on main `37da0fd` in each crate's production code (test modules exclude
 
 | Crate | Reads | Because the TypeScript build did, in |
 |---|---|---|
-| `heddle` (the binary) | boot: `command::run`, `LayerOptions`, `default_layers`, `compose`, `anchor_dir`, `EntryRow` and `ComponentName`, `NamedLayer`, `Layer`, `profile_argument`, `ManifestCatalog`, `read_component_manifest`, `Schema` and `SchemaLookup`, `Env`, and it implements `ComponentCatalog`; the model row (`adapters.rs`): `read_local_config`, `local_config_candidates`, `resolve_endpoints`, `EndpointPatch`, `describe_endpoint`; web (`web.rs`): `describe_endpoints`, `selection_problem`, `heddle_home` | `cli.ts`, `boot.ts`, `plugins/model.ts`, `server/web.ts`, `server/uploads.ts` |
+| `heddle` (the binary) | boot: `command::run`, `LayerOptions`, `default_layers`, `compose`, `anchor_dir`, `EntryRow` and `ComponentName`, `NamedLayer`, `Layer`, `profile_argument`, `ManifestCatalog`, `read_component_manifest`, `Schema` and `SchemaLookup`, `Env`, and it implements `ComponentCatalog`; the model row (`adapters.rs`): `model_row_endpoints`, `EndpointPatch`, `describe_endpoint`; web (`web.rs`): `describe_endpoints`, `selection_problem`, `heddle_home` | `cli.ts`, `boot.ts`, `plugins/model.ts`, `server/web.ts`, `server/uploads.ts` |
 | `heddle-llm` | `EndpointConfig`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel` and `ReasoningLevels`, `ReasoningValue`, `describe_endpoint` | the adapters |
 | `heddle-session` | `canonical_path`, `expand_home`, `heddle_home`, `paths`, `Env` | `session/*.ts` |
 | `heddle-workspace` | `canonical_path`, `is_under`, `depth_of`, `expand_home`, `heddle_home`, `Env` | `workspace/service.ts` |
 
-**The model row should read `model_row_endpoints`.** On main `f72def9` the binary's model adapter composes the row
-itself and hands the model service only the row's `default`, dropping `heddle.json`'s (D-052 gap c: the 3097
-preview reported `default: null`, and an unnamed turn went to the first endpoint by name instead of the one the
-file nominates). One call replaces that composition; the patch is with integrator-one for developer-two's crate.
+**The model row reads `model_row_endpoints`**, on main since `34837787` (the call-site change `401d957d` in the
+binary's crate, `heddle`). Before it, the binary's model adapter composed the row itself and handed the model
+service only the row's `default`, dropping `heddle.json`'s (D-052 gap c: the 3097 preview reported `default: null`,
+and an unnamed turn went to the first endpoint by name instead of the one the file nominates).
 
 `heddle-server`, `heddle-web-composer`, `heddle-web-files` and `heddle-context` take nothing from this crate in
 production code, and `heddle-sandbox` does not depend on it: the web routes reach it through the binary's `web.rs`,
@@ -225,7 +239,8 @@ that validates is one that starts.
 The two last rows are agreed with developer-five, who owns the process protocol (2026-10-22). **Where the binary still
 differs:** as of main `c072e63` it names the running component by the manifest's file name without `.component.yml`,
 so `id: alpha` naming `./shout.component.yml` says `shout` once running. `Catalog::component(&ComponentRef)` does not
-carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change is developer-two's.
+carry the row, so the row's `id` has to be threaded to `OutsideRow` where the row starts; that change belongs to the
+binary's crate (`heddle`), and it still stands on main `ac4615d3`.
 
 ### Keeping `05-config-system` judged
 
@@ -330,6 +345,8 @@ The tree is read per commit, never from a fixed list: since `web` was wired it i
 | 2026-10-23 | lane `ddc5e2b` (`web`'s default endpoint falls back to the first endpoint, as TypeScript does — the part-70 follow-up turn's 400) | `HEDDLE_BIN=<debug build of exactly ddc5e2b> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1. Main `e69f552` and `c1d59f5` carry the same code (measured: no non-Markdown change under `rust/` since) |
 | 2026-10-23 | lane `65dae73` (`web` leaves goal edges to the boot's goal-driver row) | `HEDDLE_BIN=<debug build of exactly 65dae73> sh _verifiers_/05-config-system/verify.sh --json`, and the lane gate with the same binary | 10/10 passed, verdict 0; lane gate green; `web --dry-run` boots, and `web --profile nope` gives this crate's sentence with exit 1 |
 | 2026-10-29 | this branch's `model_row` commit on main `92a9955` (`heddle.json`'s `default` nominated, D-052 gap c), alone and with the offered `adapters.rs` call-site patch | `HEDDLE_BIN=<release build of the branch> sh _verifiers_/05-config-system/verify.sh --json` and its lane gate; the same with a debug build of the branch plus the patch; `--turn` and `GET /api/endpoints` against a machine file nominating an endpoint that sorts after the first | 10/10, verdict 0, lane gate green, both builds. Unnamed turn: main's adapter took the first endpoint by name, the patched binary and the TypeScript build both took the nominated one (the same sentence from each). `/api/endpoints` over the machine file's shape, credentials stripped: `default` `null` on main's adapter, the nominated endpoint patched |
+| 2026-10-29 | lane `54bf9da4`, now main `2858e60` (this crate's `model_row` commits, without the call-site patch) | the backend lane written as a baseline from a debug build of main `92a9955`, then `lane.mjs --baseline` with `54bf9da4` built in the same tree (the binary checked to carry the change: a numeric `default` is read as absent, where main refuses the file); 05's `verify.sh` with the same binary | 10/10, verdict 0. Backend lane 111 pass, 5 fail, 1 unjudged; against the baseline 1 newly passing, 0 regressed. The newly passing check is part 10's real-backend request, unjudged in main's run because the live endpoint did not answer: the network, not this change. Part 10's default-endpoint check passes even without the call-site patch, because its default (`chosen`) sorts before `first`; with the default renamed to sort last it fails on `54bf9da4` and passes with the patch |
+| 2026-10-29 | lane `20bd7752`, on main since `34837787` (`401d957d`: the binary's model row calls `model_row_endpoints`, a call-site change to the binary's crate landed under D-055; `20bd775`: part 10's default check names a default that sorts last) | `HEDDLE_BIN=<debug build of exactly 20bd7752> sh _verifiers_/05-config-system/verify.sh --json` and its lane gate; part 10's `check-backends.mjs` with the same binary; `GET /api/endpoints` over the machine file's shape, credentials stripped | 05 10/10, verdict 0, lane gate green. Part 10: 6 of 6, the corrected default check among them. `/api/endpoints` `default` is the machine file's nominated endpoint (it was `null`), over all four endpoints. The landed change is byte for byte the offered patch |
 
 ## Known differences from the TypeScript build
 

@@ -66,8 +66,9 @@ function cacheFor(config) {
 }
 
 test('the three wire formats are named for the provider families', () => {
-  assert.deepEqual(API_TYPES, { 'anthropic-vertex': 'claude', 'openai-responses': 'codex', 'openai-chat': 'deepseek' })
+  assert.deepEqual(API_TYPES, { 'anthropic-vertex': 'claude', 'anthropic-messages': 'claude', 'openai-responses': 'codex', 'openai-chat': 'deepseek' })
   assert.equal(apiTypeFor('anthropic-vertex'), 'claude')
+  assert.equal(apiTypeFor('anthropic-messages'), 'claude', 'Anthropic’s own Messages API is the same family as the publisher route')
   assert.equal(apiTypeFor('openai-responses'), 'codex')
   assert.equal(apiTypeFor('openai-chat'), 'deepseek')
   assert.equal(apiTypeFor('scripted'), null, 'the offline fixture is not one of them')
@@ -168,6 +169,32 @@ test('a fresh passing record judges true; a missing, stale or failing record doe
   const invisibleDeepSeek = cacheFor(configured)
   invisibleDeepSeek.results[resultKey('chat', 'chat-small')].reasoning.visible = { deltas: 0, chars: 0 }
   assert.equal(judge(invisibleDeepSeek, configured).ok, true, 'a non-Claude family is not required to disclose its reasoning text')
+})
+
+test('an endpoint switched to Anthropic’s Messages API is a Claude target whose old record no longer counts', () => {
+  /**
+   * The switch D-052 anticipates: the Conclave rows move from `openai-chat` (whose Claude answers arrived in one
+   * chunk) to `anthropic-messages`. The kind is part of the fingerprint, so the record made before the switch is
+   * stale rather than passing for a wire it never exercised, and a record that still says `deepseek` for the moved
+   * rows is named as validated under the wrong family.
+   */
+  const before = { endpoints: [{ name: 'gateway-claude', kind: 'openai-chat', baseUrl: 'http://127.0.0.1:8088/v1', models: [{ id: 'claude-model', reasoning: { levels: [{ id: 'high', value: 'high' }] } }] }] }
+  const after = structuredClone(before)
+  after.endpoints[0].kind = 'anthropic-messages'
+  assert.notEqual(fingerprint(after), fingerprint(before), 'the kind is part of the identity, so the switch re-triggers validation')
+  const [target] = validationTargets(after)
+  assert.equal(target.apiType, 'claude')
+  assert.equal(target.reasoningConfigured, true)
+
+  const old = cacheFor(before)
+  assert.equal(judge(old, after).stale, true, 'the pre-switch record is stale')
+  const relabelled = { ...cacheFor(before), configFingerprint: fingerprint(after) }
+  assert.match(judge(relabelled, after).failures.join(' '), /validated as 'deepseek' but configured as 'claude'/)
+
+  const fresh = cacheFor(after)
+  assert.equal(judge(fresh, after).ok, true, judge(fresh, after).failures.join('; '))
+  fresh.results[resultKey('gateway-claude', 'claude-model')].reasoning.visible = { deltas: 1, chars: 0 }
+  assert.match(judge(fresh, after).failures.join(' '), /gateway-claude\/claude-model: reasoning is not visible/, 'held to visible thinking like every Claude row')
 })
 
 test('the tiny reasoning call respects the smallest output a Responses route accepts', () => {

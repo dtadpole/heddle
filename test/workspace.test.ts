@@ -7,7 +7,7 @@ import { after, test } from 'node:test'
 
 import { canonicalPath } from '../src/paths.ts'
 import type { SessionMeta } from '../src/session/store.ts'
-import { WorkspaceService, workspaceViews, type WorkspaceRecord } from '../src/workspace/service.ts'
+import { WorkspaceNameConflict, WorkspaceService, workspaceViews, type WorkspaceRecord } from '../src/workspace/service.ts'
 
 /**
  * A workspace record: how a root came to exist, and what unregistering one does to its sessions.
@@ -106,6 +106,23 @@ test('a root with a parent above it is removed, and its sessions are adopted by 
   assert.equal(outcome.ownedSessions, 1)
   assert.equal(outcome.adoptedBy, root.split('/').pop(), 'the ancestor takes them, which is durable')
   assert.equal(workspaces.owner(join(inner, 'src'))?.path, canonicalPath(root), 'and ownership resolves to it afterwards')
+})
+
+test('a rename refuses a name another chosen root carries, and the current name changes nothing', () => {
+  const workspaces = service()
+  const one = workspaces.add(folder('one'), 'one').record
+  const two = workspaces.add(folder('two'), 'two').record
+  workspaces.ensure(folder('three'), 'three', { origin: 'auto' })
+
+  assert.throws(
+    () => workspaces.rename(two.id, ' one '),
+    (error: Error & { code?: string }) => error instanceof WorkspaceNameConflict && error.code === 'workspace/name-conflict' && error.message === 'A workspace named “one” already exists.',
+    "DSH's code and sentence",
+  )
+  assert.equal(workspaces.find(two.id)?.title, 'two', 'nothing was written')
+  assert.equal(workspaces.rename(one.id, 'one')?.updatedAt, one.updatedAt, 'the current name is a no-op, not a clash with itself')
+  assert.equal(workspaces.rename(two.id, 'three')?.title, 'three', 'an adopted root is never drawn as a workspace, so its name does not count')
+  assert.throws(() => workspaces.rename(two.id, '  '), /needs a name/, 'a blank name is still refused')
 })
 
 test('a record written before the field existed stays where it was being shown', () => {

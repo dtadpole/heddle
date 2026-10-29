@@ -1,6 +1,6 @@
 ---
 title: Verifier 1 — LLM Backends
-version: 1.0.0
+version: 1.1.0
 description: heddle connects to backend model servers and runs agent loops over them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -10,7 +10,7 @@ grounded_in:
 
 Instance of this project's `_verifiers_`. **The claim it decides:** heddle connects to backend model servers and runs agent loops over them.
 
-One endpoint is not a backend tier. This part judges that more than one wire shape is spoken, that the endpoint list is configuration rather than code, and that a real configured backend answers — the last of those spending one short request, and reporting unjudged rather than passing when nothing is configured.
+One endpoint is not a backend tier. This part judges that more than one wire shape is spoken (four HTTP shapes: Chat Completions, Responses, Anthropic's Messages API and Anthropic's publisher route), that the endpoint list is configuration rather than code, and that a real configured backend answers — the last of those spending one short request, and reporting unjudged rather than passing when nothing is configured.
 
 ## Where it runs
 
@@ -19,7 +19,14 @@ a display or a window.
 
 ## What decides it
 
-`check-model-service.mjs` runs a turn against a local double that speaks the provider shape, `check-config-driven.mjs` judges that the tree itself is loaded from configuration, and `check-real-backend.mjs` asks a configured endpoint for one answer.
+- `check-backends.mjs` — the endpoint list is configuration, turns run over the Chat Completions and Responses
+  shapes against local doubles, the configured default is honoured, listing costs nothing, and a configured
+  `openai-chat` backend answers one short request (or is unjudged).
+- `check-publisher-route.mjs` — a turn over Anthropic's cloud publisher route (`anthropic-vertex`) against a double,
+  and a configured publisher endpoint answering one short turn (or unjudged).
+- `check-messages-route.mjs` — a turn over Anthropic's own Messages API (`anthropic-messages`, `POST
+  {baseUrl}/messages`, `x-api-key` and `anthropic-version` headers) against a double, and a configured Messages
+  endpoint answering one short turn (or unjudged).
 
 ## Running it
 
