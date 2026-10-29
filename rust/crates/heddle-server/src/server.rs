@@ -3367,9 +3367,13 @@ mod tests {
         let (router, state) = app("events-follow");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
-        state.events().publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 1}));
         let seen = state.events().cursor();
-        state.events().publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 2}));
         async fn read_until(router: &Router, cookie: &str, cursor: &str, marker: &str) -> String {
             let response = router
                 .clone()
@@ -3400,8 +3404,14 @@ mod tests {
         }
         let text = read_until(&router, &cookie, &seen, "\"n\":2").await;
         assert!(text.contains("\"resumed\":true"), "{text}");
-        assert!(!text.contains("\"n\":1"), "nothing before the cursor is repeated: {text}");
-        assert!(text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(), "{text}");
+        assert!(
+            !text.contains("\"n\":1"),
+            "nothing before the cursor is repeated: {text}"
+        );
+        assert!(
+            text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(),
+            "{text}"
+        );
         let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
         assert!(text.contains("\"resumed\":false"), "{text}");
     }
