@@ -41,7 +41,7 @@ const base = {
     { index: 2, state: 'free' },
   ],
   processes: [],
-  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, swapWarnPct: 75, swapStopPct: 95, slots: 3 },
+  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, swapWarnMb: 6656, swapStopMb: 7168, slots: 3 },
 }
 
 test('the machine sources are parsed from the commands a Mac answers with', () => {
@@ -145,8 +145,17 @@ test('the assessment warns and stops at the working model\'s lines', () => {
   const teamStop = assess({ ...base, processes: [{ pid: 7, cpu: 1400, command: '/x/rustc' }] })
   assert.equal(teamStop.loadVerdict, STOP)
 
-  assert.equal(assess({ ...base, swap: { totalMb: 6144, usedMb: 4700, freeMb: 1444 } }).swapVerdict, WARN)
-  assert.equal(assess({ ...base, swap: { totalMb: 6144, usedMb: 6000, freeMb: 144 } }).swapVerdict, STOP)
+  // D-051 on an 8192M Mac: the line is 7168M used (7 GiB), whatever percent of the total that is
+  const swapAt = (usedMb) => assess({ ...base, swap: { totalMb: 8192, usedMb, freeMb: 8192 - usedMb } })
+  assert.equal(swapAt(6000).swapVerdict, OK)
+  assert.equal(swapAt(6656).swapVerdict, WARN)
+  const under = swapAt(7100)
+  assert.equal(under.swapVerdict, WARN, '7100M is under the line: a start is allowed, one at a time')
+  assert.match(under.findings.join(','), /swap: 7100M used, under 7168M: one start at a time \(D-051\)/)
+  assert.equal(swapAt(7168).swapVerdict, STOP)
+  const over = swapAt(7200)
+  assert.equal(over.swapVerdict, STOP)
+  assert.match(over.findings.join(','), /swap: 7200M used >= 7168M, nothing new starts \(D-051\)/)
 
   const stale = assess({ ...base, slots: [...base.slots.slice(1), { index: 2, state: 'stale', pid: 9, cargo: 0, age: 5, cwd: '/x' }] })
   assert.equal(stale.slotVerdict, WARN)
@@ -205,9 +214,9 @@ test('the team share and the desktop share are split from one process list, dete
 })
 
 test('thresholds come from the environment when they are set', () => {
-  const t = thresholdsFrom({ LOAD_CHECK_DISK_WARN_GB: '40', LOAD_CHECK_SWAP_STOP_PCT: '99', LOAD_CHECK_SLOTS: '5' })
+  const t = thresholdsFrom({ LOAD_CHECK_DISK_WARN_GB: '40', LOAD_CHECK_SWAP_STOP_MB: '8000', LOAD_CHECK_SLOTS: '5' })
   assert.equal(t.diskWarnGb, 40)
-  assert.equal(t.swapStopPct, 99)
+  assert.equal(t.swapStopMb, 8000)
   assert.equal(t.slots, 5)
   assert.equal(t.diskStopGb, 20, 'an unset threshold keeps its default')
 })
@@ -224,8 +233,8 @@ test('the command exits 0 on a healthy machine and 1 on a stale slot', (t) => {
     LOAD_CHECK_DISK_STOP_GB: '0',
     LOAD_CHECK_LOAD_WARN_PER_CORE: '1000',
     LOAD_CHECK_LOAD_STOP_PER_CORE: '1001',
-    LOAD_CHECK_SWAP_WARN_PCT: '1000',
-    LOAD_CHECK_SWAP_STOP_PCT: '2000',
+    LOAD_CHECK_SWAP_WARN_MB: '1000000000',
+    LOAD_CHECK_SWAP_STOP_MB: '2000000000',
     LOAD_CHECK_SLOTS: '30',
   }
   const healthy = spawnSync(process.execPath, [SCRIPT, '--home', home, '--slots', slots], { encoding: 'utf8', env: relaxed })
