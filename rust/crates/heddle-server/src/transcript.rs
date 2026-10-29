@@ -736,11 +736,13 @@ mod tests {
     /// event, outside the conversation".
     #[test]
     fn a_sessions_history_shows_each_command_as_its_own_row_settled_by_its_done_event() {
+        // A `/goal` create answers with DSH's goal card (developer-nine's `/goal`, D-059).
+        let created = "Goal created\nStatus: active\nObjective: ship it\nRounds: 0/256\nActivation: armed\n\nCommands: /goal edit <objective>, /goal pause, /goal clear";
         let turns = transcript_turns(&[
             json!({"type": "message", "seq": 0, "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
             json!({"type": "command/run", "seq": 1, "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "source": {"kind": "user"}}),
             json!({"type": "goal/change", "seq": 2}),
-            json!({"type": "command/done", "seq": 3, "commandId": "cmd-0000abcd-1", "kind": "success", "text": "Goal set: ship it"}),
+            json!({"type": "command/done", "seq": 3, "commandId": "cmd-0000abcd-1", "kind": "success", "text": created}),
             json!({"type": "command/run", "seq": 4, "commandId": "cmd-0000abcd-2", "name": "export"}),
             json!({"type": "command/done", "seq": 5, "commandId": "cmd-0000abcd-2", "kind": "error", "text": "The Web /export command does not accept a path."}),
             json!({"type": "command/run", "seq": 6, "commandId": "cmd-0000abcd-3", "name": "compact"}),
@@ -752,7 +754,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&commands).unwrap(),
             json!([
-                {"kind": "command", "text": "Goal set: ship it", "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "state": "done"},
+                {"kind": "command", "text": created, "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "state": "done"},
                 {"kind": "command", "text": "The Web /export command does not accept a path.", "commandId": "cmd-0000abcd-2", "name": "export", "state": "error"},
                 {"kind": "command", "text": "", "commandId": "cmd-0000abcd-3", "name": "compact", "state": "running"},
             ])
@@ -760,7 +762,10 @@ mod tests {
         // The bytes keep the TypeScript object's key order.
         assert_eq!(
             serde_json::to_string(commands[0]).unwrap(),
-            r#"{"kind":"command","text":"Goal set: ship it","commandId":"cmd-0000abcd-1","name":"goal","args":"ship it","state":"done"}"#
+            format!(
+                r#"{{"kind":"command","text":{},"commandId":"cmd-0000abcd-1","name":"goal","args":"ship it","state":"done"}}"#,
+                serde_json::to_string(created).unwrap()
+            )
         );
         assert_eq!(
             turns[0].kind,
