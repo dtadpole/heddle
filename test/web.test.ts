@@ -77,6 +77,7 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   const turns = transcriptTurns([
     { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'first' }] } },
     { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: 'a.txt', content: 'x' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 1 bytes to a.txt' }], toolCallId: 'c1' } },
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'done' } },
     { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'second' }] } },
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'nothing to write' } },
@@ -85,6 +86,59 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   assert.equal(answers.length, 2, 'one answer per exchange')
   assert.deepEqual(answers[0]?.files, [{ path: 'a.txt', added: 1 }])
   assert.equal(answers[1]?.files, undefined, 'the next exchange does not inherit the previous one\'s files')
+})
+
+test('a write that failed is not an edited file; one that succeeded in the same exchange is', () => {
+  /**
+   * DSH parity R-developer-twelve-11, measured 2026-10-29: with every `write_file` refused by the sandbox the panel
+   * still named the files with their added lines, though the disk was unchanged. A call's arguments are what the
+   * model asked for; only an `ok` result is a change.
+   */
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit three files' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: '/w/refused.txt', content: 'one\ntwo\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: "error (SANDBOX): '/w/refused.txt' is outside the sandbox root /elsewhere" }], toolCallId: 'c1' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c2', name: 'bash', arguments: JSON.stringify({ command: "sed -i '' 's/a/b/' /w/shell.txt" }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'error (SANDBOX): [sandbox: file access denied under workspace-write mode]' }], toolCallId: 'c2' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c3', name: 'write_file', arguments: JSON.stringify({ path: '/w/kept.txt', content: 'x\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 2 bytes to /w/kept.txt' }], toolCallId: 'c3' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'one of three' } },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answer?.files, [{ path: '/w/kept.txt', added: 1 }], 'only the write that succeeded is listed')
+  assert.equal(turns.find((turn) => turn.name === 'write_file')?.state, 'error', 'the refused call itself still reads as an error')
+})
+
+test('an exchange whose every write failed carries no panel at all', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'x' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'error: permission denied' }], toolCallId: 'c1' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'could not write' } },
+  ])
+  assert.equal(turns.find((turn) => turn.kind === 'assistant')?.files, undefined, 'nothing changed, so no Edited files panel')
+})
+
+test('a write still waiting for its result is not yet an edited file', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'writing now' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'x' }) } },
+  ])
+  assert.equal(turns.find((turn) => turn.kind === 'assistant')?.files, undefined, 'a running call has changed nothing yet')
+})
+
+test('a path written twice keeps the lines of its last successful write', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit' }] } },
+    // Results without ids pair with the newest open call, as a provider that sends no ids requires.
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'one\ntwo\nthree\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 14 bytes to /w/a.txt' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'one\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'Error: disk full' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'the second write failed' } },
+  ])
+  assert.deepEqual(turns.find((turn) => turn.kind === 'assistant')?.files, [{ path: '/w/a.txt', added: 3 }], 'the failed second write does not overwrite the first')
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {

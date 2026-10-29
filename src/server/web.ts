@@ -2454,16 +2454,22 @@ export function transcriptTurns(
   let openAssistant = -1
   let openReasoning = -1
   /**
-   * The files written since the last user message, which the exchange's answer carries as its panel data. A write
-   * that arrives after the answer has been drawn belongs to no answer, so it is kept for the next one rather than
-   * retroactively attached.
+   * The files written since the last user message are the exchange's answer's panel data. A `write_file` call is
+   * noted when it is made and **counted only once its result says it succeeded**.
+   *
+   * A call's arguments say what the model asked for, not what happened: a write the sandbox refused, or one that
+   * failed for any other reason, changed nothing on disk. Measured 2026-10-29 (DSH parity R-developer-twelve-11):
+   * with every write refused, the panel still named three files with their added lines. So a write is held
+   * against its call until the paired result arrives, and only an `ok` result makes it an edited file.
    */
-  let written: { path: string; added: number }[] = []
-  /** Writes kept per exchange, keyed by the index of the user turn that opened it. */
-  const sections = new Map<number, { path: string; added: number }[]>()
+  interface NotedWrite { readonly path: string; readonly added: number; ok: boolean }
+  /** Writes kept per exchange in call order, keyed by the index of the user turn that opened it. */
+  const sections = new Map<number, NotedWrite[]>()
+  /** The write each open call would make, by the index of its turn. */
+  const writeOfCall = new Map<number, NotedWrite>()
   let sectionStart = -1
-  const noteWrite = (name: string, argumentsText: string): void => {
-    if (name !== 'write_file') return
+  const noteWrite = (name: string, argumentsText: string, callIndex: number): void => {
+    if (name !== 'write_file' || sectionStart < 0) return
     let args: { path?: unknown; content?: unknown }
     try {
       args = JSON.parse(argumentsText) as { path?: unknown; content?: unknown }
@@ -2473,14 +2479,22 @@ export function transcriptTurns(
     if (typeof args.path !== 'string' || typeof args.content !== 'string') return
     /** Lines a file will have, not segments: a trailing newline closes the last line rather than starting one. */
     const lines = args.content === '' ? 0 : args.content.split('\n').length - (args.content.endsWith('\n') ? 1 : 0)
-    if (sectionStart >= 0) {
-      const bucket = sections.get(sectionStart) ?? []
-      sections.set(sectionStart, bucket)
-      written = bucket
+    const write: NotedWrite = { path: args.path, added: lines, ok: false }
+    const bucket = sections.get(sectionStart) ?? []
+    sections.set(sectionStart, bucket)
+    bucket.push(write)
+    writeOfCall.set(callIndex, write)
+  }
+  /** The edited files of one exchange: its successful writes, first position per path, the latest lines. */
+  const editedFiles = (writes: readonly NotedWrite[]): { path: string; added: number }[] => {
+    const files: { path: string; added: number }[] = []
+    for (const write of writes) {
+      if (!write.ok) continue
+      const existing = files.find((file) => file.path === write.path)
+      if (existing === undefined) files.push({ path: write.path, added: write.added })
+      else existing.added = write.added
     }
-    const existing = written.find((file) => file.path === args.path)
-    if (existing === undefined) written.push({ path: args.path, added: lines })
-    else existing.added = lines
+    return files
   }
   const closeRuns = (): void => {
     openAssistant = -1
@@ -2514,7 +2528,11 @@ export function transcriptTurns(
   const close = (index: number, result: string): void => {
     const turn = turns[index]
     if (turn === undefined) return
-    turns[index] = { ...turn, result, state: /^error/i.test(result) ? 'error' : 'ok' }
+    const state = /^error/i.test(result) ? 'error' : 'ok'
+    turns[index] = { ...turn, result, state }
+    /** Only a write whose call succeeded is an edited file. */
+    const write = writeOfCall.get(index)
+    if (write !== undefined && state === 'ok') write.ok = true
   }
 
   for (const event of events) {
@@ -2531,7 +2549,6 @@ export function transcriptTurns(
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
-        written = []
         sectionStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
         turns.push({
@@ -2598,7 +2615,7 @@ export function transcriptTurns(
      * built, which is why it travels as a field.
      */
     else if (chunk.type === 'tool-call' && chunk.name !== undefined) {
-      noteWrite(chunk.name, chunk.arguments ?? '')
+      noteWrite(chunk.name, chunk.arguments ?? '', turns.length)
       turns.push({
         kind: 'tool',
         name: chunk.name,
@@ -2618,7 +2635,8 @@ export function transcriptTurns(
    * exchange's last answer once the whole log is folded — not to the first delta of a streamed answer, which is
    * created before the writes that followed it are known.
    */
-  for (const [start, files] of sections) {
+  for (const [start, writes] of sections) {
+    const files = editedFiles(writes)
     if (files.length === 0) continue
     let lastAnswer = -1
     for (let index = start + 1; index < turns.length; index += 1) {
