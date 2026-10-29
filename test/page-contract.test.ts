@@ -139,8 +139,8 @@ test('a first visit opens a workspace, so the tree arrives with its sessions on 
    */
   assert.match(page, /const firstVisit = \(\(\) => \{/, 'the page asks whether this is a first visit')
   assert.match(page, /localStorage\.getItem\(EXPANDED_KEY\) === null/, 'by there being no remembered expansion')
-  assert.match(page, /const firstBranch = tops\.find\(\(node\) => Array\.isArray\(node\.children\) && node\.children\.length > 0\)/, 'and it opens the first branch that has something in it')
-  assert.match(page, /if \(firstBranch !== undefined\) \{\s*expanded\.add\(firstBranch\.path\)\s*rememberExpanded\(\)/, 'writing the choice like any other')
+  /** The workspace tree (G2): the first registered workspace is opened, as DSH's browser arrives with one open. */
+  assert.match(page, /if \(firstVisit && treeTops\.length > 0\) \{\s*expanded\.add\(treeTops\[0\]\.path\)\s*rememberExpanded\(\)/, 'it opens the first workspace, writing the choice like any other')
 })
 
 test('the panel has DSH\'s primary action, and it starts a session where the reader is', () => {
@@ -157,7 +157,8 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')
   assert.match(page, /let treeTops = \[\]/, 'the tree keeps the workspace rows the action needs')
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
-  assert.match(page, /if \(selectedPath !== null\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'from the selected row\'s workspace first')
+  assert.match(page, /if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/, 'from the open session\'s workspace first')
+  assert.match(page, /if \(selectedPath !== null && !selectedPath\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
   assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')

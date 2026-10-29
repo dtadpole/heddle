@@ -1071,6 +1071,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * offer to type the path instead of looking broken. Nothing is mounted here: the answer travels back
    * to the page, which registers it through the route below. One dialog, one decision.
    */
+  /**
+   * Every workspace with its parent and its sessions — the data the left column's workspace tree is drawn from.
+   *
+   * DSH's browser is fed one `WorkspaceView` per workspace (path, title, session membership); this is the same answer
+   * under heddle's rules, derived by `WorkspaceService.views`: `parent` nests a root under its nearest registered
+   * ancestor, and `sessionIds` names the sessions whose nearest root it is. Read-only and additive: the folder tree and
+   * every write route are unchanged.
+   */
+  if (url.pathname === '/api/workspaces' && request.method === 'GET') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    respond(response, 200, 'application/json', `${JSON.stringify({ workspaces: workspaces.views(ctx.session.list()) }, null, 2)}\n`)
+    return
+  }
+
   if (url.pathname === '/api/workspaces/pick' && request.method === 'POST') {
     const outcome = await pickFolder()
     if (outcome.kind === 'unavailable') {

@@ -97,6 +97,23 @@ pub struct BootstrapReport {
     pub created: usize,
 }
 
+/// One workspace as the Web UI's workspace tree reads it — `GET /api/workspaces`, DSH's `WorkspaceView`
+/// under heddle's rules (`workspaceViews` in `src/workspace/service.ts`). `parent` is the nearest
+/// registered root strictly above (`null` at the top), `session_ids` the sessions whose nearest root this
+/// is, in the store's order. Derived on every call, never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceView {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub origin: WorkspaceOrigin,
+    pub parent: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub session_ids: Vec<String>,
+}
+
 /// A record with the ids of the sessions it accounts for — one row of `heddle workspaces --json`.
 pub fn listing_row(record: &WorkspaceRecord, sessions: &[SessionMeta]) -> Value {
     // `{ ...record, sessions: [ids] }`: the record's own keys in their order, then the ids.

@@ -1517,6 +1517,19 @@
   #tree li[data-kind='generated'] .label { opacity: .55; }
   #tree li[data-kind='folder'] .label { opacity: .8; }
   #tree .empty { font-size: .78rem; opacity: .5; padding-left: 1.4rem; }
+  /**
+   * The workspace tree (G2), after DSH's workspace browser: a session row leads with a **16-pixel status cell** rather
+   * than a glyph (DSH's `SessionNodeItem`: the running loader there, nothing while idle), and a workspace whose subtree
+   * holds the open session tints its folder (DSH's `folderActive`), which is how a collapsed group still says "it is in
+   * here". `Show more` is DSH's 28-pixel overflow row in the tertiary label colour; `Files` is the quiet heading over the
+   * folder rows heddle keeps under a workspace's sessions.
+   */
+  #tree li[data-kind='session'] > .row > .status-cell, #tree li[data-kind='more'] > .row > .status-cell { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; }
+  #tree li[data-contains-current='true'] > .row > .icon { color: var(--accent); }
+  #tree li[data-kind='more'] > .row { height: 28px; color: var(--text-3); font-size: 13px; }
+  #tree li[data-kind='more'] > .row:hover { color: var(--text-2); background: transparent; }
+  #tree li.tree-heading { display: flex; align-items: center; height: 24px; padding: 0 .5rem 0 calc(.5rem + var(--tree-depth, 0) * 14px); font-size: 11px; color: var(--text-3); cursor: default; user-select: none; }
+  #tree li[data-kind='ungrouped'] > .row .label { color: var(--text-2); }
   /** The adopted-folder group used to live here; the owner removed it, so the tree ends its own list. */
   /**
    * The composer: the draft on top, its tool row underneath, and **this rule is load-bearing**.
@@ -8739,11 +8752,14 @@ function paintRunningMarks() {
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
     const row = li.querySelector(':scope > .row')
     if (row === null) continue
-    const existing = row.querySelector(':scope > .status-dot')
+    /** A session row's spinner lives in its status cell; a row without one (an older shape) keeps it after the icon. */
+    const cell = row.querySelector(':scope > .status-cell')
+    const existing = cell !== null ? cell.querySelector(':scope > .status-dot') : row.querySelector(':scope > .status-dot')
     const running = runningSessions.has(node.session.id)
     if (running && existing === null) {
       const mark = runningMark()
-      row.querySelector(':scope > .icon')?.after(mark)
+      if (cell !== null) cell.append(mark)
+      else row.querySelector(':scope > .icon')?.after(mark)
       /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
       for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
     } else if (!running && existing !== null) {
@@ -8796,7 +8812,8 @@ const ARCHIVED_KEY = 'heddle.tree.archived.v1'
 const GROUPING_KEY = 'heddle.tree.grouping.v1'
 let groupingMode = (() => {
   try {
-    return localStorage.getItem(GROUPING_KEY) === 'list' ? 'list' : 'tree'
+    const stored = localStorage.getItem(GROUPING_KEY)
+    return stored === 'list' || stored === 'workspace' ? stored : 'tree'
   } catch (error) {
     return 'tree'
   }
@@ -8859,6 +8876,20 @@ function viewOptionItems() {
       current: groupingMode === 'tree',
       run: async () => {
         groupingMode = 'tree'
+        rememberGrouping()
+        await renderTree()
+      },
+    },
+    /**
+     * DSH's own default: every workspace a **sibling section**, a nested root drawn beside its parent rather than inside
+     * it. Heddle keeps `Workspace Tree` as its default because roots here do nest and that was already this page's view.
+     */
+    {
+      label: 'Workspace',
+      glyph: 'workspace',
+      current: groupingMode === 'workspace',
+      run: async () => {
+        groupingMode = 'workspace'
         rememberGrouping()
         await renderTree()
       },
@@ -8985,6 +9016,7 @@ function kindIcon(kind, open = false) {
     unregister: 'M4.5 4.5l7 7M11.5 4.5l-7 7',
     tree: 'M2.5 3.5h4v3h-4zM9.5 9.5h4v3h-4zM4.5 6.5v5h5',
     list: 'M3 4h10M3 8h10M3 12h10',
+    workspace: 'M2.5 3h3.5l1 1.2h6.5v3H2.5zM2.5 9.3h11v3.7h-11z',
     clock: 'M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11M8 5v3.2l2.2 1.3',
     'archive-restore': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M8 2.5v4M6 4.5L8 2.5l2 2',
     'archive-only': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M6 3.5h4',
@@ -9331,7 +9363,8 @@ function slug(text) {
  * is always its grandparent: `<branch>/_sessions_/<session>`.
  */
 async function selectSession(node) {
-  activeFolder = node.path.replace(/\/_sessions_\/[^/]+$/, '')
+  /** The composer follows the session's own folder; a definition row (an older shape) still derives its branch. */
+  activeFolder = typeof node.cwd === 'string' && node.cwd.length > 0 ? node.cwd : node.path.replace(/\/_sessions_\/[^/]+$/, '')
   setNote('')
   if (view !== 'chat' && view !== 'trajectory') await showView('chat')
   renderRing('session')
@@ -9362,6 +9395,12 @@ let selectedPath = null
  * not what a treeitem means. The stylesheet reads the attribute, so the style and the ARIA name cannot disagree.
  */
 function markSelection() {
+  /** DSH's `containsCurrent`: a group whose subtree holds the open session tints its folder, folded or not. */
+  for (const entry of rowIndex.values()) {
+    if (entry.node.group === undefined) continue
+    if (WorkspaceTree.containsSession(entry.node.group, current)) entry.li.dataset.containsCurrent = 'true'
+    else delete entry.li.dataset.containsCurrent
+  }
   for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
     if (!li.hasAttribute('aria-selected')) continue
     /** A tree row is chosen by path; a flat list row by the session it opens, because it has no definition folder. */
@@ -9382,10 +9421,14 @@ function chooseSelected(path) {
 /** Move the mark to the row whose session is the one now shown, when that row is drawn at all. */
 function syncSelectionToSession() {
   if (current === null) return
-  for (const [path, entry] of rowIndex) {
-    if (entry.node.session?.id === current) {
-      chooseSelected(path)
-      return
+  /** A session row first: a folder row bound to the same session is where it worked, not the conversation itself. */
+  for (const kind of ['session', null]) {
+    for (const [path, entry] of rowIndex) {
+      if (kind !== null && entry.node.kind !== kind) continue
+      if (entry.node.session?.id === current) {
+        chooseSelected(path)
+        return
+      }
     }
   }
 }
@@ -9538,13 +9581,23 @@ function menuItemsFor(node) {
  * One function for the menu and (in future) a shortcut, because the two must not drift: a rename that one of them
  * wrote differently would be two behaviours wearing one label.
  */
+/** The folder holding a session's definition, when one is known: a definition row's own path, or one a listing showed. */
+function definitionFolder(node) {
+  if (typeof node.path === 'string' && node.path.startsWith('/')) return node.path
+  return node.session === undefined || node.session === null ? undefined : definitionOf.get(node.session.id)
+}
+
 async function renameSession(node) {
   const title = window.prompt('Rename this session', node.session?.title ?? '')
   if (title === null) return
   const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title, folder: node.path }),
+    /**
+     * The definition folder goes with the rename when the tree has seen one, so the store and `session.json` agree; a
+     * session with no definition (bound to a folder by a run) renames in the store alone.
+     */
+    body: JSON.stringify({ title, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -9603,7 +9656,7 @@ async function setSessionFlags(node, patch, extra = {}) {
   const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...patch, ...extra, folder: node.path }),
+    body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -9645,7 +9698,9 @@ async function startSessionAt(node) {
   activeFolder = node.path
   expanded.add(node.path)
   rememberExpanded()
-  if (typeof body.definition === 'string') chooseSelected(body.definition.replace(/\/session\.json$/, ''))
+  if (typeof body.definition === 'string') definitionOf.set(body.session, body.definition.replace(/\/session\.json$/, ''))
+  /** The new session's row is the selected one; the tree keys a session row by its id. */
+  chooseSelected('session:' + body.session)
   await showSession(body.session)
   await renderTree()
 }
@@ -9658,9 +9713,17 @@ async function startSessionAt(node) {
  * workspace the tree draws. All three are answers to "where am I", and the first one that applies wins.
  */
 function newSessionWorkspace() {
-  /** The top-level root that owns a path, if any. A session's definition lives under it. */
-  const owner = (path) => treeTops.find((node) => path === node.path || path.startsWith(node.path + '/')) ?? null
-  if (selectedPath !== null) {
+  /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
+  const owner = (path) =>
+    treeTops
+      .filter((node) => path === node.path || path.startsWith(node.path + '/'))
+      .sort((left, right) => right.path.length - left.path.length)[0] ?? null
+  /** The open session's own workspace comes first: it is the group the reader is looking at. */
+  if (current !== null) {
+    const byCurrent = treeTops.find((node) => node.group !== undefined && WorkspaceTree.containsSession(node.group, current, false))
+    if (byCurrent !== undefined) return byCurrent
+  }
+  if (selectedPath !== null && !selectedPath.startsWith('session:')) {
     const bySelection = owner(selectedPath)
     if (bySelection !== null) return bySelection
   }
@@ -9999,6 +10062,320 @@ document.addEventListener('click', closeMenus)
  */
 Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
 
+/* workspace-tree:begin */
+/**
+ * The workspace tree's derivation — DSH's workspace browser (`dsh-client-ui-workspace`, `tree.ts`) under heddle's rules.
+ *
+ * Pure on purpose: no DOM, no fetch, no page state, so `test/workspace-tree.test.ts` loads this block out of the page
+ * and judges it in Node (the owner's rule that key functions carry tests). The page calls it with the answers of
+ * `GET /api/workspaces` and `GET /api/sessions` and draws what it returns.
+ *
+ * - **Groups** are the workspaces a person registered (`origin !== 'auto'`). An adopted root is not a group: its
+ *   sessions fold into its nearest registered ancestor, else into **Ungrouped**, which also takes a session no root owns —
+ *   DSH's bucket for sessions outside every workspace, drawn last.
+ * - **Nesting**: `tree` puts a group under its nearest registered ancestor (DSH's `Workspace Tree`, child workspaces
+ *   before the parent's own sessions); `workspace` keeps every group a sibling section (DSH's `WorkSpace`).
+ * - **Rows**: subagent-origin sessions are hidden (DSH hides `origin: 'subagent'`); the archive filter is DSH's three
+ *   states; the order is pinned first (newest pin first), then last updated, newest first, then id.
+ * - **Show more**: an open group shows 5 rows, raised to cover the last running or open session within the first 50;
+ *   each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
+ */
+const WorkspaceTree = (() => {
+  const UNGROUPED = ''
+  const INITIAL = 5
+  const STEP = 5
+  const REACH = 50
+
+  /** The last path segment, which is a workspace's label when its record has no title. */
+  function basename(path) {
+    const parts = String(path ?? '').split('/').filter(Boolean)
+    return parts.length > 0 ? parts[parts.length - 1] : String(path ?? '')
+  }
+
+  /** The age a row shows and sorts by: last written, else created. */
+  function stamp(meta) {
+    return String(meta.updated ?? meta.created ?? '')
+  }
+
+  /** Pinned first (the newest pin first, a timed pin before an untimed one), then last updated, then id. */
+  function sessionOrder(left, right) {
+    const leftPinned = left.pinned === true && left.archived !== true
+    const rightPinned = right.pinned === true && right.archived !== true
+    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
+    if (leftPinned) {
+      const leftAt = left.pinnedAt === undefined ? '' : String(left.pinnedAt)
+      const rightAt = right.pinnedAt === undefined ? '' : String(right.pinnedAt)
+      if (leftAt !== rightAt) {
+        if (leftAt === '') return 1
+        if (rightAt === '') return -1
+        return leftAt < rightAt ? 1 : -1
+      }
+    }
+    const leftStamp = stamp(left)
+    const rightStamp = stamp(right)
+    if (leftStamp !== rightStamp) return leftStamp < rightStamp ? 1 : -1
+    const leftId = String(left.id)
+    const rightId = String(right.id)
+    return leftId === rightId ? 0 : leftId < rightId ? -1 : 1
+  }
+
+  /** Whether a session is a row under the archive filter: `hide` (the default), `show`, or `only`. */
+  function visible(meta, archived) {
+    if (meta === null || typeof meta !== 'object' || typeof meta.id !== 'string') return false
+    if (meta.origin === 'subagent') return false
+    const isArchived = meta.archived === true
+    if (archived === 'only') return isArchived
+    if (archived === 'show') return true
+    return !isArchived
+  }
+
+  /** Whether a group, or (with `deep`) any group under it, holds the session `id` among its rows. */
+  function containsSession(group, id, deep = true) {
+    if (id === null || id === undefined) return false
+    if (group.sessions.some((meta) => meta.id === id)) return true
+    return deep && group.children.some((child) => containsSession(child, id, true))
+  }
+
+  /**
+   * The groups to draw, in order: `[{key, workspace, label, path, depth, children, sessions}]`.
+   *
+   * `workspaces` is `/api/workspaces`'s array (registry order, each with `parent` and `sessionIds`); `sessions` is
+   * `/api/sessions`. A session named by no workspace, or by an adopted one with nothing registered above it, is
+   * Ungrouped; a session is placed once, by the first workspace that names it.
+   */
+  function deriveGroups(workspaces, sessions, options = {}) {
+    const grouping = options.grouping === 'workspace' ? 'workspace' : 'tree'
+    const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
+    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object') : []
+    const byId = new Map(list.map((entry) => [entry.id, entry]))
+    const registered = (entry) => entry !== undefined && entry.origin !== 'auto'
+    /** The nearest registered workspace above one, following `parent`; a cycle in bad data ends the walk. */
+    const registeredAbove = (entry) => {
+      const seen = new Set([entry.id])
+      let next = entry.parent === null || entry.parent === undefined ? undefined : byId.get(entry.parent)
+      while (next !== undefined && !seen.has(next.id)) {
+        if (registered(next)) return next
+        seen.add(next.id)
+        next = next.parent === null || next.parent === undefined ? undefined : byId.get(next.parent)
+      }
+      return undefined
+    }
+    const groups = new Map()
+    for (const entry of list) {
+      if (!registered(entry)) continue
+      groups.set(entry.id, {
+        key: entry.id,
+        workspace: entry,
+        label: typeof entry.title === 'string' && entry.title.length > 0 ? entry.title : basename(entry.path),
+        path: entry.path,
+        depth: 0,
+        children: [],
+        sessions: [],
+      })
+    }
+    const ungrouped = { key: UNGROUPED, workspace: null, label: 'Ungrouped', path: '', depth: 0, children: [], sessions: [] }
+    const metaById = new Map(metas.map((meta) => [meta.id, meta]))
+    const placed = new Set()
+    for (const entry of list) {
+      const above = registered(entry) ? entry : registeredAbove(entry)
+      const target = above === undefined ? ungrouped : groups.get(above.id)
+      for (const id of Array.isArray(entry.sessionIds) ? entry.sessionIds : []) {
+        if (placed.has(id)) continue
+        const meta = metaById.get(id)
+        if (meta === undefined) continue
+        placed.add(id)
+        if (visible(meta, archived)) target.sessions.push(meta)
+      }
+    }
+    for (const meta of metas) {
+      if (!placed.has(meta.id) && visible(meta, archived)) ungrouped.sessions.push(meta)
+    }
+    for (const group of [...groups.values(), ungrouped]) group.sessions.sort(sessionOrder)
+
+    let tops = []
+    for (const entry of list) {
+      if (!registered(entry)) continue
+      const group = groups.get(entry.id)
+      const above = grouping === 'tree' ? registeredAbove(entry) : undefined
+      if (above !== undefined) groups.get(above.id).children.push(group)
+      else tops.push(group)
+    }
+    /**
+     * `Archived only` drops a workspace with no archived session, and its children rise to the nearest shown ancestor —
+     * DSH's rule, so the filter answers "where did it go" without a page of empty folders.
+     */
+    if (archived === 'only') {
+      const prune = (level) => level.flatMap((group) => {
+        group.children = prune(group.children)
+        return group.sessions.length === 0 ? group.children : [group]
+      })
+      tops = prune(tops)
+    }
+    const settle = (group, depth) => {
+      group.depth = depth
+      for (const child of group.children) settle(child, depth + 1)
+    }
+    for (const group of tops) settle(group, 0)
+    if (ungrouped.sessions.length > 0) tops.push(ungrouped)
+    return tops
+  }
+
+  /** Every group in the forest, parents before children — what the primary action and the selection search over. */
+  function flatten(groups) {
+    return groups.flatMap((group) => [group, ...flatten(group.children)])
+  }
+
+  /**
+   * How many of a group's rows are drawn: the watermark (5 until `Show more`), raised to cover the last running or open
+   * session among the first 50, never more than there are.
+   */
+  function shownCount(sessions, watermark, options = {}) {
+    const total = sessions.length
+    const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
+    let count = Math.min(total, mark)
+    const running = options.running instanceof Set ? options.running : new Set()
+    const current = options.current ?? null
+    for (let index = Math.min(total, REACH) - 1; index >= count; index -= 1) {
+      const meta = sessions[index]
+      if (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current)) {
+        count = index + 1
+        break
+      }
+    }
+    return count
+  }
+
+  /** The watermark after a `Show more` click: five more rows, or all of them when five or fewer remain. */
+  function nextWatermark(total, shown) {
+    return Math.min(total, shown + STEP)
+  }
+
+  /** The overflow control a group needs: `more`, `less` after the last batch, or none when its rows fit. */
+  function overflow(total, shown) {
+    if (total <= INITIAL) return null
+    if (shown < total) return 'more'
+    return shown > INITIAL ? 'less' : null
+  }
+
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+})()
+/* workspace-tree:end */
+
+/**
+ * The page's state for the workspace tree: the groups the last render drew, each group's watermark, and the definition
+ * folder of every session a folder listing has shown (so `Rename` can write both halves, as SESSION_TREE.md asks).
+ */
+let treeGroups = []
+const watermarks = new Map()
+const definitionOf = new Map()
+
+/** A session's row label: its stored title, `New session` while it has no turn, else `Untitled` (DSH's words). */
+function sessionLabel(meta) {
+  if (typeof meta.title === 'string' && meta.title.trim().length > 0) return meta.title
+  return (meta.turns ?? 0) === 0 ? 'New session' : 'Untitled'
+}
+
+/** One session as a tree node, in the shape `nodeRow` and the session actions already read. */
+function sessionNode(meta) {
+  return {
+    kind: 'session',
+    path: 'session:' + meta.id,
+    label: sessionLabel(meta),
+    cwd: meta.cwd,
+    badge: null,
+    children: [],
+    session: {
+      id: meta.id,
+      turns: meta.turns ?? 0,
+      ...(typeof meta.title === 'string' && meta.title.length > 0 ? { title: meta.title } : {}),
+      created: meta.created,
+      ...(meta.updated !== undefined ? { updated: meta.updated } : {}),
+    },
+    ...(meta.pinned === true ? { pinned: true } : {}),
+    ...(meta.pinnedAt !== undefined ? { pinnedAt: meta.pinnedAt } : {}),
+    ...(meta.archived === true ? { archived: true } : {}),
+  }
+}
+
+/** One session row, marked as part of its group's session slot so `Show more` can redraw the slot alone. */
+function sessionRow(meta, depth) {
+  const li = nodeRow(sessionNode(meta), depth)
+  li.dataset.sessionId = meta.id
+  li.dataset.slot = 'sessions'
+  return li
+}
+
+/** A group's header row: a registered workspace (its menu and `+`), or the Ungrouped bucket (neither). */
+function groupRow(group) {
+  const node =
+    group.workspace === null
+      ? { kind: 'ungrouped', path: '#ungrouped', label: group.label, badge: null, session: null, children: null, group }
+      : { kind: 'workspace', path: group.path, label: group.label, badge: null, session: null, children: null, group }
+  const li = nodeRow(node, group.depth)
+  li.dataset.slot = 'group'
+  if (WorkspaceTree.containsSession(group, current)) li.dataset.containsCurrent = 'true'
+  return li
+}
+
+/**
+ * Draw (or redraw) a group's session rows and its overflow row, in place, after its child workspaces.
+ *
+ * In place rather than by redrawing the group, so `Show more` does not close the folders a person opened beneath it.
+ */
+function paintSessionRows(list, group, depth) {
+  for (const old of list.querySelectorAll(':scope > li[data-slot="sessions"], :scope > li[data-slot="more"]')) {
+    if (old.dataset.rowKey !== undefined) rowIndex.delete(old.dataset.rowKey)
+    old.remove()
+  }
+  const groupRows = list.querySelectorAll(':scope > li[data-slot="group"]')
+  const anchor = groupRows.length > 0 ? groupRows[groupRows.length - 1].nextSibling : list.firstChild
+  const total = group.sessions.length
+  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, { running: runningSessions, current })
+  const rows = group.sessions.slice(0, shown).map((meta) => sessionRow(meta, depth))
+  const mode = WorkspaceTree.overflow(total, shown)
+  if (mode !== null) {
+    const li = document.createElement('li')
+    li.dataset.kind = 'more'
+    li.dataset.slot = 'more'
+    li.setAttribute('role', 'none')
+    li.style.setProperty('--tree-depth', String(depth))
+    const row = document.createElement('div')
+    row.className = 'row'
+    row.tabIndex = 0
+    row.setAttribute('role', 'button')
+    /** An empty status cell, so the words line up with the session titles above them, as DSH's overflow row does. */
+    const spacer = document.createElement('span')
+    spacer.className = 'status-cell'
+    spacer.setAttribute('aria-hidden', 'true')
+    const label = document.createElement('span')
+    label.className = 'label'
+    label.textContent = mode === 'more' ? 'Show more' : 'Show less'
+    row.append(spacer, label)
+    row.onclick = () => {
+      if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))
+      else watermarks.delete(group.key)
+      paintSessionRows(list, group, depth)
+      markSelection()
+    }
+    row.onkeydown = (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        row.onclick()
+      }
+    }
+    li.append(row)
+    rows.push(li)
+  }
+  for (const li of rows) list.insertBefore(li, anchor)
+  paintRunningMarks()
+}
+
+/** Forget the watermarks of a group and everything under it — DSH resets them when a workspace folds. */
+function resetWatermarks(group) {
+  for (const each of WorkspaceTree.flatten([group])) watermarks.delete(each.key)
+}
+
 function nodeRow(node, depth = 0) {
   /** The row's right-hand slot, declared before anything appends to it: a later `const` was a TDZ error that took
    * every session row out of the tree while its branch still rendered. */
@@ -10024,7 +10401,7 @@ function nodeRow(node, depth = 0) {
    * `aria-expanded` at all. This UI put `aria-expanded="false"` on session rows too, which told a screen reader
    * that a leaf has something under it — measured on DSH: its session rows carry `aria-selected` only.
    */
-  const expandable = node.kind === 'workspace' || node.kind === 'type' || node.kind === 'instance' || node.kind === 'folder'
+  const expandable = node.kind === 'workspace' || node.kind === 'ungrouped' || node.kind === 'type' || node.kind === 'instance' || node.kind === 'folder'
   if (expandable) li.setAttribute('aria-expanded', 'false')
   if (node.kind === 'session' || node.kind === 'file') {
     li.setAttribute('aria-selected', node.path === selectedPath ? 'true' : 'false')
@@ -10039,7 +10416,12 @@ function nodeRow(node, depth = 0) {
   /** The left of the row is what it **is**: its kind, a type's badge, and its name. */
   const icon = document.createElement('span')
   icon.className = 'icon'
-  icon.append(kindIcon(node.kind, false))
+  /**
+   * A session row leads with DSH's **status cell** rather than a glyph: 16 pixels that hold the running spinner while a
+   * turn runs and nothing while the session is idle (`SessionNodeItem`). Every other row keeps its kind glyph.
+   */
+  if (node.kind === 'session') icon.classList.add('status-cell')
+  else icon.append(kindIcon(node.kind, false))
   row.append(icon)
   /**
    * A running session carries the reference's **spinner** before its name — not a word: `StateDot`'s ongoing state is a
@@ -10048,7 +10430,7 @@ function nodeRow(node, depth = 0) {
    */
   if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
     const mark = runningMark()
-    row.append(mark)
+    icon.append(mark)
     for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
   }
   if (node.badge) {
@@ -10068,7 +10450,8 @@ function nodeRow(node, depth = 0) {
    * reachable as the row's tooltip, because it is still the identity.
    */
   label.textContent = node.kind === 'session' && node.session?.title ? node.session.title : node.label
-  if (node.kind === 'session') row.title = node.path
+  /** The folder a session works in is its tooltip: the tree groups by workspace, and the folder is still its identity. */
+  if (node.kind === 'session') row.title = node.cwd ?? node.path
   row.append(label)
 
   /**
@@ -10354,6 +10737,50 @@ async function loadChildren(node, li) {
   const group = document.createElement('ul')
   group.setAttribute('role', 'group')
   li.append(group)
+  const depth = Number(li.style.getPropertyValue('--tree-depth') || '0')
+  /**
+   * A workspace group draws in DSH's order — its **child workspaces**, then **its sessions** (watermarked), and then,
+   * heddle's addition, the workspace's own folders and files under a `Files` heading. The folder listing drops what the
+   * group already shows: a nested root (it is a child group, or a sibling section) and a `_sessions_` definition (it is
+   * a session row), so each conversation and each workspace is drawn once.
+   */
+  if (node.group !== undefined) {
+    for (const child of node.group.children) group.append(groupRow(child))
+    paintSessionRows(group, node.group, depth + 1)
+    let files = []
+    if (node.kind === 'workspace') {
+      try {
+        const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
+        if (!response.ok) throw new Error('the tree answered ' + response.status)
+        const listed = (await response.json()).children ?? []
+        for (const entry of listed) {
+          if (entry.kind === 'session' && entry.session !== null && entry.session !== undefined) definitionOf.set(entry.session.id, entry.path)
+        }
+        files = listed.filter((entry) => entry.kind !== 'workspace' && entry.kind !== 'session')
+      } catch (error) {
+        setNote('could not read ' + node.label + ': ' + (error && error.message))
+      }
+    }
+    /** The group may have been closed (or the tree redrawn) while its folders were being read. */
+    if (!group.isConnected) return
+    if (files.length > 0) {
+      const heading = document.createElement('li')
+      heading.className = 'tree-heading'
+      heading.setAttribute('role', 'none')
+      heading.style.setProperty('--tree-depth', String(depth + 1))
+      heading.textContent = 'Files'
+      group.append(heading)
+      for (const child of files) group.append(nodeRow(child, depth + 1))
+    }
+    if (group.children.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'empty'
+      empty.textContent = 'nothing inside'
+      group.append(empty)
+    }
+    markSelection()
+    return
+  }
   let children = node.children
   if (children === null) {
     try {
@@ -10386,8 +10813,20 @@ async function loadChildren(node, li) {
     group.append(empty)
     return
   }
-  const depth = Number(li.style.getPropertyValue('--tree-depth') || '0')
-  for (const child of children) group.append(nodeRow(child, depth + 1))
+  for (const entry of children) {
+    if (entry.kind === 'session' && entry.session !== null && entry.session !== undefined) definitionOf.set(entry.session.id, entry.path)
+  }
+  /**
+   * A deeper folder drops the same two kinds a workspace's listing drops: a nested root is a group of its own, and a
+   * hoisted `_sessions_` definition is already its workspace's session row.
+   */
+  for (const child of children.filter((entry) => entry.kind !== 'workspace' && entry.kind !== 'session')) group.append(nodeRow(child, depth + 1))
+  if (group.children.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'empty'
+    empty.textContent = 'nothing inside'
+    group.append(empty)
+  }
   markSelection()
 }
 
@@ -10407,6 +10846,7 @@ async function toggle(node, li) {
   if (open) {
     paint(false)
     li.querySelector('ul[role=group]')?.remove()
+    if (node.group !== undefined) resetWatermarks(node.group)
     expanded.delete(node.path)
     rememberExpanded()
     return
@@ -10581,33 +11021,43 @@ async function renderTree() {
     await renderFlatList()
     return
   }
-  rowIndex.clear()
-  let body
+  /**
+   * The workspace tree (G2): DSH's workspace browser drawn from two answers — `/api/workspaces` (each workspace with its
+   * parent and its sessions) and `/api/sessions` (each session's title, age, flags and running state). `WorkspaceTree`
+   * turns them into groups; this draws the groups and re-opens what the reader left open.
+   */
+  let workspaces
+  let sessions
   try {
-    const response = await fetch('/api/tree' + archiveQuery('?'))
-    if (!response.ok) {
+    const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
+    if (workspaceResponse.status === 503) {
       treeList.replaceChildren()
-      setNote(
-        response.status === 503
-          ? 'this profile does not load the workspace plugin'
-          : 'the tree answered ' + response.status,
-      )
+      rowIndex.clear()
+      setNote('this profile does not load the workspace plugin')
       return
     }
-    body = await response.json()
+    if (!workspaceResponse.ok) {
+      /** A server older than the route still lists every session, so the page says so and shows them flat. */
+      await renderFlatList()
+      setNote('this server predates the workspace tree, so sessions are listed in one column')
+      return
+    }
+    workspaces = (await workspaceResponse.json()).workspaces ?? []
+    sessions = sessionResponse.ok ? await sessionResponse.json() : []
   } catch (error) {
-    setNote('could not read the tree: ' + (error && error.message))
+    setNote('could not read the workspaces: ' + (error && error.message))
     return
   }
-  const tops = body.children ?? []
-  treeTops = tops
+  rowIndex.clear()
+  treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode })
+  /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
+  treeTops = WorkspaceTree.flatten(treeGroups)
+    .filter((group) => group.workspace !== null)
+    .map((group) => ({ kind: 'workspace', path: group.path, label: group.label, group }))
   /**
-   * A **first visit** opens the first workspace, which is what DSH shows.
-   *
-   * Measured from DSH's sidebar on 2026-10-17: its tree arrives with a workspace's sessions on screen, not with a list
-   * of closed folder names. Heddle arrived closed unless a previous visit had recorded an expansion, so a reader with
-   * no history saw two words — the case the owner reported as the tree having stopped showing. The default is chosen
-   * once, written down like any other expansion, and a reader who closes it is remembered as having closed it.
+   * A **first visit** opens the first workspace, which is what DSH shows: its tree arrives with a workspace's sessions on
+   * screen, not with a list of closed names. Chosen once and written down like any other expansion, so a reader who
+   * closes it is remembered as having closed it.
    */
   const firstVisit = (() => {
     try {
@@ -10616,26 +11066,17 @@ async function renderTree() {
       return false
     }
   })()
-  if (firstVisit) {
-    const firstBranch = tops.find((node) => Array.isArray(node.children) && node.children.length > 0)
-    if (firstBranch !== undefined) {
-      expanded.add(firstBranch.path)
-      rememberExpanded()
-    }
+  if (firstVisit && treeTops.length > 0) {
+    expanded.add(treeTops[0].path)
+    rememberExpanded()
   }
-  if (tops.length === 0) setNote('no workspace root yet — register one with the + above')
+  if (treeTops.length === 0 && treeGroups.length === 0) setNote('no workspace root yet — register one with the + above')
   else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
-  /**
-   * `map` passes the **array index** as the second argument, and `nodeRow(node, depth)` reads one — so the first version
-   * drew the three workspace roots as depth 0, 1 and 2, each indented 14 pixels more than the last and reading as nested
-   * rather than parallel. The owner saw it exactly that way. The callback is explicit so the index cannot leak again.
-   */
-  treeList.replaceChildren(...tops.map((node) => nodeRow(node)))
+  treeList.replaceChildren(...treeGroups.map((group) => groupRow(group)))
 
   /**
-   * A reload comes back to the shape a person left: the remembered nodes are opened again shallowest
-   * first, so a deeper one is drawn by the time its turn comes, and each level is re-read rather than
-   * remembered, because a cached level is a level that can be stale.
+   * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
+   * a deeper one is drawn by the time its turn comes, and each level is re-read rather than remembered.
    */
   for (const path of [...expanded].sort((left, right) => left.split('/').length - right.split('/').length)) {
     const entry = rowIndex.get(path)

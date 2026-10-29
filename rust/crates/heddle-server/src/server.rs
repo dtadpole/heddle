@@ -98,6 +98,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/folders/session"),
     ("POST", "/api/turn"),
     ("GET", "/api/tree"),
+    ("GET", "/api/workspaces"),
     ("POST", "/api/workspaces"),
     ("PATCH", "/api/workspaces/{id}"),
     ("DELETE", "/api/workspaces/{id}"),
@@ -389,7 +390,7 @@ impl ServerBuilder {
             .route("/api/folders/session", post(folder_session))
             .route("/api/turn", post(turn))
             .route("/api/tree", get(tree))
-            .route("/api/workspaces", post(add_workspace))
+            .route("/api/workspaces", get(list_workspaces).post(add_workspace))
             .route("/api/workspaces/{id}", patch(rename_workspace))
             .route("/api/workspaces/{id}", delete(remove_workspace))
             .route("/api/approvals", get(list_approvals))
@@ -1218,6 +1219,20 @@ async fn tree(
     match workspaces.tree(path.as_deref(), archived, &sessions) {
         Ok(value) => respond::json(StatusCode::OK, &value),
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Every workspace with its parent and its sessions, for the page's workspace tree (web.ts's
+/// `GET /api/workspaces`): `{workspaces: [{id, path, title, origin, parent, createdAt, updatedAt,
+/// sessionIds}]}`, `503` when the profile loads no workspace plugin.
+async fn list_workspaces(State(state): State<AppState>) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let sessions = state.harness().sessions.list();
+    match workspaces.views(&sessions) {
+        Ok(views) => respond::json(StatusCode::OK, &json!({"workspaces": views})),
+        Err(error) => service_refusal(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -2286,6 +2301,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// A registry double for the workspace-tree route: it answers what it was given, and records that
+    /// the route handed it the store's sessions.
+    struct ViewWorkspaces;
+
+    impl crate::services::WorkspaceService for ViewWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            let ids: Vec<Value> = sessions
+                .iter()
+                .map(|meta| Value::String(meta.id.clone()))
+                .collect();
+            Ok(
+                json!([{"id": "w-1", "path": "/work", "title": "work", "origin": "added",
+                "parent": null, "createdAt": "a", "updatedAt": "a", "sessionIds": ids}]),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn the_workspace_tree_route_answers_the_registry_views_and_503_without_the_plugin() {
+        // Without the plugin: the same refusal every workspace route gives.
+        let (router, _) = app("workspaces-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, _) = call(&router, Method::GET, "/api/workspaces", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        // With it: `{workspaces: [...]}`, fed the store's sessions.
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-views")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, headers, bytes) =
+            call(&router, Method::GET, "/api/workspaces", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "application/json");
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let first = &body["workspaces"][0];
+        assert_eq!(first["id"], "w-1");
+        assert_eq!(first["parent"], Value::Null);
+        assert_eq!(
+            first["sessionIds"].as_array().map(Vec::len),
+            Some(1),
+            "the route hands the registry the store's sessions: {body}"
+        );
     }
 
     #[tokio::test]
