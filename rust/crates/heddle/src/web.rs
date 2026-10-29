@@ -351,6 +351,8 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
                 .map(|sandbox| sandbox.mode())
                 .unwrap_or(heddle_sandbox::SandboxMode::WorkspaceWrite),
             heddle_home: host.home.clone(),
+            // The directory `compose_uploads` gives the turn route: a command line's attachments are read as a turn's.
+            upload_dir: heddle_web_files::uploads::upload_directory(&host.home),
         },
     ))
 }

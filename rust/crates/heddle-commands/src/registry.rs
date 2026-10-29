@@ -12,8 +12,12 @@
 //!   why a typo like `/compcat` reaches the model rather than vanishing.
 //! - **A run is two log-only events.** `command/run` is appended before the handler runs and `command/done`
 //!   after it, both outside the model's surface: a command is something the person did to the session, not
-//!   something said to the model. A handler that fails — an `Err`, or a panic — is a `command/done` of kind
-//!   `error`, never a half-written run.
+//!   something said to the model. `command/run` records `args` as the raw remainder, separating whitespace
+//!   included, as DSH records it (the page draws `/name` + args, trimmed). A handler that fails — an `Err`, or
+//!   a panic — is a `command/done` of kind `error`, never a half-written run.
+//! - **Attachments travel only to a command that accepts them.** The files sent with a line reach the handler
+//!   as message parts; a command whose input does not accept attachments refuses the line
+//!   ([`CommandError::Input`]) before anything is written, with DSH's sentence.
 //! - **The handler's words are the result.** It answers [`CommandResult::Success`] or
 //!   [`CommandResult::Error`]; the page shows them in the command's row rather than echoing them into the
 //!   composer.
@@ -25,7 +29,9 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use heddle_session::{AppendOptions, NewEvent, SessionEvent, SessionHandle, SessionStore};
+use heddle_session::{
+    AppendOptions, ContentPart, NewEvent, SessionEvent, SessionHandle, SessionStore,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -248,6 +254,9 @@ pub struct CommandContext {
     pub raw_input: String,
     /// The raw input with surrounding whitespace removed: what most commands read.
     pub args: String,
+    /// The files sent with the line, already read as message parts — the parts a user message records, so a
+    /// handler can put them in one beside its text. Empty unless the command accepts attachments.
+    pub attachments: Vec<ContentPart>,
 }
 
 /// What a handler answers: its result, or the failure a TypeScript handler would have thrown — which the run
@@ -405,6 +414,26 @@ impl std::fmt::Display for RegistrationError {
 
 impl std::error::Error for RegistrationError {}
 
+/// Why [`CommandRegistry::execute`] did not answer a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandError {
+    /// A line the layer refuses before anything runs or is written — the TypeScript `CommandInputError`, which
+    /// DSH throws to the composer so it keeps the draft. The route answers it with `400`.
+    Input(String),
+    /// The session log refused an append, with the store's sentence. The route answers it with `500`.
+    Log(String),
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandError::Input(message) | CommandError::Log(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for CommandError {}
+
 type CommandMap = Mutex<HashMap<String, Arc<CommandDefinition>>>;
 
 /// Removes one registration — and only that one: a command registered again under the same name after this
@@ -532,16 +561,20 @@ impl CommandRegistry {
             .collect()
     }
 
-    /// Run a line in a session, or answer `None` when it is not a registered command.
+    /// Run a line in a session, with the files sent with it, or answer `None` when it is not a registered
+    /// command.
     ///
-    /// `None` writes nothing: the line was never a command, and the caller sends it on as a prompt. An `Err`
-    /// is the session log refusing an append; a handler's own failure is a result of kind `error`.
+    /// `None` writes nothing: the line was never a command, and the caller sends it on as a prompt (with its
+    /// files). [`CommandError::Input`] writes nothing either: attachments sent to a command that does not accept
+    /// them. [`CommandError::Log`] is the session log refusing an append; a handler's own failure is a result of
+    /// kind `error`.
     pub async fn execute(
         &self,
         log: &dyn CommandLog,
         session: &SessionHandle,
         line: &str,
-    ) -> Result<Option<CommandExecution>, String> {
+        attachments: Vec<ContentPart>,
+    ) -> Result<Option<CommandExecution>, CommandError> {
         let Some(parsed) = parse_command_line(line) else {
             return Ok(None);
         };
@@ -554,6 +587,17 @@ impl CommandRegistry {
         let Some(definition) = definition else {
             return Ok(None);
         };
+        let accepts_attachments = definition
+            .input
+            .as_ref()
+            .and_then(|input| input.attachments)
+            == Some(true);
+        if !attachments.is_empty() && !accepts_attachments {
+            return Err(CommandError::Input(format!(
+                "/{} does not accept attachments; remove them first",
+                definition.name
+            )));
+        }
 
         let number = self.count.fetch_add(1, Ordering::SeqCst) + 1;
         let command_id = format!("{}-{number}", self.prefix);
@@ -561,16 +605,19 @@ impl CommandRegistry {
         let mut run = NewEvent::new(COMMAND_RUN_EVENT)
             .field("commandId", command_id.clone())
             .field("name", definition.name.clone());
+        // DSH records the raw remainder, separating whitespace included; the page draws `/name` + args, trimmed.
         if definition.record_input && !args.is_empty() {
-            run = run.field("args", args.clone());
+            run = run.field("args", parsed.raw_input.clone());
         }
-        log.append_event(session, run.field("source", json!({"kind": "user"})))?;
+        log.append_event(session, run.field("source", json!({"kind": "user"})))
+            .map_err(CommandError::Log)?;
 
         let context = CommandContext {
             session: session.clone(),
             command_id: command_id.clone(),
             raw_input: parsed.raw_input,
             args,
+            attachments,
         };
         let handler = Arc::clone(&definition.handler);
         // The handler is called inside the guarded future, so a panic while building its future is caught too.
@@ -590,7 +637,7 @@ impl CommandRegistry {
         if let Some(seq) = result.source_event_seq() {
             done = done.field("sourceEventSeq", seq);
         }
-        let done = log.append_event(session, done)?;
+        let done = log.append_event(session, done).map_err(CommandError::Log)?;
         Ok(Some(CommandExecution {
             command_id,
             name: definition.name.clone(),
@@ -776,7 +823,7 @@ mod tests {
         for line in ["/compcat", "hello /compact", "/Compact"] {
             assert_eq!(
                 registry
-                    .execute(fixture.log(), &fixture.handle, line)
+                    .execute(fixture.log(), &fixture.handle, line, Vec::new())
                     .await
                     .unwrap(),
                 None,
@@ -806,7 +853,12 @@ mod tests {
             .unwrap();
         let surface_before = fold_surface(fixture.events().as_slice()).unwrap().nodes;
         let execution = registry
-            .execute(fixture.log(), &fixture.handle, "/echo  hello there ")
+            .execute(
+                fixture.log(),
+                &fixture.handle,
+                "/echo  hello there ",
+                Vec::new(),
+            )
             .await
             .unwrap()
             .expect("a registered command runs");
@@ -844,7 +896,11 @@ mod tests {
             .expect("command/done");
         assert_eq!(run.get("commandId"), Some(&json!(execution.command_id)));
         assert_eq!(run.get("name"), Some(&json!("echo")));
-        assert_eq!(run.get("args"), Some(&json!("hello there")));
+        assert_eq!(
+            run.get("args"),
+            Some(&json!("  hello there ")),
+            "the raw remainder, as DSH records it"
+        );
         assert_eq!(run.get("source"), Some(&json!({"kind": "user"})));
         assert!(
             run.seq < done.seq,
@@ -865,13 +921,13 @@ mod tests {
         assert_eq!(
             body,
             format!(
-                r#""commandId":"{}","name":"echo","args":"hello there","source":{{"kind":"user"}}}}"#,
+                r#""commandId":"{}","name":"echo","args":"  hello there ","source":{{"kind":"user"}}}}"#,
                 execution.command_id
             )
         );
 
         let second = registry
-            .execute(fixture.log(), &fixture.handle, "/echo again")
+            .execute(fixture.log(), &fixture.handle, "/echo again", Vec::new())
             .await
             .unwrap()
             .unwrap();
@@ -892,7 +948,7 @@ mod tests {
         let registry = CommandRegistry::new();
         registry.register(succeed()).unwrap();
         registry
-            .execute(fixture.log(), &fixture.handle, "/ok   ")
+            .execute(fixture.log(), &fixture.handle, "/ok   ", Vec::new())
             .await
             .unwrap()
             .unwrap();
@@ -911,6 +967,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_run_records_the_raw_remainder_and_the_handler_reads_it_trimmed() {
+        let fixture = Fixture::new("raw-args");
+        let registry = CommandRegistry::new();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = Arc::clone(&seen);
+        registry
+            .register(
+                CommandDefinition::sync("goal", "a goal", move |context| {
+                    record.lock().unwrap().push(context.args);
+                    Ok(CommandResult::success())
+                })
+                .input(CommandInput::hint("<objective>")),
+            )
+            .unwrap();
+        registry
+            .register(
+                CommandDefinition::sync("quiet", "kept out of the log", |_| {
+                    Ok(CommandResult::success())
+                })
+                .record_input(false),
+            )
+            .unwrap();
+        for line in [
+            "/goal ship the parity table",
+            "/goal\tline one\nline two ",
+            "/quiet a secret",
+        ] {
+            registry
+                .execute(fixture.log(), &fixture.handle, line, Vec::new())
+                .await
+                .unwrap()
+                .expect("a registered command runs");
+        }
+        let recorded: Vec<Option<Value>> = fixture
+            .events()
+            .iter()
+            .filter(|event| event.kind == COMMAND_RUN_EVENT)
+            .map(|event| event.get("args").cloned())
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                Some(json!(" ship the parity table")),
+                Some(json!("\tline one\nline two ")),
+                None,
+            ],
+            "the raw remainder, separating whitespace included; none when the command keeps its input out"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["ship the parity table", "line one\nline two"],
+            "the handler's args are trimmed"
+        );
+    }
+
+    #[tokio::test]
+    async fn attachments_reach_only_a_command_that_accepts_them_and_any_other_refuses_before_anything_is_written()
+     {
+        let fixture = Fixture::new("attachments");
+        let registry = CommandRegistry::new();
+        let seen = Arc::new(Mutex::new(Vec::<Vec<ContentPart>>::new()));
+        let record = Arc::clone(&seen);
+        registry
+            .register(
+                CommandDefinition::sync("takes", "accepts files", move |context| {
+                    record.lock().unwrap().push(context.attachments);
+                    Ok(CommandResult::success())
+                })
+                .input(CommandInput {
+                    hint: "<text>".to_owned(),
+                    attachments: Some(true),
+                }),
+            )
+            .unwrap();
+        registry
+            .register(CommandDefinition::sync("plain", "no files", |_| {
+                panic!("must not run")
+            }))
+            .unwrap();
+        registry
+            .register(
+                CommandDefinition::sync("hinted", "input, but no files", |_| {
+                    panic!("must not run")
+                })
+                .input(CommandInput {
+                    hint: "<text>".to_owned(),
+                    attachments: Some(false),
+                }),
+            )
+            .unwrap();
+        let file = ContentPart::File(heddle_session::FilePart {
+            name: "a.txt".to_owned(),
+            path: "/uploads/a.txt".to_owned(),
+            bytes: 1,
+            sha256: "00".to_owned(),
+        });
+
+        let first = registry
+            .execute(
+                fixture.log(),
+                &fixture.handle,
+                "/takes look",
+                vec![file.clone()],
+            )
+            .await
+            .unwrap()
+            .expect("an accepting command runs");
+        assert_eq!(*seen.lock().unwrap(), [vec![file.clone()]]);
+
+        let before = fixture.events().len();
+        for (line, name) in [("/plain", "plain"), ("/hinted with text", "hinted")] {
+            let refused = registry
+                .execute(fixture.log(), &fixture.handle, line, vec![file.clone()])
+                .await;
+            assert_eq!(
+                refused,
+                Err(CommandError::Input(format!(
+                    "/{name} does not accept attachments; remove them first"
+                )))
+            );
+        }
+        assert_eq!(
+            fixture.events().len(),
+            before,
+            "a refused line writes nothing"
+        );
+        assert_eq!(
+            registry
+                .execute(
+                    fixture.log(),
+                    &fixture.handle,
+                    "/unknown",
+                    vec![file.clone()]
+                )
+                .await,
+            Ok(None),
+            "a line that is no command is sent on as a prompt, files and all"
+        );
+        assert_eq!(fixture.events().len(), before);
+
+        let second = registry
+            .execute(fixture.log(), &fixture.handle, "/takes", Vec::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[1],
+            Vec::<ContentPart>::new(),
+            "no files is an empty list"
+        );
+        assert_eq!(
+            second.command_id,
+            format!("{}2", &first.command_id[..first.command_id.len() - 1]),
+            "a refused line takes no run id"
+        );
+    }
+
+    #[tokio::test]
     async fn a_handler_that_fails_is_a_run_that_ended_in_error_recorded_as_such() {
         let fixture = Fixture::new("boom");
         let registry = CommandRegistry::new();
@@ -920,7 +1134,7 @@ mod tests {
             }))
             .unwrap();
         let execution = registry
-            .execute(fixture.log(), &fixture.handle, "/boom")
+            .execute(fixture.log(), &fixture.handle, "/boom", Vec::new())
             .await
             .unwrap()
             .unwrap();
@@ -945,7 +1159,7 @@ mod tests {
             }))
             .unwrap();
         let execution = registry
-            .execute(fixture.log(), &fixture.handle, "/boom")
+            .execute(fixture.log(), &fixture.handle, "/boom", Vec::new())
             .await
             .unwrap()
             .unwrap();
