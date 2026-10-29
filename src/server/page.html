@@ -5677,7 +5677,7 @@ events.addEventListener('session', (message) => {
   } else if (event.type === 'message' && event.message.role === 'user') {
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
-      attachments: contentAttachments(event.message.content),
+      attachments: contentAttachments(event.message.content, payload.session),
     })
   }
   else if (event.type === 'message' && event.message.role === 'tool') {
@@ -6416,7 +6416,11 @@ function queueAttachmentStrip(attachments) {
   const strip = document.createElement('div')
   strip.className = 'queue-files'
   for (const file of attachments) {
-    const url = uploadUrlFor(file.path)
+    /**
+     * A queued message is not in the session's log yet, so the server does not serve its upload; the thumbnail is the
+     * page's own copy of the picked file, as DSH's queue draws its previews from the client's memory.
+     */
+    const url = typeof file.preview === 'string' ? file.preview : null
     if (url !== null && /[.](png|jpe?g|webp|gif)$/i.test(String(file.name ?? ''))) {
       const thumb = document.createElement('img')
       thumb.className = 'queue-thumb'
@@ -7554,18 +7558,25 @@ function takeAttachments() {
   return taken
 }
 
-/** The same-origin address a stored upload path is served at, or null when there is no leaf. */
-function uploadUrlFor(path) {
+/**
+ * The same-origin address a stored upload path is served at for one session, or null when there is no leaf.
+ *
+ * The server serves an upload only to a session whose log references it (DSH's `session/attachment`), so the address
+ * names the session the card belongs to.
+ */
+function uploadUrlFor(path, session) {
   const leaf = String(path ?? '').split('/').pop() ?? ''
-  return leaf.length === 0 ? null : `/api/uploads/${encodeURIComponent(leaf)}`
+  if (leaf.length === 0) return null
+  const scope = typeof session === 'string' && session.length > 0 ? `?session=${encodeURIComponent(session)}` : ''
+  return `/api/uploads/${encodeURIComponent(leaf)}${scope}`
 }
 
-/** The attachments a live message event carries, shaped like the transcript's own metadata. */
-function contentAttachments(content) {
+/** The attachments a live message event of one session carries, shaped like the transcript's own metadata. */
+function contentAttachments(content, session) {
   const attachments = []
   for (const part of content ?? []) {
     if (part.type !== 'image' && part.type !== 'file') continue
-    const url = uploadUrlFor(part.path)
+    const url = uploadUrlFor(part.path, session)
     if (url === null) continue
     attachments.push({
       kind: part.type,
@@ -7663,7 +7674,9 @@ async function addPickedFiles(files) {
         throw new Error(detail.length > 0 ? detail : `the server answered ${response.status}`)
       }
       const saved = await response.json()
-      added.push({ path: saved.path, name: file.name, bytes: saved.bytes })
+      // The page's own preview of an image, for the queue's thumbnail before the message reaches the log.
+      const preview = /^image\//.test(String(file.type ?? '')) ? URL.createObjectURL(file) : undefined
+      added.push({ path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) })
     } catch (error) {
       showAttachFailure(files, error)
       return
