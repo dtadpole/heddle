@@ -106,6 +106,8 @@ pub struct Args {
     pub quiet: bool,
     /// `-h, --help`.
     pub help: bool,
+    /// `-V, --version`: print the release version and exit, as `dsh -V` does.
+    pub version: bool,
     /// `-c, --config <path>`: the base layer instead of the default profile.
     pub config: Option<String>,
     /// `--profile <name|dir>`, as typed. A name and a directory are told apart by the argument itself
@@ -211,6 +213,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, UsageError> {
             "--json" => args.json = true,
             "-q" | "--quiet" => args.quiet = true,
             "-h" | "--help" => args.help = true,
+            "-V" | "--version" => args.version = true,
             "goal" => {
                 args.command = Some(CommandWord::Goal);
                 args.target = optional_positional(argv, &mut index);
@@ -446,6 +449,15 @@ mod tests {
         parse_args(&argv)
             .expect_err("the command line is refused")
             .0
+    }
+
+    /// DSH parity S74: `-V` and `--version` are the version flag, as in `dsh`; before the fix both were refused as
+    /// unknown arguments.
+    #[test]
+    fn the_version_flag_is_minus_capital_v_or_double_dash_version() {
+        assert!(parse(&["-V"]).version);
+        assert!(parse(&["--version"]).version);
+        assert!(!parse(&["--help"]).version);
     }
 
     #[test]

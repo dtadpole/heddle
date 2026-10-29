@@ -11,6 +11,7 @@ import { describeContent } from './llm/types.ts'
 import { canonicalPath } from './paths.ts'
 import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
+import { HEDDLE_VERSION } from './version.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
 import { heddleHome } from './config/schema.ts'
@@ -26,6 +27,8 @@ interface Args {
   target?: string
   quiet: boolean
   help: boolean
+  /** `-V, --version`: print the release version and exit, as `dsh -V` does. */
+  version: boolean
   config?: string
   profile?: string
   patch: string[]
@@ -85,6 +88,7 @@ options:
   -p, --punctuation <mark>   punctuation the greeting service appends (default !)
   -t, --target <name>        who the run is for (default heddle)
   -q, --quiet                do not attach the console exporter
+  -V, --version              print the version and exit
   -h, --help                 show this message
 
 commands:
@@ -115,7 +119,7 @@ credential of its own.
 `
 
 function parseArgs(argv: readonly string[]): Args {
-  const args: Args = { quiet: false, help: false, patch: [], list: false, json: false, stream: false, validate: false, origins: false, dryRun: false, fresh: false, generated: [] }
+  const args: Args = { quiet: false, help: false, version: false, patch: [], list: false, json: false, stream: false, validate: false, origins: false, dryRun: false, fresh: false, generated: [] }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? ''
     const next = () => argv[++index]
@@ -217,6 +221,10 @@ function parseArgs(argv: readonly string[]): Args {
       case '-h':
       case '--help':
         args.help = true
+        break
+      case '-V':
+      case '--version':
+        args.version = true
         break
       case 'goal': {
         /**
@@ -938,6 +946,11 @@ function requireWorkspace(ctx: { workspace?: WorkspaceService }): WorkspaceServi
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
+  /** DSH's `-V, --version`: the release alone on one line, exit 0 (DSH parity S74). */
+  if (args.version) {
+    process.stdout.write(`${HEDDLE_VERSION}\n`)
+    return
+  }
   if (args.help) {
     process.stdout.write(USAGE)
     return

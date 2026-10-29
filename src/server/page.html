@@ -2955,6 +2955,12 @@
       <ul id="settings-workspaces"></ul>
     </section>
     <p id="settings-note" class="meta">Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.</p>
+    <!--
+      DSH ends General Settings with "Current version: {version}" from the build's version metadata, and omits the row
+      when a build has none (DSH parity S72). The release comes from the server's /healthz, the value the CLI's
+      --version prints.
+    -->
+    <p id="settings-version" class="meta" hidden></p>
   </div>
 </dialog>
 <!--
@@ -9896,6 +9902,12 @@ function settingsEndpoint(endpoint) {
 }
 
 /** Fill the dialog from the three routes it needs, each tolerating a profile that does not load it. */
+/** DSH's last General Settings row, "Current version: {version}", or null when the server reports no version. */
+function settingsVersionText(health) {
+  const version = health !== null && typeof health === 'object' ? health.version : undefined
+  return typeof version === 'string' && version.length > 0 ? `Current version: ${version}` : null
+}
+
 async function fillSettings() {
   const server = document.getElementById('settings-server')
   const models = document.getElementById('settings-models')
@@ -9908,10 +9920,16 @@ async function fillSettings() {
       return null
     }
   }
-  const [status, endpoints, tree] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
+  const [status, endpoints, tree, health] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree'), read('/healthz')])
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
+  const versionRow = document.getElementById('settings-version')
+  if (versionRow !== null) {
+    const version = settingsVersionText(health)
+    versionRow.textContent = version ?? ''
+    versionRow.hidden = version === null
+  }
 
   const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
   server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))

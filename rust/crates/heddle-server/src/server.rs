@@ -817,6 +817,8 @@ struct Healthz {
     ok: bool,
     service: &'static str,
     port: u16,
+    /// The release the CLI's `--version` prints and Settings shows (DSH parity S72): the workspace version.
+    version: &'static str,
 }
 
 fn healthz_body(port: u16) -> Response {
@@ -826,6 +828,7 @@ fn healthz_body(port: u16) -> Response {
             ok: true,
             service: SERVICE_NAME,
             port,
+            version: env!("CARGO_PKG_VERSION"),
         },
     )
 }
@@ -2115,7 +2118,10 @@ mod tests {
         assert_eq!(headers["content-type"], "application/json");
         assert_eq!(
             body_text(&bytes),
-            format!("{{\"ok\":true,\"service\":\"{SERVICE_NAME}\",\"port\":3082}}\n")
+            format!(
+                "{{\"ok\":true,\"service\":\"{SERVICE_NAME}\",\"port\":3082,\"version\":\"{}\"}}\n",
+                env!("CARGO_PKG_VERSION")
+            )
         );
 
         let (status, headers, bytes) = call(&router, Method::GET, "/favicon.svg", None).await;

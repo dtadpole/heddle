@@ -73,6 +73,11 @@ pub fn run(invocation: &Invocation, out: &mut output::Output<'_>) -> Exit {
         Ok(args) => args,
         Err(error) => return out.fail(&error.0),
     };
+    // DSH's `-V, --version`: the release alone on one line, exit 0 (DSH parity S74).
+    if args.version {
+        out.out(concat!(env!("CARGO_PKG_VERSION"), "\n"));
+        return Exit::Success;
+    }
     if args.help {
         out.out(&usage::usage(usage::SERVED));
         return Exit::Success;

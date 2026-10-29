@@ -28,6 +28,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { HEDDLE_VERSION } from '../version.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -409,7 +410,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   if (url.pathname === '/healthz' && request.method === 'GET') {
-    respond(response, 200, 'application/json', `${JSON.stringify({ ok: true, service: 'heddle-web', port: state.port })}\n`)
+    // `version` is the release the CLI's --version prints and Settings shows (DSH parity S72): one value, no secret.
+    respond(response, 200, 'application/json', `${JSON.stringify({ ok: true, service: 'heddle-web', port: state.port, version: HEDDLE_VERSION })}\n`)
     return
   }
 

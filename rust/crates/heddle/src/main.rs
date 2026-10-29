@@ -53,6 +53,20 @@ mod tests {
         (exit, captured.stdout_text(), captured.stderr_text())
     }
 
+    /// DSH parity S74: `heddle --version` and `-V` print the release alone and exit 0, as `dsh -V` does; before
+    /// the fix both exited 1 with "unknown argument". The help lists the flag too.
+    #[test]
+    fn version_prints_the_release_alone_and_exits_zero() {
+        for flag in ["--version", "-V"] {
+            let (exit, stdout, stderr) = run_captured(&[flag]);
+            assert_eq!(exit, Exit::Success, "{flag}");
+            assert_eq!(stdout, concat!(env!("CARGO_PKG_VERSION"), "\n"), "{flag}");
+            assert_eq!(stderr, "", "{flag}");
+        }
+        let (_, help, _) = run_captured(&["--help"]);
+        assert!(help.contains("  -V, --version              print the version and exit\n"));
+    }
+
     #[test]
     fn help_exits_zero_with_the_gated_usage_text() {
         let (exit, stdout, stderr) = run_captured(&["--help"]);

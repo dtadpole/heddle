@@ -189,6 +189,10 @@ pub const LINES: &[(&str, Capability)] = &[
         Capability::Always,
     ),
     (
+        "  -V, --version              print the version and exit",
+        Capability::Always,
+    ),
+    (
         "  -h, --help                 show this message",
         Capability::Always,
     ),

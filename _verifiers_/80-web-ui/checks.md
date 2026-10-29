@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-29T12:22:48Z
 level: L3
-version: 1.1.0
+version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -41,6 +41,10 @@ grounded_in:
   sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
   workspace* and *Delete workspace* dialogs end to end.
+- [`check-version.mjs`](check-version.mjs) — the release where DSH reports it: `--version` and `-V` print it alone
+  and exit 0, a running `heddle web` names the same release in `/healthz`, and the Settings dialog ends with DSH's
+  "Current version: {version}" row (parity S72, S74; before the fix both builds refused `--version` as an unknown
+  argument and reported no version anywhere).
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
