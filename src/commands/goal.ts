@@ -50,14 +50,6 @@ export interface GoalHost {
   clear(handle: SessionHandle, ref: GoalRef): unknown
 }
 
-/**
- * The run context `/goal` reads: the layer's, plus the attachments that travelled with the line.
- *
- * `attachments` is not yet part of {@link CommandContext}; developer-three adds it. Until then it is absent, which
- * reads as no attachments, so this handler is already the one that layer will call.
- */
-export type GoalCommandContext = CommandContext & { readonly attachments?: readonly ContentPart[] }
-
 /** The model-visible user message that carries a goal objective's attachments, DSH's `followup` (:98-107). */
 export interface GoalFollowup {
   readonly role: 'user'
@@ -75,9 +67,9 @@ export interface GoalFollowup {
  */
 export type GoalFollowupSink = (session: SessionHandle, message: GoalFollowup) => void
 
-/** `/goal`'s definition, whose handler also takes the attachments the layer will pass. */
+/** `/goal`'s definition: the layer's, with a handler that answers at once. */
 export interface GoalCommandDefinition extends CommandDefinition {
-  readonly handler: (context: GoalCommandContext) => CommandResult
+  readonly handler: (context: CommandContext) => CommandResult
 }
 
 /** One parsed `/goal` line. */
@@ -145,8 +137,9 @@ export function goalAttachmentFollowup(attachments: readonly ContentPart[]): Goa
 /**
  * The `/goal` command over the goal service.
  *
- * `followup` is where a create's or an edit's attachments go once the goal has changed; when it is absent they go
- * nowhere yet (the TODO in {@link submitObjectiveAttachments}).
+ * Its input accepts attachments, so the layer hands the files sent with the line to the handler as
+ * `context.attachments`, already read as message parts. `followup` is where a create's or an edit's attachments go
+ * once the goal has changed; when it is absent they go nowhere yet (the TODO in {@link submitObjectiveAttachments}).
  */
 export function goalCommand(goals: GoalHost, followup?: GoalFollowupSink): GoalCommandDefinition {
   return {
@@ -159,10 +152,9 @@ export function goalCommand(goals: GoalHost, followup?: GoalFollowupSink): GoalC
   }
 }
 
-/** Run one parsed line through the goal service, which owns every write (:109-172). */
-function executeGoalCommand(goals: GoalHost, followup: GoalFollowupSink | undefined, context: GoalCommandContext): CommandResult {
-  const { session } = context
-  const attachments = context.attachments ?? []
+/** Run one parsed line, with the attachments the layer read for it, through the goal service, which owns every write (:109-172). */
+function executeGoalCommand(goals: GoalHost, followup: GoalFollowupSink | undefined, context: CommandContext): CommandResult {
+  const { session, attachments } = context
   const command = parseGoalCommand(context.rawInput)
   if (attachments.length > 0 && command.kind !== 'create' && command.kind !== 'edit') {
     return { kind: 'error', text: GOAL_ATTACHMENTS_REFUSED }
@@ -227,7 +219,8 @@ function submitObjectiveAttachments(followup: GoalFollowupSink | undefined, sess
   const message = goalAttachmentFollowup(attachments)
   if (message === undefined) return
   // TODO(developer-three, D-057): the command layer has no way yet to start the follow-up turn DSH's
-  // `agent.followup` starts — `CommandContext` carries no attachments and `CommandAction` is only a download. Until
+  // `agent.followup` starts. The attachments now reach this handler (`context.attachments`, d98176c9), but nothing a
+  // command can reach queues a turn — `CommandAction` is only a download and the service holds no turn starter. Until
   // the command service passes a `followup` sink to `goalCommand`, a create's or an edit's attachments are accepted
   // and the goal changes, but the message is not delivered.
   followup?.(session, message)

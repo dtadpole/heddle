@@ -1,7 +1,7 @@
 ---
 title: The heddle-commands crate
 created: 2026-10-29T12:21:02Z
-modified: 2026-10-29T15:20:00Z
+modified: 2026-10-29T15:40:00Z
 version: 0.3.0
 description: The Rust port crate for the host's slash commands — the registry, the line parser, the five built-in commands (with DSH's /goal) and the two routes the composer's slash menu uses — its public API, what it needs from other crates, and how it is mounted.
 grounded_in:
@@ -25,7 +25,7 @@ ordinary prompt, which is how `/skillname` and a typo like `/compcat` still reac
 | Ported from | `src/commands/` (`registry.ts`, `builtins.ts`, `goal.ts`, `http.ts`, `service.ts`) |
 | Judged by | `_verifiers_/80-web-ui/check-slash-commands.mjs`, through the `heddle` binary (`HEDDLE_BIN`) |
 | Sources | [`src/`](src/INDEX.md) |
-| Status | **mounted by `heddle web`** (`rust/crates/heddle/src/web.rs`, `commands_host`); 71 unit tests port `test/commands.test.ts` and `test/commands-goal.test.ts` case by case; through a debug `HEDDLE_BIN` the check's four server checks pass, the browser check is judged separately under the browser lock |
+| Status | **mounted by `heddle web`** (`rust/crates/heddle/src/web.rs`, `commands_host`); 75 unit tests port `test/commands.test.ts` and `test/commands-goal.test.ts` case by case; through a debug `HEDDLE_BIN` the check's four server checks pass, the browser check is judged separately under the browser lock |
 | Owner | `developer-three` (D-057), with the TypeScript layer; what `/goal` means (`src/goal.rs`) is `developer-nine`'s (D-059), landed through this crate and credited under D-055 |
 
 ## Routes
@@ -49,7 +49,8 @@ feature crate's, and the session segment is named `{id}` as the server's router 
 `attachments` is the list of uploaded paths a turn takes, read by the turn's reader
 (`heddle_web_files::attachments::read_attachments` over `<heddle home>/uploads`) into the parts a user message
 records (`heddle_session::ContentPart`), and handed to the handler as `CommandContext::attachments`. Only `/goal`
-declares that it accepts them (`CommandInput::attachments`); every other built-in refuses a line that carries files. `command/run` records
+declares that it accepts them (`CommandInput::attachments`), and its handler reads them from the context; every other
+built-in refuses a line that carries files. `command/run` records
 `args` as the raw remainder after the name, separating whitespace included, as DSH does; the handler's
 `CommandContext::args` is trimmed.
 
@@ -75,7 +76,7 @@ A reload draws a command's row from the session's history: `heddle-server`'s tra
 | `parse_command_line`, `is_command_name`, `default_label` | the TypeScript `COMMAND_LINE` and `COMMAND_NAME` rules, without a regex crate |
 | `CommandDefinition` (`new`, `sync`, `label`, `section`, `input`, `record_input`), `CommandContext` (`session`, `command_id`, `raw_input`, `args`, `attachments`), `CommandResult`, `CommandAction`, `CommandDescriptor`, `CommandExecution`, `CommandLog`, `CommandError` | the shapes; a handler's `Err` (or panic) is a result of kind `error` |
 | `compact_command`, `feedback_command`, `permission_command`, `export_command` | the built-ins over `CompactionHost`, `CommandLog` + `AnonymousUser`, `PermissionHost` |
-| `goal_command(GoalHost, Option<GoalFollowupSink>)`, `execute_goal_command`, `parse_goal_command`, `render_goal`, `command_hint`, `goal_attachment_followup`, `GoalHostError`, `GOAL_USAGE`, `GOAL_STATE_ERROR`, … | `/goal` (`goal.rs`): the handler that takes attachments, the parse, the card, and the refusal split (`Refused` → the one sentence, `Failed` → the run's error) |
+| `goal_command(GoalHost, Option<GoalFollowupSink>)`, `execute_goal_command`, `parse_goal_command`, `render_goal`, `command_hint`, `goal_attachment_followup`, `GoalHostError`, `GOAL_USAGE`, `GOAL_STATE_ERROR`, … | `/goal` (`goal.rs`): the handler that reads `CommandContext::attachments`, the parse, the card, and the refusal split (`Refused` → the one sentence, `Failed` → the run's error) |
 | `Commands` (`new(CommandServices)`, `with_registry(sessions, registry, upload_dir)`, `open`, `read_attachments`, `execute`), `CommandServices` (… `heddle_home`, `upload_dir`) | the host the routes read, wired to the real services and the turn's upload directory |
 | `router(Arc<Commands>) -> axum::Router`, `ROUTES`, `MAX_COMMAND_LINE` | the mount |
 
@@ -109,8 +110,10 @@ so a command line's attachments are read exactly as a turn's.
   server's catch-all.
 - The ids (`cmd-<8 hex>`, the anonymous UUID) are random but not cryptographic: neither is a secret.
 - As in the TypeScript build, `/goal`'s attachments do not go on to a turn yet: the route reads them into
-  `CommandContext::attachments`, but the registered handler does not pass them to `execute_goal_command` yet and
-  `Commands::new` passes no follow-up sink — the TODO is in `goal.rs`.
+  `CommandContext::attachments` and the registered handler passes them to `execute_goal_command` (refused on every
+  form but a create or an edit; on those the follow-up message is built), but nothing in the layer can start the
+  follow-up turn DSH's `agent.followup` starts, so `Commands::new` passes no follow-up sink — the TODO is in
+  `goal.rs`.
 
 ## Read next
 

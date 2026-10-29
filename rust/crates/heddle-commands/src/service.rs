@@ -620,6 +620,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goal_through_the_host_takes_uploaded_files_only_with_an_objective() {
+        let fixture = Fixture::new("host-goal-attachments");
+        let goals = Arc::new(GoalService::new(
+            fixture.store.clone(),
+            heddle_goal::GoalConfig::default(),
+        ));
+        let mut services = services(&fixture);
+        services.goals = Some(Arc::clone(&goals));
+        let commands = Commands::new(services);
+        let raw = serde_json::json!([
+            fixture.upload("2026-10-29T00-00-00-000Z-spec.md", b"# the release\n")
+        ]);
+        let attachments = commands.read_attachments(Some(&raw)).unwrap();
+        let execute = |line: &'static str| {
+            let attachments = attachments.clone();
+            let commands = &commands;
+            let handle = &fixture.handle;
+            async move {
+                commands
+                    .execute(handle, line, attachments)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{line} is a command"))
+                    .result
+            }
+        };
+        assert_eq!(
+            execute("/goal pause").await,
+            CommandResult::error(crate::goal::GOAL_ATTACHMENTS_REFUSED),
+            "the layer runs /goal, which refuses files on a form that sets no objective"
+        );
+        assert_eq!(goals.get(&fixture.handle.id).unwrap(), None);
+        assert!(
+            execute("/goal ship the release")
+                .await
+                .text()
+                .unwrap_or_default()
+                .starts_with("Goal created\nStatus: active\nObjective: ship the release\n"),
+            "a create takes them"
+        );
+        assert_eq!(
+            goals
+                .get(&fixture.handle.id)
+                .unwrap()
+                .map(|view| view.goal.objective),
+            Some("ship the release".to_owned())
+        );
+    }
+
+    #[tokio::test]
     async fn permission_reads_and_writes_the_sessions_recorded_mode() {
         let fixture = Fixture::new("host-permission");
         let sessions = Arc::new(SessionService::from_store(fixture.store.clone()));

@@ -279,9 +279,10 @@ pub fn goal_attachment_followup(attachments: &[ContentPart]) -> Option<Message> 
 
 /// The `/goal` command over the goal service.
 ///
-/// `followup` is where a create's or an edit's attachments go once the goal has changed; when it is `None` they
-/// go nowhere yet (the TODO in `submit_objective_attachments`). The registered handler runs with no attachments,
-/// because [`CommandContext`] carries none yet; [`execute_goal_command`] is the handler that already takes them.
+/// Its input accepts attachments, so the layer hands the files sent with the line to the handler as
+/// [`CommandContext::attachments`], already read as message parts, and the handler passes them to
+/// [`execute_goal_command`]. `followup` is where a create's or an edit's attachments go once the goal has
+/// changed; when it is `None` they go nowhere yet (the TODO in `submit_objective_attachments`).
 pub fn goal_command(
     goals: Arc<dyn GoalHost>,
     followup: Option<GoalFollowupSink>,
@@ -289,7 +290,14 @@ pub fn goal_command(
     CommandDefinition::sync(
         "goal",
         "Set or view the goal for a long-running task",
-        move |context| execute_goal_command(goals.as_ref(), followup.as_ref(), &context, &[]),
+        move |context| {
+            execute_goal_command(
+                goals.as_ref(),
+                followup.as_ref(),
+                &context,
+                &context.attachments,
+            )
+        },
     )
     .label("Goal")
     .section(CommandSection::Add)
@@ -302,9 +310,8 @@ pub fn goal_command(
 /// Run one `/goal` line, with the attachments that travelled with it, through the goal service, which owns every
 /// write (:109-172).
 ///
-/// This is `goal.ts`'s handler over `GoalCommandContext`: the layer's context plus its attachments. An empty slice
-/// is no attachments. The `Err` is a failure that is not the goal domain's, for the layer to record as the run's
-/// error.
+/// This is `goal.ts`'s handler; the registered one passes the layer's `context.attachments`. An empty slice is no
+/// attachments. The `Err` is a failure that is not the goal domain's, for the layer to record as the run's error.
 pub fn execute_goal_command(
     goals: &dyn GoalHost,
     followup: Option<&GoalFollowupSink>,
@@ -415,11 +422,10 @@ fn submit_objective_attachments(
         return;
     };
     // TODO(developer-three, D-057): the command layer has no way yet to start the follow-up turn DSH's
-    // `agent.followup` starts — `CommandContext` carries no attachments, the `POST /api/sessions/{id}/commands`
-    // body is read for its `line` alone, and `CommandAction` is only a download. Until `Commands::new` passes a
-    // follow-up sink to `goal_command` (and its handler passes the context's attachments to
-    // `execute_goal_command`), a create's or an edit's attachments are accepted and the goal changes, but the
-    // message is not delivered.
+    // `agent.followup` starts. The attachments now reach this handler (`CommandContext::attachments`, 89df38c3),
+    // but nothing a command can reach queues a turn — `CommandAction` is only a download and `CommandServices`
+    // holds no turn starter. Until `Commands::new` passes a follow-up sink to `goal_command`, a create's or an
+    // edit's attachments are accepted and the goal changes, but the message is not delivered.
     if let Some(sink) = followup {
         sink(session, message);
     }
@@ -473,7 +479,7 @@ mod tests {
     type Followups = Arc<Mutex<Vec<(SessionHandle, Message)>>>;
 
     /// One session, its goal service and `/goal` over them. `run` takes a whole line, splits it as the layer
-    /// does and passes attachments the way the layer will once it carries them.
+    /// does and passes attachments to the handler; the layer's own run (its context) is pinned at the end.
     struct Harness {
         fixture: Fixture,
         goals: Arc<GoalService>,
@@ -529,13 +535,13 @@ mod tests {
                 command_id: "cmd-0000abcd-1".to_owned(),
                 args: text::trim(&parsed.raw_input).to_owned(),
                 raw_input: parsed.raw_input,
-                attachments: Vec::new(),
+                attachments: attachments.to_vec(),
             };
             execute_goal_command(
                 self.host.as_ref(),
                 self.sink.as_ref(),
                 &context,
-                attachments,
+                &context.attachments,
             )
         }
 
@@ -1587,6 +1593,152 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&message).unwrap()["source"],
             json!({"kind": "user"})
+        );
+    }
+
+    // ---- attachments through the layer's own context ----
+
+    /// A registry holding only the harness's `/goal`, and the run the layer performs for a line and its files.
+    async fn execute_through_the_layer(
+        harness: &Harness,
+        registry: &CommandRegistry,
+        line: &str,
+        attachments: Vec<ContentPart>,
+    ) -> CommandResult {
+        registry
+            .execute(
+                harness.fixture.log(),
+                &harness.fixture.handle,
+                line,
+                attachments,
+            )
+            .await
+            .expect("the log takes the run")
+            .unwrap_or_else(|| panic!("{line} is /goal"))
+            .result
+    }
+
+    #[tokio::test]
+    async fn the_layer_hands_goal_the_lines_files_and_every_form_that_sets_no_objective_refuses_them()
+     {
+        let harness = Harness::new();
+        let registry = CommandRegistry::new();
+        registry.register(harness.command.clone()).unwrap();
+        for line in [
+            "/goal",
+            "/goal clear",
+            "/goal pause",
+            "/goal resume",
+            "/goal edit",
+        ] {
+            assert_eq!(
+                execute_through_the_layer(&harness, &registry, line, vec![file()]).await,
+                error(ATTACHMENTS_REFUSED),
+                "{line} with no goal"
+            );
+        }
+        harness.create("o");
+        for line in ["/goal", "/goal clear", "/goal pause", "/goal resume"] {
+            assert_eq!(
+                execute_through_the_layer(&harness, &registry, line, vec![image(), file()]).await,
+                error(ATTACHMENTS_REFUSED),
+                "{line} with a goal"
+            );
+        }
+        let current = harness.current().unwrap();
+        assert_eq!(
+            current.goal.phase,
+            GoalPhase::Active,
+            "the refused pause did not pause"
+        );
+        assert_eq!(
+            current.goal.objective, "o",
+            "the refused clear did not clear"
+        );
+        assert_eq!(
+            harness.changes(),
+            1,
+            "only the direct create wrote a goal change"
+        );
+        assert!(harness.followups().is_empty());
+        // `/goal` accepts attachments, so the layer ran it and recorded `/goal`'s own refusal, not the layer's.
+        let done: Vec<_> = harness
+            .fixture
+            .events()
+            .iter()
+            .filter(|event| event.kind == crate::registry::COMMAND_DONE_EVENT)
+            .map(|event| (event.get("kind").cloned(), event.get("text").cloned()))
+            .collect();
+        assert_eq!(done.len(), 9);
+        assert!(
+            done.iter()
+                .all(|entry| *entry == (Some(json!("error")), Some(json!(ATTACHMENTS_REFUSED))))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_layer_hands_goal_the_lines_files_and_a_create_takes_them_on_as_one_follow_up_message()
+     {
+        let harness = Harness::new();
+        let registry = CommandRegistry::new();
+        registry.register(harness.command.clone()).unwrap();
+        assert_eq!(
+            execute_through_the_layer(
+                &harness,
+                &registry,
+                "/goal ship the release",
+                vec![image(), file()]
+            )
+            .await,
+            success(card(
+                "Goal created",
+                "active",
+                "ship the release",
+                "0/100",
+                "armed",
+                HINT_ARMED
+            ))
+        );
+        assert_eq!(
+            harness.current().unwrap().goal.objective,
+            "ship the release",
+            "the objective is the text alone"
+        );
+        assert_eq!(
+            harness.followups(),
+            vec![(
+                harness.fixture.handle.clone(),
+                Message {
+                    role: Role::User,
+                    tool_call_id: None,
+                    content: vec![image(), file(), attachments_text()],
+                    source: Some(json!({"kind": "user"})),
+                }
+            )]
+        );
+        assert!(
+            text_of(
+                &execute_through_the_layer(
+                    &harness,
+                    &registry,
+                    "/goal edit ship it twice",
+                    vec![file()]
+                )
+                .await
+            )
+            .starts_with("Goal updated\n")
+        );
+        assert_eq!(
+            harness.followups().len(),
+            2,
+            "an edit takes its files on too"
+        );
+        execute_through_the_layer(&harness, &registry, "/goal edit ship it thrice", Vec::new())
+            .await;
+        assert_eq!(
+            harness.followups().len(),
+            2,
+            "a line without files carries nothing on"
         );
     }
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -8,13 +9,20 @@ import { after, test } from 'node:test'
 import {
   goalCommand,
   parseGoalCommand,
-  type GoalCommandContext,
   type GoalFollowup,
   type GoalHost,
 } from '../src/commands/goal.ts'
-import { CommandRegistry, parseCommandLine, type CommandLog, type CommandResult } from '../src/commands/registry.ts'
+import { handleCommandRequest, type CommandRouteHost } from '../src/commands/http.ts'
+import {
+  CommandRegistry,
+  parseCommandLine,
+  type CommandContext,
+  type CommandLog,
+  type CommandResult,
+} from '../src/commands/registry.ts'
 import { GoalService } from '../src/goal/service.ts'
 import type { ContentPart } from '../src/llm/types.ts'
+import { uploadDirectory } from '../src/server/uploads.ts'
 import { SessionStore, type SessionHandle } from '../src/session/store.ts'
 
 /**
@@ -53,7 +61,7 @@ function hostOf(goals: GoalService): GoalHost {
 
 /**
  * One session, its goal service and `/goal` over them. `run` takes a whole line, splits it as the layer does and
- * passes attachments the way the layer will once it carries them.
+ * builds the layer's context, attachments included (none when absent). The layer's own run is pinned at the end.
  */
 function harness(options: { readonly host?: (goals: GoalService) => GoalHost; readonly sink?: boolean } = {}) {
   counter += 1
@@ -66,7 +74,7 @@ function harness(options: { readonly host?: (goals: GoalService) => GoalHost; re
   const run = (line: string, attachments?: readonly ContentPart[]) => {
     const parsed = parseCommandLine(line)
     assert.ok(parsed !== undefined && parsed.name === 'goal', `${JSON.stringify(line)} is a /goal line`)
-    const context: GoalCommandContext = {
+    const context: CommandContext = {
       session: handle,
       commandId: 'cmd-0000abcd-1',
       rawInput: parsed.rawInput,
@@ -543,4 +551,116 @@ test('without a follow-up sink a create with attachments still sets the goal (th
   const { run, goals, handle } = harness({ sink: false })
   assert.match(textOf(run('/goal ship it', [file])), /^Goal created\n/)
   assert.equal(goals.get(handle)?.objective, 'ship it')
+})
+
+// ---- attachments through the layer's own context ----
+
+/** A registry holding only `/goal`, its log, and the run the layer performs for a line and its files. */
+function layered(options: { readonly sink?: boolean } = {}) {
+  const parts = harness(options)
+  const registry = new CommandRegistry()
+  registry.register(parts.command)
+  const log: CommandLog = { append: (handle, event) => parts.store.append(handle, event) }
+  const execute = async (line: string, attachments: readonly ContentPart[] = []) => {
+    const execution = await registry.execute(log, parts.handle, line, attachments)
+    assert.ok(execution !== undefined, `${line} is /goal`)
+    return execution
+  }
+  const done = () => parts.store.read(parts.handle).filter((event) => event.type === 'command/done')
+  return { ...parts, registry, log, execute, done }
+}
+
+test("the layer hands /goal the line's files as context.attachments: refused on every form that sets no objective", async () => {
+  const { execute, goals, handle, changes, followups, done } = layered()
+  for (const line of ['/goal', '/goal clear', '/goal pause', '/goal resume', '/goal edit']) {
+    const execution = await execute(line, [file])
+    assert.deepEqual(execution.result, { kind: 'error', text: ATTACHMENTS_REFUSED }, `${line} with no goal`)
+  }
+  goals.create(handle, { objective: 'o' })
+  for (const line of ['/goal', '/goal clear', '/goal pause', '/goal resume']) {
+    const execution = await execute(line, [image, file])
+    assert.deepEqual(execution.result, { kind: 'error', text: ATTACHMENTS_REFUSED }, `${line} with a goal`)
+  }
+  assert.equal(goals.get(handle)?.phase, 'active', 'the refused pause did not pause')
+  assert.equal(goals.get(handle)?.objective, 'o', 'the refused clear did not clear')
+  assert.equal(changes(), 1, 'only the direct create wrote a goal change')
+  assert.deepEqual(followups, [])
+  // The command accepts attachments, so the layer ran it and recorded /goal's own refusal (not the layer's 400).
+  assert.equal(done().length, 9)
+  assert.ok(done().every((event) => event.kind === 'error' && event.text === ATTACHMENTS_REFUSED))
+})
+
+test("the layer hands /goal the line's files as context.attachments: a create takes them on as one follow-up message", async () => {
+  const { execute, goals, handle, followups } = layered()
+  const created = await execute('/goal ship the release', [image, file])
+  assert.deepEqual(created.result, {
+    kind: 'success',
+    text: card({ title: 'Goal created', phase: 'active', objective: 'ship the release', rounds: '0/100', activation: 'armed', hint: HINT_ARMED }),
+  })
+  assert.equal(goals.get(handle)?.objective, 'ship the release', 'the objective is the text alone')
+  assert.deepEqual(followups, [
+    {
+      session: handle,
+      message: { role: 'user', content: [image, file, { type: 'text', text: 'Reference attachments for the goal objective.' }], source: { kind: 'user' } },
+    },
+  ])
+  const edited = await execute('/goal edit ship it twice', [file])
+  assert.match(textOf(edited.result), /^Goal updated\n/)
+  assert.equal(followups.length, 2, 'an edit takes its files on too')
+  await execute('/goal edit ship it thrice')
+  assert.equal(followups.length, 2, 'a line without files carries nothing on')
+})
+
+test('through the route, uploaded files reach /goal as the parts a turn records', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'heddle-commands-goal-home-'))
+  const previous = process.env.HEDDLE_HOME
+  process.env.HEDDLE_HOME = home
+  const { store, handle, command, goals, followups } = harness()
+  const registry = new CommandRegistry()
+  registry.register(command)
+  const host: CommandRouteHost = { registry, log: { append: (target, event) => store.append(target, event) }, open: (id) => store.open(id) }
+  const server = createServer((request, response) => {
+    void handleCommandRequest(host, request, response, new URL(request.url ?? '/', 'http://localhost')).then((handled) => {
+      if (!handled) response.writeHead(418).end()
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address !== null && typeof address === 'object')
+    const uploads = uploadDirectory(home)
+    mkdirSync(uploads, { recursive: true })
+    const spec = join(uploads, '2026-10-29T00-00-00-000Z-spec.md')
+    writeFileSync(spec, '# the release\n')
+    const post = async (body: unknown) => {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${handle.id}/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return { status: response.status, body: (await response.json()) as Record<string, unknown> }
+    }
+    const paused = await post({ line: '/goal pause', attachments: [spec] })
+    assert.equal(paused.status, 200, '/goal accepts attachments, so the layer runs it')
+    assert.deepEqual([paused.body.kind, paused.body.text], ['error', ATTACHMENTS_REFUSED])
+    assert.equal(goals.get(handle), undefined)
+
+    const created = await post({ line: '/goal ship the release', attachments: [spec] })
+    assert.equal(created.status, 200)
+    assert.equal(created.body.kind, 'success')
+    assert.match(String(created.body.text), /^Goal created\nStatus: active\nObjective: ship the release\n/)
+    assert.equal(followups.length, 1)
+    const [part, text] = followups[0]?.message.content ?? []
+    assert.deepEqual(text, { type: 'text', text: 'Reference attachments for the goal objective.' })
+    assert.equal(part?.type, 'file')
+    assert.ok(part?.type === 'file')
+    assert.equal(part.name, 'spec.md', 'the upload stamp is not part of the name')
+    assert.equal(part.bytes, 14)
+    assert.equal(part.path, realpathSync(spec))
+  } finally {
+    server.close()
+    if (previous === undefined) delete process.env.HEDDLE_HOME
+    else process.env.HEDDLE_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+  }
 })
