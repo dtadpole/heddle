@@ -41,9 +41,10 @@ that turn's next model call — DSH's "applies from the next step", without a pe
 
 `exit_plan_mode {plan}` refuses outside plan mode, without a `#` heading, and when no review channel is loaded
 ("no user-questions channel is available to review the plan; ask the user to switch the session mode instead"). The
-channel is a cordis service `planReview` answering `review(session, {title, markdown}, signal)` with `approve`,
-`keep-planning` (feedback back to the model) or `dismissed` (plan mode stays). It is to be provided over the
-user-question tool (developer-eleven), which is not on main yet.
+channel is the user-question service (developer-eleven's `questions`, agreed 2026-10-29): `questionsReviewChannel`
+asks its public `ask` DSH's one `plan-review` question with the plan under it and no time limit. Approve approves;
+Keep planning or typed words keep planning with the words as feedback; a skip dismisses (plan mode stays). The
+question service is not on main yet; until it is, the tool refuses as above.
 
 ## The composer
 

@@ -10,7 +10,7 @@ import type { GenerateRequest } from '../src/llm/types.ts'
 import { handlePlanRequest } from '../src/plan/http.ts'
 import { PLAN_EVENT, PLAN_OFF_NOTICE, PLAN_ON_NOTICE, planActive, setPlanMode, type PlanLog } from '../src/plan/mode.ts'
 import { PLAN_POLICY_SECTION, withPlanPolicy } from '../src/plan/policy.ts'
-import { applyPlanPolicy, planCommand } from '../src/plan/service.ts'
+import { applyPlanPolicy, planCommand, questionsReviewChannel, type QuestionAsker } from '../src/plan/service.ts'
 import { EXIT_DESCRIPTION, EXIT_PLAN_MODE, PLAN_REVIEW, exitPlanModeTool, planTitle, type PlanReviewAnswer, type PlanReviewChannel } from '../src/plan/tool.ts'
 import { foldSurface, SessionStore } from '../src/session/store.ts'
 
@@ -238,4 +238,44 @@ test('GET /api/sessions/{id}/plan answers whether the session is in plan mode', 
   } finally {
     server.close()
   }
+})
+
+test("the review over the question service asks DSH's plan-review question and reads each answer as DSH does", async () => {
+  const { handle } = session()
+  const asked: unknown[] = []
+  const asker = (answer: Awaited<ReturnType<QuestionAsker['ask']>>): QuestionAsker => ({
+    ask: async (_session, questions, options) => {
+      asked.push({ questions, timeout: options.timeout })
+      return answer
+    },
+  })
+  const review = (answer: Awaited<ReturnType<QuestionAsker['ask']>>) => questionsReviewChannel(asker(answer)).review(handle, { title: 'Ship it', markdown: '# Ship it\n\n1. Go' })
+
+  assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Approve'] }] }), { kind: 'approve' })
+  assert.deepEqual(asked[0], {
+    questions: [
+      {
+        id: 'plan-review',
+        header: 'Plan review',
+        question: 'Approve this plan and leave plan mode?\n\n# Ship it\n\n1. Go',
+        options: [
+          { label: 'Approve', description: 'Leave plan mode; the plan is carried out from the next step.' },
+          { label: 'Keep planning', description: 'Stay in plan mode; feedback goes back to the model.' },
+        ],
+      },
+    ],
+    timeout: -1,
+  })
+  assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Keep planning'] }] }), { kind: 'keep-planning', feedback: '' })
+  assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: [], custom: ' split it ' }] }), { kind: 'keep-planning', feedback: 'split it' })
+  assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Approve'], custom: 'but rename it' }] }), { kind: 'keep-planning', feedback: 'but rename it' }, 'typed words are feedback, never approval')
+  assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: [] }] }), { kind: 'dismissed' }, 'a skip dismisses')
+  assert.deepEqual(await review({ kind: 'pending', callId: 'call-1' }), { kind: 'dismissed' }, 'pending cannot happen with no time limit, and reads as the safe outcome')
+})
+
+test('a stop during the review reaches the turn as the stop it is', async () => {
+  const { handle } = session()
+  const stopped = Object.assign(new Error('the question was cancelled'), { code: 'CANCELLED' })
+  const channel = questionsReviewChannel({ ask: async () => Promise.reject(stopped) })
+  await assert.rejects(channel.review(handle, { title: 'x', markdown: '# x' }), (error: unknown) => error === stopped)
 })

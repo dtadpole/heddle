@@ -6,7 +6,7 @@ import type { SessionHandle } from '../session/store.ts'
 import type { PlanRouteHost } from './http.ts'
 import { planActive, setPlanMode, type PlanLog } from './mode.ts'
 import { withPlanPolicy } from './policy.ts'
-import { exitPlanModeTool, type PlanReviewChannel } from './tool.ts'
+import { PLAN_REVIEW, exitPlanModeTool, type PlanReviewChannel } from './tool.ts'
 
 export const name = 'plan'
 
@@ -98,15 +98,63 @@ export class PlanService extends Service {
 }
 
 /**
- * The plan-review channel: the user-question service when one is loaded.
+ * The plan-review channel: the user-question service (developer-eleven's `questions`) when it is loaded.
  *
- * heddle's question tool (developer-eleven, `src/questions/`) is not on main yet; a service named `planReview` that
- * answers {@link PlanReviewChannel} is used as soon as one is provided, so the question tool can offer it — or this
- * function can adapt the question service's own API — without changing the tool.
+ * Agreed with developer-eleven on 2026-10-29 (option b): the question service stays free of plan semantics and this
+ * side asks its public `ask` the one `plan-review` question (`questionsReviewChannel`).
  */
 function reviewChannel(ctx: Context): PlanReviewChannel | undefined {
-  const channel = ctx.get('planReview') as PlanReviewChannel | undefined
-  return channel !== undefined && typeof channel.review === 'function' ? channel : undefined
+  const questions = ctx.get('questions') as QuestionAsker | undefined
+  return questions !== undefined && typeof questions.ask === 'function' ? questionsReviewChannel(questions) : undefined
+}
+
+/** The part of the question service the review uses: `ask(handle, questions, {timeout, signal})`. */
+export interface QuestionAsker {
+  ask(
+    handle: SessionHandle,
+    questions: unknown,
+    options: { readonly timeout?: unknown; readonly signal?: AbortSignal },
+  ): Promise<
+    | { readonly kind: 'answered'; readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[] }
+    | { readonly kind: 'pending'; readonly callId: string }
+  >
+}
+
+/**
+ * The plan review as one question to the person (DSH's `plan-review`), with the plan under the question.
+ *
+ * Approve approves; Keep planning, or anything typed, keeps planning with the typed words as the feedback; a skip is a
+ * dismissal (plan mode stays on). The wait never runs out (`timeout: -1`), so a `pending` answer cannot happen; if it
+ * did, it is read as a dismissal — the safe outcome, because it leaves plan mode on. A stop rejects, and the rejection
+ * reaches the turn as the stop it is.
+ */
+export function questionsReviewChannel(questions: QuestionAsker): PlanReviewChannel {
+  return {
+    review: async (session, plan, signal) => {
+      const outcome = await questions.ask(
+        session,
+        [
+          {
+            id: PLAN_REVIEW.id,
+            header: PLAN_REVIEW.header,
+            question: `${PLAN_REVIEW.question}\n\n${plan.markdown}`,
+            options: [
+              { label: PLAN_REVIEW.approve.label, description: PLAN_REVIEW.approve.description },
+              { label: PLAN_REVIEW.keepPlanning.label, description: PLAN_REVIEW.keepPlanning.description },
+            ],
+          },
+        ],
+        { timeout: -1, ...(signal !== undefined ? { signal } : {}) },
+      )
+      if (outcome.kind !== 'answered') return { kind: 'dismissed' }
+      const answer = outcome.answers.find((entry) => entry.id === PLAN_REVIEW.id) ?? outcome.answers[0]
+      const custom = answer?.custom?.trim() ?? ''
+      const selected = answer?.selected ?? []
+      if (custom === '' && selected.includes(PLAN_REVIEW.approve.label)) return { kind: 'approve' }
+      if (custom !== '' || selected.includes(PLAN_REVIEW.keepPlanning.label)) return { kind: 'keep-planning', feedback: custom }
+      return { kind: 'dismissed' }
+    },
+  }
 }
 
 /** The plan plugin, loaded by the profile. */
