@@ -619,6 +619,12 @@ impl heddle_web_files::host::FilesHost for PageHost {
             Err(error) => Err(FileReadError::NotText(error.to_string())),
         }
     }
+
+    /// The upload route serves a file only to a session whose log references it, so it reads the log the
+    /// session view draws from.
+    fn session_events(&self, id: &str) -> Option<Vec<Value>> {
+        heddle_web_composer::SessionLookup::session_events(self, id)
+    }
 }
 
 impl heddle_web_composer::SessionLookup for PageHost {

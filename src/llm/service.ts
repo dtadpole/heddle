@@ -41,15 +41,57 @@ export { adapterFor } from './adapters.ts'
 export class ModelService extends Service {
   static readonly provide = 'model'
 
-  private readonly endpoints = new Map<string, Adapter>()
+  private endpoints = new Map<string, Adapter>()
   /** One provider modality read per endpoint, shared by every request that carries an image. */
   private readonly modalityLookups = new Map<string, Promise<EndpointConfig>>()
   /** The endpoint the configuration nominated, if any. */
   private nominated: string | undefined
+  /**
+   * Where a changed configuration comes from: asked before every read and every call, it answers the new endpoints
+   * and default when the configuration changed since it last answered, and `undefined` when it did not.
+   */
+  private refreshSource: (() => { readonly endpoints: readonly EndpointConfig[]; readonly nominated?: string } | undefined) | undefined
 
   constructor(ctx: Context, endpoints: readonly EndpointConfig[] = []) {
     super(ctx, 'model')
     for (const endpoint of endpoints) this.register(endpoint)
+  }
+
+  /**
+   * Re-read the configuration before every read and every call (DSH: a settings change applies to the next request
+   * without a restart). The source decides whether anything changed; this service only swaps in what it answers.
+   */
+  setRefresh(source: () => { readonly endpoints: readonly EndpointConfig[]; readonly nominated?: string } | undefined): void {
+    this.refreshSource = source
+  }
+
+  /**
+   * Replace every endpoint and the nominated default at once.
+   *
+   * A call already streaming keeps the adapter it resolved, so an in-flight request finishes on the configuration it
+   * started with; the next request reads the new one. An endpoint whose configuration is unchanged keeps its adapter,
+   * and with it its discovered modalities.
+   */
+  reconfigure(endpoints: readonly EndpointConfig[], nominated?: string): void {
+    const next = new Map<string, Adapter>()
+    for (const endpoint of endpoints) {
+      const current = this.endpoints.get(endpoint.name)
+      if (current !== undefined && JSON.stringify(current.endpoint) === JSON.stringify(endpoint)) {
+        next.set(endpoint.name, current)
+        continue
+      }
+      next.set(endpoint.name, adapterFor(endpoint))
+      for (const key of [...this.modalityLookups.keys()]) {
+        if (key.startsWith(`${endpoint.name}\u0000`)) this.modalityLookups.delete(key)
+      }
+    }
+    this.endpoints = next
+    this.nominated = nominated !== undefined && next.has(nominated) ? nominated : undefined
+  }
+
+  private refresh(): void {
+    const changed = this.refreshSource?.()
+    if (changed !== undefined) this.reconfigure(changed.endpoints, changed.nominated)
   }
 
   /** Add an endpoint, replacing one of the same name. */
@@ -99,16 +141,19 @@ export class ModelService extends Service {
 
   /** Every endpoint, in declaration order. Surfaced so a caller can configure. */
   list(): readonly EndpointConfig[] {
+    this.refresh()
     return [...this.endpoints.values()].map((adapter) => adapter.endpoint)
   }
 
   /** The endpoints' names, which is what a `--endpoint` flag accepts. */
   names(): readonly string[] {
+    this.refresh()
     return [...this.endpoints.keys()]
   }
 
   /** One endpoint's configuration, or `undefined` when it is not registered. */
   endpoint(name: string): EndpointConfig | undefined {
+    this.refresh()
     return this.endpoints.get(name)?.endpoint
   }
 
@@ -121,6 +166,7 @@ export class ModelService extends Service {
    * a caller that already knew to use it.
    */
   defaultEndpoint(nominated?: string): string | undefined {
+    this.refresh()
     const candidate = nominated ?? this.nominated
     if (candidate !== undefined && this.endpoints.has(candidate)) return candidate
     return this.endpoints.keys().next().value
@@ -140,6 +186,7 @@ export class ModelService extends Service {
    * made it.
    */
   stream(request: GenerateRequest, signal?: AbortSignal): AsyncIterable<Chunk> {
+    this.refresh()
     const adapter = this.endpoints.get(request.endpoint)
     if (adapter === undefined) {
       throw new ModelError(
