@@ -889,6 +889,47 @@
   details.turn.tool [data-result] { color: var(--chat-secondary); }
   details.turn.tool[data-state='running'] > summary { opacity: .6; }
   /**
+   * The `todo_write` call is DSH's **checklist card**, not its JSON (dsh-client-ui-tool's `TodoRow` over
+   * `ToolDetails`). The closed line keeps the row grammar above — DSH's checklist glyph, the title `Update to-do list`,
+   * the dot, `{done}/{total} completed · <active item>` — and adds DSH's `summarySuffix` (`3 added`). The open body is
+   * the `ToolDetails` card, measured from its stylesheet: a 0.5px hairline on the code surface, 13px text, a 12px
+   * caption, items padded 10/14 with 0.5px separators, a 14×18 status mark (a check, a play triangle, a 10×10 pending
+   * square; `+`/`−` for an added/removed item), the status in 12px caption ink at the end, and the unchanged items
+   * folded under one disclosure. The marks keep the card's ink — DSH colours only an added (success) or removed (error)
+   * mark, never a status, unlike the dock's dots — while the glyph and the status words are the ones the todo dock
+   * already uses (DSH's dock and card share `IconChecklistOutlineRegular` and the Completed / In progress / Pending
+   * labels). **Inspect** is DSH's pill at the body's top right (12/12) and opens the raw call in place.
+   */
+  details.turn.tool.todo-call > summary .todo-call-suffix { flex: none; margin-left: 4px; white-space: nowrap; font-size: 13px; line-height: 20px; color: var(--chat-caption); }
+  details.turn.tool.todo-call > [data-body] { position: relative; }
+  .todo-call-card { margin: 4px 0 4px 4px; border: .5px solid var(--border); border-radius: 12px; background: var(--chat-code); color: var(--chat-secondary); font-size: 13px; line-height: 20px; overflow: hidden; }
+  .todo-call-card[hidden], .todo-call-raw[hidden] { display: none; }
+  .todo-call-caption { padding: 10px 88px 6px 14px; font-size: 12px; color: var(--chat-caption); }
+  .todo-call-list { max-height: 320px; margin: 0; padding: 0; list-style: none; overflow-y: auto; }
+  .todo-call-item, .todo-call-empty { margin: 0; padding: 10px 14px; }
+  .todo-call-item + .todo-call-item { border-top: .5px solid color-mix(in oklab, var(--border) 70%, transparent); }
+  .todo-call-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+  .todo-call-mark { flex: none; align-self: flex-start; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 20px; font-size: 16px; line-height: 20px; }
+  .todo-call-pending { box-sizing: border-box; width: 10px; height: 10px; border: 1px solid var(--chat-caption); border-radius: 2px; }
+  .todo-call-text { flex: 1 1 12em; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .todo-call-status { margin-inline-start: auto; white-space: nowrap; font-size: 12px; color: var(--chat-caption); }
+  .todo-call-previous { color: color-mix(in oklab, var(--chat-caption) 75%, transparent); }
+  .todo-call-item[data-change='added'] .todo-call-mark { color: #2fa36b; }
+  .todo-call-item[data-change='removed'] .todo-call-mark { color: #d14343; }
+  .todo-call-item[data-change='removed'] .todo-call-text { color: var(--chat-caption); text-decoration: line-through; }
+  .todo-call-unchanged { border-top: .5px solid color-mix(in oklab, var(--border) 70%, transparent); color: var(--chat-caption); }
+  .todo-call-unchanged > summary { display: flex; align-items: center; gap: 6px; padding: 9px 14px; list-style: none; }
+  .todo-call-unchanged > summary::-webkit-details-marker, .todo-call-raw > summary::-webkit-details-marker { display: none; }
+  .todo-call-unchanged > summary svg { flex: none; transition: transform .15s ease; }
+  .todo-call-unchanged[open] > summary svg { transform: rotate(90deg); }
+  .todo-call-raw > summary {
+    position: absolute; top: 12px; right: 12px; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+    border: .5px solid var(--border-strong); border-radius: 999px; background: var(--bg); color: var(--chat-secondary);
+    font-size: 11px; line-height: 16px; list-style: none;
+  }
+  .todo-call-raw > summary:hover, .todo-call-raw[open] > summary { color: var(--chat-text); }
+  .todo-call-raw > summary:focus-visible { outline: 1px solid color-mix(in oklab, currentColor 45%, transparent); outline-offset: 2px; }
+  /**
    * DSH's view ring, measured on its own tablist on 2026-10-17: the tablist is transparent with 8px of left padding; each
    * tab is **plain text** — no background, no border, no radius — 13px at weight 500, with 9px of padding below, and the
    * selected tab is told apart by **colour alone** (`rgb(122,170,255)`) against the muted `rgb(173,178,184)` of the other.
@@ -3985,6 +4026,8 @@ function addBlock(kind, text, merge, label, tool) {
   node.append(line, body)
   if (kind === 'tool' && tool !== undefined && typeof tool.result === 'string') showToolError(node, tool.result)
   log.append(node)
+  /** After the append: the card compares itself with the `todo_write` rows above it. */
+  if (kind === 'tool') paintTodoCard(node)
   keepRunningLast()
   followChatTail()
 }
@@ -4031,6 +4074,7 @@ function growLiveToolCall(chunk) {
     const args = card.querySelector('[data-args]')
     if (args) args.textContent += chunk.argumentsDelta
   }
+  paintTodoCard(card)
   followChatTail()
 }
 
@@ -4066,6 +4110,7 @@ function settleLiveToolCall(chunk) {
     fresh.textContent = hintText
     card.querySelector('summary').append(sep, fresh)
   }
+  paintTodoCard(card)
   return true
 }
 
@@ -4090,7 +4135,301 @@ function fillToolResult(toolCallId, result, failed) {
   answer.textContent += result
   open.dataset.state = failed ? 'error' : 'ok'
   showToolError(open, answer.textContent)
+  paintTodoCard(open)
   return true
+}
+
+/**
+ * The `todo_write` call, drawn as DSH draws it: a checklist card rather than its JSON.
+ *
+ * DSH registers a toolview for this one tool (`todoToolview`, slot key `todo_write`, in dsh-client-ui-tool's
+ * `todo-row.js`). Its row is titled **Update to-do list** (`todo.rowTitle`); the closed line reads
+ * `{done}/{total} completed · <first in-progress item>` (`todo.completed` over `planSummary`), followed by the change
+ * summary (`3 added · 1 updated`, or `No changes to the list`) and `+N` for further in-progress items. Opened, the body
+ * is `ToolDetails`: a caption (`Initial list` / `Changes since the previous list`), one list item per to-do with a
+ * status mark labelled for assistive technology by its change or its status (`role="img"`), the text, and the status
+ * in words at the end; unchanged items fold under one `N unchanged` disclosure. A refused call, or arguments that are
+ * not a valid list, get the generic body instead, because DSH's `todoDiffModel` returns null for both.
+ *
+ * The baseline is the nearest earlier `todo_write` row of this transcript that was not refused — DSH reads the
+ * preceding `todo/write`, which only a successful call records. The transcript is loaded whole, so DSH's
+ * `Previous list unavailable` (older history not yet loaded) has no case here.
+ *
+ * One painter serves every path — a streamed card, its settled call, its filled result and a row drawn from the log —
+ * so a live call and a reload draw the same card. The row's own `[data-args]` and `[data-result]` blocks stay in it,
+ * behind DSH's **Inspect** affordance, so everything that grows, settles or fills a tool row still finds them.
+ */
+const TODO_TOOL = 'todo_write'
+const TODO_ROW_TITLE = 'Update to-do list'
+const TODO_STATUS_LABELS = { pending: 'Pending', in_progress: 'In progress', completed: 'Completed' }
+const TODO_CHANGE_LABELS = { added: 'Added', removed: 'Removed', status: 'Status changed', moved: 'Reordered' }
+
+function todoCallParse(argsText) {
+  try {
+    const parsed = JSON.parse(argsText || '')
+    return typeof parsed === 'object' && parsed !== null ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** DSH's `todosDetail`: records with non-empty content, a known status and a unique trimmed title — or nothing. */
+function todoCallItems(argsText) {
+  const parsed = todoCallParse(argsText)
+  if (parsed === null || !Array.isArray(parsed.todos)) return null
+  const items = []
+  const seen = new Set()
+  for (const todo of parsed.todos) {
+    if (typeof todo !== 'object' || todo === null || Array.isArray(todo)) return null
+    if (typeof todo.content !== 'string' || todo.content.trim() === '') return null
+    if (typeof todo.status !== 'string' || !Object.hasOwn(TODO_STATUS_LABELS, todo.status)) return null
+    const title = todo.content.trim()
+    if (seen.has(title)) return null
+    seen.add(title)
+    items.push({ title, status: todo.status })
+  }
+  return items
+}
+
+/** DSH's `summarize` over `planSummary`: the counts, and the first in-progress item when it has a name. */
+function todoCallLine(argsText) {
+  const parsed = todoCallParse(argsText)
+  if (parsed === null || !Array.isArray(parsed.todos)) return null
+  const todos = parsed.todos
+  if (!todos.every((todo) => typeof todo === 'object' && todo !== null)) return null
+  const active = todos.filter((todo) => todo.status === 'in_progress')
+  const first = active[0]?.content
+  const named = typeof first === 'string' && first.trim() !== ''
+  const head = todos.filter((todo) => todo.status === 'completed').length + '/' + todos.length + ' completed'
+  return { text: named ? head + ' · ' + first : head, extra: named ? active.length - 1 : 0 }
+}
+
+/** The list the nearest earlier, unrefused `todo_write` row wrote; null when this is the first. */
+function todoCallBaseline(node) {
+  const rows = Array.from(log.querySelectorAll('.turn.tool[data-tool-name="' + TODO_TOOL + '"]'))
+  for (let index = rows.indexOf(node) - 1; index >= 0; index -= 1) {
+    if (rows[index].dataset.state === 'error') continue
+    const items = todoCallItems(rows[index].querySelector('[data-args]')?.textContent ?? '')
+    if (items !== null) return items
+  }
+  return null
+}
+
+/** DSH's `todoDiffModel`: each item marked added, updated or removed against the baseline, the rest folded. */
+function todoCallDiff(items, baseline) {
+  const previousByTitle = new Map((baseline ?? []).map((item) => [item.title, item]))
+  const currentTitles = new Set(items.map((item) => item.title))
+  const retained = new Map((baseline ?? []).filter((item) => currentTitles.has(item.title)).map((item, index) => [item.title, index]))
+  let retainedIndex = 0
+  const listed = []
+  const unchanged = []
+  let added = 0
+  let updated = 0
+  for (const item of items) {
+    const before = previousByTitle.get(item.title)
+    previousByTitle.delete(item.title)
+    if (before === undefined) {
+      added += 1
+      listed.push({ ...item, change: 'added', changeLabel: TODO_CHANGE_LABELS.added })
+      continue
+    }
+    const moved = retained.get(item.title) !== retainedIndex++
+    const statusChanged = before.status !== item.status
+    if (statusChanged || moved) {
+      updated += 1
+      listed.push({
+        ...item,
+        change: 'updated',
+        changeLabel: statusChanged ? TODO_CHANGE_LABELS.status : TODO_CHANGE_LABELS.moved,
+        ...(statusChanged ? { previousStatus: before.status } : {}),
+      })
+    } else unchanged.push(item)
+  }
+  const removed = previousByTitle.size
+  for (const item of previousByTitle.values()) listed.push({ ...item, change: 'removed', changeLabel: TODO_CHANGE_LABELS.removed })
+  const parts = []
+  if (added > 0) parts.push(added + ' added')
+  if (updated > 0) parts.push(updated + ' updated')
+  if (removed > 0) parts.push(removed + ' removed')
+  return {
+    change: parts.join(' · ') || 'No changes to the list',
+    caption: baseline === null ? 'Initial list' : 'Changes since the previous list',
+    empty: items.length === 0 && baseline === null ? 'The to-do list is empty' : 'No changes to the list',
+    listed,
+    unchanged,
+  }
+}
+
+/** A 14px outline drawing on DSH's 16-unit grid, as the card's marks are drawn. */
+function todoCallSvg(size, viewBox, strokeWidth, paths) {
+  const svg = document.createElementNS(ICON_NS, 'svg')
+  svg.setAttribute('width', String(size))
+  svg.setAttribute('height', String(size))
+  svg.setAttribute('viewBox', viewBox)
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', strokeWidth)
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('focusable', 'false')
+  for (const d of paths) {
+    const path = document.createElementNS(ICON_NS, 'path')
+    path.setAttribute('d', d)
+    svg.append(path)
+  }
+  return svg
+}
+
+/**
+ * The status mark of one item: DSH's `DetailItem` draws `+` / `−` for an added / removed item, else a check
+ * (`IconCheckOutlineRegular`, the path `copiedIcon` already carries), a play triangle (`IconPlayOutlineRegular`) or
+ * an empty 10px square, and labels the mark with the change when there is one and the status otherwise.
+ */
+function todoCallMark(item) {
+  const mark = document.createElement('span')
+  mark.className = 'todo-call-mark'
+  mark.setAttribute('role', 'img')
+  mark.setAttribute('aria-label', item.changeLabel ?? TODO_STATUS_LABELS[item.status])
+  if (item.change === 'added') mark.textContent = '+'
+  else if (item.change === 'removed') mark.textContent = '\u2212'
+  else if (item.status === 'completed') mark.append(todoCallSvg(14, '0 0 16 16', '1', ['M2.25 8.5L5.49732 11.7473C5.90519 12.1552 6.57263 12.1344 6.95426 11.7018L13.75 4']))
+  else if (item.status === 'in_progress') mark.append(todoCallSvg(14, '0 0 16 16', '1', ['M4.5 3.13v9.74a.6.6 0 0 0 .92.5l7.5-4.87a.6.6 0 0 0 0-1l-7.5-4.87a.6.6 0 0 0-.92.5Z']))
+  else {
+    const square = document.createElement('span')
+    square.className = 'todo-call-pending'
+    mark.append(square)
+  }
+  return mark
+}
+
+function todoCallItem(item) {
+  const entry = document.createElement('li')
+  entry.className = 'todo-call-item'
+  entry.dataset.status = item.status
+  if (item.change !== undefined) entry.dataset.change = item.change
+  const heading = document.createElement('div')
+  heading.className = 'todo-call-heading'
+  const text = document.createElement('span')
+  text.className = 'todo-call-text'
+  text.textContent = item.title
+  const status = document.createElement('span')
+  status.className = 'todo-call-status'
+  if (item.previousStatus !== undefined) {
+    const previous = document.createElement('span')
+    previous.className = 'todo-call-previous'
+    previous.textContent = TODO_STATUS_LABELS[item.previousStatus]
+    status.append(previous, ' \u2192 ')
+  }
+  const label = document.createElement('span')
+  label.textContent = TODO_STATUS_LABELS[item.status]
+  status.append(label)
+  if (item.change === 'updated' && item.previousStatus === undefined) status.append(' · ' + item.changeLabel)
+  heading.append(todoCallMark(item), text, status)
+  entry.append(heading)
+  return entry
+}
+
+function todoCallList(items) {
+  const list = document.createElement('ul')
+  list.className = 'todo-call-list'
+  list.append(...items.map(todoCallItem))
+  return list
+}
+
+/** Draw (or redraw) a `todo_write` row as DSH's card; every other row is left exactly as it was. */
+function paintTodoCard(node) {
+  if (node === null || node === undefined || node.dataset.toolName !== TODO_TOOL) return
+  const line = node.querySelector(':scope > summary')
+  const body = node.querySelector(':scope > [data-body]')
+  if (line === null || body === null) return
+  node.classList.add('todo-call')
+  node.dataset.todoCard = 'dsh'
+  /** DSH's `IconChecklistOutlineRegular`, which the todo dock's lead already draws; the chevron swap is unchanged. */
+  const kindIcon = line.querySelector('.glyph > .kind')
+  if (kindIcon !== null && kindIcon.getAttribute('data-todo') === null) {
+    const checklist = todoCallSvg(14, '0 0 24 24', '1.4', ['M12 7h9M3 14h6M12 14h9M3 21h6M12 21h9M5 5.5l1.5 1.5 2.5-2.5'])
+    const box = document.createElementNS(ICON_NS, 'rect')
+    for (const [name, value] of [['x', '3'], ['y', '4'], ['width', '6'], ['height', '6'], ['rx', '1.5']]) box.setAttribute(name, value)
+    checklist.prepend(box)
+    checklist.setAttribute('class', 'kind')
+    checklist.setAttribute('data-todo', '')
+    kindIcon.replaceWith(checklist)
+  }
+  const title = line.querySelector('.title')
+  if (title !== null) title.textContent = TODO_ROW_TITLE
+  const args = body.querySelector('[data-args]')
+  const result = body.querySelector('[data-result]')
+  const argsText = args?.textContent ?? ''
+  const items = todoCallItems(argsText)
+  const failed = node.dataset.state === 'error'
+  const presentable = items !== null && !failed
+  const diff = presentable ? todoCallDiff(items, todoCallBaseline(node)) : null
+  /** The closed line: DSH's summary and suffix; a refusal's own sentence replaces both, as `showToolError` writes it. */
+  for (const stale of line.querySelectorAll('.sep, .hint, .todo-call-suffix')) stale.remove()
+  const plan = todoCallLine(argsText)
+  if (failed) showToolError(node, result?.textContent ?? '')
+  else if (plan !== null) {
+    const sep = document.createElement('span')
+    sep.className = 'sep'
+    sep.setAttribute('aria-hidden', 'true')
+    const hint = document.createElement('span')
+    hint.className = 'hint'
+    hint.textContent = plan.text
+    line.append(sep, hint)
+    const suffixText = [diff?.change, plan.extra > 0 ? '+' + plan.extra : null].filter((part) => typeof part === 'string').join(' · ')
+    if (suffixText !== '') {
+      const suffix = document.createElement('span')
+      suffix.className = 'todo-call-suffix'
+      suffix.textContent = suffixText
+      line.append(suffix)
+    }
+  }
+  /** The body: the card, and the raw call behind Inspect — or, with no card to draw, the raw call itself. */
+  let card = body.querySelector(':scope > .todo-call-card')
+  if (card === null) {
+    card = document.createElement('div')
+    card.className = 'todo-call-card'
+    card.dataset.caption = ''
+    body.prepend(card)
+  }
+  let raw = body.querySelector(':scope > .todo-call-raw')
+  if (raw === null) {
+    raw = document.createElement('details')
+    raw.className = 'todo-call-raw'
+    const inspect = document.createElement('summary')
+    inspect.textContent = 'Inspect'
+    raw.append(inspect)
+    body.append(raw)
+  }
+  const home = presentable ? raw : body
+  for (const block of [args, result]) if (block !== null && block.parentElement !== home) home.append(block)
+  card.hidden = !presentable
+  raw.hidden = !presentable
+  if (diff === null) {
+    card.replaceChildren()
+    return
+  }
+  const caption = document.createElement('div')
+  caption.className = 'todo-call-caption'
+  caption.textContent = diff.caption
+  let listing
+  if (diff.listed.length === 0) {
+    listing = document.createElement('p')
+    listing.className = 'todo-call-empty'
+    listing.textContent = diff.empty
+  } else listing = todoCallList(diff.listed)
+  const parts = [caption, listing]
+  if (diff.unchanged.length > 0) {
+    const fold = document.createElement('details')
+    fold.className = 'todo-call-unchanged'
+    fold.open = card.querySelector(':scope > .todo-call-unchanged')?.open === true
+    const label = document.createElement('summary')
+    label.append(todoCallSvg(14, '0 0 16 16', '1', ['M6 3.5 10.5 8 6 12.5']), diff.unchanged.length + ' unchanged')
+    fold.append(label, todoCallList(diff.unchanged))
+    parts.push(fold)
+  }
+  card.replaceChildren(...parts)
 }
 
 
