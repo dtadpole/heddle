@@ -2437,6 +2437,69 @@ test('a session forks into a new one named after it, with its conversation and i
   }
 })
 
+test("a fork shows its source's turns and no more: the runtime-context note stays a note", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-notes')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    for (const prompt of ['the first question', 'the second question']) {
+      const turn = await runCli(adminArgs(h, ['--turn', prompt]), { env: h.env, cwd: branch })
+      assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+    }
+    /**
+     * The loop writes DSH's runtime-context snapshot into the source's log as a harness note. Without one the check
+     * would prove nothing, so its presence is asserted first.
+     */
+    const isSnapshot = (event) => event.type === 'context/note' && event.origin === 'runtime-context'
+    assert.ok(readTranscript(join(h.home, 'sessions', made.session)).some(isSnapshot), 'the source holds a runtime-context note')
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const response = await fetch(new URL(`/api/sessions/${made.session}/fork`, live.url), { method: 'POST', headers: { cookie } })
+    assert.equal(response.status, 200, `the session forks\n${await response.clone().text()}`)
+    const forked = await response.json()
+
+    /**
+     * DSH's fork seeds the child with the source's own events (dsh-session fork.js buildForkSeed), so the snapshot is
+     * still a snapshot there and the child's chat shows exactly the source's prompts. Measured in phase A on both builds
+     * (R-developer-eight-15): the child drew a "Current runtime context..." user bubble and counted one turn more.
+     */
+    const prompts = async (id) => {
+      const detail = await (await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })).json()
+      return (detail.turns ?? []).filter((turn) => turn.kind === 'user').map((turn) => turn.text)
+    }
+    const fromSource = await prompts(made.session)
+    assert.deepEqual(fromSource, ['the first question', 'the second question'], 'the source shows its two prompts')
+    assert.deepEqual(await prompts(forked.session), fromSource, 'and the fork shows the same two, with no runtime-context bubble')
+
+    const listed = await sessionsOf(h)
+    assert.equal(
+      listed.find((meta) => meta.id === forked.session)?.turns,
+      listed.find((meta) => meta.id === made.session)?.turns,
+      `the fork counts as many turns as its source\nsaw: ${JSON.stringify(listed.map((meta) => [meta.id === forked.session ? 'fork' : meta.id === made.session ? 'source' : 'other', meta.turns]))}`,
+    )
+
+    const copied = readTranscript(join(h.home, 'sessions', forked.session))
+    assert.ok(copied.some(isSnapshot), "the fork's log carries the snapshot as a runtime-context note")
+    assert.ok(
+      !copied.some((event) => event.type === 'message' && JSON.stringify(event.message ?? {}).includes('Current runtime context')),
+      'and no message carries it',
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test("a session row's controls appear on hover, and a search replaces the tree with named hits", async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
