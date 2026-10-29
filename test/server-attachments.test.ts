@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { AttachmentInputError, MAX_ATTACHMENTS, readAttachment, readAttachments } from '../src/server/attachments.ts'
-import { saveUpload, uploadDirectory } from '../src/server/uploads.ts'
+import { saveUpload, uploadDirectory, uploadReferencedBy } from '../src/server/uploads.ts'
 
 /**
  * Unit tests for the server half of an attachment: a path from the browser becomes a typed content block.
@@ -76,4 +76,22 @@ test('the request may carry a bounded list, and a malformed one is refused', () 
     assert.throws(() => readAttachments([42]), /must be a path/)
     assert.throws(() => readAttachments(Array.from({ length: MAX_ATTACHMENTS + 1 }, () => saved.path)), /at most/)
   })
+})
+
+test('an upload is referenced by a session only when one of its logged messages carries that leaf', () => {
+  const leaf = '2026-10-29T11-00-00-000Z-pixel.png'
+  const events = [
+    { type: 'session/created', cwd: '/w' },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', path: `/home/uploads/${leaf}`, name: 'pixel.png' }] } },
+    { type: 'message', message: { role: 'user', content: [{ type: 'file', path: '/home/uploads/2026-10-29-notes.md', name: 'notes.md' }] } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'image', path: '/home/uploads/2026-10-29-shot.png' }] } },
+  ]
+  assert.equal(uploadReferencedBy(events, leaf), true, 'an image in a prompt')
+  assert.equal(uploadReferencedBy(events, '2026-10-29-notes.md'), true, 'a file part counts as well')
+  assert.equal(uploadReferencedBy(events, '2026-10-29-shot.png'), true, 'and an image a tool result carries')
+  // DSH's ATTACHMENT_NOT_REFERENCED: another upload, a name only mentioned in text, or nothing at all.
+  assert.equal(uploadReferencedBy(events, '2026-10-29-other.png'), false, 'another upload is not referenced')
+  assert.equal(uploadReferencedBy([{ type: 'message', message: { role: 'user', content: [{ type: 'text', text: leaf }] } }], leaf), false, 'a leaf named in text is not an attachment')
+  assert.equal(uploadReferencedBy([], leaf), false, 'an empty log references nothing')
+  assert.equal(uploadReferencedBy(events, ''), false, 'and an empty leaf matches nothing')
 })

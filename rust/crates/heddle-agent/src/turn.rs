@@ -387,6 +387,8 @@ async fn run_turn_body(
             text: rooted.policy_statement(mode),
         }];
         runtime.context.record_runtime_context(session, &sections)?;
+        // The harness's per-step notes, beside the snapshot: the clock reading (DSH's time context).
+        runtime.hooks.record_step_context(session, rounds)?;
 
         let mut report = runtime
             .context

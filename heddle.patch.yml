@@ -102,6 +102,12 @@
       name: ./src/plugins/todo-tool.ts
       inject: [todo, tools]
 
+    # Schedules and reminders (DSH's dsh-schedule and dsh-tool-schedule): the four tools, the store at
+    # $HEDDLE_HOME/schedule.json, and delivery, which only `heddle web` starts.
+    - id: schedule
+      name: ./src/plugins/schedule.ts
+      inject: [session, model, tools, sandbox, context]
+
     # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
     # the loop checks for it — so a minimal profile can run turns without interruption.
     - id: turns

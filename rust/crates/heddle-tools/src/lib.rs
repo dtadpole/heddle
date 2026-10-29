@@ -32,6 +32,7 @@ pub mod protocol;
 pub mod registry;
 pub mod tool;
 pub mod upstream;
+pub mod validate;
 
 pub use builtin::{BuiltinOptions, builtin_tools, escalation_fields};
 pub use config::ToolsConfig;
@@ -50,6 +51,7 @@ pub use upstream::{
     EscalationSubject, RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode,
     SandboxOutcome, SandboxUnavailable, SessionHandle, ToolSpec,
 };
+pub use validate::{argument_violations, invalid_arguments, open_root};
 
 /// The cancellation token every call carries for a Stop — the TypeScript build's `AbortSignal`.
 pub use tokio_util::sync::CancellationToken;
