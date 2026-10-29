@@ -228,7 +228,11 @@ pub fn heartbeat_interval() -> std::time::Duration {
 /// The subscription is passed in already registered with the hub, so every frame published after a client
 /// reads `ready` is queued for it: a baseline read that starts on `ready` cannot race an increment, which is
 /// the ordering DSH's `$events` source guarantees.
-pub fn events_frames(subscription: Subscription, client_id: &str, home: &str) -> impl Stream<Item = SseFrame> + Send + 'static {
+pub fn events_frames(
+    subscription: Subscription,
+    client_id: &str,
+    home: &str,
+) -> impl Stream<Item = SseFrame> + Send + 'static {
     futures::stream::once(std::future::ready(SseFrame::ready(client_id, home))).chain(subscription)
 }
 
@@ -582,9 +586,16 @@ mod tests {
     fn the_heartbeat_interval_is_two_seconds_unless_a_usable_value_is_named() {
         use std::time::Duration;
         assert_eq!(heartbeat_interval_from(None), Duration::from_millis(2000));
-        assert_eq!(heartbeat_interval_from(Some("500")), Duration::from_millis(500));
+        assert_eq!(
+            heartbeat_interval_from(Some("500")),
+            Duration::from_millis(500)
+        );
         for bad in ["", " ", "soon", "-5", "10", "1.5"] {
-            assert_eq!(heartbeat_interval_from(Some(bad)), Duration::from_millis(2000), "{bad:?}");
+            assert_eq!(
+                heartbeat_interval_from(Some(bad)),
+                Duration::from_millis(2000),
+                "{bad:?}"
+            );
         }
     }
 
@@ -718,7 +729,11 @@ mod tests {
         assert_eq!(ids.len(), 64, "no two streams share an id");
         for id in &ids {
             assert_eq!(id.len(), 32, "{id}");
-            assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{id}");
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "{id}"
+            );
         }
     }
 

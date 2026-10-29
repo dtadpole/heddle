@@ -372,6 +372,51 @@ test('an html document is previewed as a page, and nothing in it can act', async
   }
 })
 
+test('only an .html or .htm file is previewed as a page; a Word document or a text file is refused', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const home = isolatedHome('html-only')
+  const work = fixtureDir('html-only')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
+  /**
+   * DSH frames a file as a page only through its HTML renderer, registered for `html` and `htm`; a `.docx` goes to its
+   * Office renderer. So the HTML route answers the page, and refuses a Word document (here the zip header a real one
+   * starts with, plus bytes that are not text) and a plain text file alike, instead of decoding either as markup.
+   */
+  writeFileSync(join(work, 'page.html'), '<!doctype html><h1>Only page</h1>')
+  writeFileSync(join(work, 'report.docx'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00, 0xff, 0xfe, 0x9c, 0x00, 0x77, 0x6f, 0x72, 0x64]))
+  writeFileSync(join(work, 'notes.txt'), 'plain words, not markup')
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
+    HEDDLE_HOME: home,
+    HEDDLE_CONFIG: config,
+  })
+  try {
+    const cookie = await handshakeCookie(server.url)
+    const origin = new URL(server.url).origin
+    await fetch(`${origin}/api/workspaces`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, origin },
+      body: JSON.stringify({ path: work }),
+    })
+    const preview = (leaf) => fetch(`${origin}/api/html?path=${encodeURIComponent(join(work, leaf))}`, { headers: { cookie } })
+
+    const page = await preview('page.html')
+    assert.equal(page.status, 200, 'the html document is previewed')
+    assert.match(String((await page.json()).html), /Only page/, 'with its own markup')
+
+    for (const leaf of ['report.docx', 'notes.txt']) {
+      const refused = await preview(leaf)
+      const body = await refused.text()
+      assert.equal(refused.status, 415, `${leaf} is not a page to preview (HTTP ${refused.status}: ${body.slice(0, 160)})`)
+      assert.match(body, /not an HTML document/, `${leaf} is refused by name, not decoded as markup`)
+      assert.ok(!body.includes('"html"'), `${leaf} comes back with no html to frame`)
+    }
+  } finally {
+    server.kill()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 test('a click in the left panel opens the one preview, rendered for its type and styled', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
