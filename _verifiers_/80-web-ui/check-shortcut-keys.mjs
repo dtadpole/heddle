@@ -315,6 +315,25 @@ test('the session shortcuts fire on the physical key, with the key values the br
       while (!(await running()) && Date.now() < deadline) await settle(150)
       assert.equal(await running(), true, 'the slow turn is running')
       await settle(400)
+      const queued = () => browser.evaluate(`Number((/^(\\d+) queued/.exec(document.querySelector('#queue .panel button')?.textContent ?? '') ?? [0, 0])[1])`)
+      await browser.evaluate(`(() => {
+        const field = document.querySelector('#prompt textarea')
+        field.focus()
+        field.value = 'queued while the slow turn runs'
+        field.dispatchEvent(new Event('input', { bubbles: true }))
+        field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }))
+        return true
+      })()`)
+      await settle(400)
+      assert.equal(await queued(), 1, 'a message sent while the turn runs waits in the queue')
+      /** DSH's breakers: an Escape a menu takes for itself does not count toward a stop. */
+      await browser.evaluate(`(() => { document.getElementById('attach').click(); return true })()`)
+      await settle(200)
+      await escape()
+      await settle(100)
+      await escape()
+      await settle(900)
+      assert.equal(await running(), true, 'Escape that closed a menu, then one more, leaves the turn running')
       await browser.evaluate(`(() => { document.querySelector('#prompt textarea').focus(); return true })()`)
       await escape()
       await settle(1200)
@@ -325,6 +344,9 @@ test('the session shortcuts fire on the physical key, with the key values the br
       const stopBy = Date.now() + 2500
       while ((await running()) && Date.now() < stopBy) await settle(150)
       assert.equal(await running(), false, 'two presses stopped it well before the command would have finished')
+      await settle(1500)
+      assert.equal(await queued(), 1, 'the queued message stays queued after the stop, as DSH preserves it')
+      assert.equal(await running(), false, 'and no queued turn started on its own')
     })
 
     await t.test('archive: Mod+Alt+A archives the open session', async () => {

@@ -2896,7 +2896,7 @@
           </button>
           <div id="model-menu" role="menu" aria-label="Model and reasoning effort" hidden></div>
         </div>
-        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating" hidden>
+        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating (Esc Esc)" aria-keyshortcuts="Escape Escape" hidden>
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/></svg>
         </button>
         <button id="send" type="submit" aria-label="Send message">
@@ -5648,7 +5648,7 @@ events.addEventListener('session', (message) => {
      * waiting on a turn this page never started. The pump refuses to run twice for one queue, so this can
      * never double-send.
      */
-    if (payload.session === composerKey) void pumpQueue()
+    if (payload.session === composerKey && !queueHeldAfterStop.has(payload.session)) void pumpQueue()
     renderComposerState()
     /**
      * And it is when the answer stops arriving, so the rows settle and the document is drawn.
@@ -6285,6 +6285,7 @@ function submitDraft(gesture) {
  * queued row; the message was never recorded, so restoring it cannot duplicate anything.
  */
 async function sendNow(text, attachments = []) {
+  queueHeldAfterStop.delete(composerKey)
   if (directTurnPending === 0) {
     directPendingSince = Date.now()
     directPendingKey = composerKey
@@ -6319,13 +6320,14 @@ async function sendNow(text, attachments = []) {
       }
     }
     renderComposerState()
-    /** The turn this page started just ended: now a message that was waiting behind it can go. */
-    void pumpQueue()
+    /** The turn this page started just ended: now a message that was waiting behind it can go, unless it was stopped. */
+    if (!queueHeldAfterStop.has(composerKey)) void pumpQueue()
   }
 }
 
 /** Add one message to the wait: at the end for an ordinary submit, at the front for a steer that could not land. */
 function enqueue(text, where, attachments = []) {
+  queueHeldAfterStop.delete(composerKey)
   const item = { id: `queued-${++queueSeq}`, text, attachments, status: 'pending' }
   const queue = queueOf()
   if (where === 'steer') queue.unshift(item)
@@ -6374,6 +6376,7 @@ async function steerNow(text, attachments = []) {
  * whatever the composer holds; a row is that operation on a row.
  */
 async function steerItem(id) {
+  queueHeldAfterStop.delete(composerKey)
   const queue = queueOf()
   const at = queue.findIndex((item) => item.id === id)
   if (at === -1) return
@@ -6401,6 +6404,7 @@ async function steerItem(id) {
  * ordinary drain, which is what turns a closed window back into a queue.
  */
 async function steerQueue() {
+  queueHeldAfterStop.delete(composerKey)
   const queue = queueOf()
   for (const item of queue) if (item.status === 'failed') item.status = 'pending'
   renderQueue()
@@ -6586,6 +6590,8 @@ async function pumpQueue(key = composerKey) {
   pumping.add(queue)
   try {
     for (;;) {
+      /** A stop holds the rest of the queue where it is. */
+      if (queueHeldAfterStop.has(key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE ? composerKey : key)) break
       const item = queue.find((entry) => entry.status === 'pending')
       if (item === undefined) break
       /**
@@ -7399,12 +7405,20 @@ async function refreshSessionStats() {
  */
 let stopRequested = false
 
+/**
+ * Sessions whose queued messages stay queued after a stop, until the person sends, queues or steers again. DSH: a stop
+ * (the Stop button or Esc Esc) "preserve[s] queued messages"; the page used to pump the queue at the end of the stopped
+ * turn, so the next queued message started at once.
+ */
+const queueHeldAfterStop = new Set()
+
 /** Ask the server to end the turn that is running. A no-op when it already ended is not a failure. */
 async function stopTurn() {
   if (composerKey === QUEUE_KEY_NONE) {
     stopRequested = true
     return
   }
+  queueHeldAfterStop.add(composerKey)
   /**
    * The button says it is working, because the acknowledgement is a different request from the stream the turn is
    * on: a second click while the first is in flight is a person telling the UI it did nothing, which is the symptom
@@ -10613,34 +10627,69 @@ shortcutReference.querySelector('[data-ws-close]').addEventListener('click', () 
  * Two independent Escape presses stop the running turn, DSH's fixed action (`dsh-client-ui-conversation`: "two
  * independent Escape presses in the focused Chat or Composer stop its current running turn and preserve queued
  * messages"; the interval is the shortcuts service's `stopSequenceMs`, 500 ms by default). Only presses in the
- * conversation column count (the chat and the composer live in `main`); a held repeat, a composing input method, a press
- * another control took, an open dialog, or a press with any modifier does not, and the second press must come within the
- * interval. The stop route ends the turn alone, so queued messages stay queued. Stop was a click only
- * (DSH parity R-developer-seven-10, row S43).
+ * conversation column count (the chat and the composer live in `main`); DSH's sequence breakers reset it: a menu, the
+ * approval card, a dialog, a composing input method, a held repeat, a modifier, or a change of input region, session or
+ * turn between the presses. The second press must come within the interval. It is the Stop button's own cancellation,
+ * and queued messages stay queued after it (`queueHeldAfterStop`). Stop was a click only (DSH parity
+ * R-developer-seven-10, row S43).
  */
 const STOP_SEQUENCE_MS = 500
-let stopEscapeAt = null
+let stopSequence = null
 function isStopSequence(previous, now) {
   return previous !== null && now - previous >= 0 && now - previous <= STOP_SEQUENCE_MS
 }
-document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') {
-    stopEscapeAt = null
-    return
-  }
-  if (event.repeat || event.isComposing || event.defaultPrevented) return
-  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
-  if (document.querySelector('dialog[open]') !== null) return
-  const target = event.target instanceof Element ? event.target : document.activeElement
-  if (target === null || target.closest('main') === null) return
-  const now = performance.now()
-  if (isStopSequence(stopEscapeAt, now) && anyRunning()) {
-    stopEscapeAt = null
-    void stopTurn()
-    return
-  }
-  stopEscapeAt = now
-})
+/**
+ * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover or the approval
+ * card. DSH breaks the stop sequence on each, so Escape closing the model menu or an approval card never also counts
+ * toward a stop. Read in the capture phase, before those controls close themselves.
+ */
+function uiTakesEscape() {
+  if (document.querySelector('dialog[open]') !== null) return true
+  if ([...document.querySelectorAll('[role="menu"]')].some((menu) => !menu.hidden)) return true
+  if (statPopoverKind !== null) return true
+  const card = document.getElementById('approval-card')
+  return card !== null && !card.hidden
+}
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key !== 'Escape' || event.repeat || event.isComposing) {
+      stopSequence = null
+      return
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || uiTakesEscape()) {
+      stopSequence = null
+      return
+    }
+    const target = event.target instanceof Element ? event.target : document.activeElement
+    if (target === null || target.closest('main') === null) {
+      stopSequence = null
+      return
+    }
+    /** A change of input region, session or turn between the presses breaks the sequence, as in DSH. */
+    const press = {
+      at: performance.now(),
+      region: target.closest('#prompt') !== null ? 'composer' : 'chat',
+      session: composerKey,
+      turn: runningSince.get(composerKey) ?? null,
+    }
+    const previous = stopSequence
+    if (
+      previous !== null &&
+      isStopSequence(previous.at, press.at) &&
+      previous.region === press.region &&
+      previous.session === press.session &&
+      previous.turn === press.turn &&
+      anyRunning()
+    ) {
+      stopSequence = null
+      void stopTurn()
+      return
+    }
+    stopSequence = press
+  },
+  true,
+)
 
 /** The `…` control: a button, and the one list it opens. */
 function menuButton(node, items, options = {}) {

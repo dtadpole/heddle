@@ -143,10 +143,20 @@ test('two Escape presses within 500 ms stop the running turn, as DSH does', () =
   assert.equal(isStopSequence(1000, 1501), false, 'past the interval it re-arms instead')
   assert.equal(isStopSequence(1000, 900), false, 'a clock that went back is not a sequence')
   assert.match(page, /const STOP_SEQUENCE_MS = 500/)
-  assert.match(page, /if \(event\.repeat \|\| event\.isComposing \|\| event\.defaultPrevented\) return/, 'repeats, composition and taken presses do not count')
-  assert.match(page, /if \(document\.querySelector\('dialog\[open\]'\) !== null\) return/, 'nor presses while a dialog is open')
-  assert.match(page, /if \(target === null \|\| target\.closest\('main'\) === null\) return/, 'only presses in the conversation column count')
-  assert.match(page, /if \(isStopSequence\(stopEscapeAt, now\) && anyRunning\(\)\) \{\n\s+stopEscapeAt = null\n\s+void stopTurn\(\)/, 'and the sequence stops the turn')
+  /** DSH's sequence breakers (`dsh-client-ui-conversation`): each resets the sequence. */
+  assert.match(page, /if \(event\.key !== 'Escape' \|\| event\.repeat \|\| event\.isComposing\) \{\n\s+stopSequence = null/, 'a repeat or composition breaks it')
+  assert.match(page, /event\.shiftKey \|\| uiTakesEscape\(\)\) \{\n\s+stopSequence = null/, 'a modifier or a control that takes Escape breaks it')
+  assert.match(page, /if \(document\.querySelector\('dialog\[open\]'\) !== null\) return true/, 'a dialog takes Escape')
+  assert.match(page, /\[\.\.\.document\.querySelectorAll\('\[role="menu"\]'\)\]\.some\(\(menu\) => !menu\.hidden\)/, 'so does any open menu')
+  assert.match(page, /const card = document\.getElementById\('approval-card'\)\n\s+return card !== null && !card\.hidden/, 'and the approval card')
+  assert.match(page, /previous\.region === press\.region &&\n\s+previous\.session === press\.session &&\n\s+previous\.turn === press\.turn &&/, 'a change of region, session or turn breaks it')
+  assert.match(page, /\n\s+\},\n\s+true,\n\)\n/, 'read in the capture phase, before menus close themselves')
+  /** "preserve queued messages": the stop holds the queue until the person acts again. */
+  assert.match(page, /queueHeldAfterStop\.add\(composerKey\)/, 'a stop holds the queue')
+  assert.match(page, /if \(payload\.session === composerKey && !queueHeldAfterStop\.has\(payload\.session\)\) void pumpQueue\(\)/, 'the stopped turn\'s end does not pump it')
+  assert.match(page, /if \(queueHeldAfterStop\.has\(key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE \? composerKey : key\)\) break/, 'nor does the pump loop carry on')
+  assert.equal((page.match(/queueHeldAfterStop\.delete\(composerKey\)/g) ?? []).length, 4, 'sending, queueing or steering releases it')
+  assert.match(page, /title="Stop generating \(Esc Esc\)"/, 'and the Stop button names the sequence, as DSH\'s tooltip does')
 })
 
 test('Mod+/ opens DSH\'s keyboard reference: every command in product order, then the fixed input actions', () => {
