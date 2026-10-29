@@ -93,3 +93,55 @@ test('a fork keeps the runtime-context note a note, so the child shows the same 
   const texts = service.store.messages(child).map((message) => message.content.map((part) => ('text' in part ? part.text : '')).join(''))
   assert.deepEqual(texts, ['first question', SNAPSHOT, 'answer to first question', 'second question', 'answer to second question'])
 })
+
+/**
+ * Fork at a chosen turn: DSH's `session/fork` with `atSeq`, the inclusive event seq to cut at
+ * (dsh-api-session-controller/lib/index.js:849-872), which its chat's Branch action sets to the seq that ended the turn.
+ * Phase A measured heddle ignoring it on both builds (R-developer-eight-16): the child always held every turn.
+ */
+test('a fork at a turn end holds the turns up to it, and a seq the source lacks is refused with the last seq', () => {
+  const service = new SessionService(new Context(), { root: join(scratch, 'root-2') })
+  const source = service.start({ cwd: scratch, title: 'Long' })
+  for (const prompt of ['turn one', 'turn two', 'turn three']) turn(service, source, prompt)
+  const ends = service.store.read(source).filter((event) => event.type === 'turn/completed').map((event) => event.seq)
+  assert.equal(ends.length, 3, 'three completed turns')
+
+  const forked = service.fork(source.id, { atSeq: ends[1] })
+  assert.ok(forked !== null && 'handle' in forked, `the cut at the second turn's end forks\nsaw: ${JSON.stringify(forked)}`)
+  const prompts = transcriptTurns(service.store.read(forked.handle)).filter((one) => one.kind === 'user').map((one) => one.text)
+  assert.deepEqual(prompts, ['turn one', 'turn two'], 'the child ends after turn two')
+  assert.equal(service.list().find((meta) => meta.id === forked.handle.id)?.title, 'Long (1)', 'and is titled after its source')
+  assert.equal(service.list().find((meta) => meta.id === forked.handle.id)?.parentSession, source.id, 'and records it')
+
+  const last = service.store.read(source).at(-1)?.seq
+  assert.deepEqual(service.fork(source.id, { atSeq: 9999 }), { error: 'no-such-event', atSeq: 9999, lastSeq: last }, 'a seq past the log is refused')
+  const untouched = service.start({ cwd: scratch, title: 'Empty' })
+  assert.deepEqual(service.fork(untouched.id), { error: 'unavailable' }, 'with no atSeq a session with no completed turn is still refused')
+  const atStart = service.fork(untouched.id, { atSeq: 0 })
+  assert.ok(atStart !== null && 'handle' in atStart, 'while an explicit seq it has forks, as DSH accepts any existing event')
+})
+
+test('the transcript marks the answer that closes a completed turn with the seq the Branch action forks at', () => {
+  const service = new SessionService(new Context(), { root: join(scratch, 'root-3') })
+  const source = service.start({ cwd: scratch, title: 'Marks' })
+  turn(service, source, 'first')
+  turn(service, source, 'second')
+  const events = service.store.read(source)
+  const ends = events.filter((event) => event.type === 'turn/completed').map((event) => event.seq)
+  const turns = transcriptTurns(events)
+  assert.deepEqual(
+    turns.filter((one) => one.forkSeq !== undefined).map((one) => [one.kind, one.text, one.forkSeq]),
+    [
+      ['assistant', 'answer to first', ends[0]],
+      ['assistant', 'answer to second', ends[1]],
+    ],
+  )
+
+  /** A turn whose last row is a call, not an answer with text, is not offered: DSH marks it unavailable. */
+  service.user(source, 'third')
+  service.store.assistantChunk(source, { type: 'tool-call', id: 'call-1', name: 'list_dir', arguments: '{}' })
+  service.store.assistantChunk(source, { type: 'done', finishReason: 'tool-calls' })
+  service.store.append(source, { type: 'turn/completed' })
+  const after = transcriptTurns(service.store.read(source))
+  assert.equal(after.filter((one) => one.forkSeq !== undefined).length, 2, 'the call-ended turn carries no seq')
+})

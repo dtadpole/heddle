@@ -584,6 +584,18 @@ impl SessionStore {
         source: &str,
         attribution: ForkAttribution,
     ) -> Result<Option<SessionHandle>, SessionError> {
+        self.fork_at(source, attribution, None)
+    }
+
+    /// [`SessionStore::fork`] with DSH's `atSeq`: `Some(seq)` is the inclusive event seq to cut at
+    /// instead of the last completed turn (dsh-api-session-controller/lib/index.js:843-872). The caller
+    /// checks that the seq exists in the source.
+    pub fn fork_at(
+        &self,
+        source: &str,
+        attribution: ForkAttribution,
+        at_seq: Option<u64>,
+    ) -> Result<Option<SessionHandle>, SessionError> {
         let Some(from) = self.open(source) else {
             return Ok(None);
         };
@@ -608,8 +620,16 @@ impl SessionStore {
         })?;
 
         // The fork inherits what the source had **finished**: a dangling user message is not carried.
+        // An explicit cut is DSH's inclusive `atSeq` instead.
         let events = self.read(&from)?;
-        let inherited = completed_prefix(events.as_slice());
+        let inherited = match at_seq {
+            None => completed_prefix(events.as_slice()),
+            Some(cut) => events
+                .iter()
+                .filter(|event| event.seq <= cut)
+                .cloned()
+                .collect(),
+        };
         let by_seq = index_by_seq(&inherited);
         for seq in fold_surface(&inherited)?.nodes {
             let Some(message) = derive_message(&by_seq, seq) else {

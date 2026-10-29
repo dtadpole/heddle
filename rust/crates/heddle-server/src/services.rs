@@ -140,6 +140,12 @@ pub enum ForkOutcome {
     Unavailable {
         code: String,
     },
+    /// Refused — an explicit `atSeq` names no event of the source. Answered `409` with DSH's sentence, which
+    /// cites the source's last seq (`none` for an empty log).
+    NoSuchEvent {
+        at_seq: u64,
+        last_seq: Option<u64>,
+    },
     Forked(CreatedSession),
 }
 
@@ -185,8 +191,8 @@ pub trait SessionService: Send + Sync {
     fn create_at(&self, branch: &Path, title: Option<&str>)
     -> Result<CreatedSession, ServiceError>;
 
-    /// Fork a session at its last completed turn.
-    fn fork(&self, id: &str) -> ForkOutcome;
+    /// Fork a session at its last completed turn, or at `at_seq` (DSH's inclusive `atSeq`) when given.
+    fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome;
 
     /// Pin, unpin, archive or unarchive. `Ok(None)` is an unknown session; `Err` is a refusal answered
     /// `409` with its code (`archived` when the store gave none).
@@ -617,7 +623,7 @@ impl SessionService for UnavailableSessions {
     ) -> Result<CreatedSession, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
-    fn fork(&self, _id: &str) -> ForkOutcome {
+    fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
         ForkOutcome::NotFound
     }
     fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {

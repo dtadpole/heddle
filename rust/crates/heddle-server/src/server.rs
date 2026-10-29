@@ -1035,9 +1035,54 @@ async fn session_view_route(
     respond::json(StatusCode::OK, &Value::Object(body))
 }
 
-async fn fork_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    match state.harness().sessions.fork(id.as_str()) {
+/// The largest integer a JavaScript number holds exactly: DSH's `atSeq` must be a safe integer.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// DSH's `atSeq` from a fork body: `Ok(None)` when absent, `Err(())` when it is not a non-negative
+/// safe integer (dsh-api-session-controller/lib/index.js:856-861). `1.0` reads as 1, as `JSON.parse` does.
+fn fork_cut(body: &JsonBody) -> Result<Option<u64>, ()> {
+    let Some(value) = body.get("atSeq") else {
+        return Ok(None);
+    };
+    if let Some(whole) = value.as_u64() {
+        return if whole <= MAX_SAFE_INTEGER {
+            Ok(Some(whole))
+        } else {
+            Err(())
+        };
+    }
+    match value.as_f64() {
+        Some(number)
+            if number.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER as f64).contains(&number) =>
+        {
+            Ok(Some(number as u64))
+        }
+        _ => Err(()),
+    }
+}
+
+async fn fork_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    // An optional `atSeq` is DSH's inclusive cut: the chat's Branch action sends the seq that ended its turn.
+    let Ok(at_seq) = fork_cut(&body) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "atSeq must be a non-negative safe integer",
+        );
+    };
+    match state.harness().sessions.fork(id.as_str(), at_seq) {
         ForkOutcome::NotFound => respond::no_session(id.as_str()),
+        ForkOutcome::NoSuchEvent { at_seq, last_seq } => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "event {at_seq} does not exist in session \"{id}\" (last seq: {})",
+                last_seq.map_or_else(|| "none".to_owned(), |seq| seq.to_string())
+            ),
+            "unavailable".to_owned(),
+        ),
         ForkOutcome::Unavailable { code } => respond::error_with_code(
             StatusCode::CONFLICT,
             format!("session {id} has no completed turn to fork from"),
@@ -1818,6 +1863,29 @@ mod tests {
     use std::path::Path;
     use tower::ServiceExt;
 
+    #[test]
+    fn a_fork_cut_is_a_non_negative_safe_integer_or_absent() {
+        // DSH's `atSeq` (dsh-api-session-controller/lib/index.js:856-861).
+        let body = |value: Value| JsonBody(value.as_object().cloned().unwrap_or_default());
+        assert_eq!(fork_cut(&body(json!({}))), Ok(None));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 13}))), Ok(Some(13)));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 13.0}))), Ok(Some(13)));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 0}))), Ok(Some(0)));
+        for bad in [
+            json!(-1),
+            json!(1.5),
+            json!("13"),
+            json!(null),
+            json!(9_007_199_254_740_992_u64),
+        ] {
+            assert_eq!(
+                fork_cut(&body(json!({"atSeq": bad}))),
+                Err(()),
+                "refused: {bad}"
+            );
+        }
+    }
+
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
@@ -1867,7 +1935,7 @@ mod tests {
                 log: "log.zst".into(),
             })
         }
-        fn fork(&self, _id: &str) -> ForkOutcome {
+        fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
             ForkOutcome::NotFound
         }
         fn set_flags(
