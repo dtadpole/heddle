@@ -213,6 +213,22 @@ mod tests {
         assert!(!stale.contains("id=\"log\""));
     }
 
+    /// DSH parity C23 and C31 (R-developer-eight-26, -1), with the reload of C28 and C33 (-28, -2): the page this
+    /// binary embeds keeps a subagent's child out of the flat list and the search as well as the tree
+    /// (dsh-client-ui-workspace `sessionVisible`), reopens the saved session on a reload instead of `sessions[0]`
+    /// (`restoreSelection`), and gives a one-shot child DSH's read-only record in place of the composer
+    /// (dsh-client-ui-subagent `SubagentReadOnlyComposer`). The rules themselves are judged in
+    /// `test/session-rules.test.ts`.
+    #[test]
+    fn the_served_page_hides_subagent_children_restores_the_open_session_and_locks_a_one_shot_record() {
+        let served = page();
+        assert!(served.contains("sessions: SessionRules.sidebarSessions(sessions),"));
+        assert!(served.contains("const select = SessionRules.startupSession("));
+        assert!(!served.contains("const select = sessions[0]?.id ?? null"));
+        assert!(served.contains("const CURRENT_KEY = 'heddle.session.current.v1'"));
+        assert!(served.contains("<div id=\"subagent-readonly\" role=\"status\" hidden><strong>One-shot subagent record</strong><span>One-shot tasks do not accept follow-ups; review the full execution record here.</span></div>"));
+    }
+
     #[test]
     fn the_favicon_is_the_projects_own_asset() {
         assert!(FAVICON_SVG.starts_with(b"<svg") || FAVICON_SVG.starts_with(b"<?xml"));
