@@ -17,6 +17,7 @@ import {
   StallWatch,
   STREAM_OPEN,
   type WatchedSocket,
+  withoutSettledApprovals,
 } from '../src/server/stream.ts'
 import { push } from '../src/server/web.ts'
 
@@ -216,4 +217,16 @@ test('a subscriber that throws on write does not stop the push reaching the othe
   ])
   push({ log, subscribers: subscribers as never }, 'sessions', { type: 'session/renamed', session: 's', title: 't' })
   assert.equal(reached.length, 1)
+})
+
+test('a replay keeps an approval question only while it waits, as DSH replays pending questions only', () => {
+  const log = new EventLog({ epoch: 'e1' })
+  const asked = log.record('approval', '{"id":"approval-1","tool":"bash"}')
+  const settled = log.record('approval-settled', '{"type":"approval/settled","id":"approval-1","outcome":"rejected"}')
+  const other = log.record('session', '{"session":"s","event":{"type":"message"}}')
+  const stillAsked = log.record('approval', '{"id":"approval-2","tool":"bash"}')
+  const replay = log.since('e1-0') ?? []
+  assert.deepEqual(withoutSettledApprovals(replay, new Set(['approval-2'])), [settled, other, stillAsked], 'the answered question is dropped, its settlement kept')
+  assert.deepEqual(withoutSettledApprovals(replay, new Set(['approval-1', 'approval-2'])), [asked, settled, other, stillAsked])
+  assert.deepEqual(withoutSettledApprovals(['id: e1-9\nevent: approval\ndata: not json\n\n'], new Set()), [], 'an unreadable question is not replayed')
 })

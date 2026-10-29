@@ -40,7 +40,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
-import { EventLog, heartbeatFrame, heartbeatInterval, newClientId, readyFrame, resetFrame, StallWatch, STREAM_OPEN } from './stream.ts'
+import { EventLog, heartbeatFrame, heartbeatInterval, newClientId, readyFrame, resetFrame, StallWatch, STREAM_OPEN, withoutSettledApprovals } from './stream.ts'
 
 /**
  * The Web UI.
@@ -1818,7 +1818,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     const replay = cursor === null ? [] : state.log.since(cursor)
     response.write(readyFrame(newClientId(), undefined, { cursor: state.log.cursor, resumed: cursor !== null && replay !== null, heartbeatMs: state.heartbeatMs }))
     if (replay === null) response.write(resetFrame())
-    for (const frame of replay ?? []) response.write(frame)
+    /** A question answered while the client was away is not put back on its page: only waiting ones replay. */
+    const approvals = ctx.get('approvals') as { pendingRequests?: () => readonly unknown[] } | undefined
+    const waiting = new Set(
+      (approvals?.pendingRequests?.() ?? []).map((request) => (request as { id?: unknown }).id).filter((id): id is string => typeof id === 'string'),
+    )
+    for (const frame of withoutSettledApprovals(replay ?? [], waiting)) response.write(frame)
     return
   }
 
