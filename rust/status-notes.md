@@ -1,9 +1,9 @@
 ---
 title: Notes behind the Rust port's status
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-24T05:50:00Z
+modified: 2026-10-29T05:45:00Z
 level: L3
-version: 1.0.0
+version: 1.0.1
 description: The rule that admits failing checks, the intermittent and fixed checks with the code that owns them, and the seam the figures rest on.
 status: unverified
 grounded_in:
@@ -22,7 +22,10 @@ and [`status.md`](status.md) names each failure with the code that owns it.
 that port; `88-file-preview`'s html preview times out waiting for the preview (owned by `heddle-web-files`; the ui lane
 read 88 in full on `33407a4`, so it is to be confirmed there).
 
-**Intermittent, through the binary:** `check-chat-view` #11, a scroll race between page and check, seen on the
+**Intermittent, through the binary:** `50/check-teams`' restart check failed once under load in the gate of `0199453`
+and passes alone on both builds (and in the run on `0199453`).
+
+**Intermittent in the ui parts:** `check-chat-view` #11, a scroll race between page and check, seen on the
 TypeScript build too; #16, not yet root-caused (owned by `web.rs` and `heddle-server`;
 [readings](../_verifiers_/80-web-ui/readings.md)). `check-goal` #1 was a torn read
 of session metadata: since `42c6b3f` `heddle-session` and `heddle-workspace` replace those files atomically, and a
