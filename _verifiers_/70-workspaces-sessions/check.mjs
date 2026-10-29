@@ -957,6 +957,95 @@ test('a session interrupted mid-frame still reads, and its next turn lands', asy
   }
 })
 
+test('a session one process is writing refuses a second writer, so its log never holds a seq twice', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * R-developer-eight-27, reproduced the way it was found: a running server held a session, the command line resumed
+   * the same session with a turn, and both appended from their own in-memory count — the log held seqs 14 to 19
+   * twice and each process showed a different history. DSH keeps one writer per session (a lock beside the log;
+   * a second writer is refused with "session ... is already owned by an active write handle"), and so must this.
+   *
+   * The second half is the other order: a session the server has only **read** is written by the command line, and
+   * the server's next write must continue after it rather than from the count it read before.
+   */
+  const h = harness('writer-lock')
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const webTurn = async (body) => {
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return { status: response.status, text: await response.text() }
+    }
+    const said = (id) =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user')
+        .map((event) => event.message.content?.[0]?.text)
+    const assertEverySeqOnce = (id, when) => {
+      const seqs = readTranscript(join(h.home, 'sessions', id)).map((event) => event.seq)
+      assert.deepEqual(seqs, seqs.map((_, index) => index), `${when}: every seq is written once, in order\nsaw: ${seqs.join(', ')}`)
+    }
+
+    /** The server starts the session with a turn of its own, so it is the session's writer. */
+    const first = await webTurn({ prompt: 'remember the word loom', folder: h.work })
+    assert.equal(first.status, 200, `the server's turn ran\n${first.text}`)
+    assert.ok(!first.text.includes('event: error'), `and did not fail\n${first.text}`)
+    const id = /"session":"(session-[^"]+)"/.exec(first.text)?.[1]
+    assert.ok(id, `the turn names its session\n${first.text}`)
+    const transcript = transcriptFile(join(h.home, 'sessions', id))
+    const held = readFileSync(transcript)
+
+    /** The command line resumes it while the server still runs: refused, in DSH's words, and nothing is written. */
+    const cli = await runCli([...h.args, '--resume', id, '--turn', 'resumed from cli'], { env: h.env })
+    assert.equal(cli.timedOut, false, `the refused turn returned\n${cli.stdout}${cli.stderr}`)
+    assert.notEqual(cli.code, 0, `a second writer is refused while the server holds the session\n${cli.stdout}${cli.stderr}`)
+    assert.ok(
+      cli.stderr.includes(`session "${id}" is already owned by an active write handle`),
+      `and the refusal says why\n${cli.stdout}${cli.stderr}`,
+    )
+    assert.ok(readFileSync(transcript).equals(held), 'and the refused writer appended nothing to the log')
+
+    /** The server keeps writing the session it holds, from the log's own next seq. */
+    const second = await webTurn({ session: id, prompt: 'resumed from web' })
+    assert.equal(second.status, 200, `the server's next turn ran\n${second.text}`)
+    assert.ok(!second.text.includes('event: error'), `and did not fail\n${second.text}`)
+    assertEverySeqOnce(id, 'after a refused command-line turn and the next server turn')
+    assert.deepEqual(said(id), ['remember the word loom', 'resumed from web'], 'the log holds one history: the server\'s two turns and nothing else')
+
+    /** The other order: the command line writes a session the server has read but does not hold. */
+    const started = await runCli([...h.args, '--turn', 'started on the command line', '--json'], { env: h.env })
+    assert.equal(started.code, 0, `the command line started a session\n${started.stdout}${started.stderr}`)
+    const other = parseJson(started.stdout)?.session
+    assert.ok(typeof other === 'string' && other !== id, `a second session\n${started.stdout}`)
+    const viewed = await fetch(new URL(`/api/sessions/${other}`, live.url), { headers: { cookie } })
+    assert.equal(viewed.status, 200, 'the server reads the session')
+    await viewed.text()
+    const again = await runCli([...h.args, '--resume', other, '--turn', 'the command line again'], { env: h.env })
+    assert.equal(again.code, 0, `reading does not hold a session, so the command line may still write it\n${again.stdout}${again.stderr}`)
+    const continued = await webTurn({ session: other, prompt: 'the server continues it' })
+    assert.equal(continued.status, 200, `the server's turn on it ran\n${continued.text}`)
+    assert.ok(!continued.text.includes('event: error'), `and did not fail\n${continued.text}`)
+    assertEverySeqOnce(other, 'after the server wrote a session the command line had written since the server read it')
+    assert.deepEqual(
+      said(other),
+      ['started on the command line', 'the command line again', 'the server continues it'],
+      'and the server\'s turn continued the history on disk rather than the one it had read',
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
