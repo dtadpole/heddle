@@ -4,6 +4,9 @@ import { test } from 'node:test'
 
 import {
   DEFAULT_HEARTBEAT_MS,
+  EventLog,
+  RESET_EVENT,
+  resetFrame,
   HEARTBEAT_EVENT,
   heartbeatFrame,
   heartbeatInterval,
@@ -138,4 +141,57 @@ test('bytes queued behind a stalled peer are not progress: a heartbeat a minute 
   assert.deepEqual(watch.sweep([paused], 1000), [])
   paused.waiting += 40
   assert.deepEqual(watch.sweep([paused], 2000), [paused], 'still dead after two intervals')
+})
+
+test('ready carries the follow fields after DSH\'s keys, in the order the Rust server writes them', () => {
+  const frame = readyFrame('abc123', '/home/owner', { cursor: 'e1-7', resumed: true, heartbeatMs: 2000 })
+  assert.equal(
+    frame,
+    'event: ready\ndata: {"type":"ready","clientId":"abc123","host":{"home":"/home/owner"},"cursor":"e1-7","resumed":true,"heartbeatMs":2000}\n\n',
+  )
+})
+
+test('the reset frame tells a client to re-read its baselines', () => {
+  assert.equal(resetFrame(), 'event: reset\ndata: {"type":"reset"}\n\n')
+  assert.equal(parseFrame(resetFrame()).event, RESET_EVENT)
+})
+
+test('every recorded frame gets the next id, written first so the browser takes it as its last event id', () => {
+  const log = new EventLog({ epoch: 'e1' })
+  assert.equal(log.cursor, 'e1-0', 'before the first frame')
+  assert.equal(log.record('session', '{"a":1}'), 'id: e1-1\nevent: session\ndata: {"a":1}\n\n')
+  assert.equal(log.record('approval', '{"b":2}'), 'id: e1-2\nevent: approval\ndata: {"b":2}\n\n')
+  assert.equal(log.cursor, 'e1-2')
+  assert.match(new EventLog().epoch, /^[0-9a-f]{16}$/, 'a fresh server picks a random epoch')
+})
+
+test('a cursor in the log is given exactly the frames after it, no duplicate and no gap', () => {
+  const log = new EventLog({ epoch: 'e1' })
+  for (let index = 1; index <= 5; index += 1) log.record('session', `{"n":${index}}`)
+  assert.deepEqual(log.since('e1-5'), [], 'an up-to-date client is given nothing')
+  assert.deepEqual(
+    log.since('e1-3')?.map((text) => text.split('\n')[0]),
+    ['id: e1-4', 'id: e1-5'],
+  )
+  assert.equal(log.since('e1-0')?.length, 5, 'a client that saw ready before any frame is given all of them')
+})
+
+test('a cursor the log cannot honour gets null, which the route answers with a reset', () => {
+  const log = new EventLog({ epoch: 'e1', maxFrames: 3 })
+  for (let index = 1; index <= 6; index += 1) log.record('session', `{"n":${index}}`)
+  assert.equal(log.since('e0-3'), null, 'another epoch: the server restarted')
+  assert.equal(log.since('e1-1'), null, 'older than the log reaches back (frames 4..6 kept)')
+  assert.deepEqual(log.since('e1-3')?.length, 3, 'the oldest honoured cursor is the one just before the log')
+  assert.equal(log.since('e1-9'), null, 'ahead of the log')
+  for (const bad of ['', 'e1', 'e1-', '-3', 'e1-x', 'e1-3.5']) assert.equal(log.since(bad), null, `'${bad}' is malformed`)
+})
+
+test('the log is bounded by bytes as well as by count, and always keeps the newest frame', () => {
+  const log = new EventLog({ epoch: 'e1', maxBytes: 100 })
+  log.record('session', 'x'.repeat(60))
+  log.record('session', 'y'.repeat(60))
+  assert.equal(log.since('e1-0'), null, 'the first frame was evicted to keep under the byte bound')
+  assert.equal(log.since('e1-1')?.length, 1)
+  log.record('session', 'z'.repeat(500))
+  assert.equal(log.since('e1-2')?.length, 1, 'a frame larger than the bound is still kept on its own')
 })

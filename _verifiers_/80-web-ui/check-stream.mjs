@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
  * 80-web-ui — the live event stream, judged against DSH's `$events` stream (DSH parity phase B, developer-ten).
@@ -22,16 +23,26 @@ after(() => Promise.all([...servers].map((server) => server.close())))
 
 /** Spawn `heddle web` on a free port with a scripted endpoint; resolves once it prints its URL. */
 function startServer(label, steps = [{ text: 'scripted answer' }], extraEnv = {}) {
+  const home = isolatedHome(`stream-${label}`)
+  const work = fixtureDir(`stream-${label}-work`)
+  const { config, script } = scriptedConfig({ home, steps })
+  return spawnHeddle({ home, work, config, script, port: 0, extraEnv })
+}
+
+/** Start the same server again — same home, secret, store and port — after it was stopped. */
+function restartServer(server) {
+  return spawnHeddle({ home: server.home, work: server.work, config: server.config, script: server.script, port: server.port, extraEnv: server.extraEnv })
+}
+
+function spawnHeddle({ home, work, config, script, port, extraEnv }) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const home = isolatedHome(`stream-${label}`)
-      const work = fixtureDir(`stream-${label}-work`)
-      const { config, script } = scriptedConfig({ home, steps })
+      const env = { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config, ...extraEnv }
       const child = spawn(
-        ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
-        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] },
+        ...heddleCommand(['web', '--host', '127.0.0.1', '--port', String(port), '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
+        { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
       let settled = false
@@ -45,8 +56,19 @@ function startServer(label, steps = [{ text: 'scripted answer' }], extraEnv = {}
             port: Number(match[2]),
             home,
             work,
+            config,
             script,
+            extraEnv,
+            env,
             output: () => output,
+            /** Stop the process and keep its home, so it can be started again. */
+            stop: () =>
+              new Promise((done) => {
+                servers.delete(server)
+                if (child.exitCode !== null) return done()
+                child.once('exit', () => done())
+                child.kill('SIGKILL')
+              }),
             close: async () => {
               servers.delete(server)
               child.kill('SIGKILL')
@@ -104,7 +126,7 @@ async function api(server, cookie, method, path, body) {
  * Open `GET /api/events` with the cookie and parse frames as they arrive.
  * `frames` holds `{ event, data, id, comment }`; `next(predicate, ms)` resolves with the first frame that matches.
  */
-async function openStream(server, cookie, headers = {}) {
+async function openStream(server, cookie, headers = {}, path = '/api/events') {
   const http = await import('node:http')
   const stream = { frames: [], chunks: [], closed: false, status: null }
   const waiters = []
@@ -118,7 +140,7 @@ async function openStream(server, cookie, headers = {}) {
       }
     }
   }
-  const request = http.get({ host: '127.0.0.1', port: server.port, path: '/api/events', headers: { cookie, accept: 'text/event-stream', ...headers } }, (response) => {
+  const request = http.get({ host: '127.0.0.1', port: server.port, path, headers: { cookie, accept: 'text/event-stream', ...headers } }, (response) => {
     stream.status = response.statusCode
     response.setEncoding('utf8')
     response.on('data', (chunk) => {
@@ -226,6 +248,9 @@ test("the stream opens with DSH's ready frame, and a baseline read on it misses 
     const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'baseline' })
     assert.equal(created.status, 200, created.text)
     const session = created.json.session
+    // The creation's own frame is waited for first, so it cannot arrive after the clock starts and be counted
+    // against the turn (a race the Rust server's asynchronous body write exposed).
+    await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'session/created', 10_000)
     const baseline = await logEntries(server, cookie, session)
     const startedAt = Date.now()
     const turn = await runTurn(server, cookie, { session, prompt: 'go' })
@@ -310,6 +335,107 @@ test('an idle stream carries a heartbeat every interval, and a peer that stops r
     stalled.socket.destroy()
     stream.close()
   } finally {
+    await server.close()
+  }
+})
+
+/** The sequence number of a frame id `<epoch>-<seq>`. */
+const seqOf = (id) => Number(String(id).slice(String(id).lastIndexOf('-') + 1))
+
+test('a reconnecting client is given every frame it missed after its cursor, and a cursor from another start gets reset', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const server = await startServer('follow', [
+    { text: 'one ', toolCall: { name: 'bash', arguments: { command: 'true' } } },
+    { text: 'two' },
+  ])
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'follow' })
+    const session = created.json.session
+
+    /** Every frame on the followed stream carries an id, `<epoch>-<seq>`, counting up by one. */
+    const first = await openStream(server, cookie)
+    const ready = await first.next((frame) => frame.event === 'ready')
+    assert.equal(typeof ready.data.cursor, 'string', 'ready names the newest id')
+    assert.equal(ready.data.resumed, false, 'a first connection resumes nothing')
+    assert.ok(Number.isInteger(ready.data.heartbeatMs) && ready.data.heartbeatMs > 0, 'and says the heartbeat interval')
+    await runTurn(server, cookie, { session, prompt: 'first' })
+    await first.next((frame) => frame.event === 'session' && frame.data?.event?.type === 'turn/completed')
+    const numbered = first.frames.filter((frame) => frame.event === 'session')
+    assert.ok(numbered.every((frame) => /^[0-9a-f]+-\d+$/.test(frame.id ?? '')), 'every session frame has an id')
+    const seqs = numbered.map((frame) => seqOf(frame.id))
+    assert.deepEqual(seqs, seqs.map((_, index) => seqs[0] + index), 'ids count up by one with no gap')
+    const lastSeen = numbered.at(-1).id
+    first.close()
+
+    /** A turn runs while no stream is open; the reconnect is given all of it, after ready, and nothing twice. */
+    const before = await logEntries(server, cookie, session)
+    await runTurn(server, cookie, { session, prompt: 'while away' })
+    const missed = (await logEntries(server, cookie, session)) - before
+    for (const [how, reconnect] of [
+      ['Last-Event-ID', () => openStream(server, cookie, { 'last-event-id': lastSeen })],
+      ['?cursor=', () => openStream(server, cookie, {}, `/api/events?cursor=${encodeURIComponent(lastSeen)}`)],
+    ]) {
+      const again = await reconnect()
+      const resumed = await again.next((frame) => frame.event === 'ready')
+      assert.equal(resumed.data.resumed, true, `${how}: the cursor was honoured`)
+      await again.next((frame) => frame.event === 'session' && frame.data?.event?.type === 'turn/completed')
+      const replayed = again.frames.filter((frame) => frame.event === 'session')
+      assert.equal(replayed.length, missed, `${how}: every entry written while away was replayed (${replayed.length} of ${missed})`)
+      assert.equal(seqOf(replayed[0].id), seqOf(lastSeen) + 1, `${how}: starting right after the cursor`)
+      assert.ok(again.frames.indexOf(resumed) < again.frames.indexOf(replayed[0]), `${how}: after ready`)
+      again.close()
+    }
+
+    /** A cursor this server never gave (another start) cannot be resumed: ready says so and reset follows. */
+    const stranger = await openStream(server, cookie, { 'last-event-id': '0000000000000000-12' })
+    const notResumed = await stranger.next((frame) => frame.event === 'ready')
+    assert.equal(notResumed.data.resumed, false, 'a cursor from another start is not honoured')
+    const reset = await stranger.next((frame) => frame.event !== null && frame.event !== 'ready' && frame.event !== 'heartbeat')
+    assert.equal(reset.event, 'reset', 'and the client is told to re-read its baselines')
+    stranger.close()
+  } finally {
+    await server.close()
+  }
+})
+
+test('the page shows it is reconnecting while the server is down, and a session made meanwhile appears without a reload', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  let server = await startServer('page-reconnect', [{ text: 'scripted answer' }], { HEDDLE_WEB_HEARTBEAT_MS: '500' })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'before the outage' })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 10_000), 'the page says its stream is open')
+    assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), true, 'and shows no connection notice')
+
+    /** DSH shows a connecting state while it retries; so must the page, within a few seconds of losing the server. */
+    await server.stop()
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "connecting"', 8000), 'the page knows the stream is down')
+    assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), false, 'and shows it')
+
+    /** A session made while the page cannot hear about it: the CLI writes the same store. */
+    // From the checkout, as the server runs: the TypeScript CLI composes its layers from its working folder.
+    const made = await runCli(['session', 'new', server.work, '--session-root', join(server.home, 'sessions')], { env: server.env })
+    assert.equal(made.code, 0, `the CLI made a session while the server was down: ${made.stderr}`)
+
+    server = await restartServer(server)
+    const sessions = await api(server, cookie, 'GET', '/api/sessions')
+    const fresh = sessions.json.find((entry) => entry.title !== 'before the outage')
+    assert.ok(fresh !== undefined, 'the restarted server lists the session made while it was down')
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 20_000), 'the page reconnects on its own')
+    assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), true, 'and the notice goes')
+    assert.ok(
+      await browser.waitFor(`document.querySelector('#tree li[data-session-id="${fresh.id}"]') !== null`, 10_000),
+      'the session made while it was away appears in the tree without a reload',
+    )
+  } finally {
+    browser.close()
     await server.close()
   }
 })

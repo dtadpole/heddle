@@ -860,13 +860,26 @@ async fn page_route() -> Response {
     respond::html(StatusCode::OK, page::page())
 }
 
-async fn events_route(State(state): State<AppState>) -> Response {
-    // Subscribed before the body starts, so `ready` is followed by every frame published after it.
-    let subscription = state.events().subscribe();
-    sse_response(stream::events_frames(
-        subscription,
+async fn events_route(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // The follow cursor: `Last-Event-ID` from the browser's own retries, `?cursor=` from the page's reconnects
+    // (web.ts reads the header first). Subscribed and replayed under one lock, before the body starts.
+    let presented = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| query.get("cursor").cloned())
+        .filter(|cursor| !cursor.is_empty());
+    let follow = state.events().subscribe_from(presented.as_deref());
+    sse_response(stream::follow_frames(
+        follow,
+        presented.is_some(),
         &stream::new_client_id(),
         &stream::host_home(),
+        stream::heartbeat_interval().as_millis() as u64,
     ))
 }
 
@@ -3265,6 +3278,53 @@ mod tests {
         assert!(client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()), "{client}");
         assert_eq!(data["host"]["home"], std::env::var("HOME").unwrap_or_default());
         assert!(rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(), "{text}");
+    }
+
+    /// A reconnect with `Last-Event-ID` is given the frames it missed after `ready`; a cursor from another
+    /// server start is given `reset`.
+    #[tokio::test]
+    async fn the_event_stream_replays_after_a_cursor_and_resets_an_unknown_one() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-follow");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        state.events().publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        let seen = state.events().cursor();
+        state.events().publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        async fn read_until(router: &Router, cookie: &str, cursor: &str, marker: &str) -> String {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri("/api/events")
+                        .header("cookie", cookie)
+                        .header("last-event-id", cursor)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut body = response.into_body();
+            let mut text = String::new();
+            while !text.contains(marker) {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                    .await
+                    .expect("a frame in time")
+                    .expect("the stream stays open")
+                    .expect("a body frame");
+                if let Ok(data) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            text
+        }
+        let text = read_until(&router, &cookie, &seen, "\"n\":2").await;
+        assert!(text.contains("\"resumed\":true"), "{text}");
+        assert!(!text.contains("\"n\":1"), "nothing before the cursor is repeated: {text}");
+        assert!(text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(), "{text}");
+        let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
+        assert!(text.contains("\"resumed\":false"), "{text}");
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.

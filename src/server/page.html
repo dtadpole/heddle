@@ -1965,6 +1965,18 @@
     font-variant-numeric: tabular-nums;
   }
   #composer-status[hidden] { display: none; }
+  /**
+   * The connection's state while the live stream is down: DSH shows a connecting state while its Connection retries;
+   * this pill is that state, over everything, until the stream is open again (phase B item 3).
+   */
+  #connection-state {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
+    display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px;
+    background: var(--surface-2, #2a2a2a); color: var(--text-2, #ddd); font-size: 12px; line-height: 20px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  #connection-state[hidden] { display: none; }
+  #connection-state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #e0a43a; }
   #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
   #composer-status .stat-icon { flex: none; width: 16px; height: 16px; }
   #composer-status .stat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -2665,6 +2677,7 @@
 -->
 <div id="gutter-left" role="separator" aria-orientation="vertical" aria-label="resize the sidebar" aria-valuemin="12" aria-valuemax="48" aria-valuenow="22" tabindex="0"></div>
 <main>
+  <div id="connection-state" role="status" aria-live="polite" hidden>Reconnecting to heddle…</div>
   <!--
     The session's own header, above its tabs — DSH prints the conversation's name there, and this view showed it
     only in the sidebar, so the reader had to look away from the conversation to know which one it was.
@@ -5526,7 +5539,113 @@ async function refreshSessions() {
  * Motion turns on after the reader's first input in the sidebar — the reference's own guard, so a page that is loading does
  * not animate its first draw. Captured, so a helper restoring focus does not count as a second arming.
  */
-const events = new EventSource('/api/events')
+/**
+ * The live stream, kept open the way DSH's Connection keeps its `$events` stream open.
+ *
+ * A browser's own EventSource retry is fixed, shows nothing, and gives up for good on any answer that is not a
+ * stream (a relay's 502 while the server restarts), so the page owns the connection instead:
+ * - every frame's id is remembered, and a reconnect presents it as `?cursor=`, so the server replays what was
+ *   written while the stream was down (or answers `reset`, and the page re-reads its baselines);
+ * - a failure closes the source and retries on DSH's schedule, capped jittered exponential backoff from 500 ms
+ *   to 10 s, with `#connection-state` shown and `body[data-connection]` set to `connecting` until `ready`;
+ * - two heartbeat intervals of silence count as a failure, so a stream a relay dropped without closing is noticed.
+ * Listeners are registered once, on this object, and re-attached to every source it opens.
+ */
+const events = (() => {
+  const handlers = new Map()
+  const banner = document.getElementById('connection-state')
+  let source = null
+  let lastEventId = ''
+  let attempt = 0
+  let heartbeatMs = 2000
+  let retryTimer = 0
+  let silenceTimer = 0
+  function setState(state) {
+    document.body.dataset.connection = state
+    banner.hidden = state !== 'connecting'
+  }
+  function heard() {
+    clearTimeout(silenceTimer)
+    silenceTimer = setTimeout(() => fail(), heartbeatMs * 2 + 500)
+  }
+  function deliver(name, message) {
+    if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
+    heard()
+    for (const handler of handlers.get(name) ?? []) {
+      try {
+        handler(message)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+  }
+  function attach(es, name) {
+    es.addEventListener(name, (message) => {
+      if (source === es) deliver(name, message)
+    })
+  }
+  function connect() {
+    clearTimeout(retryTimer)
+    const es = new EventSource(lastEventId.length > 0 ? '/api/events?cursor=' + encodeURIComponent(lastEventId) : '/api/events')
+    source = es
+    /** A connection that never says `ready` is as dead as one that went quiet. */
+    heard()
+    es.addEventListener('ready', (message) => {
+      if (source !== es) return
+      try {
+        const data = JSON.parse(message.data)
+        if (Number.isFinite(data.heartbeatMs) && data.heartbeatMs > 0) heartbeatMs = data.heartbeatMs
+        /** Not resumed: nothing will be replayed, so the newest id is where the next reconnect starts. */
+        if (data.resumed !== true && typeof data.cursor === 'string') lastEventId = data.cursor
+      } catch {
+        // a ready frame without data still opens the stream
+      }
+      attempt = 0
+      setState('open')
+      deliver('ready', message)
+    })
+    es.addEventListener('heartbeat', () => {
+      if (source === es) heard()
+    })
+    for (const name of handlers.keys()) if (name !== 'ready') attach(es, name)
+    es.onerror = () => {
+      if (source === es) fail()
+    }
+  }
+  function fail() {
+    clearTimeout(silenceTimer)
+    if (source !== null) source.close()
+    source = null
+    setState('connecting')
+    clearTimeout(retryTimer)
+    const cap = Math.min(10_000, 500 * 2 ** attempt)
+    attempt = Math.min(attempt + 1, 10)
+    retryTimer = setTimeout(connect, cap / 2 + Math.random() * (cap / 2))
+  }
+  connect()
+  return {
+    addEventListener(name, handler) {
+      if (!handlers.has(name)) {
+        handlers.set(name, [])
+        if (source !== null && name !== 'ready') attach(source, name)
+      }
+      handlers.get(name).push(handler)
+    },
+  }
+})()
+/**
+ * A reset means the server could not replay what this page missed — it restarted, or the page was away too long —
+ * so everything the stream would have told it is read again: the list and its running marks, the tree, the open
+ * session's transcript and any waiting question (DSH's owners re-read their baselines on `connection/reset`).
+ */
+events.addEventListener('reset', () => {
+  void (async () => {
+    await refreshSessions()
+    await renderTree()
+    if (current !== null) await showSession(current)
+    await refreshApprovals()
+  })()
+})
 /**
  * The list is redrawn shortly after activity, once per burst.
  *

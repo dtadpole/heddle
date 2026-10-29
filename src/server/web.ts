@@ -40,7 +40,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
-import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
+import { EventLog, heartbeatFrame, heartbeatInterval, newClientId, readyFrame, resetFrame, StallWatch, STREAM_OPEN } from './stream.ts'
 
 /**
  * The Web UI.
@@ -165,9 +165,17 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   // Tracked so shutdown can reach a connection whose handler is still awaiting a turn.
   const sockets = new Set<import('node:net').Socket>()
 
+  /**
+   * The stream's log: every frame pushed to `/api/events` gets an id from it and is kept for a while, so a client
+   * that reconnects is given what it missed (the follow cursor, `stream.ts`). The heartbeat interval is fixed here
+   * too, because `ready` tells the page what silence means.
+   */
+  const log = new EventLog()
+  const heartbeatMs = heartbeatInterval()
+
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
-    const line = `event: session\ndata: ${JSON.stringify(payload)}\n\n`
+    const line = log.record('session', JSON.stringify(payload))
     for (const client of subscribers) {
       client.write(line)
     }
@@ -227,7 +235,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     | undefined
   const detachApprovals = approvals?.attachAnswerer?.()
   ctx.on('approval/request', (request) => {
-    const line = `event: approval\ndata: ${JSON.stringify(request)}\n\n`
+    const line = log.record('approval', JSON.stringify(request))
     for (const client of subscribers) {
       client.write(line)
     }
@@ -248,6 +256,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       port,
       clients,
       subscribers,
+      log,
+      heartbeatMs,
       running,
       controllers,
       runningSince,
@@ -277,7 +287,6 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
    * two intervals while it still had some to send is destroyed (DSH's dead-peer rule, see `stream.ts`). One timer
    * for the server, unref'd so it never keeps a process alive on its own.
    */
-  const heartbeatMs = heartbeatInterval()
   const stalls = new StallWatch(heartbeatMs)
   const heartbeat = setInterval(() => {
     const frame = heartbeatFrame()
@@ -342,6 +351,10 @@ interface RequestState {
   readonly port: number
   readonly clients: Set<ServerResponse>
   readonly subscribers: Set<ServerResponse>
+  /** The stream's log: ids for every pushed frame, and the frames a reconnecting client missed. */
+  readonly log: EventLog
+  /** The heartbeat interval, which `ready` tells the page. */
+  readonly heartbeatMs: number
   /**
    * How many turns are running per session.
    *
@@ -1789,7 +1802,19 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      */
     state.subscribers.add(response)
     request.on('close', () => state.subscribers.delete(response))
-    response.write(readyFrame(newClientId()))
+    /**
+     * The follow cursor: `Last-Event-ID` is what the browser sends on its own retries, `?cursor=` what the page sends
+     * when it reconnects itself. Honoured, the frames after it follow `ready`; not honoured (the server restarted,
+     * or the log no longer reaches back), a `reset` tells the client to re-read its baselines. All of it is written
+     * in this one turn of the event loop, after the subscriber was added, so no frame falls between.
+     */
+    const header = request.headers['last-event-id']
+    const presented = (Array.isArray(header) ? header[0] : header) ?? url.searchParams.get('cursor')
+    const cursor = presented !== undefined && presented !== null && presented.length > 0 ? presented : null
+    const replay = cursor === null ? [] : state.log.since(cursor)
+    response.write(readyFrame(newClientId(), undefined, { cursor: state.log.cursor, resumed: cursor !== null && replay !== null, heartbeatMs: state.heartbeatMs }))
+    if (replay === null) response.write(resetFrame())
+    for (const frame of replay ?? []) response.write(frame)
     return
   }
 
