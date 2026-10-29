@@ -2,10 +2,11 @@
 //! as a status and the exact body bytes the TypeScript server writes (`src/server/web.ts`).
 //!
 //! A success body is `JSON.stringify(value, null, 2)` plus a newline, an error body compact JSON plus a newline. The
-//! server only matches the path, reads the body, and - for a late answer to a session with a running turn - appends
-//! the returned [`Steer`] as the user message, which is how the TypeScript route delivers it.
+//! server only matches the path and reads the body. A late answer comes back as `message`, the user message DSH sends,
+//! for the caller to deliver as a turn or queue behind a running one - never steered in, because a turn on its last
+//! step ends without another model call and the answer was measured to go unanswered.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::model::{codes, QuestionError};
 use crate::service::QuestionService;
@@ -17,15 +18,6 @@ pub struct HttpAnswer {
     pub status: u16,
     /// The exact body.
     pub body: String,
-}
-
-/// A late answer the server must append to a running session as a user message.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Steer {
-    /// The session.
-    pub session: String,
-    /// The user message text (DSH's `answer_to_pending_question` record).
-    pub text: String,
 }
 
 fn success(value: &Value) -> HttpAnswer {
@@ -80,40 +72,34 @@ pub fn get_questions(service: Option<&QuestionService>, session: Option<&str>, a
     }
 }
 
-/// Answer `POST /api/questions/<id>` (or `/hold` when `hold`), given the parsed body and whether the body's session
-/// has a running turn. A late answer to a running session comes back as the [`Steer`] to append.
-pub fn post_question(service: Option<&QuestionService>, id: &str, hold: bool, body: &Value, running: impl Fn(&str) -> bool) -> (HttpAnswer, Option<Steer>) {
-    let Some(service) = service else { return (unloaded(), None) };
+/// Answer `POST /api/questions/<id>` (or `/hold` when `hold`), given the parsed body.
+pub fn post_question(service: Option<&QuestionService>, id: &str, hold: bool, body: &Value) -> HttpAnswer {
+    let Some(service) = service else { return unloaded() };
     if !is_question_id(id) {
-        return (failure(400, json!({ "error": "not a question route" })), None);
+        return failure(400, json!({ "error": "not a question route" }));
     }
     let session = match session_of(service, body.get("session").and_then(Value::as_str)) {
         Ok(session) => session,
-        Err(answer) => return (answer, None),
+        Err(answer) => return answer,
     };
     if hold {
         return match service.hold(&session, id) {
-            Ok(view) => (success(&json!({ "request": view })), None),
-            Err(error) => (refusal(&error), None),
+            Ok(view) => success(&json!({ "request": view })),
+            Err(error) => refusal(&error),
         };
     }
     let outcome = match service.answer(&session, id, body.get("answers").unwrap_or(&Value::Null)) {
         Ok(outcome) => outcome,
-        Err(error) => return (refusal(&error), None),
+        Err(error) => return refusal(&error),
     };
     if !outcome.late {
-        return (success(&json!({ "answered": true, "late": false, "request": outcome.view })), None);
+        return success(&json!({ "answered": true, "late": false, "request": outcome.view }));
     }
-    let message = outcome.message.unwrap_or_default();
-    let steered = running(&session);
-    let mut answer = Map::new();
-    answer.insert("answered".into(), Value::Bool(true));
-    answer.insert("late".into(), Value::Bool(true));
-    answer.insert("delivered".into(), json!(if steered { "steer" } else { "none" }));
-    if !steered {
-        answer.insert("message".into(), Value::String(message.clone()));
-    }
-    answer.insert("request".into(), Value::Object(outcome.view));
-    let steer = steered.then(|| Steer { session, text: message });
-    (success(&Value::Object(answer)), steer)
+    success(&json!({
+        "answered": true,
+        "late": true,
+        "delivered": "none",
+        "message": outcome.message.unwrap_or_default(),
+        "request": outcome.view,
+    }))
 }
