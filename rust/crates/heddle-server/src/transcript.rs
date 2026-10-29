@@ -540,11 +540,23 @@ mod tests {
         let turns = transcript_turns(&events);
         let last = turns.last().expect("an answer row");
         assert_eq!(last.kind, TurnKind::Assistant);
-        assert_eq!(last.ended.as_deref(), Some(&["the turn failed: upstream answered 502".to_owned()][..]));
+        assert_eq!(
+            last.ended.as_deref(),
+            Some(&["the turn failed: upstream answered 502".to_owned()][..])
+        );
 
-        let alone = transcript_turns(&[serde_json::json!({"seq": 0, "type": "turn/failed", "message": ""})]);
-        assert_eq!(alone.len(), 1, "a failure with no answer gets a row of its own");
-        assert_eq!(alone[0].ended.as_deref(), Some(&["the turn failed: unknown error".to_owned()][..]));
+        let alone = transcript_turns(&[
+            serde_json::json!({"seq": 0, "type": "turn/failed", "message": ""}),
+        ]);
+        assert_eq!(
+            alone.len(),
+            1,
+            "a failure with no answer gets a row of its own"
+        );
+        assert_eq!(
+            alone[0].ended.as_deref(),
+            Some(&["the turn failed: unknown error".to_owned()][..])
+        );
     }
     use serde_json::json;
 

@@ -483,7 +483,8 @@ impl ServerBuilder {
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let listener = crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
+            let listener =
+                crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
             let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
@@ -1345,9 +1346,10 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
     match workspaces.add(&path, name) {
         Ok((record, created)) => {
             if created {
-                state
-                    .events()
-                    .push("workspace", &json!({"type": "workspace/added", "workspace": record}));
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/added", "workspace": record}),
+                );
             }
             respond::json(
                 StatusCode::OK,
@@ -1371,9 +1373,10 @@ async fn rename_workspace(
     };
     match workspaces.rename(&id, title) {
         Ok(Some(record)) => {
-            state
-                .events()
-                .push("workspace", &json!({"type": "workspace/renamed", "workspace": record}));
+            state.events().push(
+                "workspace",
+                &json!({"type": "workspace/renamed", "workspace": record}),
+            );
             respond::json(StatusCode::OK, &record)
         }
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
@@ -1611,6 +1614,14 @@ async fn html_preview(
         return respond::error(
             StatusCode::NOT_FOUND,
             "that path is not under any workspace root",
+        );
+    }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or
+    // not, is refused, as web.ts does.
+    if !preview::is_html_document(&path) {
+        return respond::error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            preview::NOT_AN_HTML_DOCUMENT,
         );
     }
     let metadata = match std::fs::metadata(&path) {
@@ -2537,6 +2548,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_html_route_previews_only_an_html_document() {
+        let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<h1>page</h1>").unwrap();
+        // A real Word document is a zip; a text file is valid UTF-8. Neither is a page.
+        std::fs::write(
+            dir.join("report.docx"),
+            b"PK\x03\x04\x14\x00\x00\x00\x08\x00binary",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain words").unwrap();
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("html-only")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = |leaf: &str| {
+            format!(
+                "/api/html?path={}",
+                dir.join(leaf).to_string_lossy().replace('/', "%2F")
+            )
+        };
+        let (status, _, bytes) = call(&router, Method::GET, &uri("page.html"), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("page"), "{}", body_text(&bytes));
+        for leaf in ["report.docx", "notes.txt"] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri(leaf), Some(&cookie)).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{leaf}");
+            assert_eq!(
+                body_text(&bytes),
+                format!("{{\"error\":\"{}\"}}\n", preview::NOT_AN_HTML_DOCUMENT),
+                "{leaf}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn status_names_the_deployment_mode_and_root() {
         let (router, _) = app("status");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
@@ -3374,15 +3432,23 @@ mod tests {
         assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
         let rest = &text[": heddle stream open\n\n".len()..];
         assert!(rest.starts_with("event: ready\ndata: "), "{text}");
-        let data: Value = serde_json::from_str(
-            rest.lines().nth(1).unwrap().trim_start_matches("data: "),
-        )
-        .unwrap();
+        let data: Value =
+            serde_json::from_str(rest.lines().nth(1).unwrap().trim_start_matches("data: "))
+                .unwrap();
         assert_eq!(data["type"], "ready");
         let client = data["clientId"].as_str().unwrap();
-        assert!(client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()), "{client}");
-        assert_eq!(data["host"]["home"], std::env::var("HOME").unwrap_or_default());
-        assert!(rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(), "{text}");
+        assert!(
+            client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()),
+            "{client}"
+        );
+        assert_eq!(
+            data["host"]["home"],
+            std::env::var("HOME").unwrap_or_default()
+        );
+        assert!(
+            rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(),
+            "{text}"
+        );
     }
 
     /// A reconnect with `Last-Event-ID` is given the frames it missed after `ready`; a cursor from another
@@ -3393,9 +3459,13 @@ mod tests {
         let (router, state) = app("events-follow");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
-        state.events().publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 1}));
         let seen = state.events().cursor();
-        state.events().publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 2}));
         async fn read_until(router: &Router, cookie: &str, cursor: &str, marker: &str) -> String {
             let response = router
                 .clone()
@@ -3426,8 +3496,14 @@ mod tests {
         }
         let text = read_until(&router, &cookie, &seen, "\"n\":2").await;
         assert!(text.contains("\"resumed\":true"), "{text}");
-        assert!(!text.contains("\"n\":1"), "nothing before the cursor is repeated: {text}");
-        assert!(text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(), "{text}");
+        assert!(
+            !text.contains("\"n\":1"),
+            "nothing before the cursor is repeated: {text}"
+        );
+        assert!(
+            text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(),
+            "{text}"
+        );
         let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
         assert!(text.contains("\"resumed\":false"), "{text}");
     }
@@ -3485,12 +3561,19 @@ mod tests {
     }
 
     /// The next frame a subscription holds, as `(event, data)`, within a second.
-    async fn next_pushed(subscription: &mut crate::stream::Subscription) -> (String, Value, Option<String>) {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
-            .await
-            .expect("a frame in time")
-            .expect("the hub is open");
-        (frame.event, serde_json::from_str(&frame.data).unwrap(), frame.id)
+    async fn next_pushed(
+        subscription: &mut crate::stream::Subscription,
+    ) -> (String, Value, Option<String>) {
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
+                .await
+                .expect("a frame in time")
+                .expect("the hub is open");
+        (
+            frame.event,
+            serde_json::from_str(&frame.data).unwrap(),
+            frame.id,
+        )
     }
 
     /// The changes that never reach a session's log are pushed to the stream, numbered like every frame:
@@ -3515,21 +3598,39 @@ mod tests {
         let mut pushed = state.events().subscribe();
         let session = "session-00000000-0000-0000-0000-000000000001";
 
-        let (status, _) = post_json(&router, &format!("/api/sessions/{session}/title"), &cookie, r#"{"title":"renamed"}"#).await;
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{session}/title"),
+            &cookie,
+            r#"{"title":"renamed"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let (event, data, id) = next_pushed(&mut pushed).await;
         assert_eq!(event, "sessions");
-        assert_eq!(data, json!({"type": "session/renamed", "session": session, "title": "renamed"}));
-        assert!(id.is_some(), "a push is numbered, so it is replayed to a reconnecting client");
+        assert_eq!(
+            data,
+            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+        );
+        assert!(
+            id.is_some(),
+            "a push is numbered, so it is replayed to a reconnecting client"
+        );
 
         let folder = std::env::temp_dir();
         let body = json!({"path": folder}).to_string();
         let (status, _) = post_json(&router, "/api/workspaces", &cookie, &body).await;
         assert_eq!(status, StatusCode::OK);
         let (event, data, _) = next_pushed(&mut pushed).await;
-        assert_eq!((event.as_str(), data["type"].as_str()), ("workspace", Some("workspace/added")));
+        assert_eq!(
+            (event.as_str(), data["type"].as_str()),
+            ("workspace", Some("workspace/added"))
+        );
 
-        for (method, expected) in [(Method::PATCH, "workspace/renamed"), (Method::DELETE, "workspace/removed")] {
+        for (method, expected) in [
+            (Method::PATCH, "workspace/renamed"),
+            (Method::DELETE, "workspace/removed"),
+        ] {
             let response = router
                 .clone()
                 .oneshot(
@@ -3545,7 +3646,10 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let (event, data, _) = next_pushed(&mut pushed).await;
-            assert_eq!((event.as_str(), data["type"].as_str()), ("workspace", Some(expected)));
+            assert_eq!(
+                (event.as_str(), data["type"].as_str()),
+                ("workspace", Some(expected))
+            );
         }
 
         let (status, _) = post_json(
@@ -3606,11 +3710,18 @@ mod tests {
         let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
         assert_eq!(status, StatusCode::OK);
         let text = body_text(&bytes);
-        assert!(text.contains("event: error\n") && text.contains("upstream answered 502"), "{text}");
+        assert!(
+            text.contains("event: error\n") && text.contains("upstream answered 502"),
+            "{text}"
+        );
         let recorded = sessions.recorded.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec![(session.to_owned(), "turn/failed".to_owned(), json!({"message": "upstream answered 502"}))]
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
         );
     }
 
