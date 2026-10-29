@@ -6,6 +6,9 @@ import type { Chunk, ContentPart, Message, ToolSpec } from '../llm/types.ts'
 import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
+import { randomUUID } from 'node:crypto'
+
+import { planRetry, retryFailureCode, retryPolicyKey, retryPolicyOf, waitForRetry, type RetryPolicy } from '../config/retry.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
 import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
 
@@ -19,12 +22,21 @@ import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
  * `failure.code === CONTEXT_WINDOW_EXCEEDED_CODE` — and it survives a plugin boundary, a bundle, or
  * a second copy of the module.
  */
-function modelFailure(error: unknown): { readonly code: string; readonly message: string } | undefined {
+function modelFailure(
+  error: unknown,
+): { readonly code: string; readonly message: string; readonly status?: number; readonly retryAfterMs?: number } | undefined {
   if (typeof error !== 'object' || error === null) return undefined
   const code = (error as { code?: unknown }).code
   if (typeof code !== 'string') return undefined
   const message = (error as { message?: unknown }).message
-  return { code, message: typeof message === 'string' ? message : String(error) }
+  const status = (error as { status?: unknown }).status
+  const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs
+  return {
+    code,
+    message: typeof message === 'string' ? message : String(error),
+    ...(typeof status === 'number' ? { status } : {}),
+    ...(typeof retryAfterMs === 'number' ? { retryAfterMs } : {}),
+  }
 }
 
 /** The surface positions that hold a user message, which is what "new input" means to a running turn. */
@@ -349,7 +361,16 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
 
     const calls: { id: string; name: string; arguments: string }[] = []
     let roundText = ''
+    /**
+     * Provider retry, as DSH's `dsh-llm-retry` executes the endpoint's `retryPolicy`: counted per round (a step, in
+     * DSH's words), so a new round starts its budget again; the context-overflow recovery keeps its own count.
+     */
+    let providerRetries = 0
+    let retryId: string | undefined
+    let overflowRetries = 0
     for (let attempt = 0; ; attempt += 1) {
+      /** Whether this attempt recorded any of its answer; a failure after that is not retried (see below). */
+      let streamed = false
       /**
        * The comparison window is the **model call itself**.
        *
@@ -390,6 +411,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
+          if (chunk.type !== 'tool-call-delta') streamed = true
           if (chunk.type === 'text-delta') roundText += chunk.text
           else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
           else if (chunk.type === 'tool-call') calls.push({ id: chunk.id, name: chunk.name, arguments: chunk.arguments })
@@ -419,7 +441,51 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
          * re-derives the request before trying.
          */
         const failure = modelFailure(error)
-        if (failure === undefined || attempt >= maxOverflowRetries) throw error
+        /**
+         * A transient provider failure is retried as the endpoint's `retryPolicy` says (DSH: rate limits, server
+         * errors, timeouts and transport errors, five times with bounded backoff, unless the endpoint says otherwise).
+         * The retry is durable before its wait: `llm/retry` is written, then the wait, then `llm/retry-started`, and the
+         * same request goes again over the same history. A stopped turn aborts the wait and does not retry.
+         *
+         * Only a failure **before the attempt recorded any answer** is retried. The surface folds a run of chunks into
+         * one assistant message until a `done` chunk, so a retry after a partial answer would leave that partial text in
+         * the derived messages and hide the retried answer behind it — DSH keeps failed output out of the model's view,
+         * and until the session can close a failed run, not retrying is how that is kept here.
+         */
+        if (failure !== undefined && !streamed && !stoppedByCaller()) {
+          const endpoint = ctx.model.endpoint(options.endpoint)
+          let policy: RetryPolicy | undefined
+          try {
+            policy = endpoint === undefined ? undefined : retryPolicyOf(endpoint)
+          } catch (problem) {
+            ctx.logger.warn('turn: the retry policy of %s cannot be used: %s', options.endpoint, (problem as Error).message)
+          }
+          const code = retryFailureCode(failure.code, failure.status)
+          const plan =
+            policy === undefined
+              ? undefined
+              : planRetry(policy, { code, ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}) }, providerRetries, Math.random())
+          if (policy !== undefined && plan !== undefined) {
+            retryId ??= randomUUID()
+            ctx.session.store.append(options.session, {
+              type: 'llm/retry',
+              retryId,
+              round,
+              provider: options.endpoint,
+              mode: policy.mode,
+              policyKey: retryPolicyKey(policy),
+              retry: plan.retry,
+              ...(policy.mode === 'normal' ? { maxRetries: policy.maxRetries } : {}),
+              delayMs: plan.delayMs,
+              failure: { code, message: failure.message },
+            })
+            if (!(await waitForRetry(plan.delayMs, signal))) throw error
+            ctx.session.store.append(options.session, { type: 'llm/retry-started', retryId, round, retry: plan.retry })
+            providerRetries = plan.retry
+            continue
+          }
+        }
+        if (failure === undefined || overflowRetries >= maxOverflowRetries) throw error
         const action = await ctx.waterfall(
           'agent/request-error',
           {
@@ -460,11 +526,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         ctx.session.store.append(options.session, {
           type: 'turn/retry',
           round,
-          attempt: attempt + 1,
+          attempt: overflowRetries + 1,
           code: failure.code,
           estimatedTokens: report.estimatedTokens,
           compacted: report.compacted,
         })
+        overflowRetries += 1
       }
     }
     text += roundText
