@@ -95,6 +95,7 @@ impl ToolRegistry {
         if config.include_builtins {
             let options = BuiltinOptions {
                 bash_timeout_ms: config.bash_timeout_ms,
+                bash_output_limit: config.bash_output_limit,
             };
             for tool in builtin_tools(Arc::clone(&registry.gates.sandbox), options) {
                 registry
@@ -1247,6 +1248,7 @@ pub(crate) mod tests {
             allow: vec!["read_file".into(), "absent".into()],
             include_builtins: true,
             bash_timeout_ms: 5,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
         };
         let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
         assert_eq!(
@@ -1269,6 +1271,7 @@ pub(crate) mod tests {
             allow: Vec::new(),
             include_builtins: false,
             bash_timeout_ms: 0,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
         };
         let registry = ToolRegistry::from_config(gates(SandboxMode::WorkspaceWrite), &config);
         assert!(registry.names().is_empty());
