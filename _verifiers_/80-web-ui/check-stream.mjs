@@ -226,6 +226,9 @@ test("the stream opens with DSH's ready frame, and a baseline read on it misses 
     const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'baseline' })
     assert.equal(created.status, 200, created.text)
     const session = created.json.session
+    // The creation's own frame is waited for first, so it cannot arrive after the clock starts and be counted
+    // against the turn (a race the Rust server's asynchronous body write exposed).
+    await stream.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'session/created', 10_000)
     const baseline = await logEntries(server, cookie, session)
     const startedAt = Date.now()
     const turn = await runTurn(server, cookie, { session, prompt: 'go' })
