@@ -48,6 +48,9 @@ chain with the round attributed to the revision it started under.
 
 - [`../../test/goal.test.ts`](../../test/goal.test.ts) — the fold, the revision CAS, every transition and
   refusal, the block reason's lifetime, the tombstone, and the restart rule for activation.
+- [`../../test/goal-tool.test.ts`](../../test/goal-tool.test.ts) — the tools against DSH: the verb enum and its
+  descriptions, the filler rule, every per-verb refusal, the block threshold at N-1 and N, and authority for a
+  person's turn, a goal round, a reminder or team-sourced turn, and a delegated session.
 - [`../../test/goal-driver.test.ts`](../../test/goal-driver.test.ts) — the round decision, the prompt, the
   chain's safety stops, the reentrant re-evaluation, the boot sweep, and the yield to the event loop.
 - [`../../_verifiers_/80-web-ui/check-goal.mjs`](../../_verifiers_/80-web-ui/check-goal.mjs) — end to end:
