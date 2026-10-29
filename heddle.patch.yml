@@ -71,6 +71,12 @@
       name: ./src/commands/service.ts
       inject: [session]
 
+    # Plan mode: /plan and /plan off, DSH's plan-mode policy on every request of a session in plan mode, and the
+    # exit_plan_mode tool, whose review goes through the user-question channel once one is loaded.
+    - id: plan
+      name: ./src/plan/service.ts
+      inject: [session, commands, tools]
+
     # The round driver: when a session goes idle with an armed goal, it continues the goal one round at a
     # time, attributed in the log. It needs a turn's whole machinery, which it declares.
     - id: goal-driver
