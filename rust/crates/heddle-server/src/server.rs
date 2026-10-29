@@ -65,7 +65,7 @@ use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
     ServiceError, SessionMeta, StartSession,
 };
-use crate::stream::{EventHub, SseFrame, names, sse_response};
+use crate::stream::{self, EventHub, SseFrame, names, sse_response};
 use crate::token::{
     self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
 };
@@ -839,7 +839,13 @@ async fn page_route() -> Response {
 }
 
 async fn events_route(State(state): State<AppState>) -> Response {
-    sse_response(state.events().subscribe())
+    // Subscribed before the body starts, so `ready` is followed by every frame published after it.
+    let subscription = state.events().subscribe();
+    sse_response(stream::events_frames(
+        subscription,
+        &stream::new_client_id(),
+        &stream::host_home(),
+    ))
 }
 
 /// One session's meta as a listing entry: the store's record plus this server's run state.
@@ -3187,6 +3193,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_text(&bytes), "not found\n");
+    }
+
+    /// `/api/events` opens with its comment and then DSH's `ready` frame, and a frame published after the
+    /// subscription was registered (before any byte was read) arrives after `ready`, not lost.
+    #[tokio::test]
+    async fn the_event_stream_opens_with_ready_and_then_carries_what_is_published() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-ready");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/events")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"type": "message"}));
+        let mut text = String::new();
+        while !text.contains("event: session\n") {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                .await
+                .expect("a frame in time")
+                .expect("the stream stays open")
+                .expect("a body frame");
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+        assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
+        let rest = &text[": heddle stream open\n\n".len()..];
+        assert!(rest.starts_with("event: ready\ndata: "), "{text}");
+        let data: Value = serde_json::from_str(
+            rest.lines().nth(1).unwrap().trim_start_matches("data: "),
+        )
+        .unwrap();
+        assert_eq!(data["type"], "ready");
+        let client = data["clientId"].as_str().unwrap();
+        assert!(client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()), "{client}");
+        assert_eq!(data["host"]["home"], std::env::var("HOME").unwrap_or_default());
+        assert!(rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(), "{text}");
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.

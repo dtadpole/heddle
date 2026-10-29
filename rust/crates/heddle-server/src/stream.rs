@@ -32,6 +32,8 @@ pub mod names {
     pub const SESSION: &str = "session";
     /// An approval question, pushed to `/api/events` subscribers.
     pub const APPROVAL: &str = "approval";
+    /// The opening item of `/api/events`, sent once after the subscriber is registered.
+    pub const READY: &str = "ready";
     /// A turn's normal end, on its own response.
     pub const DONE: &str = "done";
     /// A turn that was stopped, on its own response.
@@ -70,6 +72,20 @@ impl SseFrame {
         }
     }
 
+    /// The opening `ready` frame of `/api/events`: DSH's `{ type: 'ready', clientId, host: { home } }` item, keys
+    /// in that order (a struct, so the order holds whatever map `serde_json` is built with). `src/server/stream.ts`
+    /// writes the same bytes.
+    pub fn ready(client_id: &str, home: &str) -> Self {
+        SseFrame::new(
+            names::READY,
+            &ReadyData {
+                kind: "ready",
+                client_id,
+                host: ReadyHost { home },
+            },
+        )
+    }
+
     /// An `approval` frame for one approval request, as the approval service emitted it.
     pub fn approval(request: &Value) -> Self {
         SseFrame {
@@ -91,6 +107,45 @@ impl SseFrame {
         let value: Value = serde_json::from_str(&self.data).ok()?;
         value.get("session")?.as_str().map(str::to_owned)
     }
+}
+
+/// The data of the opening `ready` frame.
+#[derive(Serialize)]
+struct ReadyData<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(rename = "clientId")]
+    client_id: &'a str,
+    host: ReadyHost<'a>,
+}
+
+/// The Host facts the opening frame carries.
+#[derive(Serialize)]
+struct ReadyHost<'a> {
+    home: &'a str,
+}
+
+/// A client id for one stream: 16 random bytes, hex — the shape `src/server/stream.ts` mints. One per
+/// connection, so a reconnect is a new id.
+pub fn new_client_id() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("the operating system entropy source");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The Host's home folder as the opening frame names it: `$HOME`, which is what Node's `os.homedir()` reads
+/// on the platforms heddle runs on; empty when it is unset.
+pub fn host_home() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
+/// The frames of `/api/events`: the opening `ready` frame, then every frame the subscription carries.
+///
+/// The subscription is passed in already registered with the hub, so every frame published after a client
+/// reads `ready` is queued for it: a baseline read that starts on `ready` cannot race an increment, which is
+/// the ordering DSH's `$events` source guarantees.
+pub fn events_frames(subscription: Subscription, client_id: &str, home: &str) -> impl Stream<Item = SseFrame> + Send + 'static {
+    futures::stream::once(std::future::ready(SseFrame::ready(client_id, home))).chain(subscription)
 }
 
 /// The listener a binary registers on its event bus's `session/event` channel: it captures the hub the
@@ -252,6 +307,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ready_frame_writes_the_typescript_bytes() {
+        // src/server/stream.ts writes exactly this for readyFrame('abc123', '/home/owner').
+        assert_eq!(
+            SseFrame::ready("abc123", "/home/owner").encode(),
+            "event: ready\ndata: {\"type\":\"ready\",\"clientId\":\"abc123\",\"host\":{\"home\":\"/home/owner\"}}\n\n"
+        );
+    }
+
+    #[test]
+    fn every_stream_gets_its_own_client_id_in_hex() {
+        let ids: std::collections::HashSet<String> = (0..64).map(|_| new_client_id()).collect();
+        assert_eq!(ids.len(), 64, "no two streams share an id");
+        for id in &ids {
+            assert_eq!(id.len(), 32, "{id}");
+            assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_events_frames_open_with_ready_and_keep_what_was_published_after_subscribing() {
+        let hub = EventHub::new();
+        let subscription = hub.subscribe();
+        // Published after the subscriber registered but before anything was read: it must not be lost.
+        hub.publish_session_event("session-1", &serde_json::json!({"type": "message"}));
+        let mut frames = Box::pin(events_frames(subscription, "abc", "/h"));
+        let first = frames.next().await.expect("the ready frame");
+        assert_eq!(first.event, names::READY);
+        assert_eq!(first, SseFrame::ready("abc", "/h"));
+        let second = frames.next().await.expect("the published frame");
+        assert_eq!(second.event, names::SESSION);
+        assert_eq!(second.session_id().as_deref(), Some("session-1"));
+    }
 
     #[test]
     fn a_session_frame_serializes_keys_in_the_typescript_order() {

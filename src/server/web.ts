@@ -40,6 +40,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
+import { newClientId, readyFrame, STREAM_OPEN } from './stream.ts'
 
 /**
  * The Web UI.
@@ -1761,8 +1762,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/events' && request.method === 'GET') {
     respondSse(response)
+    /**
+     * Subscribed **before** `ready` is written, so every frame published after a client reads `ready` reaches it:
+     * a baseline read that starts on `ready` cannot race an increment (DSH's opening rule, see `stream.ts`).
+     */
     state.subscribers.add(response)
     request.on('close', () => state.subscribers.delete(response))
+    response.write(readyFrame(newClientId()))
     return
   }
 
@@ -2401,7 +2407,7 @@ function respondSse(response: ServerResponse): void {
     connection: 'keep-alive',
     'x-accel-buffering': 'no',
   })
-  response.write(': heddle stream open\n\n')
+  response.write(STREAM_OPEN)
 }
 
 /**
