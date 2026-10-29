@@ -14,6 +14,7 @@ import type { CommandService } from '../commands/service.ts'
 import { handlePlanRequest } from '../plan/http.ts'
 import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
+import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
@@ -3512,6 +3513,16 @@ export function transcriptTurns(
     openReasoning = -1
   }
   /**
+   * The exchange's token usage, DSH's per-Turn usage row: every model round (`model/request`) since the message that
+   * opened the exchange, and the rounds that reported usage. The sum is attached to the answer at `turn/completed`
+   * only when **every** round reported, because DSH hides the row rather than show a partial total.
+   */
+  let usageRounds = 0
+  let usageReports = 0
+  let usageReported = false
+  let usageSum: TokenUsage | undefined
+  let usageStart = -1
+  /**
    * A blank-line-only delta between two tokens is a **stream artifact**, not prose.
    *
    * Measured 2026-10-18 in the owner's transcript: a build of the server streamed content as `'检测'`, `'\n\n\n'`,
@@ -3590,6 +3601,11 @@ export function transcriptTurns(
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
         sectionStart = turns.length
+        usageRounds = 0
+        usageReports = 0
+        usageReported = false
+        usageSum = undefined
+        usageStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
         /** A message the harness wrote names its trigger in `source`; a person's message has none. */
         const source = message.source as { kind?: unknown } | undefined
@@ -3625,6 +3641,25 @@ export function transcriptTurns(
       }
       continue
     }
+    if (event.type === 'model/request') {
+      usageRounds += 1
+      usageReported = false
+    }
+    if (event.type === 'turn/completed') {
+      /** The exchange's usage belongs to its last answer, and only a complete account is shown. */
+      if (usageRounds > 0 && usageReports === usageRounds && usageSum !== undefined) {
+        let lastAnswer = -1
+        for (let index = turns.length - 1; index > usageStart; index -= 1) {
+          if (turns[index]?.kind === 'user') break
+          if (turns[index]?.kind === 'assistant') { lastAnswer = index; break }
+        }
+        const answer = turns[lastAnswer]
+        if (lastAnswer >= 0 && answer !== undefined) turns[lastAnswer] = { ...answer, usage: usageSum }
+      }
+      usageRounds = 0
+      usageReports = 0
+      usageSum = undefined
+    }
     if (event.type !== 'assistant/chunk') {
       /**
        * A stopped turn records its reason on the completion. It is attached to the answer it stopped — or, when
@@ -3652,8 +3687,14 @@ export function transcriptTurns(
       closeRuns()
       continue
     }
-    const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string } | undefined
+    const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string; usage?: TokenUsage } | undefined
     if (chunk === undefined) continue
+    if (chunk.usage !== undefined) {
+      /** One report per round, however many frames of that round carried usage. */
+      if (!usageReported) usageReports += 1
+      usageReported = true
+      usageSum = mergeTokenUsage(usageSum, chunk.usage)
+    }
     if (chunk.type === 'text-delta' && chunk.text !== undefined) {
       openAssistant = append('assistant', chunk.text, openAssistant)
       openReasoning = -1
@@ -3737,6 +3778,11 @@ export interface ChatTurn {
    * local to the loop before this; a reloaded transcript could not say why its answer was empty.
    */
   readonly ended?: readonly string[]
+  /**
+   * The exchange's token usage, summed over its model rounds - DSH's per-Turn usage row, carried by the exchange's
+   * last answer. Present only when every round reported usage; a bucket no round reported is absent.
+   */
+  readonly usage?: TokenUsage
   /**
    * Files attached to this message, in the order they were chosen — the gallery and file chips DSH draws on
    * a person's row. The metadata is what the server measured when it recorded the message, so the page never

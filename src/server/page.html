@@ -713,6 +713,17 @@
     margin-top: 6px; padding: 2px 8px; font-size: 12px; line-height: 18px; color: var(--text-3);
     border-left: 2px solid color-mix(in oklab, #d9a441 55%, transparent);
   }
+  /**
+   * DSH's per-Turn token usage: a completed turn's own row, closed to its total and opening to the buckets the
+   * provider reported. It exists only when every model round of the turn reported usage (the transcript decides).
+   */
+  .turn-usage { margin-top: 6px; font-size: 12px; line-height: 18px; color: var(--text-3); }
+  .turn-usage summary { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; list-style: none; }
+  .turn-usage summary::-webkit-details-marker { display: none; }
+  .turn-usage summary::before { content: '›'; display: inline-block; transition: transform .12s; }
+  .turn-usage[open] summary::before { transform: rotate(90deg); }
+  .turn-usage .turn-usage-figures { display: flex; flex-wrap: wrap; gap: .25rem 1rem; padding: 4px 0 0 .9rem; }
+  .turn-usage .turn-usage-figures span b { font-weight: 500; color: var(--text-2); }
   .changed-files { margin-top: 8px; border: .5px solid var(--line); border-radius: 16px; background: var(--surface); overflow: hidden; }
   .changed-head {
     display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; height: 60px; padding: 8px 10px;
@@ -3941,6 +3952,10 @@ function add(kind, text, merge = true, label, tool) {
     node.append(messageActions(node))
     if (tool !== undefined && Array.isArray(tool.files) && tool.files.length > 0) node.append(editedFilesPanel(tool.files))
     if (tool !== undefined && Array.isArray(tool.ended) && tool.ended.length > 0) node.append(turnNotice(tool.ended))
+    if (tool !== undefined && tool.usage !== null && typeof tool.usage === 'object') {
+      const usageRow = turnUsageRow(tool.usage)
+      if (usageRow !== null) node.append(usageRow)
+    }
   } else if (kind === 'user') {
     /**
      * A person's message is a **row**: the bubble, then the actions beneath it. History carries the event's own
@@ -4166,6 +4181,61 @@ function turnNotice(ended) {
   const reason = ended.join('; ')
   notice.textContent = reason.charAt(0).toUpperCase() + reason.slice(1)
   return notice
+}
+
+/**
+ * A completed turn's token usage, DSH's per-Turn usage row: closed it reads the total, open it lists the buckets the
+ * provider reported, and a bucket nobody reported is left out rather than shown as zero.
+ */
+const TURN_USAGE_BUCKETS = [
+  ['inputTokens', 'Input'],
+  ['cacheReadTokens', 'Cache read'],
+  ['cacheWriteTokens', 'Cache write'],
+  ['outputTokens', 'Output'],
+]
+function turnUsageRow(usage) {
+  const present = TURN_USAGE_BUCKETS.filter(([key]) => typeof usage[key] === 'number' && Number.isFinite(usage[key]))
+  if (present.length === 0) return null
+  const total = present.reduce((sum, [key]) => sum + usage[key], 0)
+  const row = document.createElement('details')
+  row.className = 'turn-usage'
+  row.dataset.turnUsage = String(total)
+  const head = document.createElement('summary')
+  head.textContent = `Tokens · ${total.toLocaleString('en-US')}`
+  const figures = document.createElement('div')
+  figures.className = 'turn-usage-figures'
+  for (const [key, label] of present) {
+    const figure = document.createElement('span')
+    figure.dataset.bucket = key
+    const value = document.createElement('b')
+    value.textContent = usage[key].toLocaleString('en-US')
+    figure.append(`${label} `, value)
+    figures.append(figure)
+  }
+  row.append(head, figures)
+  return row
+}
+/** The live turn's row, once it ends: the durable fold decides, so a live answer shows exactly what a reload shows. */
+async function attachTurnUsage() {
+  if (current === null) return
+  let data
+  try {
+    const response = await fetch('/api/sessions/' + encodeURIComponent(current))
+    if (!response.ok) return
+    data = await response.json()
+  } catch {
+    return
+  }
+  const turns = data.turns ?? []
+  let lastUser = -1
+  turns.forEach((turn, index) => { if (turn.kind === 'user') lastUser = index })
+  const answer = turns.slice(lastUser + 1).filter((turn) => turn.kind === 'assistant').at(-1)
+  if (answer === undefined || answer.usage === undefined) return
+  const row = [...log.querySelectorAll('.turn')].at(-1)
+  const last = row !== undefined && row.classList.contains('assistant') ? row : [...log.querySelectorAll('.turn.assistant')].at(-1)
+  if (last === undefined || last.querySelector('.turn-usage') !== null) return
+  const usageRow = turnUsageRow(answer.usage)
+  if (usageRow !== null) last.append(usageRow)
 }
 
 function basenameOf(path) {
@@ -8272,6 +8342,9 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         void renderSettledAnswers()
         /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
         renderScheduleCards(true)
+
+        /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
+        void attachTurnUsage()
         /**
          * The turn may have created **this folder's** session, so both the tree and the list are
          * re-read.

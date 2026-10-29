@@ -64,6 +64,37 @@ test('a goal round is a user turn that names its trigger, and a person\'s messag
   assert.equal('trigger' in (turns[2] ?? {}), false, 'a source without a kind names no trigger')
 })
 
+test('a completed exchange carries its token usage on its answer, only when every round reported it', () => {
+  /**
+   * DSH's per-Turn usage row: a completed Turn shows its usage only when every started model attempt reported exact
+   * usage, and omits a bucket nobody reported. A round is a `model/request`; its report rides an assistant chunk.
+   */
+  const user = (text: string) => ({ type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } })
+  const round = (usage?: Record<string, number>) => [
+    { type: 'model/request' },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'step ' } },
+    { type: 'assistant/chunk', chunk: { type: 'done', ...(usage !== undefined ? { usage } : {}) } },
+  ]
+  const turns = transcriptTurns([
+    user('two rounds, both reported'),
+    ...round({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 }),
+    ...round({ inputTokens: 30, outputTokens: 5, cacheReadTokens: 1000 }),
+    { type: 'assistant/completed', text: 'step step ' },
+    { type: 'turn/completed', rounds: 2 },
+    user('one round unreported'),
+    ...round({ inputTokens: 10, outputTokens: 1 }),
+    ...round(),
+    { type: 'assistant/completed', text: 'step step ' },
+    { type: 'turn/completed', rounds: 2 },
+  ])
+  /** Each round's text is its own run, so the usage sits on the exchange's last answer and on nothing else. */
+  const second = turns.findIndex((turn, index) => index > 0 && turn.kind === 'user')
+  const lastAnswer = (from: number, to: number) => turns.slice(from, to).filter((turn) => turn.kind === 'assistant').at(-1)
+  assert.deepEqual(lastAnswer(0, second)?.usage, { inputTokens: 130, outputTokens: 25, cacheReadTokens: 1900 }, 'the sum of both rounds, with no bucket invented')
+  assert.equal(turns.slice(0, second).filter((turn) => turn.usage !== undefined).length, 1, 'carried once, by the last answer')
+  assert.equal(lastAnswer(second, turns.length)?.usage, undefined, 'a partial account shows no row at all')
+})
+
 test('the answer carries the files its exchange wrote, with the lines each one now has', () => {
   /**
    * The Edited-files panel's data. DSH derives it from a host-side before/after comparison; heddle states the fact
