@@ -104,6 +104,25 @@ impl Component for ModelComponent {
             composed.nominated.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The machine's file applies to the next request without a restart, as `plugins/model.ts` keeps it: the
+        // service asks before every read and call, and an edit that cannot be read keeps the previous endpoints.
+        if config.read_local_config {
+            let source = heddle_config::ModelRowSource::new(
+                config.endpoints.clone(),
+                config.default.clone(),
+                true,
+                self.env.clone(),
+            );
+            service.set_refresh(Arc::new(move || match source.changed()? {
+                Ok(composed) => Some((composed.endpoints, composed.nominated)),
+                Err(error) => {
+                    eprintln!(
+                        "model: the machine configuration changed but could not be read ({error}); the previous endpoints stay"
+                    );
+                    None
+                }
+            }));
+        }
         let service = Arc::new(service);
         // `model/request` reaches the bus, where a hook may rewrite the request.
         if let Some(hooks) = bus_hooks(services) {

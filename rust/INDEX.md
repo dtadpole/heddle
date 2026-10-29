@@ -1,6 +1,6 @@
 ---
 title: Rust port
-version: 0.17.4
+version: 0.18.1
 description: The Cargo workspace of the Rust port of Heddle — what it holds, where it builds and runs, and the per-part status.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-22, asking to build or port Heddle with Rust
@@ -24,9 +24,9 @@ folder, not a type folder. `target/` is cargo's output and is ignored.
 
 ## Status
 
-On `main` at `c72b543`, through the binary: 124 backend checks, **123 pass, 0 fail**, 1 unjudged (part 1's
+On `main` at `f72cdf2`, through the binary: 125 backend checks, **124 pass, 0 fail**, 1 unjudged (part 1's
 publisher route, which needs an endpoint of that kind). Parts 0, 2 to 10 and the model endpoints are met; part 1
-passes all nine judged checks. Every part, the command and the
+passes all ten judged checks. Every part, the command and the
 failures' owners are in [`status.md`](status.md).
 
 ## Read next
