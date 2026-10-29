@@ -18,6 +18,10 @@ pub enum WorkspaceError {
     /// `a workspace needs a name` — a rename to a blank title.
     #[error("a workspace needs a name")]
     EmptyName,
+    /// `A workspace named “<title>” already exists.` — a rename to a title another workspace a person chose
+    /// already carries; DSH's `workspace/name-conflict`, a `409` on the route.
+    #[error("A workspace named “{0}” already exists.")]
+    NameConflict(String),
     /// Removing a root that still holds sessions with nothing above it — a `409` on the route:
     /// `workspace '<title>' still holds <n> session(s) and no root above it, so removing it would only be
     /// undone on the next run; remove those sessions, register a root above '<path>', or force it`

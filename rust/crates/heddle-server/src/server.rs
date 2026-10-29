@@ -1305,6 +1305,9 @@ async fn rename_workspace(
     match workspaces.rename(&id, title) {
         Ok(Some(record)) => respond::json(StatusCode::OK, &record),
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
+        Err(error) if error.code.as_deref() == Some("workspace/name-conflict") => {
+            service_refusal(error, StatusCode::CONFLICT)
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }

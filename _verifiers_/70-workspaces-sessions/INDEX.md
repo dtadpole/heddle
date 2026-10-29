@@ -36,6 +36,9 @@ doubles. Nothing here needs a display, so it runs unattended.
 | the association | 3 | a session is grouped under the folder it ran in, a subdirectory is a member of the root above it, and one folder's prompts continue one session |
 | the tree | 14 | containment, the segment-wise trap, the nearest root, `--new` and history, one level at a time, type and instance classification, badges, recursion, plain containers, plumbing and generated folders, **the boundary that only an instance carries a session**, the folder name as the session name, an empty type folder, a folder outside every root, and **in a browser: a folder that opens and closes with the same control, and a tree whose lists draw no markers** |
 
+Since 29 Oct one more check judges the Web API's add, rename and delete of a workspace at DSH parity, on whichever
+build runs the part (TypeScript or `HEDDLE_BIN`): `the Web API adds, renames and deletes a workspace the way DSH does`.
+
 ## Where it stands, 2026-10-11
 
 **22 checks, all passing — verdict `0`.** The tree group was written **before** the mechanism it judges,

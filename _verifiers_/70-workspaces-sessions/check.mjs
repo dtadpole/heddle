@@ -1515,6 +1515,120 @@ test('a workspace is unregistered, and a root that still holds sessions is refus
   }
 })
 
+test('the Web API adds, renames and deletes a workspace the way DSH does', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * The owner's request of 29 Oct — "ensure add, remove, rename workspace all works … function parity" with DSH — judged
+   * over the routes the page calls, on whichever build runs this part:
+   *
+   * - **add** registers an existing absolute folder, answers `created: false` for one already registered (a trailing
+   *   slash is the same folder), nests a folder under the root above it, and refuses a missing, relative, absent or
+   *   file path with `400`;
+   * - **rename** by id or by path; a blank name is `400`, another workspace's name is `409 workspace/name-conflict`
+   *   (DSH's rule), the current name is a no-op, an unknown workspace `404`;
+   * - **delete** removes the registration even while sessions remain — they move to the root above, or out of every
+   *   workspace (Ungrouped) — and an unknown workspace is `404`. The CLI keeps its refusal; the check above judges it.
+   */
+  const h = harness('web-crud')
+  const top = fixtureDir('web-crud-top')
+  const child = join(top, 'child')
+  const loose = fixtureDir('web-crud-loose')
+  const file = join(loose, 'a-file.txt')
+  let live
+  try {
+    mkdirSync(child, { recursive: true })
+    writeFileSync(file, 'not a folder\n')
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body) })
+    const views = async () => (await call('/api/workspaces')).body.workspaces ?? []
+
+    const added = await post('/api/workspaces', { path: top })
+    assert.equal(added.status, 200, `a folder is added (${JSON.stringify(added.body)})`)
+    assert.equal(added.body.created, true, 'and this call created it')
+    assert.equal(added.body.record.path, realpathSync(top), 'under its canonical path')
+    const again = await post('/api/workspaces', { path: `${top}/` })
+    assert.equal(again.status, 200, 'adding it again is not an error')
+    assert.equal(again.body.created, false, 'it reports the workspace that was already there')
+    const nested = await post('/api/workspaces', { path: child })
+    assert.equal(nested.status, 200, 'a folder inside it is added too')
+    const byPath = Object.fromEntries((await views()).map((view) => [view.path, view]))
+    assert.equal(byPath[realpathSync(child)]?.parent, byPath[realpathSync(top)]?.id, 'and nests under the root above it')
+    for (const [what, body] of [
+      ['no path', {}],
+      ['a folder that does not exist', { path: join(loose, 'nowhere') }],
+      ['a relative path', { path: 'not/absolute' }],
+      ['a file', { path: file }],
+    ]) {
+      const refused = await post('/api/workspaces', body)
+      assert.equal(refused.status, 400, `${what} is refused (${JSON.stringify(refused.body)})`)
+      assert.equal(typeof refused.body.error, 'string', `with a sentence for ${what}`)
+    }
+
+    const topId = byPath[realpathSync(top)].id
+    const renamed = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Top Renamed' }) })
+    assert.equal(renamed.status, 200, `a workspace is renamed by id (${JSON.stringify(renamed.body)})`)
+    assert.equal(renamed.body.title, 'Top Renamed')
+    assert.equal(renamed.body.path, realpathSync(top), 'and its path does not move')
+    const byItsPath = await call(`/api/workspaces/${encodeURIComponent(child)}`, { method: 'PATCH', body: JSON.stringify({ title: '  Child  ' }) })
+    assert.equal(byItsPath.body.title, 'Child', 'or by path, trimmed')
+    const clash = await call(`/api/workspaces/${encodeURIComponent(child)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Top Renamed' }) })
+    assert.equal(clash.status, 409, `another workspace's name is refused (${JSON.stringify(clash.body)})`)
+    assert.equal(clash.body.code, 'workspace/name-conflict', "with DSH's code")
+    assert.equal(clash.body.error, 'A workspace named “Top Renamed” already exists.', "and DSH's sentence")
+    const same = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Top Renamed' }) })
+    assert.equal(same.status, 200, 'confirming the current name is not a clash with itself')
+    assert.equal(same.body.updatedAt, renamed.body.updatedAt, 'and changes nothing')
+    const blank = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'PATCH', body: JSON.stringify({ title: '   ' }) })
+    assert.equal(blank.status, 400, 'a blank name is refused')
+    const unknown = await call(`/api/workspaces/${encodeURIComponent(join(loose, 'nowhere'))}`, { method: 'PATCH', body: JSON.stringify({ title: 'x' }) })
+    assert.equal(unknown.status, 404, 'an unknown workspace is not found')
+
+    const inChild = await post('/api/sessions', { branch: child })
+    assert.equal(inChild.status, 200, `a session starts in the child (${JSON.stringify(inChild.body)})`)
+    const inTop = await post('/api/sessions', { branch: top })
+    assert.equal(inTop.status, 200, `and one in the top (${JSON.stringify(inTop.body)})`)
+    const childGone = await call(`/api/workspaces/${encodeURIComponent(child)}`, { method: 'DELETE' })
+    assert.equal(childGone.status, 200, `a workspace holding a session is deleted (${JSON.stringify(childGone.body)})`)
+    assert.equal(childGone.body.ownedSessions, 1, 'and it says how many sessions it held')
+    assert.equal(childGone.body.adoptedBy, 'Top Renamed', 'and that the root above took them')
+    const topGone = await call(`/api/workspaces/${encodeURIComponent(topId)}`, { method: 'DELETE' })
+    assert.equal(topGone.status, 200, `a workspace with sessions and nothing above is deleted too (${JSON.stringify(topGone.body)})`)
+    assert.equal(topGone.body.ownedSessions, 2)
+    const left = await views()
+    assert.ok(!left.some((view) => view.path === realpathSync(top) && view.origin !== 'auto'), 'it is no longer a workspace')
+    const owned = new Set(left.filter((view) => view.origin !== 'auto').flatMap((view) => view.sessionIds ?? []))
+    assert.ok(!owned.has(inTop.body.session) && !owned.has(inChild.body.session), 'and its sessions are Ungrouped')
+    const sessions = (await call('/api/sessions')).body.map((meta) => meta.id)
+    assert.ok(sessions.includes(inTop.body.session) && sessions.includes(inChild.body.session), 'but they still exist')
+    assert.ok(existsSync(top), 'and so does the folder')
+    const missing = await call(`/api/workspaces/${encodeURIComponent(join(loose, 'nowhere'))}`, { method: 'DELETE' })
+    assert.equal(missing.status, 404, 'an unknown workspace is not found')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(top)
+    removeDir(loose)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return

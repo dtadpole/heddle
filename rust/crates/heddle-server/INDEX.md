@@ -116,6 +116,7 @@ to confirm or move a row.
 | `POST /api/folders/session`, `POST /api/turn` | heddle-server | the turn streams its own session's events, runs to its end if its reader goes away, stops running when it returns, and sends its terminal frame when it ends, without waiting for the `/api/events` readers, as web.ts does |
 | `GET /api/tree`, `GET`/`POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}` | heddle-server | over `WorkspaceService`; `GET /api/workspaces` is `views` (each workspace's parent and sessions, for the page's workspace tree) |
 | `POST /api/workspaces/pick` | heddle-web-files | the platform folder picker |
+| `GET /api/directories`, `POST /api/directories` | heddle-web-files | the page's own folder chooser (DSH's browse picker) |
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |
 | `GET`, `POST /api/goal`, `GET /api/todo`, `GET /api/team` | heddle-server | over the goal, todo and team traits; a team log that refuses to fold answers `500 internal error: <message>`, as web.ts's catch-all does |
 | `GET /api/endpoints`, `GET /api/context` | heddle-web-composer | |

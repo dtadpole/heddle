@@ -313,7 +313,9 @@ impl WorkspaceService {
     }
 
     /// Retitle a root by id or path; the path never changes. `Ok(None)` for an unknown root,
-    /// [`WorkspaceError::EmptyName`] for a blank title.
+    /// [`WorkspaceError::EmptyName`] for a blank title, [`WorkspaceError::NameConflict`] for a title another
+    /// `added` root already carries (DSH's rule; adopted roots are never drawn as workspaces, so they do not
+    /// count). Confirming the current title changes nothing.
     pub fn rename(
         &self,
         id_or_path: &str,
@@ -331,6 +333,15 @@ impl WorkspaceService {
             return Ok(None);
         };
         let mut shape = self.read();
+        if record.title == trimmed {
+            return Ok(Some(record));
+        }
+        let clash = shape.workspaces.values().any(|entry| {
+            entry.id != record.id && entry.origin != WorkspaceOrigin::Auto && entry.title == trimmed
+        });
+        if clash {
+            return Err(WorkspaceError::NameConflict(trimmed.to_string()));
+        }
         let updated = WorkspaceRecord {
             title: trimmed.to_string(),
             updated_at: iso_now(),
@@ -677,6 +688,33 @@ mod tests {
             WorkspaceError::EmptyName
         ));
         assert_eq!(service.rename("/no-such-root", "x").unwrap(), None);
+    }
+
+    #[test]
+    fn a_rename_refuses_a_title_another_chosen_root_carries_and_keeps_its_own() {
+        let (_dir, service) = service();
+        let one = service.add("/work/one", Some("one")).unwrap().record;
+        let two = service.add("/work/two", Some("two")).unwrap().record;
+        let adopted = service
+            .ensure("/work/three", Some("three"), Some(WorkspaceOrigin::Auto))
+            .unwrap();
+        match service.rename(&two.id, " one ").unwrap_err() {
+            WorkspaceError::NameConflict(title) => assert_eq!(title, "one"),
+            other => panic!("expected a name conflict, got {other:?}"),
+        }
+        assert_eq!(
+            WorkspaceError::NameConflict("one".to_string()).to_string(),
+            "A workspace named “one” already exists."
+        );
+        // The unchanged title is a no-op, not a conflict with itself.
+        let same = service.rename(&one.id, "one").unwrap().unwrap();
+        assert_eq!(same.updated_at, one.updated_at);
+        // An adopted root's title does not count: the tree never draws it as a workspace.
+        assert_eq!(adopted.origin, WorkspaceOrigin::Auto);
+        assert_eq!(
+            service.rename(&two.id, "three").unwrap().unwrap().title,
+            "three"
+        );
     }
 
     #[test]
