@@ -2613,7 +2613,7 @@
         <line x1="10.2" y1="10.2" x2="13.5" y2="13.5" stroke="currentColor" stroke-width="1.4"/>
       </svg>
     </button>
-    <button id="add-workspace" type="button" title="register a folder as a workspace root" aria-label="register a folder">+</button>
+    <button id="add-workspace" type="button" title="register a folder as a workspace root (⌥⌘O)" aria-label="register a folder" aria-keyshortcuts="Alt+Meta+O">+</button>
     <span id="view-options"></span>
   </h1>
   <!--
@@ -10091,6 +10091,7 @@ settingsDialog.addEventListener('click', (clickEvent) => {
  * only has Control should still reach it. Each entry states its modifiers exactly: a chord with `shift` is not the
  * same gesture as one without, and matching loosely would make `Shift+Alt+Meta+A` archive a session by accident.
  */
+/* session-shortcuts:begin */
 const SESSION_SHORTCUTS = [
   { key: 'a', alt: true, action: 'archive' },
   { key: 'g', alt: true, action: 'rename' },
@@ -10102,6 +10103,8 @@ const SESSION_SHORTCUTS = [
   { key: 'n', alt: true, action: 'new-session' },
   /** DSH's chord for Settings, read from its menu in the same session. */
   { key: ',', alt: true, action: 'settings' },
+  /** DSH's `workspace.add`, `KeyO` with primary+alt on the Web (dsh-client-ui-workspace `client.js:133`). */
+  { key: 'o', alt: true, action: 'add-workspace' },
 ]
 
 /**
@@ -10109,17 +10112,24 @@ const SESSION_SHORTCUTS = [
  *
  * A pure reading of the event rather than four `if`s in a handler: the chords are a table, and a table can be read
  * back in a test or a bug report instead of being inferred from control flow.
+ *
+ * The **physical key** decides when the event names one, as DSH's registry matches `event.code` (dsh-client-shortcuts
+ * `client.js:1416`): on a Mac, ⌥ changes the character, so ⌥⌘O arrives as `key: 'ø'` and only `code: 'KeyO'` says
+ * which key it was. A synthetic event without a code falls back to its character.
  */
 function shortcutFor(event) {
   if (!event.metaKey && !event.ctrlKey) return null
+  const code = typeof event.code === 'string' && event.code !== '' ? event.code : null
   for (const shortcut of SESSION_SHORTCUTS) {
-    if (String(event.key).toLowerCase() !== shortcut.key) continue
+    const physical = shortcut.key === ',' ? 'Comma' : 'Key' + shortcut.key.toUpperCase()
+    if (code !== null ? code !== physical : String(event.key).toLowerCase() !== shortcut.key) continue
     if (Boolean(shortcut.alt) !== event.altKey) continue
     if (Boolean(shortcut.shift) !== event.shiftKey) continue
     return shortcut.action
   }
   return null
 }
+/* session-shortcuts:end */
 
 /** The node of the row the panel is showing, which is what a shortcut acts on. */
 function selectedNode() {
@@ -10149,6 +10159,11 @@ document.addEventListener('keydown', (event) => {
   }
   if (action === 'settings') {
     void showSettings()
+    return
+  }
+  /** Add workspace opens the folder chooser the panel's `+` opens; pressed again while it is open, it changes nothing. */
+  if (action === 'add-workspace') {
+    if (!workspacePicker.open) void openWorkspacePicker()
     return
   }
   if (action === 'search') {
