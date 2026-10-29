@@ -147,8 +147,27 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// A scratch directory removed when the test ends. The removal is in `Drop`, so a test that fails (a
+    /// panic unwinds through it) cleans up too; removing it at the end of the test body did not, and one
+    /// test never removed it at all, which left these folders in TMPDIR on every run.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A session store on a fresh directory, and one session in it.
-    fn session() -> (SessionStore, SessionHandle, PathBuf) {
+    fn session() -> (SessionStore, SessionHandle, Scratch) {
         let root = std::env::temp_dir().join(format!(
             "heddle-context-session-{}-{}",
             std::process::id(),
@@ -165,7 +184,7 @@ mod tests {
                 ..CreateOptions::default()
             })
             .expect("the session is created");
-        (store, handle, root)
+        (store, handle, Scratch(root))
     }
 
     fn append_message(store: &SessionStore, handle: &SessionHandle, message: Message) -> u64 {
@@ -236,8 +255,26 @@ mod tests {
     }
 
     #[test]
+    fn the_scratch_directory_is_removed_when_the_test_ends_even_by_a_panic() {
+        let (_, _, scratch) = session();
+        let path = scratch.to_path_buf();
+        assert!(path.is_dir());
+        drop(scratch);
+        assert!(!path.exists(), "an ordinary end removes it");
+
+        let (_, _, scratch) = session();
+        let path = scratch.to_path_buf();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = scratch;
+            panic!("a failing test");
+        }));
+        assert!(unwound.is_err());
+        assert!(!path.exists(), "a panic removes it too");
+    }
+
+    #[test]
     fn the_adapter_reads_a_written_session_back_through_the_trait() {
-        let (store, handle, root) = session();
+        let (store, handle, _scratch) = session();
         append_message(&store, &handle, text_message(Role::System, "be brief"));
         append_message(&store, &handle, text_message(Role::User, "hello"));
         append_message(
@@ -273,13 +310,11 @@ mod tests {
         let derived = ContextStore::derive_messages(&store, &handle).expect("the messages derive");
         assert_eq!(derived.len(), 3);
         assert_eq!(derived[2].tool_call_id.as_deref(), Some("call-1"));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn a_replacement_lands_through_the_store_and_the_pruner_shrinks_a_tool_result() {
-        let (store, handle, root) = session();
+        let (store, handle, _scratch) = session();
         append_message(&store, &handle, text_message(Role::System, "be brief"));
         append_message(&store, &handle, text_message(Role::User, "make a big file"));
         let tool = Message {
@@ -313,8 +348,6 @@ mod tests {
                 .any(|text| text.contains("pruned")),
             "the model is sent the marker"
         );
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A log written before the inbox existed keeps its bad order on disk, and every request built from it is
@@ -489,8 +522,6 @@ mod tests {
             derived.iter().any(|text| text.contains("qqqq")),
             "the newest message is kept verbatim beside the checkpoint"
         );
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The log as the TypeScript oracle records it, less `session/created` (whose fields carry a
@@ -524,7 +555,7 @@ mod tests {
         use crate::meter::{Measurement, MeterInput, MeteredMessage, TokenMeter};
 
         let expected = oracle("landed");
-        let (store, handle, root) = session();
+        let (store, handle, _scratch) = session();
         append_message(&store, &handle, text_message(Role::System, "be brief"));
         append_message(&store, &handle, text_message(Role::User, "u".repeat(600)));
         append_message(
@@ -612,8 +643,6 @@ mod tests {
             ),
             expected["surface"]
         );
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A store adapter that maps only the required methods, as a composition writing its own would:
@@ -699,7 +728,7 @@ mod tests {
         };
         let deps = || ContextDependencies {
             model: None,
-            heddle_home: root.clone(),
+            heddle_home: root.to_path_buf(),
         };
 
         let bound = ContextService::new(Arc::new(store), config(), deps());
@@ -722,6 +751,5 @@ mod tests {
         println!(
             "{events} events: bound store {bound_time:?}, required-only adapter {other_time:?}"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 }
