@@ -1,12 +1,13 @@
 ---
 title: The heddle-sandbox crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T13:14:11Z
-version: 0.7.1
+modified: 2026-10-29T13:14:16Z
+version: 0.7.2
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
   - source: src/sandbox/*.ts at 8047667 and src/approvals/service.ts at 4d4075f (each one's last change), read 2026-10-22
+  - source: rust/crates/heddle-sandbox/src/service.rs at 58baa89d (root_for and rooted_at, developer-eight, D-055), read 2026-10-29
   - source: _verifiers_/75-permission-sandbox at f473854 and _verifiers_/80-web-ui/check-approval.mjs at b71a1f0, run 2026-10-23
 ---
 
@@ -35,7 +36,7 @@ heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 | `canonical`, `contains`, `paths::resolve` | the fence, the profiles | `paths.ts` |
 | `SandboxConfig` / `ApprovalsConfig` (serde, camelCase, unknown keys ignored) | boot, from the `sandbox` and `approvals` profile rows | the two `Config` schemas |
 | `SandboxHost { cwd, harness_home, platform }` | boot (the harness home comes from the config crate) | `process.cwd()`, `heddleHome()` |
-| `SandboxService::{new, with_backend, mode, workspace_root, policy, backend_name, escalation_targets, resolve_path, confine, assert_writable, assert_readable, writable}` | the tool registry and built-in tools; the server (`mode`, `workspace_root`) | `SandboxService` |
+| `SandboxService::{new, with_backend, mode, workspace_root, root_for, rooted_at, policy, backend_name, escalation_targets, resolve_path, confine, assert_writable, assert_readable, writable}` | the tool registry and built-in tools; the server (`mode`, `workspace_root`); through `heddle-tools`' gate adapter, the agent turn (`root_for` its session's folder, then `rooted_at` that root, so a session's calls are confined to its own folder unless the operator named a root) and the built-in tools (`rooted_at` the call's folder) | `SandboxService` (`rootFor`) |
 | `SandboxDenial` (code `SANDBOX`), `SandboxUnavailableError` (code `SANDBOX_UNAVAILABLE`) | the tools, reported as tool results | the two error classes |
 | `classify_outcome`, `SandboxOutcome`, `shell_denial_message`, `runner_failure_message` | the `bash` tool | `classifyOutcome`, the bash tool's sentences |
 | `SandboxBackend` trait, `ConfinedArgv`, `select_backend`, `seatbelt::*`, `linux::*` | the service; tests inject doubles | `backend.ts`, `seatbelt.ts`, `linux.ts` |
