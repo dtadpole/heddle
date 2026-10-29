@@ -1451,10 +1451,16 @@ test('a write the sandbox refused is not shown as an edited file, whether by wri
    * `write_file` the model *asked* for: with each write refused by the sandbox, the card still showed three files
    * and their added lines while the disk was unchanged. Here the sandbox root is the work folder, so a write to a
    * folder outside it is refused — once through `write_file`, once through `bash` — and one write inside succeeds.
+   *
+   * The refused target is under `/etc`, not beside the work folder. `workspace-write` also lets both builds write
+   * to `/tmp` and the OS temp directory (src/sandbox/policy.ts `writableRoots`), so a sibling of the work folder
+   * is writable whenever the checkout itself sits under a temp directory, as a gate's scratch checkout does: the
+   * precondition then failed on an integrator's TypeScript run (2026-10-29) though nothing in heddle had changed.
+   * `/etc` is outside every writable root on any machine, and not writable by an ordinary user either.
    */
-  const outside = fixtureDir('chat-edits-refused-outside')
+  const outside = join('/etc', `heddle-check-refused-${process.pid}`)
   const refusedPath = join(outside, 'refused.txt')
-  const shellPath = join(outside, 'shell.txt')
+  const shellPath = `${outside}-shell.txt`
   const mixed = await startServer('edits-refused', (work) => [
     { toolCall: { name: 'write_file', arguments: { path: refusedPath, content: 'one\ntwo\n' } }, reasoning: 'writing outside the root' },
     { toolCall: { name: 'bash', arguments: { command: `printf 'x\\n' > '${shellPath}'` } }, reasoning: 'writing outside the root through the shell' },
@@ -1514,7 +1520,7 @@ test('a write the sandbox refused is not shown as an edited file, whether by wri
     browser.close()
     await mixed.close()
     await refused.close()
-    removeDir(outside)
+    // Nothing was created under /etc to remove: the writes were refused, which is what the test asserts.
   }
 })
 
