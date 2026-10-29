@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, scriptedConfig, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, scratchRoot, scriptedConfig, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The approval card as a **control**, judged in a browser.
@@ -16,6 +17,25 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, scriptedConfig, run
  */
 
 const CAPABILITY = 'a Web UI on localhost with a live stream'
+
+/**
+ * workspace-write makes /tmp and the OS temp dir writable as well as the workspace (src/sandbox/policy.ts writableRoots;
+ * heddle-sandbox alike). The "outside" folder lives in this checkout's scratch, so in a checkout under one of those roots
+ * the first, unescalated write already lands and no refusal can be judged: Reject and Stop are then unjudged, with the
+ * reason, rather than failed. Allow is unaffected.
+ */
+const OUTSIDE_JUDGEABLE = 'a checkout outside /tmp and the OS temp dir (workspace-write makes those writable, so the outside folder would be too)'
+function outsideIsJudgeable() {
+  const real = (path) => {
+    try {
+      return realpathSync(path)
+    } catch {
+      return path
+    }
+  }
+  const scratch = real(scratchRoot)
+  return !['/tmp', real('/tmp'), real(tmpdir())].some((root) => scratch === root || scratch.startsWith(root.endsWith(sep) ? root : root + sep))
+}
 
 /** Start a server whose endpoint is scripted, so a specific denied-and-retried call can be arranged. */
 function startServer(label, stepsFor) {
@@ -166,6 +186,7 @@ test('the approval card appears with the justification, and Allow once runs the 
 })
 
 test('Reject answers the card, and the denied call stays undone', async (context) => {
+  if (!skipUnless(context, outsideIsJudgeable(), OUTSIDE_JUDGEABLE)) return
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('reject', escalationSteps)
@@ -191,6 +212,7 @@ test('Reject answers the card, and the denied call stays undone', async (context
 })
 
 test('Stop ends a turn that is waiting on an approval, instead of leaving it stuck', async (context) => {
+  if (!skipUnless(context, outsideIsJudgeable(), OUTSIDE_JUDGEABLE)) return
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
