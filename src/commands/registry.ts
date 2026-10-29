@@ -44,8 +44,11 @@ export interface CommandInput {
 /** Where the page's menu lists a command when nothing has been typed: DSH's two sections. */
 export type CommandSection = 'add' | 'commands'
 
-/** Something the page does after a successful run, because only the page can do it. */
-export type CommandAction = { readonly kind: 'download'; readonly href: string }
+/**
+ * Something the page does after a successful run, because only the page can do it: download a file, or send words as
+ * an ordinary message (DSH's `/plan <message>` enters plan mode and then hands the message to the model).
+ */
+export type CommandAction = { readonly kind: 'download'; readonly href: string } | { readonly kind: 'prompt'; readonly text: string }
 
 /** A handler's answer. */
 export type CommandResult =
