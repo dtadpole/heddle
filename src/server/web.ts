@@ -847,7 +847,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
-    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
+    // The default selection rides along, so a composer opening a fresh session shows and sends it (DSH parity A104).
+    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint(), ctx.model.defaultSelection())
     /**
      * A provider that lists its models already knows each one's context window, and the composer's gauge needs
      * it. The declarative configuration always wins; only an endpoint that declares none asks its provider, and

@@ -9629,6 +9629,15 @@ async function loadEndpoints() {
     const body = await response.json()
     endpointOptions = Array.isArray(body.endpoints) ? body.endpoints : []
     endpointDefault = typeof body.default === 'string' ? body.default : null
+    /**
+     * A page that has chosen nothing yet starts from the run's default selection (the model row's defaultModel and
+     * defaultEffort, which the server already checked against the default endpoint; DSH's default model selection),
+     * so a fresh session shows and sends it. A session's own recorded selection still wins when one is opened.
+     */
+    if (chosenEndpoint === null && chosenModel === null && chosenEffort === null) {
+      if (typeof body.defaultModel === 'string') chosenModel = body.defaultModel
+      if (typeof body.defaultEffort === 'string') chosenEffort = body.defaultEffort
+    }
   } catch (error) {
     setNote(`could not read the endpoint list: ${(error && error.message) || error}`)
   }
