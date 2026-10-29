@@ -2156,6 +2156,44 @@
   #approval-reject { background: none; color: var(--text); border: 1px solid var(--border); }
   #approval-reject:hover { background: var(--hover); }
   #approval-allow { background: var(--text); color: #0f1115; border: 0; }
+  /**
+   * The question card (`ask_user_question`), DSH's attached card: it takes the place above the composer while the model
+   * waits for a person. A pager walks a batch, a single choice advances on click, free text sits under the choices,
+   * and Skip and the one batch submit are the actions; a timed wait shows its countdown and Take time.
+   */
+  #question-card {
+    width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto .35rem;
+    padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--radius);
+    background: color-mix(in oklab, var(--accent) 7%, var(--surface)); color: var(--text);
+  }
+  #question-card[hidden] { display: none; }
+  #question-card .head { display: flex; align-items: center; gap: .45rem; font-size: 13px; font-weight: 600; }
+  #question-card .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  #question-card[data-read-only='true'] .dot { background: var(--text-3); }
+  #question-card .badge { font-size: 11px; font-weight: 500; color: var(--text-3); border: 1px solid var(--border); border-radius: 6px; padding: 0 .35rem; }
+  #question-card .pager { margin-left: auto; display: flex; align-items: center; gap: .3rem; font-weight: 400; color: var(--text-3); }
+  #question-card .pager button { height: 22px; width: 22px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
+  #question-card .pager button:disabled { opacity: .35; cursor: default; }
+  #question-text { margin: .45rem 0 .5rem; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+  #question-options { display: flex; flex-direction: column; gap: .3rem; margin: 0 0 .5rem; }
+  #question-options .q-option {
+    display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; width: 100%; padding: .4rem .6rem; text-align: left;
+    font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+  }
+  #question-options .q-option:hover:not(:disabled) { background: var(--hover); }
+  #question-options .q-option[aria-pressed='true'] { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, var(--surface)); }
+  #question-options .q-option:disabled { cursor: default; opacity: .8; }
+  #question-options .q-option .desc { font-size: 12px; color: var(--text-3); }
+  #question-custom { width: 100%; box-sizing: border-box; min-height: 34px; padding: .35rem .5rem; font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; resize: vertical; }
+  #question-skipped { margin: 0 0 .5rem; font-size: 12px; color: var(--text-3); }
+  #question-note { margin: .35rem 0 0; font-size: 12px; color: var(--text-3); }
+  #question-card .actions { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; margin-top: .5rem; }
+  #question-countdown { margin-right: auto; font-size: 12px; color: var(--text-3); }
+  #question-card .actions button { height: 32px; padding: 0 .8rem; font: inherit; font-size: 13px; border-radius: 10px; cursor: pointer; background: none; color: var(--text); border: 1px solid var(--border); }
+  #question-card .actions button:hover { background: var(--hover); }
+  #question-submit { background: var(--text) !important; color: #0f1115 !important; border: 0 !important; }
+  .turn.tool .question-open { margin: .35rem 0 0; height: 26px; padding: 0 .6rem; font: inherit; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; background: none; color: var(--text); cursor: pointer; }
+  .turn.user .bubble.question-answer { white-space: pre-wrap; }
   /** The status line under the card: only what the page can actually know. */
   #composer-status {
     display: flex; justify-content: center; align-items: center; gap: .75rem;
@@ -3373,6 +3411,33 @@
   </div>
 
   <!--
+    DSH's question card for `ask_user_question`: drawn from `GET /api/questions` and the session's `question/*` events,
+    answered through `POST /api/questions/<id>`. The same card, read-only, is what a settled question's tool row opens.
+  -->
+  <div id="question-card" role="dialog" aria-labelledby="question-title" hidden>
+    <div class="head">
+      <span class="dot" aria-hidden="true"></span><span id="question-title">Question</span>
+      <span id="question-badge" class="badge" hidden></span>
+      <span class="pager" id="question-pager" hidden>
+        <button type="button" id="question-prev" aria-label="Previous question">‹</button>
+        <span id="question-position"></span>
+        <button type="button" id="question-next" aria-label="Next question">›</button>
+      </span>
+    </div>
+    <p id="question-text"></p>
+    <div id="question-options" role="group" aria-label="Choices"></div>
+    <p id="question-skipped" hidden>Skipped</p>
+    <textarea id="question-custom" rows="1" placeholder="Type another answer" aria-label="Your own answer"></textarea>
+    <p id="question-note" hidden></p>
+    <div class="actions">
+      <span id="question-countdown" hidden></span>
+      <button type="button" id="question-take-time" hidden>Take time</button>
+      <button type="button" id="question-skip">Skip</button>
+      <button type="button" id="question-close" hidden>Close</button>
+      <button type="button" id="question-submit">Submit</button>
+    </div>
+  </div>
+  <!--
     DSH's approval card: an amber-bordered question above the composer, with the model's justification verbatim and
     one way to say no and one to allow exactly the call that asked. It is drawn from the server's
     `approval/request` event and answered through `POST /api/approvals/<id>`.
@@ -3844,7 +3909,10 @@ function add(kind, text, merge = true, label, tool) {
     if (text !== '') {
       const bubble = document.createElement('div')
       bubble.className = 'bubble'
-      bubble.textContent = text
+      /** A late answer to a question arrives as DSH's JSON record; it is drawn as the questions and their answers. */
+      const answered = questionAnswerText(text)
+      if (answered !== null) bubble.classList.add('question-answer')
+      bubble.textContent = answered ?? text
       node.append(bubble)
     }
     node.dataset.copyText = text
@@ -4636,6 +4704,8 @@ function addBlock(kind, text, merge, label, tool) {
     body.textContent = text
   }
   node.append(line, body)
+  /** A question's tool row reopens the question, read-only once it is answered (DSH's question card). */
+  if (kind === 'tool' && tool !== undefined && tool.name === 'ask_user_question') body.append(questionToolButton(node))
   if (kind === 'tool' && tool !== undefined && typeof tool.result === 'string') showToolError(node, tool.result)
   log.append(node)
   /** After the append: the card compares itself with the `todo_write` rows above it. */
@@ -18572,11 +18642,311 @@ setInterval(() => {
   void refreshApprovals()
 }, 2000)
 
+/**
+ * The question card: DSH's answer surface for `ask_user_question`.
+ *
+ * A live card is one request from `GET /api/questions`; its draft (choices, free text, the question on show) is kept
+ * per request in browser storage, so a reload or a session switch restores it. A first choice marked Recommended starts
+ * selected. Submit sends the whole batch, a question with nothing chosen going as skipped; Skip skips the one on show.
+ * A timed wait shows its countdown, and Take time (or typing an answer) holds it. An answer the turn no longer waits
+ * for comes back as the user message to send, and is sent as a turn. A settled question opens read-only from its tool
+ * row: the same pager over the recorded answers, marked Answered.
+ */
+const questionCard = document.getElementById('question-card')
+const questionCustom = document.getElementById('question-custom')
+let questionShown = null
+let questionTimer = null
+const QUESTION_DRAFT_PREFIX = 'heddle.question-draft.'
+function questionDraftLoad(request) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(QUESTION_DRAFT_PREFIX + request.id) ?? 'null')
+    if (saved !== null && typeof saved === 'object' && saved.answers && typeof saved.answers === 'object') return saved
+  } catch {}
+  const answers = {}
+  for (const question of request.questions) {
+    const first = Array.isArray(question.options) ? question.options[0] : undefined
+    answers[question.id] = { selected: first !== undefined && /\(Recommended\)/.test(first.label) ? [first.label] : [], custom: '', skipped: false }
+  }
+  return { index: 0, answers }
+}
+function questionDraftSave() {
+  if (questionShown === null || questionShown.readOnly) return
+  try { localStorage.setItem(QUESTION_DRAFT_PREFIX + questionShown.request.id, JSON.stringify(questionShown.draft)) } catch {}
+}
+function questionDraftDrop(id) {
+  try { localStorage.removeItem(QUESTION_DRAFT_PREFIX + id) } catch {}
+}
+function renderQuestion() {
+  const shown = questionShown
+  if (shown === null) return
+  const { request, draft, readOnly } = shown
+  const total = request.questions.length
+  draft.index = Math.min(Math.max(0, draft.index), total - 1)
+  const question = request.questions[draft.index]
+  const answer = draft.answers[question.id] ?? (draft.answers[question.id] = { selected: [], custom: '', skipped: false })
+  questionCard.dataset.state = readOnly ? 'answered' : request.state
+  questionCard.dataset.readOnly = String(readOnly)
+  questionCard.dataset.id = request.id
+  document.getElementById('question-title').textContent = question.header || 'Question'
+  const badge = document.getElementById('question-badge')
+  badge.hidden = !readOnly && request.state !== 'pending' && request.state !== 'continued'
+  badge.textContent = readOnly ? 'Answered' : 'Answer later'
+  document.getElementById('question-pager').hidden = total < 2
+  document.getElementById('question-position').textContent = `${draft.index + 1} of ${total}`
+  document.getElementById('question-prev').disabled = draft.index === 0
+  document.getElementById('question-next').disabled = draft.index === total - 1
+  document.getElementById('question-text').textContent = question.question
+  const options = document.getElementById('question-options')
+  options.replaceChildren()
+  for (const option of question.options ?? []) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'q-option'
+    button.dataset.label = option.label
+    button.setAttribute('aria-pressed', String(answer.selected.includes(option.label)))
+    button.disabled = readOnly
+    const label = document.createElement('span')
+    label.textContent = option.label
+    button.append(label)
+    if (option.description) {
+      const description = document.createElement('span')
+      description.className = 'desc'
+      description.textContent = option.description
+      button.append(description)
+    }
+    button.addEventListener('click', () => questionChoose(option.label))
+    button.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void questionSubmit() }
+    })
+    options.append(button)
+  }
+  options.hidden = (question.options ?? []).length === 0
+  const skipped = readOnly && answer.selected.length === 0 && !answer.custom
+  document.getElementById('question-skipped').hidden = !skipped
+  questionCustom.value = answer.custom ?? ''
+  questionCustom.disabled = readOnly
+  questionCustom.hidden = readOnly && !answer.custom
+  const note = document.getElementById('question-note')
+  if (!readOnly && (request.state === 'pending' || request.state === 'continued')) {
+    note.textContent = 'The turn went on without this answer; your answer will be sent to the model as a message.'
+    note.hidden = false
+  } else if (note.dataset.kind !== 'error') note.hidden = true
+  document.getElementById('question-skip').hidden = readOnly
+  document.getElementById('question-submit').hidden = readOnly
+  document.getElementById('question-close').hidden = !readOnly
+  renderQuestionClock()
+  questionCard.hidden = false
+}
+function renderQuestionClock() {
+  const shown = questionShown
+  const countdown = document.getElementById('question-countdown')
+  const take = document.getElementById('question-take-time')
+  clearInterval(questionTimer)
+  questionTimer = null
+  const live = shown !== null && !shown.readOnly && shown.request.state === 'waiting' && shown.request.timed
+  if (!live) { countdown.hidden = true; take.hidden = true; return }
+  if (shown.request.held || shown.request.deadline === null) {
+    countdown.textContent = 'Taking time: the model waits for your answer'
+    countdown.hidden = false
+    take.hidden = true
+    return
+  }
+  const tick = () => {
+    const left = Math.max(0, Math.round((Date.parse(shown.request.deadline) - Date.now()) / 1000))
+    countdown.textContent = `Continues without an answer in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
+    if (left === 0) { clearInterval(questionTimer); void refreshQuestions() }
+  }
+  tick()
+  questionTimer = setInterval(tick, 1000)
+  countdown.hidden = false
+  take.hidden = false
+}
+function questionChoose(label) {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const question = shown.request.questions[shown.draft.index]
+  const answer = shown.draft.answers[question.id]
+  answer.skipped = false
+  if (question.multi_select === true) {
+    answer.selected = answer.selected.includes(label) ? answer.selected.filter((entry) => entry !== label) : [...answer.selected, label]
+  } else {
+    /** A single choice replaces free text and moves on, as DSH's card does. */
+    answer.selected = [label]
+    answer.custom = ''
+    if (shown.draft.index < shown.request.questions.length - 1) shown.draft.index += 1
+  }
+  questionDraftSave()
+  renderQuestion()
+}
+function showQuestion(request, options = {}) {
+  if (request === null || typeof request !== 'object' || !Array.isArray(request.questions) || request.questions.length === 0) return
+  const readOnly = options.readOnly === true
+  if (!readOnly && questionShown !== null && !questionShown.readOnly && questionShown.request.id === request.id) {
+    questionShown.request = request
+    renderQuestion()
+    return
+  }
+  questionShown = { request, readOnly, draft: readOnly ? options.draft : questionDraftLoad(request) }
+  const note = document.getElementById('question-note')
+  note.dataset.kind = ''
+  renderQuestion()
+}
+function hideQuestion() {
+  clearInterval(questionTimer)
+  questionTimer = null
+  questionShown = null
+  questionCard.hidden = true
+}
+function questionBatch() {
+  const { request, draft } = questionShown
+  return request.questions.map((question) => {
+    const answer = draft.answers[question.id] ?? { selected: [], custom: '' }
+    const custom = (answer.custom ?? '').trim()
+    return { id: question.id, selected: answer.skipped ? [] : answer.selected, ...(custom !== '' && !answer.skipped ? { custom } : {}) }
+  })
+}
+async function questionPost(path, body) {
+  const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  return { response, body: await response.json().catch(() => ({})) }
+}
+async function questionSubmit() {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const submit = document.getElementById('question-submit')
+  submit.disabled = true
+  const note = document.getElementById('question-note')
+  try {
+    const { response, body } = await questionPost('/api/questions/' + encodeURIComponent(shown.request.id), { session: shown.request.session, answers: questionBatch() })
+    if (!response.ok || body.answered !== true) {
+      note.textContent = body.error ?? 'that answer did not land'
+      note.dataset.kind = 'error'
+      note.hidden = false
+      await refreshQuestions()
+      return
+    }
+    questionDraftDrop(shown.request.id)
+    hideQuestion()
+    /** An answer the turn no longer waits for is the user message DSH sends; the composer sends it as a turn. */
+    if (body.late === true && body.delivered === 'none' && typeof body.message === 'string') void sendNow(body.message)
+  } catch (error) {
+    note.textContent = `could not send the answer: ${(error && error.message) || error}`
+    note.dataset.kind = 'error'
+    note.hidden = false
+  } finally {
+    submit.disabled = false
+  }
+}
+async function questionHold() {
+  const shown = questionShown
+  if (shown === null || shown.readOnly || shown.request.held || !shown.request.timed || shown.request.state !== 'waiting') return
+  shown.request = { ...shown.request, held: true, deadline: null }
+  renderQuestionClock()
+  try {
+    const { response, body } = await questionPost('/api/questions/' + encodeURIComponent(shown.request.id) + '/hold', { session: shown.request.session })
+    if (response.ok && body.request && questionShown === shown) { shown.request = body.request; renderQuestionClock() }
+  } catch {}
+}
+async function refreshQuestions() {
+  if (current === null) { if (questionShown !== null && !questionShown.readOnly) hideQuestion(); return }
+  try {
+    const response = await fetch('/api/questions?session=' + encodeURIComponent(current))
+    if (!response.ok) return
+    const body = await response.json()
+    if (body.session !== current) return
+    const request = (body.requests ?? [])[0]
+    if (request !== undefined) showQuestion(request)
+    else if (questionShown !== null && !questionShown.readOnly) hideQuestion()
+  } catch {
+    // a page that cannot read the questions still answers the next one it is shown
+  }
+}
+document.getElementById('question-prev').addEventListener('click', () => { if (questionShown) { questionShown.draft.index -= 1; questionDraftSave(); renderQuestion() } })
+document.getElementById('question-next').addEventListener('click', () => { if (questionShown) { questionShown.draft.index += 1; questionDraftSave(); renderQuestion() } })
+document.getElementById('question-skip').addEventListener('click', () => {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const question = shown.request.questions[shown.draft.index]
+  shown.draft.answers[question.id] = { selected: [], custom: '', skipped: true }
+  if (shown.draft.index < shown.request.questions.length - 1) shown.draft.index += 1
+  questionDraftSave()
+  renderQuestion()
+})
+document.getElementById('question-submit').addEventListener('click', () => void questionSubmit())
+document.getElementById('question-close').addEventListener('click', () => hideQuestion())
+document.getElementById('question-take-time').addEventListener('click', () => void questionHold())
+questionCustom.addEventListener('input', () => {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const question = shown.request.questions[shown.draft.index]
+  const answer = shown.draft.answers[question.id]
+  answer.custom = questionCustom.value
+  answer.skipped = false
+  /** Free text replaces a single choice, as DSH makes it exclusive; editing also holds a timed wait. */
+  if (question.multi_select !== true && questionCustom.value.trim() !== '') answer.selected = []
+  questionDraftSave()
+  for (const button of document.querySelectorAll('#question-options .q-option')) button.setAttribute('aria-pressed', String(answer.selected.includes(button.dataset.label)))
+  void questionHold()
+})
+events.addEventListener('session', (message) => {
+  try {
+    const payload = JSON.parse(message.data)
+    if (payload.session === current && typeof payload.event?.type === 'string' && payload.event.type.startsWith('question/')) void refreshQuestions()
+  } catch {}
+})
+setInterval(() => {
+  if (document.hidden) return
+  void refreshQuestions()
+}, 2000)
+/**
+ * A settled question opens from its tool row, read-only: the batch from the call's arguments and the answers from its
+ * result. The button reads both when clicked, so a row drawn before its result landed still opens the answered card.
+ */
+function questionToolButton(node) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'question-open'
+  button.textContent = 'Open question'
+  button.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    let args = {}
+    let result = {}
+    try { args = JSON.parse(node.querySelector('[data-args]')?.textContent ?? '{}') } catch {}
+    try { result = JSON.parse(node.querySelector('[data-result]')?.textContent ?? '{}') } catch {}
+    const questions = Array.isArray(args.questions) ? args.questions : []
+    if (questions.length === 0) return
+    if (!Array.isArray(result.answers)) { void refreshQuestions(); return }
+    const answers = {}
+    for (const question of questions) {
+      const given = result.answers.find((entry) => entry.id === question.id) ?? { selected: [] }
+      answers[question.id] = { selected: Array.isArray(given.selected) ? given.selected : [], custom: given.custom ?? '', skipped: false }
+    }
+    showQuestion({ id: node.dataset.toolCallId ?? 'settled', session: current, questions, state: 'answered', timed: false }, { readOnly: true, draft: { index: 0, answers } })
+  })
+  return button
+}
+/** A late answer's user message, DSH's `answer_to_pending_question`, drawn as the questions and the answers given. */
+function questionAnswerText(text) {
+  if (typeof text !== 'string' || !text.startsWith('{"kind":"answer_to_pending_question"')) return null
+  try {
+    const record = JSON.parse(text)
+    if (record.kind !== 'answer_to_pending_question' || !Array.isArray(record.questions)) return null
+    return record.questions.map((question) => {
+      const answer = (record.answers ?? []).find((entry) => entry.id === question.id) ?? { selected: [] }
+      const given = [...(answer.selected ?? []), ...(answer.custom ? [answer.custom] : [])].join(', ')
+      return `${question.question}\n→ ${given || 'Skipped'}`
+    }).join('\n')
+  } catch {
+    return null
+  }
+}
+
 await loadEndpoints()
 await loadStatus()
 growComposer()
 await refreshSessions()
 void refreshApprovals()
+void refreshQuestions()
 document.getElementById('session-search').addEventListener('input', applySearch)
 renderTree()
   .then(() => initializeDefaultWorkspace())
