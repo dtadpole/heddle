@@ -10285,6 +10285,15 @@ Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSes
 
 /* workspace-tree:begin */
 /**
+ * The label a workspace is shown with — DSH's workspaceDisplayTitle (dsh-api-workspace-controller
+ * lib/types/default-workspace.js): the first-use workspace keeps its folder's name, default-workspace, as its stored
+ * title, and reads as *Default workspace* until someone renames it. Every other title reads as it is stored.
+ */
+function workspaceDisplayTitle(title) {
+  return title === 'default-workspace' ? 'Default workspace' : title
+}
+
+/**
  * The workspace tree's derivation — DSH's workspace browser (`dsh-client-ui-workspace`, `tree.ts`) under heddle's rules.
  *
  * Pure on purpose: no DOM, no fetch, no page state, so `test/workspace-tree.test.ts` loads this block out of the page
@@ -10388,7 +10397,7 @@ const WorkspaceTree = (() => {
       groups.set(entry.id, {
         key: entry.id,
         workspace: entry,
-        label: typeof entry.title === 'string' && entry.title.length > 0 ? entry.title : basename(entry.path),
+        label: typeof entry.title === 'string' && entry.title.length > 0 ? workspaceDisplayTitle(entry.title) : basename(entry.path),
         path: entry.path,
         depth: 0,
         children: [],
@@ -11559,7 +11568,12 @@ async function adoptWorkspace(path) {
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) return body.error ?? 'could not register that folder'
-  const added = typeof body.record?.path === 'string' ? body.record.path : path
+  await showNewWorkspace(typeof body.record?.path === 'string' ? body.record.path : path)
+  return null
+}
+
+/** Show a workspace that was just registered: the tree redrawn, it open and selected, the composer aimed at it. */
+async function showNewWorkspace(added) {
   activeFolder = added
   expanded.add(added)
   rememberExpanded()
@@ -11567,7 +11581,30 @@ async function adoptWorkspace(path) {
   chooseSelected(added)
   const row = Array.from(treeList.querySelectorAll('.row')).find((entry) => entry.dataset.path === added)
   row?.scrollIntoView({ block: 'nearest' })
-  return null
+}
+
+/**
+ * First use — DSH's startup (dsh-client-ui-workspace lib/client.js:1620-1636, README "an empty installation calls
+ * workspaces.initializeDefault"): with nothing open, no workspace and no session, the page asks the server for the
+ * default workspace, which it creates or reuses under heddle's home, and shows it as *Add workspace* would. Nothing is
+ * sent; the composer is aimed at it, and the first prompt starts the session there (heddle starts none unasked, D-056).
+ * An install that is not empty gets nothing and no error. A failure says so once and leaves the + to choose a folder.
+ */
+async function initializeDefaultWorkspace() {
+  if (current !== null || activeFolder !== null || treeTops.length > 0 || treeGroups.length > 0 || listedSessions.size > 0) return
+  try {
+    const response = await fetch('/api/workspaces/default', { method: 'POST' })
+    /** No workspace plugin, or a server older than the route: the tree has already said what it can, so say nothing. */
+    if (response.status === 503 || response.status === 404) return
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(body.error ?? String(response.status))
+    if (typeof body.workspace?.path !== 'string') return
+    /** As in DSH, a later navigation wins: a session opened or a folder aimed at meanwhile keeps the selection. */
+    if (current === null && activeFolder === null) await showNewWorkspace(body.workspace.path)
+    else await renderTree()
+  } catch {
+    setNote('Unable to create default workspace. Use the + beside Workspaces to choose a folder.')
+  }
 }
 
 async function openWorkspacePicker() {
@@ -11673,7 +11710,8 @@ async function openRenameWorkspace(node) {
     busy: false,
   }
   const input = document.getElementById('workspace-rename-input')
-  input.value = renameTarget.stored
+  /** Seeded with the name on screen, while the stored title decides what "unchanged" is (DSH's rule for its default). */
+  input.value = workspaceDisplayTitle(renameTarget.stored)
   dialogError('workspace-rename-error', '')
   refreshRename()
   if (!workspaceRename.open) workspaceRename.showModal()
@@ -11751,11 +11789,11 @@ async function openDeleteWorkspace(node) {
     }
     above = candidate.parent ?? null
   }
-  const name = own?.title ?? node.label
+  const name = workspaceDisplayTitle(own?.title ?? node.label)
   deleteTarget = { path: node.path, busy: false }
   document.getElementById('workspace-delete-desc').textContent =
     `This removes “${name}” from the workspace list. The folder and session logs will be kept. ` +
-    (heir === null ? 'Its sessions will appear under Ungrouped.' : `Its sessions will appear under “${heir.title}”.`)
+    (heir === null ? 'Its sessions will appear under Ungrouped.' : `Its sessions will appear under “${workspaceDisplayTitle(heir.title)}”.`)
   document.getElementById('workspace-delete-status').hidden = true
   dialogError('workspace-delete-error', '')
   document.getElementById('workspace-delete-confirm').disabled = false
@@ -11890,7 +11928,9 @@ growComposer()
 await refreshSessions()
 void refreshApprovals()
 document.getElementById('session-search').addEventListener('input', applySearch)
-renderTree().then(() => applySearch())
+renderTree()
+  .then(() => initializeDefaultWorkspace())
+  .then(() => applySearch())
 renderQueue()
 renderComposerState()
 /** The panel's first word: a conversation, or an invitation to start one. */
