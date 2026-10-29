@@ -66,6 +66,25 @@ export const PREVIEW_CSP =
  * alone. The rewrite happens **before** the sanitiser sees the tag, so what the sanitiser compares is the address
  * the browser will actually use.
  */
+/**
+ * Whether a path is a document the page previews as a page: an `.html` or `.htm` file, by extension.
+ *
+ * DSH registers its HTML renderer for exactly these two extensions (`dsh-client-ui-sidebar-documentpreview`,
+ * `extensions: ["html", "htm"]`); a `.docx` goes to its Office renderer and anything else to its own renderer or plain
+ * text, so no other file is ever framed as a page. `GET /api/html` refuses the rest, rather than decoding a binary file
+ * as text and handing it to the frame.
+ */
+export function isHtmlDocument(path: string): boolean {
+  const leaf = path.split(/[\\/]/).pop() ?? ''
+  const dot = leaf.lastIndexOf('.')
+  if (dot <= 0) return false
+  const extension = leaf.slice(dot + 1).toLowerCase()
+  return extension === 'html' || extension === 'htm'
+}
+
+/** The sentence `GET /api/html` answers, with `415`, for a file that is not an HTML document. */
+export const NOT_AN_HTML_DOCUMENT = 'not an HTML document; only .html and .htm files are previewed as a page'
+
 export function rewriteResources(html: string, base: string, serve: (path: string) => string): string {
   const rewriteUrl = (value: string): string => {
     const trimmed = value.trim()
