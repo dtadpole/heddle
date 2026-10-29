@@ -26,6 +26,7 @@ parallel work never shares a file; a crate depends on another through its public
 | [`heddle-goal/`](heddle-goal/INDEX.md) | session goals, their driver and their tool |
 | [`heddle-todo/`](heddle-todo/INDEX.md) | the todo list and its tool |
 | [`heddle-team/`](heddle-team/INDEX.md) | durable teams, their policy, state and tool |
+| [`heddle-schedule/`](heddle-schedule/INDEX.md) | reminders a session sets for itself, their delivery, the time-context reading, and the page's routes |
 | [`heddle-server/`](heddle-server/INDEX.md) | the HTTP server, the token, the live stream and the page it serves |
 | [`heddle-web-trajectory/`](heddle-web-trajectory/INDEX.md) | the trajectory view routes, the ledger and log download |
 | [`heddle-web-composer/`](heddle-web-composer/INDEX.md) | the composer routes — runtime context, the context view, the model switcher and the tool catalog |

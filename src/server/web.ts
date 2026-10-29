@@ -11,7 +11,7 @@ import { runTurn } from '../agent/loop.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
-import { MAX_UPLOAD_BYTES, saveUpload, uploadDirectory } from './uploads.ts'
+import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
 import { renderSource } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
@@ -28,6 +28,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -179,6 +180,14 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     for (const client of subscribers) {
       client.write(line)
     }
+  })
+
+  // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
+  ctx.on('schedule/changed', () => {
+    // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
+    // publish already does for the same event (phase B item 3).
+    const line = log.record('schedule', '{}')
+    for (const client of subscribers) client.write(line)
   })
 
   /**
@@ -555,17 +564,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     const workspaces = ctx.workspace
     const wanted = url.searchParams.get('path')
     if (wanted === null || wanted.length === 0) {
-      respond(response, 400, 'text/plain', 'a path is required\n')
+      respond(response, 400, 'text/plain', 'a path is required\n', FILE_ANSWER_HEADERS)
       return
     }
     if (workspaces === undefined || workspaces.owner(wanted) === undefined) {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
       return
     }
     try {
       const stats = statSync(wanted)
       if (!stats.isFile()) {
-        respond(response, 404, 'text/plain', 'no such asset\n')
+        respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
       const contentType = inlineContentType(wanted)
@@ -575,10 +584,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
         'content-disposition': contentType === null ? `attachment; filename="${basename(wanted).replace(/"/g, '')}"` : 'inline',
         'cache-control': 'no-store',
+        ...FILE_ANSWER_HEADERS,
       })
       response.end(readFileSync(wanted))
     } catch {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
     return
   }
@@ -595,19 +605,30 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname.startsWith('/api/uploads/') && request.method === 'GET') {
     const leaf = decodeURIComponent(url.pathname.slice('/api/uploads/'.length))
     if (leaf.length === 0 || leaf.includes('/') || leaf.includes('\\') || leaf === '..' || leaf === '.') {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
+      return
+    }
+    /**
+     * An upload is served only to the session whose log references it, as DSH's `session/attachment` authorizes a
+     * read against that session's events. A request that names no session, an unknown one, or one whose log does not
+     * carry this leaf is answered the same `404`, so the route does not say which uploads exist.
+     */
+    const asking = url.searchParams.get('session') ?? ''
+    const owner = /^session-[0-9a-f-]{36}$/i.test(asking) ? ctx.session.store.open(asking) : null
+    if (owner === null || !uploadReferencedBy(ctx.session.events(owner), leaf)) {
+      respond(response, 404, 'text/plain', `${UPLOAD_NOT_REFERENCED}\n`, FILE_ANSWER_HEADERS)
       return
     }
     try {
       const directory = uploadDirectory()
       const wanted = join(directory, leaf)
       if (!isUnder(canonicalPath(directory), canonicalPath(wanted))) {
-        respond(response, 404, 'text/plain', 'no such asset\n')
+        respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
       const stats = statSync(wanted)
       if (!stats.isFile()) {
-        respond(response, 404, 'text/plain', 'no such asset\n')
+        respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
       const contentType = inlineContentType(wanted)
@@ -616,10 +637,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         'content-length': String(stats.size),
         'content-disposition': contentType === null ? `attachment; filename="${leaf.replace(/"/g, '')}"` : 'inline',
         'cache-control': 'no-store',
+        ...FILE_ANSWER_HEADERS,
       })
       response.end(readFileSync(wanted))
     } catch {
-      respond(response, 404, 'text/plain', 'no such asset\n')
+      respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
     return
   }
@@ -877,6 +899,9 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Errors carry the goal service's own stable code next to the sentence, so a client can distinguish "the
    * goal moved while you were looking" (409) from "no goal is current" (404) without parsing prose.
    */
+  // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
+  if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
     if (goals === undefined) {
@@ -1764,7 +1789,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * never has to ask per turn. The live path (a turn that just ended) asks `/api/markdown` for the one
            * answer it has, and both go through `renderMarkdown`, so there is one renderer and one allow-list.
            */
-          turns: transcriptTurns(events).map((turn) =>
+          turns: scopeAttachmentUrls(transcriptTurns(events), id).map((turn) =>
             turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
           ),
           /**
@@ -2493,6 +2518,22 @@ function respondSse(response: ServerResponse): void {
  * or a `<video>` needs, and a file outside it is still served — as a download, so a person can have it without the
  * page executing it.
  */
+/**
+ * The headers **every answer of a file route** carries, success or failure.
+ *
+ * `/api/raw` and `/api/uploads` serve a workspace's or a person's own bytes on the page's origin, with the session
+ * cookie in scope, so whatever a browser can run from such an answer runs as the user. Measured 2026-10-29 (DSH
+ * parity R-developer-twelve-16): a workspace SVG served inline and opened directly ran its script, and its
+ * `fetch('/api/sessions')` answered 200. DSH answers its own file route with exactly these two headers on every
+ * response, because "HTML and SVG files may be opened directly on the authenticated API origin": `sandbox` runs
+ * such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps a
+ * download from being read as a page. A policy on an image or a stylesheet does not affect the page that embeds it.
+ */
+export const FILE_ANSWER_HEADERS: Readonly<Record<string, string>> = {
+  'content-security-policy': "sandbox; default-src 'none'",
+  'x-content-type-options': 'nosniff',
+}
+
 function inlineContentType(path: string): string | null {
   const extension = extname(path).toLowerCase()
   const known: Readonly<Record<string, string>> = {
@@ -2505,12 +2546,34 @@ function inlineContentType(path: string): string | null {
   return known[extension] ?? null
 }
 
-function respond(response: ServerResponse, status: number, contentType: string, body: string): void {
-  response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store' })
+function respond(
+  response: ServerResponse,
+  status: number,
+  contentType: string,
+  body: string,
+  extra: Readonly<Record<string, string>> = {},
+): void {
+  response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', ...extra })
   response.end(body)
 }
 
 /** The page. One file, no build step, and no framework — the same choice DSH makes. */
+/**
+ * The transcript's attachment addresses for one session: each card's `url` names the session it is read for, because
+ * the upload route serves a file only to a session whose log references it (DSH's `session/attachment`).
+ */
+export function scopeAttachmentUrls<T extends { readonly attachments?: readonly TurnAttachment[] }>(
+  turns: readonly T[],
+  session: string,
+): T[] {
+  const query = `session=${encodeURIComponent(session)}`
+  return turns.map((turn) =>
+    Array.isArray(turn.attachments) && turn.attachments.length > 0
+      ? { ...turn, attachments: turn.attachments.map((card) => ({ ...card, url: `${card.url}${card.url.includes('?') ? '&' : '?'}${query}` })) }
+      : turn,
+  )
+}
+
 /**
  * The files one message carries, as transcript cards.
  *

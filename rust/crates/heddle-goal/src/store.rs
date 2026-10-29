@@ -31,6 +31,10 @@ impl SessionLog for SessionStore {
             .map_err(|error| LogError(error.to_string()))?;
         Ok(written.to_value())
     }
+
+    fn meta(&self, session: &str) -> Option<Value> {
+        SessionStore::meta(self, session).map(|meta| meta.to_value())
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +190,72 @@ mod tests {
             .unwrap();
         assert_eq!(cleared.revision, 2);
         assert_eq!(again.get(&fixture.session).unwrap(), None);
+    }
+
+    /// A person's message as the real store writes it: no `source` key at all.
+    fn person_message(store: &SessionStore, session: &str) {
+        let handle = store.open(session).unwrap();
+        store
+            .message(
+                &handle,
+                RecordedMessage {
+                    role: Role::User,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: "finish it, however long it takes".into(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_goal_tools_read_authority_from_the_real_store_and_its_delegation_depth() {
+        let fixture = fixture("authority");
+        let goals = GoalService::new(fixture.store.clone(), GoalConfig::default());
+        let create = json!({"objective": "one"});
+
+        // A top-level session: a person's message opens a direct human turn.
+        assert_eq!(
+            goals
+                .session_meta(&fixture.session)
+                .unwrap()
+                .get("delegationDepth"),
+            None
+        );
+        let refused = crate::tool::run_create_goal(&goals, Some(&fixture.session), &create);
+        assert_eq!(
+            refused.error.unwrap().code,
+            "GOAL_TOOL_AUTHORITY_REQUIRED",
+            "no message, no authority"
+        );
+        person_message(&fixture.store, &fixture.session);
+        let created = crate::tool::run_create_goal(&goals, Some(&fixture.session), &create);
+        assert_eq!(created.error, None, "{created:?}");
+
+        // A delegated session: the record's delegationDepth takes a person's authority away.
+        let delegated = fixture
+            .store
+            .create(CreateOptions {
+                cwd: Some(fixture.root.join("work").display().to_string()),
+                parent_session: Some(fixture.session.clone()),
+                origin: Some(heddle_session::SessionOrigin::Subagent),
+                delegation_depth: Some(1),
+                ..CreateOptions::default()
+            })
+            .unwrap()
+            .id;
+        assert_eq!(
+            goals.session_meta(&delegated).unwrap()["delegationDepth"],
+            1
+        );
+        person_message(&fixture.store, &delegated);
+        let answer = crate::tool::run_create_goal(&goals, Some(&delegated), &create);
+        assert_eq!(
+            answer.error.unwrap().message,
+            "this goal operation requires a direct human turn on a top-level agent"
+        );
     }
 
     #[test]

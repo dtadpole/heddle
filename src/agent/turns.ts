@@ -24,6 +24,8 @@ export class TurnRegistry extends Service {
   static readonly provide = 'turns'
 
   private readonly controllers = new Map<string, Set<AbortController>>()
+  /** Who is waiting for a session to have no turn in flight; resolved by the settle that empties its set. */
+  private readonly idleWaiters = new Map<string, (() => void)[]>()
 
   constructor(ctx: Context) {
     super(ctx, 'turns')
@@ -47,13 +49,35 @@ export class TurnRegistry extends Service {
         if (settled) return
         settled = true
         this.controllers.get(sessionId)?.delete(controller)
-        if (this.controllers.get(sessionId)?.size === 0) this.controllers.delete(sessionId)
+        if (this.controllers.get(sessionId)?.size === 0) {
+          this.controllers.delete(sessionId)
+          const waiters = this.idleWaiters.get(sessionId) ?? []
+          this.idleWaiters.delete(sessionId)
+          for (const wake of waiters) wake()
+        }
       },
     }
   }
 
   isRunning(sessionId: string): boolean {
     return (this.controllers.get(sessionId)?.size ?? 0) > 0
+  }
+
+  /**
+   * Resolve once the session has no turn in flight: at once when it has none now, otherwise at the settle that
+   * empties its set.
+   *
+   * A background child's settlement notice needs it. A notice delivered into a running turn is answered by that
+   * turn only if the turn notices it before ending, and the loop's last look for new input comes before its own
+   * end; the deliverer waits here and then checks whether the notice was answered.
+   */
+  whenIdle(sessionId: string): Promise<void> {
+    if (!this.isRunning(sessionId)) return Promise.resolve()
+    return new Promise((resolve) => {
+      const waiters = this.idleWaiters.get(sessionId)
+      if (waiters === undefined) this.idleWaiters.set(sessionId, [resolve])
+      else waiters.push(resolve)
+    })
   }
 
   running(): readonly string[] {

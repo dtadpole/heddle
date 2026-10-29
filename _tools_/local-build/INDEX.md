@@ -1,12 +1,12 @@
 ---
 title: Local build
-version: 1.3.0
-description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once.
+version: 1.5.0
+description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once, and queues the seats fairly for the one browser slot.
 grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
   - source: rust/INDEX.md, the build environment of the Rust port
 created: 2026-10-23T03:10:31Z
-modified: 2026-10-24T05:06:33Z
+modified: 2026-10-29T14:25:54Z
 ---
 
 # `local-build`
@@ -28,10 +28,33 @@ _tools_/local-build/run build --release --manifest-path rust/Cargo.toml      # r
 _tools_/local-build/run status                                               # who holds which slot
 ```
 
+## Browser slot
+
+Every browser gate holds a browser slot: `browser-cap` sets how many, and can reserve one for integrators.
+Take one through the queue, not with a bare mkdir:
+
+```bash
+_tools_/local-build/browser-slot take --seat <key> --purpose "ui gate"   # exit 75: queued, run it again
+_tools_/local-build/browser-slot release --seat <key>
+_tools_/local-build/browser-slot run --seat <key> -- <gate command>      # take, run, always release
+_tools_/local-build/browser-slot status                                  # slots, holders, memory, next, queue
+```
+
+[browser-slot.md](browser-slot.md) has the rules, including the coordinator's `browser.next`, stale holders
+and the hand-made lock during the switch.
+
+## TMPDIR sweep
+
+After a gate, run `_tools_/local-build/tmp-sweep` (`--dry-run` to list). It removes `heddle-*`,
+`hd-*-browser-*`, `scoped_dir*` and `com.google.Chrome*` entries older than two hours from the user TMPDIR,
+but never one a running process names. [tmp-sweep.md](tmp-sweep.md) has the details.
+
 ## Tests
 
 ```bash
 node --test _tools_/local-build/_tests_/slot-runner/unit.test.mjs
+node --test _tools_/local-build/_tests_/browser-slot/unit.test.mjs
+node --test _tools_/local-build/_tests_/tmp-sweep/unit.test.mjs
 ```
 
 Last run 2026-10-23 22:05 PDT, on hd/tool-developer with main 445ea43 merged: `node --test _tools_/local-build/_tests_/slot-runner/unit.test.mjs`, 16 passed, 0 failed.
@@ -43,6 +66,8 @@ owner, an ownerless directory, the ownership guard, both owner-file formats, the
 ## Read next
 
 - [slots.md](slots.md): what a slot guarantees, and its bounds.
+- [browser-slot.md](browser-slot.md): the browser slot queue, its priority turn and stale-holder rule.
+- [tmp-sweep.md](tmp-sweep.md): what the TMPDIR sweep removes and keeps.
 - [status-and-exit-codes.md](status-and-exit-codes.md): the `status` report and every exit code.
 - [capacity.md](capacity.md): the coordinator's cap file, the machine report and the disk line.
 - [`../../rust/INDEX.md`](../../rust/INDEX.md): where the port builds and runs, and the per-part status.
