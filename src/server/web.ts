@@ -8,6 +8,8 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import { handleCommandRequest } from '../commands/http.ts'
+import type { CommandService } from '../commands/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
@@ -499,6 +501,10 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     )
     return
   }
+
+  /** The slash commands (`src/commands/`, developer-three): their list and a run, handed over behind the door. */
+  const commands = ctx.get('commands') as CommandService | undefined
+  if (commands !== undefined && (await handleCommandRequest(commands.routes, request, response, url))) return
 
   /**
    * A file's **bytes**, so a document's embedded images and other subresources can load.

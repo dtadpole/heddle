@@ -64,6 +64,13 @@
       config:
         defaultMaxGoalRounds: 256
 
+    # Slash commands: the host registry the composer's `/` menu lists and runs — compact, goal, feedback,
+    # permission and export (DSH's set). A run is two log-only events, command/run and command/done, so it is
+    # recorded without ever reaching the model. Goal, context, model and sandbox are read when a command runs.
+    - id: commands
+      name: ./src/commands/service.ts
+      inject: [session]
+
     # The round driver: when a session goes idle with an armed goal, it continues the goal one round at a
     # time, attributed in the log. It needs a turn's whole machinery, which it declares.
     - id: goal-driver
