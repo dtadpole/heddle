@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { trackScratch } from './scratch.mjs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -481,9 +482,9 @@ export function parseJson(stdout) {
   return null
 }
 
-/** The temp directory a check may use for artifacts it is judging. */
+/** The temp directory a check may use for artifacts it is judging; removed when the process ends. */
 export function tempDir(prefix = 'heddle-check-') {
-  return mkdtempSync(join(tmpdir(), prefix))
+  return trackScratch(mkdtempSync(join(tmpdir(), prefix)))
 }
 
 /** Every session directory under a store root. */
