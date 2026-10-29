@@ -156,6 +156,7 @@ impl ModelHost for Host {
         EndpointListing {
             endpoints: vec![entry],
             default: Some("scripted".to_owned()),
+            ..EndpointListing::default()
         }
     }
 
