@@ -14,9 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use heddle_config::{
-    EndpointPatch, Env, heddle_home, local_config_candidates, read_local_config, resolve_endpoints,
-};
+use heddle_config::{EndpointPatch, Env, heddle_home, model_row_endpoints};
 use heddle_sandbox::{
     ApprovalService, ApprovalsConfig, SandboxConfig, SandboxHost, SandboxService,
 };
@@ -91,30 +89,21 @@ impl Component for ModelComponent {
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
         let config: ModelConfig =
             serde_json::from_value(config.clone()).map_err(|error| format!("model: {error}"))?;
-        let mut local_endpoints = Vec::new();
-        let mut excluded = Vec::new();
-        if config.read_local_config {
-            let candidates = local_config_candidates(&self.env);
-            match read_local_config(&candidates) {
-                Ok(Some(location)) => {
-                    local_endpoints = location
-                        .config
-                        .endpoint_patches(&location.path)
-                        .map_err(|error| error.to_string())?;
-                    excluded = location.config.exclude.clone().unwrap_or_default();
-                }
-                Ok(None) => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        // The layering rule is the configuration crate's: defaults, then the layers, then the machine's
-        // file, with the environment's overrides and the exclusions applied last.
-        let endpoints =
-            resolve_endpoints(&config.endpoints, &local_endpoints, &self.env, &excluded)
-                .map_err(|error| error.to_string())?;
-        let service =
-            heddle_llm::ModelService::from_configuration(endpoints, config.default.as_deref())
-                .map_err(|error| error.to_string())?;
+        // The model row's composition is the configuration crate's (`plugins/model.ts`): defaults, then the
+        // layers, then the machine's file, with the environment's overrides and the exclusions applied last,
+        // and the nominated default the row's `default` else the machine file's.
+        let composed = model_row_endpoints(
+            &config.endpoints,
+            config.default.as_deref(),
+            config.read_local_config,
+            &self.env,
+        )
+        .map_err(|error| error.to_string())?;
+        let service = heddle_llm::ModelService::from_configuration(
+            composed.endpoints,
+            composed.nominated.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
         let service = Arc::new(service);
         // `model/request` reaches the bus, where a hook may rewrite the request.
         if let Some(hooks) = bus_hooks(services) {
