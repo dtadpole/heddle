@@ -28,8 +28,8 @@
 //! | Method and path | Answers |
 //! |---|---|
 //! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text |
-//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf without ">"` |
-//! | `GET /api/uploads/{leaf}` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `200` the bytes, headers as `/api/raw` with the leaf as filename |
+//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf without ">"` · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
+//! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
 //! | `POST /api/workspaces/pick` | `501 {error: reason}` when unavailable · `200` pretty [`PickerOutcome`] (`picked` or `cancelled`) |
@@ -161,6 +161,9 @@ pub struct FileQuery {
     path: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// The session an upload is read for (`GET /api/uploads/{leaf}?session=`).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// The same query, read by the upload route (it uses `name`; the rest ignore it).
@@ -230,9 +233,39 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
     }
 }
 
-/// `GET /api/raw`: a file's bytes, inline only for a type a document embeds.
+/// The policy **every answer of a file route** carries, success or failure, with `nosniff` beside it.
+///
+/// `/api/raw` and `/api/uploads` serve a workspace's or a person's own bytes on the page's origin, with the session
+/// cookie in scope, so whatever a browser can run from such an answer runs as the user. Measured 2026-10-29 (DSH
+/// parity R-developer-twelve-16): a workspace SVG served inline and opened directly ran its script, and its
+/// `fetch('/api/sessions')` answered 200. DSH answers its own file route with exactly this policy and `nosniff` on
+/// every response, because "HTML and SVG files may be opened directly on the authenticated API origin": `sandbox`
+/// runs such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps
+/// a download from being read as a page. A policy on an image or a stylesheet does not affect the page embedding it.
+/// `FILE_ANSWER_HEADERS` of `src/server/web.ts`.
+pub(crate) const FILE_ANSWER_POLICY: &str = "sandbox; default-src 'none'";
+
+/// Add the file routes' two headers to an answer, whichever way it went.
+fn hardened(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(FILE_ANSWER_POLICY),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+/// `GET /api/raw`: a file's bytes, inline only for a type a document embeds, every answer hardened.
 async fn raw(State(files): State<FilesRoutes>, Query(params): Query<Params>) -> Response {
-    let Some(path) = params.path.filter(|path| !path.is_empty()) else {
+    hardened(raw_answer(&files, params.path))
+}
+
+fn raw_answer(files: &FilesRoutes, path: Option<String>) -> Response {
+    let Some(path) = path.filter(|path| !path.is_empty()) else {
         return text(StatusCode::BAD_REQUEST, "a path is required\n");
     };
     let wanted = canonical_path(Path::new(&path));
@@ -243,17 +276,45 @@ async fn raw(State(files): State<FilesRoutes>, Query(params): Query<Params>) -> 
     serve_bytes(&wanted, &leaf)
 }
 
-/// `GET /api/uploads/{leaf}`: an uploaded file's bytes, confined to the upload directory.
-async fn uploaded(State(files): State<FilesRoutes>, AxumPath(leaf): AxumPath<String>) -> Response {
+/// `GET /api/uploads/{leaf}?session=`: an uploaded file's bytes, served only to a session whose log references it,
+/// confined to the upload directory, every answer (refusals included) hardened.
+async fn uploaded(
+    State(files): State<FilesRoutes>,
+    AxumPath(leaf): AxumPath<String>,
+    Query(params): Query<Params>,
+) -> Response {
+    hardened(uploaded_answer(&files, &leaf, params.session.as_deref()))
+}
+
+fn uploaded_answer(files: &FilesRoutes, leaf: &str, session: Option<&str>) -> Response {
     if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') || leaf.contains('\\') {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
     }
+    // As DSH's `session/attachment` authorizes a read against that session's events: no session, an unknown one, or
+    // one whose log does not carry this leaf is the same 404, so the route does not say which uploads exist.
+    let referenced = session
+        .filter(|id| is_session_id(id))
+        .and_then(|id| files.host.session_events(id))
+        .is_some_and(|events| crate::uploads::upload_referenced(&events, leaf));
+    if !referenced {
+        return text(
+            StatusCode::NOT_FOUND,
+            &format!("{}\n", crate::uploads::UPLOAD_NOT_REFERENCED),
+        );
+    }
     let directory = upload_directory(&files.host.heddle_home());
-    let wanted = directory.join(&leaf);
+    let wanted = directory.join(leaf);
     if !is_under(&canonical_path(&directory), &canonical_path(&wanted)) {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
     }
-    serve_bytes(&wanted, &leaf)
+    serve_bytes(&wanted, leaf)
+}
+
+/// `session-` and a 36-character UUID, as `web.ts`'s `/^session-[0-9a-f-]{36}$/i`.
+fn is_session_id(id: &str) -> bool {
+    id.strip_prefix("session-").is_some_and(|rest| {
+        rest.len() == 36 && rest.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    })
 }
 
 /// `POST /api/uploads?name=`: the browser's bytes, stored under the harness's own home.
@@ -577,9 +638,40 @@ mod tests {
         /// Judge containment on the string the request wrote, as a host that forgot to canonicalise would.
         naive: bool,
         reads: std::sync::Mutex<Vec<String>>,
+        /// Session logs by id, for the upload route's reference check.
+        logs: std::sync::Mutex<Vec<(String, Vec<serde_json::Value>)>>,
+    }
+
+    /// A session id the double's logs use.
+    const SESSION_A: &str = "session-00000000-0000-4000-8000-00000000000a";
+    const SESSION_B: &str = "session-00000000-0000-4000-8000-00000000000b";
+
+    impl DoubleHost {
+        /// Record a session whose log carries one image part for each leaf.
+        fn log_referencing(&self, id: &str, leaves: &[&str]) {
+            let content: Vec<serde_json::Value> = leaves
+                .iter()
+                .map(|leaf| {
+                    serde_json::json!({"type": "image", "path": self.home.join("uploads").join(leaf)})
+                })
+                .collect();
+            let events = vec![
+                serde_json::json!({"type": "message", "message": {"role": "user", "content": content}}),
+            ];
+            self.logs.lock().unwrap().push((id.to_owned(), events));
+        }
     }
 
     impl FilesHost for DoubleHost {
+        fn session_events(&self, id: &str) -> Option<Vec<serde_json::Value>> {
+            self.logs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(known, _)| known == id)
+                .map(|(_, events)| events.clone())
+        }
+
         fn heddle_home(&self) -> PathBuf {
             self.home.clone()
         }
@@ -687,6 +779,7 @@ mod tests {
             loaded: true,
             naive: false,
             reads: std::sync::Mutex::new(Vec::new()),
+            logs: std::sync::Mutex::new(Vec::new()),
         };
         (base, host)
     }
@@ -936,6 +1029,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_answer_of_a_file_route_is_sandboxed_and_never_sniffed() {
+        // DSH parity R-developer-twelve-16: a workspace SVG opened directly ran its script with the session's access.
+        // DSH answers its file route with this policy and nosniff on every response; so do both of heddle's.
+        let (base, host) = scratch("raw-hardened");
+        let root = host.root.clone();
+        let uploads = upload_directory(&host.heddle_home());
+        std::fs::create_dir_all(&uploads).unwrap();
+        std::fs::write(
+            uploads.join("stored.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .unwrap();
+        // An upload is read only for a session whose log references it (R-developer-two-10).
+        host.log_referencing(SESSION_A, &["stored.svg"]);
+        let app = routes_of(host);
+        let raw = |name: &str| {
+            format!(
+                "/api/raw?path={}",
+                crate::markdown::percent_encode(&root.join(name).to_string_lossy())
+            )
+        };
+        let cases = [
+            ("an inline SVG", raw("heddle.svg"), Status::OK),
+            ("a download", raw("AGENTS.md"), Status::OK),
+            ("a missing file", raw("missing.txt"), Status::NOT_FOUND),
+            (
+                "a request without a path",
+                "/api/raw?path=".to_owned(),
+                Status::BAD_REQUEST,
+            ),
+            (
+                "an uploaded SVG",
+                format!("/api/uploads/stored.svg?session={SESSION_A}"),
+                Status::OK,
+            ),
+            (
+                "a missing upload",
+                "/api/uploads/no-such-file.svg".to_owned(),
+                Status::NOT_FOUND,
+            ),
+            (
+                "an upload read for no session",
+                "/api/uploads/stored.svg".to_owned(),
+                Status::NOT_FOUND,
+            ),
+        ];
+        for (what, uri, status) in cases {
+            let (got, headers, _) = call(app.clone(), "GET", &uri, None).await;
+            assert_eq!(got, status, "{what}");
+            assert_eq!(
+                headers
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .map(|value| value.to_str().unwrap()),
+                Some(FILE_ANSWER_POLICY),
+                "{what} is sandboxed with no sources"
+            );
+            assert_eq!(
+                headers
+                    .get(header::X_CONTENT_TYPE_OPTIONS)
+                    .map(|value| value.to_str().unwrap()),
+                Some("nosniff"),
+                "{what} is never sniffed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
     async fn a_file_a_browser_would_run_is_offered_as_a_download() {
         let (base, host) = scratch("raw-download");
         let path = host.root.join("AGENTS.md");
@@ -991,7 +1152,8 @@ mod tests {
     async fn an_upload_is_stored_and_served_back_from_the_upload_directory() {
         let (base, host) = scratch("uploads");
         let home = host.home.clone();
-        let routes = routes_of(host);
+        let host = Arc::new(host);
+        let routes = FilesRoutes::new(host.clone() as Arc<dyn FilesHost>).router();
         let (status, _, bytes) = call(
             routes.clone(),
             "POST",
@@ -1011,8 +1173,36 @@ mod tests {
         );
         let path = saved["path"].as_str().unwrap();
         let leaf = crate::node_path::basename(path);
-        let (status, headers, served) =
-            call(routes.clone(), "GET", &format!("/api/uploads/{leaf}"), None).await;
+        // Stored, but referenced by no session yet: refused whether or not a session is named.
+        for uri in [
+            format!("/api/uploads/{leaf}"),
+            format!("/api/uploads/{leaf}?session={SESSION_A}"),
+        ] {
+            let (status, _, body) = call(routes.clone(), "GET", &uri, None).await;
+            assert_eq!(status, Status::NOT_FOUND, "{uri}");
+            assert_eq!(
+                body_text(&body),
+                "this upload is not referenced by this session\n"
+            );
+        }
+        host.log_referencing(SESSION_A, &[leaf]);
+        host.log_referencing(SESSION_B, &["other.png"]);
+        // Another session's read, a malformed id, or no session at all stays refused.
+        for uri in [
+            format!("/api/uploads/{leaf}?session={SESSION_B}"),
+            format!("/api/uploads/{leaf}?session=not-a-session"),
+            format!("/api/uploads/{leaf}"),
+        ] {
+            let (status, _, _) = call(routes.clone(), "GET", &uri, None).await;
+            assert_eq!(status, Status::NOT_FOUND, "{uri}");
+        }
+        let (status, headers, served) = call(
+            routes.clone(),
+            "GET",
+            &format!("/api/uploads/{leaf}?session={SESSION_A}"),
+            None,
+        )
+        .await;
         assert_eq!(status, Status::OK);
         assert_eq!(
             headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
@@ -1235,8 +1425,14 @@ mod tests {
         let directory = host.home.join("uploads");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("a b.png"), b"png").unwrap();
-        let (status, headers, bytes) =
-            call(routes_of(host), "GET", "/api/uploads/a%20b.png", None).await;
+        host.log_referencing(SESSION_A, &["a b.png"]);
+        let (status, headers, bytes) = call(
+            routes_of(host),
+            "GET",
+            &format!("/api/uploads/a%20b.png?session={SESSION_A}"),
+            None,
+        )
+        .await;
         assert_eq!(status, Status::OK, "{}", body_text(&bytes));
         assert_eq!(
             headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
@@ -1436,7 +1632,15 @@ mod tests {
         let outside = base.join("secret.txt");
         std::fs::write(&outside, b"secret").unwrap();
         std::os::unix::fs::symlink(&outside, directory.join("link.txt")).unwrap();
-        let (status, _, bytes) = call(routes_of(host), "GET", "/api/uploads/link.txt", None).await;
+        // Even a session that references the leaf is not served a file outside the directory.
+        host.log_referencing(SESSION_A, &["link.txt"]);
+        let (status, _, bytes) = call(
+            routes_of(host),
+            "GET",
+            &format!("/api/uploads/link.txt?session={SESSION_A}"),
+            None,
+        )
+        .await;
         assert_eq!(status, Status::NOT_FOUND);
         assert_eq!(body_text(&bytes), "no such asset\n");
         let _ = std::fs::remove_dir_all(&base);

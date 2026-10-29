@@ -1,11 +1,11 @@
 ---
 title: Tools
-version: 1.0.0
+version: 1.1.0
 description: The scripts this repository runs on itself, kept out of the code it ships.
 grounded_in:
   - source: human-authored
 created: 2026-10-11T09:56:12Z
-modified: 2026-10-24T04:53:42Z
+modified: 2026-10-29T13:09:02Z
 ---
 
 # `_tools_`
@@ -25,7 +25,7 @@ Instances of `_tools_`, one per tool, each named kebab-case:
 | [`web-daemon/`](web-daemon/INDEX.md) | the launchd agent that keeps the Web UI running |
 | [`browser-use/`](browser-use/INDEX.md) | a real Chrome, driven over the DevTools protocol, with the harness browser's tool surface |
 | [`model-validation/`](model-validation/INDEX.md) | drives every configured model through the real adapter and records streaming, declared reasoning levels and tool calls, beside a fingerprint of the configuration it validated |
-| [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots shared by the team's sessions |
+| [`local-build/`](local-build/INDEX.md) | runs cargo in one of three build slots shared by the team's sessions, and queues seats fairly for the one browser slot (`browser-slot`) |
 | [`load-check/`](load-check/INDEX.md) | the Mac's disk, load, swap and build-slot report, with ok/warn/stop exit codes |
 | [`public-hygiene/`](public-hygiene/INDEX.md) | the gate before `main`: no private identifier in files, paths, messages or identities |
 | [`reflection-sync/`](reflection-sync/INDEX.md) | fast-forwards the shared reflection checkout, refusing rather than overwrite others' work |

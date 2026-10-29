@@ -7,6 +7,8 @@ import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
+import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
+import { recordTimeContext } from '../schedule/time-context.ts'
 
 /**
  * A model failure, read the way a seam has to read it: **by its code, not by its class**.
@@ -126,6 +128,13 @@ export interface RunTurnOptions {
   readonly attachments?: readonly ContentPart[]
   /** Who wrote the prompt, when it was not a person — an automatic goal round sets this. */
   readonly source?: unknown
+  /**
+   * Answer input that is already in the log instead of writing `prompt` as a new message.
+   *
+   * For a background child's settlement notice that was delivered into a turn which ended before it saw it: the
+   * notice is in the log once, and the turn that answers it must not write it a second time.
+   */
+  readonly answerPending?: boolean
   /** A system prompt, written to the surface as its first node when the session has none. */
   readonly system?: string
   /** The model id, overriding the endpoint's default. */
@@ -216,11 +225,26 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
   const instructionCwd = folder ?? ctx.sandbox.workspaceRoot
 
-  ctx.session.userContent(
-    options.session,
-    [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])],
-    options.source,
-  )
+  /**
+   * Write what waits in the session's inbox into the conversation (src/session/inbox.ts).
+   *
+   * Called at every step boundary. A steer sent while a tool runs is queued, not written, so it reaches the
+   * conversation here, after the result of the call it arrived during. Called once more before this turn's
+   * prompt, because a steer that a stopped turn left pending is DSH's next-step input, and DSH's boundary
+   * claims next-step input before the queued prompt.
+   */
+  const claimSteered = (): void => {
+    claimNextStep(ctx.session.store, options.session, (content, source) => ctx.session.userContent(options.session, content, source))
+  }
+  claimSteered()
+
+  if (options.answerPending !== true) {
+    ctx.session.userContent(
+      options.session,
+      [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])],
+      options.source,
+    )
+  }
 
   const tools = specsOf(ctx.tools)
   const denials: { tool: string; code: string; message: string }[] = []
@@ -247,6 +271,11 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       ended.push('stopped by the caller')
       break
     }
+    /**
+     * The step boundary: the previous round's tool results are on disk, so a steer that arrived during them is
+     * written now, after them. A stop is checked first, so a stopped turn leaves its steer pending.
+     */
+    claimSteered()
     rounds += 1
 
     /**
@@ -271,6 +300,8 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         text: sandboxPolicyStatement(ctx.sandbox.policy(ctx.session.effectiveMode(options.session, ctx.sandbox.mode), cwd)),
       },
     ])
+    /** The clock reading reminders depend on (DSH's dsh-time-context): due at most once per ten minutes. */
+    recordTimeContext(ctx.session.store, options.session, { step: round + 1 })
 
     let inputBefore = userInputSeqs(ctx, options.session)
 
@@ -444,13 +475,20 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     /**
      * A message that arrived while the model was answering is answered **by this turn**.
      *
-     * This is the half of steering the loop owns. The other half is the append: a `steer` submission writes the
-     * user's message to the session while the turn is running, and because context is re-derived from the
-     * surface at the top of every round, the next round would already see it — but only if there **is** a next
-     * round, and an answer with no tool calls used to end the turn. Measured consequence of leaving it out: a
-     * steered message sat in the transcript unanswered until the person sent something else.
+     * This is the half of steering the loop owns. A steer is queued in the session's inbox and written at the next
+     * step boundary, and a teammate's mail is written straight to the log; either way the next round would answer
+     * it, but only if there **is** a next round, and an answer with no tool calls used to end the turn. So the
+     * turn goes on while a message waits in the inbox or arrived on the surface during the call. DSH does the
+     * same: a step that ends the turn with next-step input pending takes another step. Measured consequence of
+     * leaving it out: a steered message sat unanswered until the person sent something else.
      */
-    if (calls.length === 0 && !hasNewInput(inputBefore, userInputSeqs(ctx, options.session))) break
+    if (
+      calls.length === 0 &&
+      !hasNewInput(inputBefore, userInputSeqs(ctx, options.session)) &&
+      !hasPendingStep(ctx.session.store, options.session)
+    ) {
+      break
+    }
 
     for (const call of calls) {
       const args = parseArguments(call.arguments)
