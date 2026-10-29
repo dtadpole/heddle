@@ -335,7 +335,11 @@ impl ToolRegistry {
         // root is open, so an unknown top-level key passes; arguments that were not valid JSON arrive as
         // `{"__unparsed": ...}` and are, in DSH's terms, not an object (`src/tools/service.ts`).
         let violations = if args.contains_key("__unparsed") {
-            crate::argument_violations(&serde_json::json!({ "type": "object" }), &serde_json::Value::Null, "")
+            crate::argument_violations(
+                &serde_json::json!({ "type": "object" }),
+                &serde_json::Value::Null,
+                "",
+            )
         } else {
             crate::argument_violations(
                 &crate::open_root(&tool.spec().parameters),
@@ -863,11 +867,18 @@ pub(crate) mod tests {
         let registry = ToolRegistry::new(gates(SandboxMode::WorkspaceWrite));
         registry.register(probe(Arc::clone(&ran))).unwrap();
         let wrong = registry
-            .call("probe", args_of(serde_json::json!({ "path": 7 })), ToolContext::new("/w"))
+            .call(
+                "probe",
+                args_of(serde_json::json!({ "path": 7 })),
+                ToolContext::new("/w"),
+            )
             .await;
         let error = wrong.error.unwrap();
         assert_eq!(error.code, codes::INVALID_ARGS);
-        assert_eq!(error.message, "invalid arguments: \"path\" must be a string");
+        assert_eq!(
+            error.message,
+            "invalid arguments: \"path\" must be a string"
+        );
         let missing = registry
             .call("probe", ToolArgs::new(), ToolContext::new("/w"))
             .await;
@@ -887,7 +898,10 @@ pub(crate) mod tests {
             "invalid arguments: \"arguments\" must be an object",
             "malformed JSON is not an object"
         );
-        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "the tool never ran");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the tool never ran"
+        );
     }
 
     #[tokio::test]

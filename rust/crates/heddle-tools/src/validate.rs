@@ -22,17 +22,17 @@ fn below(path: &str, key: &str) -> String {
 }
 
 fn scalar(schema: &serde_json::Map<String, Value>, value: &Value, path: &str) -> Vec<String> {
-    if let Some(Value::Array(allowed)) = schema.get("enum") {
-        if !allowed.contains(value) {
-            let list = serde_json::to_string(allowed).unwrap_or_default();
-            return vec![format!("\"{}\" must be one of {list}", named(path))];
-        }
+    if let Some(Value::Array(allowed)) = schema.get("enum")
+        && !allowed.contains(value)
+    {
+        let list = serde_json::to_string(allowed).unwrap_or_default();
+        return vec![format!("\"{}\" must be one of {list}", named(path))];
     }
-    if let Some(constant) = schema.get("const") {
-        if constant != value {
-            let shown = serde_json::to_string(constant).unwrap_or_default();
-            return vec![format!("\"{}\" must be {shown}", named(path))];
-        }
+    if let Some(constant) = schema.get("const")
+        && constant != value
+    {
+        let shown = serde_json::to_string(constant).unwrap_or_default();
+        return vec![format!("\"{}\" must be {shown}", named(path))];
     }
     Vec::new()
 }
@@ -70,7 +70,10 @@ pub fn argument_violations(schema: &Value, value: &Value, path: &str) -> Vec<Str
             if let Some(Value::Array(required)) = schema.get("required") {
                 for key in required.iter().filter_map(Value::as_str) {
                     if !record.contains_key(key) {
-                        violations.push(format!("missing required property \"{}\"", below(path, key)));
+                        violations.push(format!(
+                            "missing required property \"{}\"",
+                            below(path, key)
+                        ));
                     }
                 }
             }
@@ -101,7 +104,9 @@ pub fn argument_violations(schema: &Value, value: &Value, path: &str) -> Vec<Str
             entries
                 .iter()
                 .enumerate()
-                .flat_map(|(index, entry)| argument_violations(items, entry, &format!("{path}[{index}]")))
+                .flat_map(|(index, entry)| {
+                    argument_violations(items, entry, &format!("{path}[{index}]"))
+                })
                 .collect()
         }
         Some("string") => match value {
@@ -113,7 +118,11 @@ pub fn argument_violations(schema: &Value, value: &Value, path: &str) -> Vec<Str
             _ => vec![format!("\"{}\" must be a number", named(path))],
         },
         Some("integer") => match value {
-            Value::Number(number) if number.is_i64() || number.is_u64() || number.as_f64().is_some_and(|f| f.fract() == 0.0) => {
+            Value::Number(number)
+                if number.is_i64()
+                    || number.is_u64()
+                    || number.as_f64().is_some_and(|f| f.fract() == 0.0) =>
+            {
                 scalar(schema, value, path)
             }
             _ => vec![format!("\"{}\" must be an integer", named(path))],
@@ -202,7 +211,8 @@ mod tests {
 
     #[test]
     fn a_nested_closed_node_refuses_undeclared_keys_after_its_items() {
-        let args = json!({ "command": "ls", "description": "d", "opts": { "a": [1, "two"], "b": 1 } });
+        let args =
+            json!({ "command": "ls", "description": "d", "opts": { "a": [1, "two"], "b": 1 } });
         assert_eq!(
             argument_violations(&bash(), &args, ""),
             vec![
@@ -235,6 +245,10 @@ mod tests {
             json!({ "type": "object", "properties": { "o": { "type": "object", "additionalProperties": false } }, "required": [] })
         );
         let keys: Vec<&String> = open.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["type", "properties", "required"], "the remaining keys keep their order");
+        assert_eq!(
+            keys,
+            ["type", "properties", "required"],
+            "the remaining keys keep their order"
+        );
     }
 }

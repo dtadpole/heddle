@@ -46,12 +46,12 @@ pub use tool::{
     Command, LogSink, Tool, ToolArgs, ToolContext, ToolError, ToolFailure, ToolFuture, ToolResult,
     ToolRunContext, codes, tool_fn,
 };
-pub use validate::{argument_violations, invalid_arguments, open_root};
 pub use upstream::{
     ApprovalDecision, ApprovalMode, ConfinedArgv, EscalationRefusal, EscalationRefusalCode,
     EscalationSubject, RunnerFailureRule, SandboxDenial, SandboxEnforcement, SandboxMode,
     SandboxOutcome, SandboxUnavailable, SessionHandle, ToolSpec,
 };
+pub use validate::{argument_violations, invalid_arguments, open_root};
 
 /// The cancellation token every call carries for a Stop — the TypeScript build's `AbortSignal`.
 pub use tokio_util::sync::CancellationToken;
