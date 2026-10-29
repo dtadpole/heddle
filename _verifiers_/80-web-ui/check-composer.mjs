@@ -1974,11 +1974,10 @@ test('a completed turn shows its own token-usage row, which opens to the reporte
     await browser.evaluate('document.querySelector("#log .turn-usage summary").click()')
     assert.equal((await row()).visible, true, 'it opens to its figures')
 
+    // A reload reopens the session the page remembers, and draws the turn from the transcript.
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
-    await browser.waitFor('document.querySelector("#tree li[data-kind=\\"session\\"]") !== null', 10_000)
-    await browser.evaluate('document.querySelector("#tree li[data-kind=\\"session\\"] > .row").click()')
-    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant .turn-usage") !== null', 10_000), 'a reload draws the same row')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant .turn-usage") !== null', 15_000), 'a reload draws the same row')
     const reloaded = await row()
     assert.deepEqual([reloaded.summary, reloaded.buckets], [live.summary, live.buckets])
   } finally {
