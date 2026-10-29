@@ -115,6 +115,10 @@ pub struct ChatTurn {
     /// revision, round}`) or another trigger's - so the page draws it as DSH's bordered notice, not a bubble.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Value>,
+    /// The exchange's token usage summed over its model rounds - DSH's per-Turn usage row - carried by the exchange's
+    /// last answer, and only when every round reported usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
 }
 
 impl ChatTurn {
@@ -136,6 +140,7 @@ impl ChatTurn {
             state: None,
             html: None,
             trigger: None,
+            usage: None,
         }
     }
 }
@@ -323,6 +328,44 @@ pub fn scope_attachment_urls(turns: &mut [ChatTurn], session: &str) {
     }
 }
 
+/// The four usage buckets, in the order the TypeScript `mergeTokenUsage` writes them.
+const USAGE_BUCKETS: [&str; 4] = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+
+/// `mergeTokenUsage`: the first report as it came, then a bucket-by-bucket sum in which a bucket stays absent until a
+/// round reports it.
+fn merge_usage(previous: Option<Value>, next: &Value) -> Option<Value> {
+    let Some(next_buckets) = next.as_object() else {
+        return previous;
+    };
+    let Some(previous) = previous else {
+        return Some(next.clone());
+    };
+    let mut sum = serde_json::Map::new();
+    for key in USAGE_BUCKETS {
+        let (a, b) = (previous.get(key), next_buckets.get(key));
+        if a.is_none() && b.is_none() {
+            continue;
+        }
+        let whole = |value: Option<&Value>| value.map_or(Some(0), Value::as_u64);
+        let total = match (whole(a), whole(b)) {
+            (Some(a), Some(b)) => Value::from(a + b),
+            _ => Value::from(a.and_then(Value::as_f64).unwrap_or(0.0) + b.and_then(Value::as_f64).unwrap_or(0.0)),
+        };
+        sum.insert(key.to_owned(), total);
+    }
+    Some(Value::Object(sum))
+}
+
+/// The exchange's usage account: its model rounds, the rounds that reported usage, and their sum.
+#[derive(Default)]
+struct UsageAccount {
+    rounds: u32,
+    reports: u32,
+    reported: bool,
+    sum: Option<Value>,
+    start: usize,
+}
+
 /// Fold a session's recorded events into the turns the page renders.
 pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut turns: Vec<ChatTurn> = Vec::new();
@@ -337,6 +380,7 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     // The write each call would make, by the index of its turn: (the exchange's start, its position there).
     let mut write_of_call: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut section_start: Option<usize> = None;
+    let mut usage = UsageAccount::default();
 
     let close_runs = |open_assistant: &mut Option<usize>, open_reasoning: &mut Option<usize>| {
         *open_assistant = None;
@@ -411,6 +455,7 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
             match message.get("role").and_then(Value::as_str).unwrap_or("") {
                 "user" => {
                     section_start = Some(turns.len());
+                    usage = UsageAccount { start: turns.len(), ..UsageAccount::default() };
                     let attachments = attachments_of(&content);
                     let mut turn = ChatTurn::new(TurnKind::User, text);
                     if !attachments.is_empty() {
@@ -477,6 +522,25 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
             continue;
         }
 
+        if event_type == "model/request" {
+            usage.rounds += 1;
+            usage.reported = false;
+        }
+        if event_type == "turn/completed" {
+            // The exchange's usage belongs to its last answer, and only a complete account is shown.
+            if usage.rounds > 0 && usage.reports == usage.rounds && usage.sum.is_some() {
+                let last_answer = (usage.start + 1..turns.len())
+                    .rev()
+                    .take_while(|index| turns[*index].kind != TurnKind::User)
+                    .find(|index| turns[*index].kind == TurnKind::Assistant);
+                if let Some(index) = last_answer {
+                    turns[index].usage = usage.sum.clone();
+                }
+            }
+            usage.rounds = 0;
+            usage.reports = 0;
+            usage.sum = None;
+        }
         if event_type != "assistant/chunk" {
             if event_type == "assistant/completed"
                 && let Some(ended) = event.get("ended").and_then(Value::as_array)
@@ -531,6 +595,14 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
         let Some(chunk) = event.get("chunk") else {
             continue;
         };
+        if let Some(reported) = chunk.get("usage").filter(|value| value.is_object()) {
+            // One report per round, however many frames of that round carried usage.
+            if !usage.reported {
+                usage.reports += 1;
+            }
+            usage.reported = true;
+            usage.sum = merge_usage(usage.sum.take(), reported);
+        }
         let chunk_type = chunk.get("type").and_then(Value::as_str).unwrap_or("");
         match chunk_type {
             "text-delta" => {
@@ -709,6 +781,42 @@ mod tests {
         let wire = serde_json::to_value(&turns[1]).unwrap();
         assert_eq!(wire["trigger"]["round"], 2);
         assert!(serde_json::to_value(&turns[0]).unwrap().get("trigger").is_none(), "absent, not null");
+    }
+
+    #[test]
+    fn a_completed_exchange_carries_its_usage_only_when_every_round_reported() {
+        let user = |text: &str| json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}});
+        let round = |usage: Option<Value>| {
+            let mut done = json!({"type": "done"});
+            if let Some(usage) = usage {
+                done["usage"] = usage;
+            }
+            vec![
+                json!({"type": "model/request"}),
+                json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "step "}}),
+                json!({"type": "assistant/chunk", "chunk": done}),
+            ]
+        };
+        let mut events = vec![user("two rounds, both reported")];
+        events.extend(round(Some(json!({"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 900}))));
+        events.extend(round(Some(json!({"inputTokens": 30, "outputTokens": 5, "cacheReadTokens": 1000}))));
+        events.push(json!({"type": "assistant/completed", "text": "step step "}));
+        events.push(json!({"type": "turn/completed", "rounds": 2}));
+        events.push(user("one round unreported"));
+        events.extend(round(Some(json!({"inputTokens": 10, "outputTokens": 1}))));
+        events.extend(round(None));
+        events.push(json!({"type": "assistant/completed", "text": "step step "}));
+        events.push(json!({"type": "turn/completed", "rounds": 2}));
+        let turns = transcript_turns(&events);
+        let second = turns.iter().skip(1).position(|turn| turn.kind == TurnKind::User).unwrap() + 1;
+        let carried: Vec<&ChatTurn> = turns[..second].iter().filter(|turn| turn.usage.is_some()).collect();
+        assert_eq!(carried.len(), 1, "carried once, by the exchange's last answer");
+        assert_eq!(
+            serde_json::to_string(carried[0].usage.as_ref().unwrap()).unwrap(),
+            r#"{"inputTokens":130,"outputTokens":25,"cacheReadTokens":1900}"#,
+            "the sum of both rounds, with no bucket invented"
+        );
+        assert!(turns[second..].iter().all(|turn| turn.usage.is_none()), "a partial account shows no row");
     }
 
     #[test]
