@@ -213,6 +213,70 @@ test('a goal moved during its round stops the chain and keeps the round attribut
   assert.equal(outcome.stopped, 'goal-moved')
 })
 
+/**
+ * R-developer-two-31: an edit during a round must not let the goal run past its cap.
+ *
+ * DSH's fold (`dsh-goal` `applyGoalEvent`) counts rounds across revisions: every goal change carries the current
+ * `roundsStarted` forward unchanged, and each goal-sourced user message must be round `roundsStarted + 1` of the
+ * current revision. So a cap of three allows three rounds in total, edits or not. Measured before the fix on both
+ * builds: an edit during round 2 gave five rounds, labelled 1/3, 2/3, 3/3, 3/3, 3/3, because the fold counted only
+ * the edited revision's rounds and took the larger of that and the count the edit recorded.
+ */
+test('an edit during a round does not let the goal run past its cap (R-developer-two-31)', async () => {
+  const { store, goals, handle } = setup()
+  goals.create(handle, { objective: 'three rounds at most', maxGoalRounds: 3 })
+  const calls: { round: number; prompt: string }[] = []
+  const driver = new GoalDriver(new Context(), goals, {
+    run: async (session, prompt, source) => {
+      calls.push({ round: Number(source.round), prompt })
+      store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
+      if (source.round === 2) {
+        // The person edits the objective while round 2 runs, as in the parity measurement.
+        const current = goals.get(session)!
+        goals.edit(session, { id: current.id, revision: current.revision }, { objective: 'three rounds at most, sharper' })
+      }
+      return {}
+    },
+  })
+
+  // The edit stops the first chain ('goal-moved'); the next trigger starts another, as a turn/completed would.
+  const first = await driver.advance(handle)
+  assert.equal(first.stopped, 'goal-moved')
+  const second = await driver.advance(handle)
+  assert.equal(second.stopped, 'round-limit')
+
+  assert.deepEqual(calls.map((call) => call.round), [1, 2, 3], 'three rounds in total, each number once')
+  assert.deepEqual(
+    calls.map((call) => /Round: (\d+\/\d+)/.exec(call.prompt)?.[1]),
+    ['1/3', '2/3', '3/3'],
+  )
+  const folded = foldGoal(store.read(handle))
+  assert.equal(folded.roundsStarted, 3)
+  assert.equal(folded.goal?.phase, 'blocked')
+  assert.equal(folded.goal?.revision, 3, 'create, edit, then the round-limit block')
+})
+
+test('a log written before the fix still folds, and its repeated round numbers count once', () => {
+  const { store, goals, handle } = setup()
+  const created = goals.create(handle, { objective: 'old log', maxGoalRounds: 3 })
+  const say = (revision: number, round: number) =>
+    store.message(handle, {
+      role: 'user',
+      content: [{ type: 'text', text: `Round: ${round}/3` }],
+      source: { kind: 'goal', goalId: created.id, revision, round },
+    })
+  say(1, 1)
+  say(1, 2)
+  goals.edit(handle, { id: created.id, revision: 1 }, { objective: 'old log, edited' })
+  // What the old driver wrote after an edit: round 3 three times under the new revision.
+  say(2, 3)
+  say(2, 3)
+  say(2, 3)
+  const folded = foldGoal(store.read(handle))
+  assert.equal(folded.roundsStarted, 3, 'the duplicates are not extra rounds, and replay does not fail')
+  assert.equal(decideGoalRound({ ...goals.get(handle)! }).kind, 'block')
+})
+
 test('a goal completed during its round stops the chain', async () => {
   const { store, goals, handle } = setup()
   const created = goals.create(handle, { objective: 'one', maxGoalRounds: 4 })

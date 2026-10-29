@@ -104,6 +104,25 @@ impl Component for ModelComponent {
             composed.nominated.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The machine's file applies to the next request without a restart, as `plugins/model.ts` keeps it: the
+        // service asks before every read and call, and an edit that cannot be read keeps the previous endpoints.
+        if config.read_local_config {
+            let source = heddle_config::ModelRowSource::new(
+                config.endpoints.clone(),
+                config.default.clone(),
+                true,
+                self.env.clone(),
+            );
+            service.set_refresh(Arc::new(move || match source.changed()? {
+                Ok(composed) => Some((composed.endpoints, composed.nominated)),
+                Err(error) => {
+                    eprintln!(
+                        "model: the machine configuration changed but could not be read ({error}); the previous endpoints stay"
+                    );
+                    None
+                }
+            }));
+        }
         let service = Arc::new(service);
         // `model/request` reaches the bus, where a hook may rewrite the request.
         if let Some(hooks) = bus_hooks(services) {
@@ -1316,16 +1335,23 @@ impl Component for SubagentToolComponent {
             };
         let sessions = session_service(services, "subagent-tool")?;
         let runtime = crate::runtime::shared_runtime(services)?;
+        let store: Arc<dyn heddle_agent::SubagentStore> =
+            Arc::new(heddle_agent::adapters::SessionSubagents::new(sessions));
         let deps = heddle_agent::SubagentDeps {
-            store: Arc::new(heddle_agent::adapters::SessionSubagents::new(sessions)),
+            store: Arc::clone(&store),
             run: heddle_agent::subagent_runner(Arc::downgrade(&runtime)),
         };
-        for tool in heddle_agent::subagent_tools(deps, config.into()) {
+        // A child runs in the background and reports back by notice; the service is provided as `subagents`
+        // (the TypeScript `ctx.provide('subagents')`) so a one-shot `--turn` can wait for the session's children.
+        let deliver = heddle_agent::subagent_deliverer(Arc::downgrade(&runtime), store);
+        let service = heddle_agent::SubagentService::new(deps, deliver, config.into());
+        for tool in heddle_agent::subagent_tools(Arc::clone(&service)) {
             runtime
                 .tools
                 .register(tool)
                 .map_err(|error| format!("subagent-tool: {error}"))?;
         }
+        services.provide("subagents", service);
         Ok(())
     }
 }

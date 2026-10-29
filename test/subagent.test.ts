@@ -4,7 +4,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { delegateSubagent, finalAssistantText, parentFacts, SubagentError, subagentRunner } from '../src/agent/subagent.ts'
+import { Context } from '@deepseek-ai/cordis'
+
+import {
+  delegateSubagent,
+  finalAssistantText,
+  parentFacts,
+  type SettlementNotice,
+  settlementNotice,
+  settlementSummary,
+  SubagentError,
+  subagentRunner,
+  SubagentService,
+} from '../src/agent/subagent.ts'
+import { TurnRegistry } from '../src/agent/turns.ts'
 import { SessionStore } from '../src/session/store.ts'
 import { subagentTools } from '../src/tools/subagent.ts'
 import type { ToolRunContext } from '../src/tools/service.ts'
@@ -107,25 +120,146 @@ test('a child that produces no answer is a failure, not an empty success', async
   )
 })
 
-test('the tool returns the child’s answer and refuses without a session', async () => {
+/** A promise the test settles by hand, so "returns before the child finishes" is proven, not timed. */
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } {
+  let resolve!: () => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<void>((ok, fail) => {
+    resolve = ok
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
+/** A background service whose child runs answer `text` when the test releases them, recording deliveries. */
+function backgroundSetup(text = 'child answer') {
   const { store, parent } = setup()
-  const deps = {
-    store,
-    run: async (child: ReturnType<SessionStore['create']>, prompt: string) => {
-      store.append(child, { type: 'message', message: { role: 'user', content: [{ type: 'text', text: prompt }] } })
-      store.append(child, { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'from the child' } })
+  const release = deferred()
+  const notices: { parent: string; notice: SettlementNotice }[] = []
+  const service = new SubagentService(
+    {
+      store,
+      run: async (child, prompt) => {
+        store.append(child, { type: 'message', message: { role: 'user', content: [{ type: 'text', text: prompt }] } })
+        await release.promise
+        if (text.length > 0) store.append(child, { type: 'assistant/completed', text })
+      },
+      deliver: async (to, notice) => {
+        notices.push({ parent: to.id, notice })
+      },
     },
-  }
-  const tool = subagentTools(deps, { maxDepth: 2, maxActive: 1 })[0]
+    { maxDepth: 2, maxActive: 1 },
+  )
+  return { store, parent, release, notices, service }
+}
+
+test('a background delegation returns at once with the child id and depth, before the child has answered', async () => {
+  const { store, parent, release, notices, service } = backgroundSetup()
+  const started = service.start(parent, 'do the child task')
+
+  assert.equal(started.depth, 1)
+  assert.equal(service.running, 1, 'the child is still in flight when start returns')
+  assert.equal(notices.length, 0, 'and nothing has been reported yet')
+  const meta = store.list().find((one) => one.id === started.childSession)
+  assert.equal(meta?.parentSession, parent.id, 'the child names its parent')
+  assert.equal(meta?.origin, 'subagent')
+  assert.equal(meta?.delegationDepth, 1)
+
+  release.resolve()
+  assert.equal(await service.settle(parent.id), 1, 'settle waits for the child and its notice')
+  assert.equal(service.running, 0)
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0]?.parent, parent.id, 'the notice goes to the parent')
+})
+
+test('the settlement notice is DSH’s: summary, closing message, source', async () => {
+  const { parent, release, notices, service } = backgroundSetup('the answer is 42')
+  const started = service.start(parent, 'compute')
+  release.resolve()
+  await service.settle(parent.id)
+  const notice = notices[0]?.notice
+  assert.ok(notice !== undefined)
+  assert.deepEqual(
+    notice.content.map((part) => part.text),
+    [`Background subagent ${started.childSession} finished. It cannot receive follow-up messages.`, 'Its closing message:', 'the answer is 42'],
+  )
+  assert.deepEqual(notice.source, {
+    kind: 'subagent-settled',
+    form: 'notice',
+    summary: `Background subagent ${started.childSession} finished. It cannot receive follow-up messages.`,
+    senderSessionId: started.childSession,
+  })
+})
+
+test('a child with no closing text, a failed child and a stopped child are each reported as DSH words them', async () => {
+  assert.deepEqual(
+    settlementNotice('c1', 'completed', '').content.map((part) => part.text),
+    ['Background subagent c1 finished. It cannot receive follow-up messages.', 'It left no closing message.'],
+  )
+  assert.equal(settlementSummary('c2', 'error'), 'Background subagent c2 failed before it finished.')
+  assert.equal(settlementSummary('c3', 'aborted'), 'Background subagent c3 was stopped before it finished.')
+
+  const failing = backgroundSetup()
+  const started = failing.service.start(failing.parent, 'task')
+  failing.release.reject(new Error('the model went away'))
+  await failing.service.settle(failing.parent.id)
+  assert.deepEqual(
+    failing.notices[0]?.notice.content.map((part) => part.text),
+    [`Background subagent ${started.childSession} failed before it finished.`, 'It left no closing message.', 'the model went away'],
+    'the failure is reported, with its diagnostic, rather than lost',
+  )
+
+  const stopping = backgroundSetup()
+  const controller = new AbortController()
+  stopping.service.start(stopping.parent, 'task', { signal: controller.signal })
+  controller.abort()
+  stopping.release.reject(new Error('aborted'))
+  await stopping.service.settle(stopping.parent.id)
+  assert.match(stopping.notices[0]?.notice.content[0]?.text ?? '', /was stopped before it finished\.$/)
+})
+
+test('a background start refuses synchronously with the stable codes, and counts children in flight', () => {
+  const { parent, service } = backgroundSetup()
+  const refuses = (run: () => unknown, code: string) =>
+    assert.throws(run, (error: unknown) => error instanceof SubagentError && error.code === code)
+  refuses(() => service.start(undefined, 'x'), 'SUBAGENT_NO_SESSION')
+  refuses(() => service.start(parent, '  '), 'SUBAGENT_EMPTY_PROMPT')
+  service.start(parent, 'first')
+  refuses(() => service.start(parent, 'second'), 'SUBAGENT_BUSY')
+})
+
+test('the tool starts the child and answers with DSH’s start line, and refuses without a session', async () => {
+  const { parent, release, service } = backgroundSetup()
+  const tool = subagentTools(service)[0]
   assert.ok(tool !== undefined)
 
   const ok = await tool.run({ prompt: 'a task' }, { cwd: root, session: parent, mode: 'workspace-write' } as ToolRunContext)
   assert.equal(ok.error, undefined)
-  assert.match(ok.output, /from the child/)
+  const child = (ok.data as { childSession: string; depth: number }).childSession
+  assert.equal(ok.output, `started subagent ${child}`, 'the result is the start line, not the child’s answer')
   assert.equal((ok.data as { depth: number }).depth, 1)
 
   const refused = await tool.run({ prompt: 'a task' }, { cwd: root, mode: 'workspace-write' } as ToolRunContext)
   assert.equal(refused.error?.code, 'SUBAGENT_NO_SESSION')
+  release.resolve()
+  await service.settle(parent.id)
+})
+
+test('the turn registry resolves whenIdle at the settle that empties a session, not before', async () => {
+  const registry = new TurnRegistry(new Context())
+  await registry.whenIdle('s1')
+  const first = registry.begin('s1')
+  const second = registry.begin('s1')
+  let idle = false
+  const waiting = registry.whenIdle('s1').then(() => {
+    idle = true
+  })
+  first.settle()
+  await Promise.resolve()
+  assert.equal(idle, false, 'one turn is still in flight')
+  second.settle()
+  await waiting
+  assert.equal(idle, true)
 })
 
 test('the production runner is a function, not a second implementation of the loop', () => {

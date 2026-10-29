@@ -1581,6 +1581,55 @@ test('a sent image becomes a transcript card served from the upload route', asyn
   }
 })
 
+/**
+ * An upload is read only for a session whose log references it, as DSH's `session/attachment` authorizes an image
+ * against that session's events ("Image is not referenced by this session."). Before this, any page holding the cookie
+ * could read every upload by its leaf, sent or not, from any session.
+ */
+test('an upload is served only to the session whose log references it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('upload-scope', { inputModalities: ['text', 'image'] })
+  try {
+    const door = await fetch(server.url, { redirect: 'manual' })
+    const cookie = String(door.headers.get('set-cookie') ?? '').split(';')[0]
+    const origin = new URL(server.url).origin
+    const headers = { cookie, origin }
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03])
+    const upload = async (name) => (await fetch(`${origin}/api/uploads?name=${name}`, { method: 'POST', headers, body: png })).json()
+    const sent = await upload('sent.png')
+    const unsent = await upload('unsent.png')
+    const leaf = (path) => encodeURIComponent(String(path).split('/').pop())
+    const read = async (path, session) =>
+      (await fetch(`${origin}/api/uploads/${leaf(path)}${session === undefined ? '' : `?session=${encodeURIComponent(session)}`}`, { headers })).status
+    /** One turn per session; the answer is an event stream whose frames name the session. */
+    const turn = async (body) => {
+      const response = await fetch(`${origin}/api/turn`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const text = await response.text()
+      const match = /"session":"(session-[0-9a-f-]{36})"/.exec(text)
+      assert.ok(match !== null, `the turn names its session (HTTP ${response.status}: ${text.slice(0, 200)})`)
+      return match[1]
+    }
+    const other = join(server.work, 'other')
+    mkdirSync(other, { recursive: true })
+    const withImage = await turn({ prompt: 'look at this', folder: server.work, attachments: [sent.path] })
+    const without = await turn({ prompt: 'nothing attached', folder: other })
+
+    assert.equal(await read(sent.path, withImage), 200, 'the session that sent the image reads it')
+    assert.equal(await read(sent.path), 404, 'a read that names no session is refused')
+    assert.equal(await read(sent.path, without), 404, "another session's read is refused")
+    assert.equal(await read(unsent.path, withImage), 404, 'an upload no message carries is refused, even for a session that sent another')
+
+    /** The transcript's own card names its session, so the page's address is one the route serves. */
+    const view = await (await fetch(`${origin}/api/sessions/${withImage}`, { headers })).json()
+    const card = (view.turns ?? []).flatMap((entry) => entry.attachments ?? [])[0]
+    assert.ok(card !== undefined, 'the transcript carries the image card')
+    assert.match(String(card.url), new RegExp(`[?&]session=${withImage}$`), "the card's address names its session")
+    assert.equal((await fetch(`${origin}${card.url}`, { headers })).status, 200, 'and that address serves the bytes')
+  } finally {
+    await server.close()
+  }
+})
+
 /** Two images in one message reach the provider as two parts and draw as DSH's 64px tiles. */
 test('two images in one message reach the provider and render as tiles', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
