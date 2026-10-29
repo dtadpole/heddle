@@ -277,3 +277,50 @@ test('forcing a release with two holders names the slot; a holder over a lowered
   assert.equal(existsSync(lock2(root)), false)
   assert.equal(existsSync(lock(root)), true)
 })
+
+test('a head that does not take a free slot within 60 s is passed over, and keeps first place', (t) => {
+  const root = sandbox(t)
+  take(root, 'developer-one')
+  take(root, 'developer-two')
+  take(root, 'developer-three')
+  bs(root, ['release', '--seat', 'developer-one'])
+  const early = take(root, 'developer-three')
+  assert.equal(early.status, 75)
+  assert.match(early.out, /slot 1 free, developer-two is first \(\d+s before the next may take it\)/)
+  utimesSync(join(root, 'browser.free-since1'), minutesAgo(2), minutesAgo(2))
+  const late = take(root, 'developer-three')
+  assert.equal(late.status, 0, late.out)
+  assert.match(late.out, /developer-two did not take slot 1 within 60s; it keeps first place/)
+  assert.equal(existsSync(join(root, 'browser.free-since1')), false, 'a taken slot starts a new free period')
+  assert.match(bs(root, ['status']).out, /queue {3}1\. developer-two/)
+})
+
+test('an older copy of the tool refuses once a newer one is in use, without touching its ticket', (t) => {
+  const root = sandbox(t)
+  writeFileSync(join(root, 'browser-slot.version'), '99\n')
+  const r = take(root, 'developer-one')
+  assert.equal(r.status, 78, r.out)
+  assert.match(r.out, /this copy is version \d+, but version 99 is in use\. Sync it from heddle main/)
+  assert.equal(existsSync(join(root, 'browser.queue')), false)
+  writeFileSync(join(root, 'browser-slot.version'), '1\n')
+  assert.equal(take(root, 'developer-one').status, 0)
+  assert.notEqual(readFileSync(join(root, 'browser-slot.version'), 'utf8').trim(), '1', 'a newer copy records its version')
+})
+
+test('status shows why each waiter did not take a slot on its last call', (t) => {
+  const root = sandbox(t)
+  take(root, 'developer-one')
+  take(root, 'developer-two')
+  assert.match(bs(root, ['status']).out, /1\. developer-two {2}waiting \d+s; last take \d+s ago: slot 1 held by developer-one/)
+})
+
+test("a take refreshes only the caller's ticket", (t) => {
+  const root = sandbox(t)
+  take(root, 'developer-one')
+  take(root, 'developer-two')
+  const [ticket] = readdirSync(join(root, 'browser.queue'))
+  utimesSync(join(root, 'browser.queue', ticket), minutesAgo(4), minutesAgo(4))
+  take(root, 'developer-three')
+  const ageS = (Date.now() - statSync(join(root, 'browser.queue', ticket)).mtimeMs) / 1000
+  assert.ok(ageS > 200, `developer-two's ticket kept its age (${ageS}s)`)
+})
