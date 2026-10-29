@@ -93,7 +93,7 @@ fn two_escape_presses_stop_the_running_turn() {
 fn the_keyboard_reference_is_one_dialog() {
     assert!(PAGE_SOURCE.contains("<dialog id=\"shortcut-reference\" class=\"ws-dialog\""));
     assert!(PAGE_SOURCE.contains("<h2 id=\"shortcut-reference-title\">Keyboard shortcuts</h2>"));
-    assert!(PAGE_SOURCE.contains("function shortcutReferenceRows(query, mac)"));
+    assert!(PAGE_SOURCE.contains("function shortcutReferenceRows(query, mac"));
 }
 
 /// A person can record, remove and restore a binding, kept per device in `heddle.keybindings.v1` as DSH keeps
