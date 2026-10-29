@@ -170,3 +170,22 @@ export function parseRetryAfter(value: string, now: number = Date.now()): number
   else return undefined
   return Number.isFinite(delay) && delay > 0 ? delay : undefined
 }
+
+/**
+ * Wait `delayMs` before a retry; `false` when `signal` aborted first (a stopped turn does not retry). The timer is
+ * cleared on abort, so a stopped turn leaves nothing pending.
+ */
+export function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted === true) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve(true)
+    }, delayMs)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
