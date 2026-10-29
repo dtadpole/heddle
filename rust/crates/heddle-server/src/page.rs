@@ -220,7 +220,7 @@ mod tests {
     /// (dsh-client-ui-subagent `SubagentReadOnlyComposer`). The rules themselves are judged in
     /// `test/session-rules.test.ts`.
     #[test]
-    fn the_served_page_hides_subagent_children_restores_the_open_session_and_locks_a_one_shot_record() {
+    fn the_served_page_hides_subagents_restores_the_selection_and_locks_one_shot() {
         let served = page();
         assert!(served.contains("sessions: SessionRules.sidebarSessions(sessions),"));
         assert!(served.contains("const select = SessionRules.startupSession("));
