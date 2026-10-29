@@ -702,6 +702,5 @@ mod tests {
             Ok(false),
             "a second step inside the interval adds nothing"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -965,7 +965,7 @@ impl ScheduleService {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::store::tests::scratch;
+    use crate::store::tests::{Scratch, scratch};
     use serde_json::json;
     use std::sync::atomic::AtomicI64;
 
@@ -979,6 +979,8 @@ pub(crate) mod tests {
         pub changes: Arc<AtomicU64>,
         pub drives: Arc<CountingDriver>,
         pub warnings: Arc<Mutex<Vec<String>>>,
+        /// The store's folder, removed when the setup drops; declared last so the service goes first.
+        _scratch: Scratch,
     }
 
     #[derive(Default)]
@@ -993,8 +995,14 @@ pub(crate) mod tests {
         fn start(&self) {}
     }
 
-    pub(crate) fn options(label: &str, clock: &Arc<AtomicI64>) -> ScheduleServiceOptions {
-        let file = scratch(label).join("schedule.json");
+    /// Options for a store file in a fresh scratch folder, and that folder's guard: the caller holds
+    /// the guard for as long as the service may touch the file.
+    pub(crate) fn options(
+        label: &str,
+        clock: &Arc<AtomicI64>,
+    ) -> (Scratch, ScheduleServiceOptions) {
+        let root = scratch(label);
+        let file = root.join("schedule.json");
         let ids = Arc::new(AtomicU64::new(0));
         let mut options = ScheduleServiceOptions::new(file);
         let reading = Arc::clone(clock);
@@ -1002,7 +1010,7 @@ pub(crate) mod tests {
         options.new_id = Some(Arc::new(move || {
             format!("schedule-{}", ids.fetch_add(1, Ordering::SeqCst) + 1)
         }));
-        options
+        (root, options)
     }
 
     pub(crate) fn setup_with(
@@ -1010,7 +1018,7 @@ pub(crate) mod tests {
         adjust: impl FnOnce(&mut ScheduleServiceOptions),
     ) -> Setup {
         let clock = Arc::new(AtomicI64::new(T0));
-        let mut options = options(label, &clock);
+        let (scratch, mut options) = options(label, &clock);
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&warnings);
         options.warn = Some(Arc::new(move |message: &str| {
@@ -1035,6 +1043,7 @@ pub(crate) mod tests {
             changes,
             drives,
             warnings,
+            _scratch: scratch,
         }
     }
 
@@ -1837,13 +1846,13 @@ pub(crate) mod tests {
     async fn retention_bounds_are_checked_a_failing_listener_is_contained_a_stopped_service_refuses_work()
      {
         let clock = Arc::new(AtomicI64::new(T0));
-        let mut bad = options("svc-bounds", &clock);
+        let (_days, mut bad) = options("svc-bounds", &clock);
         bad.retention_days = Some(0);
         assert_eq!(
             ScheduleService::new(bad).err().unwrap().to_string(),
             "deliveryHistoryDays must be an integer from 1 through 3650"
         );
-        let mut bad = options("svc-bounds", &clock);
+        let (_records, mut bad) = options("svc-bounds", &clock);
         bad.retention_records = Some(10_001);
         assert_eq!(
             ScheduleService::new(bad).err().unwrap().to_string(),
