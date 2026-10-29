@@ -251,7 +251,7 @@ mod tests {
     ///
     /// The tests of one binary run in parallel in one process, and the clock is not a unique source: macOS reports
     /// time in microseconds, so two tests could read the same nanosecond value and share a folder, one test's file
-    /// then sitting where the other expected a folder (integrator-one measured `AlreadyExists` at 04:30, 2026-10-29).
+    /// then sitting where the other expected a folder (a gate measured `AlreadyExists` at 04:30, 2026-10-29).
     /// A per-call counter makes every name distinct within the process; the pid and the clock keep runs apart.
     fn scratch() -> (PathBuf, PathBuf) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
