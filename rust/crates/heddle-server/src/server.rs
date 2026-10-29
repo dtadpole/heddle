@@ -1346,9 +1346,10 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
     match workspaces.add(&path, name) {
         Ok((record, created)) => {
             if created {
-                state
-                    .events()
-                    .push("workspace", &json!({"type": "workspace/added", "workspace": record}));
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/added", "workspace": record}),
+                );
             }
             respond::json(
                 StatusCode::OK,
@@ -1372,9 +1373,10 @@ async fn rename_workspace(
     };
     match workspaces.rename(&id, title) {
         Ok(Some(record)) => {
-            state
-                .events()
-                .push("workspace", &json!({"type": "workspace/renamed", "workspace": record}));
+            state.events().push(
+                "workspace",
+                &json!({"type": "workspace/renamed", "workspace": record}),
+            );
             respond::json(StatusCode::OK, &record)
         }
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
@@ -3494,12 +3496,19 @@ mod tests {
     }
 
     /// The next frame a subscription holds, as `(event, data)`, within a second.
-    async fn next_pushed(subscription: &mut crate::stream::Subscription) -> (String, Value, Option<String>) {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
-            .await
-            .expect("a frame in time")
-            .expect("the hub is open");
-        (frame.event, serde_json::from_str(&frame.data).unwrap(), frame.id)
+    async fn next_pushed(
+        subscription: &mut crate::stream::Subscription,
+    ) -> (String, Value, Option<String>) {
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
+                .await
+                .expect("a frame in time")
+                .expect("the hub is open");
+        (
+            frame.event,
+            serde_json::from_str(&frame.data).unwrap(),
+            frame.id,
+        )
     }
 
     /// The changes that never reach a session's log are pushed to the stream, numbered like every frame:
@@ -3524,21 +3533,39 @@ mod tests {
         let mut pushed = state.events().subscribe();
         let session = "session-00000000-0000-0000-0000-000000000001";
 
-        let (status, _) = post_json(&router, &format!("/api/sessions/{session}/title"), &cookie, r#"{"title":"renamed"}"#).await;
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{session}/title"),
+            &cookie,
+            r#"{"title":"renamed"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let (event, data, id) = next_pushed(&mut pushed).await;
         assert_eq!(event, "sessions");
-        assert_eq!(data, json!({"type": "session/renamed", "session": session, "title": "renamed"}));
-        assert!(id.is_some(), "a push is numbered, so it is replayed to a reconnecting client");
+        assert_eq!(
+            data,
+            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+        );
+        assert!(
+            id.is_some(),
+            "a push is numbered, so it is replayed to a reconnecting client"
+        );
 
         let folder = std::env::temp_dir();
         let body = json!({"path": folder}).to_string();
         let (status, _) = post_json(&router, "/api/workspaces", &cookie, &body).await;
         assert_eq!(status, StatusCode::OK);
         let (event, data, _) = next_pushed(&mut pushed).await;
-        assert_eq!((event.as_str(), data["type"].as_str()), ("workspace", Some("workspace/added")));
+        assert_eq!(
+            (event.as_str(), data["type"].as_str()),
+            ("workspace", Some("workspace/added"))
+        );
 
-        for (method, expected) in [(Method::PATCH, "workspace/renamed"), (Method::DELETE, "workspace/removed")] {
+        for (method, expected) in [
+            (Method::PATCH, "workspace/renamed"),
+            (Method::DELETE, "workspace/removed"),
+        ] {
             let response = router
                 .clone()
                 .oneshot(
@@ -3554,7 +3581,10 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let (event, data, _) = next_pushed(&mut pushed).await;
-            assert_eq!((event.as_str(), data["type"].as_str()), ("workspace", Some(expected)));
+            assert_eq!(
+                (event.as_str(), data["type"].as_str()),
+                ("workspace", Some(expected))
+            );
         }
 
         let (status, _) = post_json(
