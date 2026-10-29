@@ -126,6 +126,15 @@ fn display_path(target: &Path, workspace_root: &Path) -> String {
         .unwrap_or_else(|_| target.display().to_string())
 }
 
+/// The sandbox one call runs under: the gate rooted at the call's folder (`context.cwd`, the session's own
+/// workspace as the loop resolved it), or the gate itself when it cannot be re-rooted. A relative path, the
+/// shell's directory and the `workspace-write` boundary are that folder, not the launch directory.
+fn rooted(sandbox: &Arc<dyn SandboxGate>, context: &ToolRunContext) -> Arc<dyn SandboxGate> {
+    sandbox
+        .rooted_at(&context.cwd)
+        .unwrap_or_else(|| Arc::clone(sandbox))
+}
+
 fn sandbox_facts(mode: SandboxMode, denied: bool) -> serde_json::Value {
     json!({ "mode": mode, "denied": denied })
 }
@@ -160,7 +169,7 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
         move |args,
               context: ToolRunContext|
               -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
-            let sandbox = Arc::clone(&write);
+            let sandbox = rooted(&write, &context);
             Box::pin(async move {
                 let path = string_arg(&args, "path");
                 if path.is_empty() {
@@ -204,7 +213,7 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
         move |args,
               context: ToolRunContext|
               -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
-            let sandbox = Arc::clone(&read);
+            let sandbox = rooted(&read, &context);
             Box::pin(async move {
                 let path = string_arg(&args, "path");
                 if path.is_empty() {
@@ -242,7 +251,7 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
         move |args,
               context: ToolRunContext|
               -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
-            let sandbox = Arc::clone(&list);
+            let sandbox = rooted(&list, &context);
             Box::pin(async move {
                 let path = {
                     let requested = string_arg(&args, "path");
@@ -328,7 +337,7 @@ fn bash_tool(
         move |args,
               context: ToolRunContext|
               -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
-            let sandbox = Arc::clone(&run);
+            let sandbox = rooted(&run, &context);
             Box::pin(async move {
                 let command = string_arg(&args, "command");
                 if command.is_empty() {
@@ -388,8 +397,9 @@ fn bash_tool(
 
 /// Spawn one argv, enforce its wall time and the call's Stop, and classify what it did.
 ///
-/// The working directory is the workspace; the confinement, when there is one, is the wrapped argv's: the
-/// whole process tree is under the kernel profile, not only the process this tool spawns.
+/// The working directory is the call's folder (`context.cwd`), not the launch directory; the confinement,
+/// when there is one, is the wrapped argv's: the whole process tree is under the kernel profile, not only the
+/// process this tool spawns.
 async fn run_command(
     sandbox: &dyn SandboxGate,
     argv: &[std::ffi::OsString],
@@ -401,7 +411,7 @@ async fn run_command(
     let mut process = tokio::process::Command::new(&argv[0]);
     process
         .args(&argv[1..])
-        .current_dir(sandbox.workspace_root())
+        .current_dir(&context.cwd)
         .env("NO_COLOR", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -614,6 +624,11 @@ mod tests {
         ToolRunContext::new(crate::ToolContext::new("/w"), mode)
     }
 
+    /// A context whose folder is `cwd`, which a shell needs: it is the directory the command runs in.
+    fn context_in(cwd: PathBuf, mode: SandboxMode) -> ToolRunContext {
+        ToolRunContext::new(crate::ToolContext::new(cwd), mode)
+    }
+
     /// A unique temporary workspace, removed when it is dropped.
     struct TempDir(PathBuf);
 
@@ -749,7 +764,7 @@ mod tests {
         let result = bash
             .run(
                 args(json!({ "command": "echo out; echo err >&2; exit 3" })),
-                context(SandboxMode::DangerFullAccess),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
             )
             .await
             .unwrap();
@@ -765,7 +780,7 @@ mod tests {
         let result = bash
             .run(
                 args(json!({ "command": "sleep 5", "timeoutMs": 100 })),
-                context(SandboxMode::DangerFullAccess),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
             )
             .await
             .unwrap();
@@ -781,7 +796,7 @@ mod tests {
         let run = bash.run(
             args(json!({ "command": "sleep 5" })),
             ToolRunContext::new(
-                crate::ToolContext::new("/w").with_cancel(token.clone()),
+                crate::ToolContext::new(root.path()).with_cancel(token.clone()),
                 SandboxMode::DangerFullAccess,
             ),
         );
@@ -823,7 +838,7 @@ mod tests {
         let result = bash
             .run(
                 args(json!({ "command": "echo blocked" })),
-                context(SandboxMode::WorkspaceWrite),
+                context_in(root.path(), SandboxMode::WorkspaceWrite),
             )
             .await
             .unwrap();
@@ -835,6 +850,28 @@ mod tests {
                 .unwrap()
                 .message
                 .contains("workspace-write")
+        );
+    }
+
+    /// R-developer-eight-10: a turn's shell ran in the sandbox's root — the directory the server was launched
+    /// in — instead of the call's folder, the session's workspace. DSH runs it in the session's directory.
+    #[tokio::test]
+    async fn a_shell_runs_in_the_calls_folder_not_the_sandboxs_root() {
+        let launch = tempdir();
+        let folder = tempdir();
+        let bash = tool("bash", sandbox(launch.path()));
+        let result = bash
+            .run(
+                args(json!({ "command": "pwd" })),
+                context_in(folder.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.error, None, "{}", result.output);
+        assert_eq!(
+            result.output,
+            format!("{}\n", folder.path().canonicalize().unwrap().display()),
+            "pwd printed the call's folder"
         );
     }
 
