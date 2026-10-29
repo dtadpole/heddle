@@ -211,8 +211,9 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   `workspace/session-active`): `{kind: 'turn'}` for the session's own running turn and `{kind: 'subagent', items}` for its
   running subagent descendants, found by lineage (`src/session/activity.ts`, `heddle_session::session_activity`). A session
   whose own turn has ended but whose subagent still works is refused too; `stop: true` stops the turn and each listed child
-  (the Web server's handles and the live-turn registry). DSH's two other families — background jobs and scheduled
-  reminders — have no runtime here yet, so nothing reports them; the page words them if a server ever does.
+  (the Web server's handles and the live-turn registry). DSH's two other families: background jobs have no runtime
+  here; scheduled reminders landed on main (`src/schedule/`, `heddle-schedule`) after this fix, with DSH's
+  `list({sessionId})` and `stopSessionTasks`, and reporting them is a follow-up. The page already words both families.
 - **The dialog.** The page sends the plain archive first and opens the stop-and-archive dialog only when the server
   refuses: DSH's title, its description naming the session and the restore path, the work one family per line, Cancel and
   Stop and archive. A quiet archive asks nothing and, like a stop-and-archive, shows DSH's notice with `undo` (and

@@ -8,8 +8,9 @@
  * at any depth (a fork shares the lineage field without the origin and is an independent conversation, so it never
  * holds its source). The sidebar lists exactly this in its stop-and-archive dialog.
  *
- * Heddle has those two families. DSH's other two — background jobs (`dsh-jobs`) and scheduled reminders
- * (`dsh-schedule`) — have no runtime here yet, so nothing reports them.
+ * Heddle reports those two families. DSH's background jobs (`dsh-jobs`) have no runtime here. Scheduled reminders
+ * (`dsh-schedule`) landed on main (`src/schedule/`, `heddle-schedule`) after this walk was written, with DSH's
+ * `list({sessionId})` and `stopSessionTasks`; asking them is a follow-up for both builds.
  */
 
 /** One family of running work, in DSH's shape: the kind, and for a counted family its items. */

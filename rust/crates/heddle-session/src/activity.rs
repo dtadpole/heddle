@@ -7,8 +7,9 @@
 //! a child whose record names its parent **and** carries the subagent origin, at any depth (a fork shares the
 //! lineage field without the origin and never holds its source).
 //!
-//! Heddle has those two families. DSH's background jobs (`dsh-jobs`) and scheduled reminders
-//! (`dsh-schedule`) have no runtime here yet, so nothing reports them.
+//! Heddle reports those two families. DSH's background jobs (`dsh-jobs`) have no runtime here. Scheduled
+//! reminders (`dsh-schedule`) landed on main (`heddle-schedule`) after this walk was written; asking them is a
+//! follow-up for both builds.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
