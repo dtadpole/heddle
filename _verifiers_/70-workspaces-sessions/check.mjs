@@ -1777,6 +1777,103 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test('a workspace moved before another keeps its place across a restart, as DSH workspace/insertBefore does', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's drag-to-reorder of workspaces (C37) stores the order with the host: workspace/insertBefore takes the moved
+   * workspace and an optional anchor, lands it before the anchor or last without one, and answers the complete order
+   * (dsh-workspace lib/index.js:473-499; dsh-api-workspace-controller lib/index.js:262-269). A workspace or anchor it
+   * does not hold is workspace/not-found with the sentence Workspace "id" not found (index.js:358-360); a new workspace
+   * still goes first (dsh-workspace lib/index.js:402). Judged over the route the page's drop calls, then again after
+   * the server restarts, in the command line's listing, and in the record file, whose shape must not change so the
+   * other build keeps reading it.
+   */
+  const h = harness('web-reorder')
+  const folders = ['one', 'two', 'three'].map((name) => fixtureDir(`web-reorder-${name}`))
+  const late = fixtureDir('web-reorder-four')
+  let live
+  try {
+    const boot = async () => {
+      live = await startServer(
+        ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+        h.env,
+      )
+      const origin = new URL(live.url).origin
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      return async (path, init = {}) => {
+        const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+        const text = await response.text()
+        let body
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+        return { status: response.status, body }
+      }
+    }
+    let call = await boot()
+    const move = (body) => call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify(body) })
+    const ids = {}
+    for (const [index, folder] of folders.entries()) {
+      const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: folder }) })
+      assert.equal(added.status, 200, `a folder is added (${JSON.stringify(added.body)})`)
+      ids[['one', 'two', 'three'][index]] = added.body.record.id
+    }
+    const named = Object.fromEntries(Object.entries(ids).map(([name, id]) => [id, name]))
+    const order = (list) => list.map((id) => named[id]).filter((name) => name !== undefined)
+    const listed = async () => order(((await call('/api/workspaces')).body.workspaces ?? []).map((view) => view.id))
+    assert.deepEqual(await listed(), ['three', 'two', 'one'], 'a new workspace goes first')
+
+    const first = await move({ workspaceId: ids.one, beforeWorkspaceId: ids.three })
+    assert.equal(first.status, 200, `a workspace is moved before another (${JSON.stringify(first.body)})`)
+    assert.deepEqual(order(first.body.workspaceIds ?? []), ['one', 'three', 'two'], 'and the answer is the complete order')
+    assert.deepEqual(await listed(), ['one', 'three', 'two'], 'which the workspace list now reads')
+    const last = await move({ workspaceId: ids.three })
+    assert.equal(last.status, 200, `without an anchor it goes last (${JSON.stringify(last.body)})`)
+    assert.deepEqual(await listed(), ['one', 'two', 'three'])
+    const itself = await move({ workspaceId: ids.two, beforeWorkspaceId: ids.two })
+    assert.equal(itself.status, 200, 'itself as the anchor is not an error')
+    assert.deepEqual(order(itself.body.workspaceIds ?? []), ['one', 'two', 'three'], 'and moves nothing')
+
+    for (const [what, body, missingId] of [
+      ['an unknown workspace', { workspaceId: 'w-nowhere', beforeWorkspaceId: ids.one }, 'w-nowhere'],
+      ['an unknown anchor', { workspaceId: ids.one, beforeWorkspaceId: 'w-nowhere' }, 'w-nowhere'],
+    ]) {
+      const refused = await move(body)
+      assert.equal(refused.status, 404, `${what} is not found (${JSON.stringify(refused.body)})`)
+      assert.equal(refused.body.code, 'workspace/not-found', `with DSH's code for ${what}`)
+      assert.equal(refused.body.error, `Workspace "${missingId}" not found`, `and DSH's sentence for ${what}`)
+    }
+    const nameless = await move({})
+    assert.equal(nameless.status, 400, `a move that names no workspace is refused (${JSON.stringify(nameless.body)})`)
+    assert.deepEqual(await listed(), ['one', 'two', 'three'], 'and no refusal moved anything')
+
+    live.kill()
+    live = undefined
+    call = await boot()
+    assert.deepEqual(await listed(), ['one', 'two', 'three'], 'the order is the host\'s: it holds across a restart')
+    const cli = await workspacesOf(h)
+    assert.deepEqual(order(cli.map((record) => record.id)), ['one', 'two', 'three'], 'and the command line lists it too')
+
+    const file = JSON.parse(readFileSync(join(h.home, 'workspaces.json'), 'utf8'))
+    assert.deepEqual(Object.keys(file), ['version', 'workspaceIds', 'workspaces'], 'the record file keeps its keys')
+    assert.deepEqual(order(file.workspaceIds), ['one', 'two', 'three'], 'and keeps the order in workspaceIds, where both builds read it')
+
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: late }) })
+    assert.equal(added.status, 200, `a fourth folder is added (${JSON.stringify(added.body)})`)
+    const views = ((await call('/api/workspaces')).body.workspaces ?? []).map((view) => view.id)
+    assert.equal(views[0], added.body.record.id, 'a new workspace still goes first')
+    assert.deepEqual(order(views), ['one', 'two', 'three'], 'before the moved order, which stays as it was')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    for (const folder of [...folders, late]) removeDir(folder)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
