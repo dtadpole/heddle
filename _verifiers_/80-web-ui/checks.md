@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-30T09:55:00Z
 level: L3
 version: 1.1.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -49,7 +49,10 @@ grounded_in:
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
-  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections; and
+  the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
+  workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves
+  the new session and its draft so the first prompt runs in the picked workspace.
 
 ## What it deliberately does not judge
 
