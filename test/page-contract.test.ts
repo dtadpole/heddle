@@ -164,6 +164,20 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
 })
 
+test('New session asks for a new session every time and names none it found in the list', () => {
+  /**
+   * DSH's sidebar `New session` and its chord create a fresh Session on each press (`startSession` with no options, then
+   * `connectBlank` with no reuse: dsh-client-ui-workspace lib/client.js:1403-1406, 1520). A page that named an empty
+   * session from the shared list put a second client into the first one's conversation (coordinator, 2026-10-29). The
+   * browser check is 70's "two clients pressing New session..."; this detects the request regaining a session field.
+   */
+  const start = page.indexOf('async function startSessionAt(node) {')
+  assert.ok(start > 0, 'the one New session path is in the page')
+  const body = page.slice(start, page.indexOf('\n}\n', start))
+  assert.match(body, /body: JSON\.stringify\(\{ branch: node\.path \}\)/, 'the request names the folder and nothing else')
+  assert.doesNotMatch(body, /session: |blankToReuse\(/, 'no session id, found or remembered, rides along')
+})
+
 test('a panel with nothing open shows an invitation, and gives way when something opens', () => {
   /**
    * DSH's home centres a mark, a heading and the composer; Heddle showed an empty column under a header that said

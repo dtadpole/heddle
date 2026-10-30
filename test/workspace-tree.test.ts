@@ -36,6 +36,7 @@ interface Tree {
   nextWatermark: (total: number, shown: number) => number
   overflow: (total: number, shown: number) => 'more' | 'less' | null
   sessionOrder: (left: unknown, right: unknown) => number
+  hiddenBlank: (meta: unknown, current: unknown) => boolean
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -114,10 +115,17 @@ test('a subagent\'s session is hidden, and the archive filter has DSH\'s three s
   assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { archived: 'only' })[0]), ['s-archived'])
 })
 
-test('one New session placeholder per folder is a row, the open one first, and a titled or pinned zero-turn session stays', () => {
-  const workspaces = [workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned', 's-titled', 's-blank-other', 's-pinned-blank'] })]
+test('only the open New session placeholder is a row, and it leads; a titled, pinned or running zero-turn session stays', () => {
+  /**
+   * DSH's `sessionVisible` (dsh-client-ui-workspace lib/client.js:959-966): among blank sessions only the current one is
+   * visible. New session makes a fresh blank on every press, so the older ones, and another client's, must not be rows.
+   */
+  const workspaces = [
+    workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned', 's-titled', 's-blank-other', 's-pinned-blank', 's-running'] }),
+  ]
   const sessions = [
     session('s-blank-new', 9, { turns: 0 }),
+    session('s-running', 6, { turns: 0, running: true }),
     session('s-talked', 5),
     session('s-titled', 4, { turns: 0, title: 'named on purpose' }),
     session('s-pinned', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
@@ -127,15 +135,22 @@ test('one New session placeholder per folder is a row, the open one first, and a
   ]
   assert.deepEqual(
     ids(tree.deriveGroups(workspaces, sessions, { current: 's-talked' })[0]),
-    ['s-pinned', 's-pinned-blank', 's-blank-new', 's-talked', 's-titled', 's-blank-other'],
-    'the newest placeholder of each folder is a row, the older one of /w is not, and the titled and pinned ones stay',
+    ['s-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'with an ordinary session open, no placeholder is a row, in any folder, newest or not',
   )
   assert.deepEqual(
     ids(tree.deriveGroups(workspaces, sessions, { current: 's-blank-old' })[0]),
-    ['s-blank-old', 's-pinned', 's-pinned-blank', 's-talked', 's-titled', 's-blank-other'],
-    'the open placeholder is the one its folder shows, and it leads, ahead of the pins',
+    ['s-blank-old', 's-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'the open placeholder is the only one shown, and it leads, ahead of the pins',
   )
-  assert.equal(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 7, 'a caller that names no open session sees every row, as before')
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: null })[0]),
+    ['s-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'with nothing open, no placeholder is a row',
+  )
+  assert.equal(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 8, 'a caller that names no open session sees every row, as before')
+  assert.equal(tree.hiddenBlank(sessions[0], 's-talked'), true, 'the flat list asks the same rule')
+  assert.equal(tree.hiddenBlank(sessions[0], 's-blank-new'), false)
 })
 
 test('archived only drops a workspace with nothing archived, and its child rises to the nearest shown level', () => {
