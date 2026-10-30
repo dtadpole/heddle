@@ -352,6 +352,56 @@ impl WorkspaceService {
         Ok(Some(updated))
     }
 
+    /// Move one workspace within the stored order, DOM-`insertBefore`-like — DSH's `workspace/insertBefore`
+    /// (dsh-workspace lib/index.js:473-499). `insertBefore` in `src/workspace/service.ts`.
+    ///
+    /// With an anchor the workspace lands just before it; with `None` it goes to the end. Both are named by id
+    /// or by path; either missing from the order is [`WorkspaceError::OrderInvalid`]. Naming itself as its
+    /// anchor, or a move that changes nothing, writes nothing. The order is the `workspaceIds` array a new root
+    /// is prepended to, so the file keeps its shape. Answers the complete order.
+    pub fn insert_before(
+        &self,
+        id_or_path: &str,
+        before: Option<&str>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let _guard = self
+            .lock
+            .lock()
+            .expect("the workspace lock is never poisoned");
+        let mut shape = self.read();
+        let listed = |key: &str| {
+            self.find(key)
+                .map(|record| record.id)
+                .filter(|id| shape.workspace_ids.contains(id))
+                .ok_or_else(|| WorkspaceError::OrderInvalid(key.to_string()))
+        };
+        let id = listed(id_or_path)?;
+        let before = before.map(listed).transpose()?;
+        if before.as_deref() == Some(id.as_str()) {
+            return Ok(shape.workspace_ids);
+        }
+        let mut order: Vec<String> = shape
+            .workspace_ids
+            .iter()
+            .filter(|each| **each != id)
+            .cloned()
+            .collect();
+        let at = match &before {
+            Some(anchor) => order
+                .iter()
+                .position(|each| each == anchor)
+                .unwrap_or(order.len()),
+            None => order.len(),
+        };
+        order.insert(at, id);
+        if order == shape.workspace_ids {
+            return Ok(order);
+        }
+        shape.workspace_ids = order.clone();
+        self.write(&shape)?;
+        Ok(order)
+    }
+
     /// The root that owns a folder: the **nearest** registered root at or above it.
     pub fn owner(&self, path: &str) -> Option<WorkspaceRecord> {
         Self::owner_among(path, &self.list())
@@ -577,6 +627,83 @@ mod tests {
         assert_eq!(promoted.record.id, adopted.id);
         assert_eq!(promoted.record.origin, WorkspaceOrigin::Added);
         assert_eq!(service.list().len(), 3);
+    }
+
+    #[test]
+    fn insert_before_moves_a_workspace_and_the_order_is_kept_in_the_same_file_shape() {
+        let (_dir, service) = service();
+        let one = service.add("/work/one", Some("one")).unwrap().record.id;
+        let two = service.add("/work/two", Some("two")).unwrap().record.id;
+        let three = service.add("/work/three", Some("three")).unwrap().record.id;
+        let titles = |service: &WorkspaceService| {
+            service
+                .list()
+                .into_iter()
+                .map(|record| record.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles(&service), vec!["three", "two", "one"]);
+
+        // Before an anchor (DSH: `insertBefore(id, beforeId)`), named by id or by path; the answer is the
+        // complete order.
+        let order = service.insert_before(&one, Some(&three)).unwrap();
+        assert_eq!(order, vec![one.clone(), three.clone(), two.clone()]);
+        assert_eq!(titles(&service), vec!["one", "three", "two"]);
+        service
+            .insert_before("/work/two", Some("/work/three"))
+            .unwrap();
+        assert_eq!(titles(&service), vec!["one", "two", "three"]);
+        // No anchor appends.
+        service.insert_before(&one, None).unwrap();
+        assert_eq!(titles(&service), vec!["two", "three", "one"]);
+
+        // Itself as the anchor, or a move that changes nothing, writes nothing.
+        let before = std::fs::read_to_string(service.file()).unwrap();
+        let modified = std::fs::metadata(service.file())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            service.insert_before(&three, Some(&three)).unwrap(),
+            vec![two.clone(), three.clone(), one.clone()]
+        );
+        service.insert_before(&two, Some(&three)).unwrap();
+        service.insert_before(&one, None).unwrap();
+        assert_eq!(std::fs::read_to_string(service.file()).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(service.file())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+
+        // An unknown workspace or anchor is refused with DSH's sentence, and nothing moves.
+        let unknown = service.insert_before("w-nowhere", None).unwrap_err();
+        assert!(matches!(&unknown, WorkspaceError::OrderInvalid(id) if id == "w-nowhere"));
+        assert_eq!(
+            unknown.to_string(),
+            "cannot reorder unknown workspace 'w-nowhere'"
+        );
+        assert!(matches!(
+            service.insert_before(&one, Some("w-nowhere")).unwrap_err(),
+            WorkspaceError::OrderInvalid(id) if id == "w-nowhere"
+        ));
+        assert_eq!(titles(&service), vec!["two", "three", "one"]);
+
+        // The file keeps its shape: the same three keys, the order in `workspaceIds`, no new field.
+        let text = std::fs::read_to_string(service.file()).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value.as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec!["version", "workspaceIds", "workspaces"]
+        );
+        assert_eq!(value["workspaceIds"], json!([two, three, one]));
+        assert_eq!(text, service.read().to_file_text());
+
+        // A new workspace is still prepended to the moved order (DSH: lib/index.js:402).
+        service.add("/work/four", Some("four")).unwrap();
+        assert_eq!(titles(&service), vec!["four", "two", "three", "one"]);
     }
 
     #[test]
