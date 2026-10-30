@@ -1168,6 +1168,29 @@
     border-radius: 4px;
     background: var(--surface);
   }
+  /**
+   * The Session Intent hero's workspace picker (C36), DSH's `WorkspaceChip` and its menu: a folder, the workspace's
+   * name (or "Choose workspace") and a chevron, 13px/20 at weight 500, min-height 28, padding 0 8px, gap 4, at most
+   * 360px wide (`dsh-client-ui-conversation` HeroShell CSS `_workspace`, `_heroWorkspaceRow`). The menu floats in
+   * viewport coordinates like the access menu, because the chip sits at the bottom of the window.
+   */
+  #hero-workspace { display: flex; align-items: center; gap: 2px; min-width: 0; box-sizing: border-box; width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto 6px; padding: 0 16px 0 12px; }
+  #hero-workspace[hidden] { display: none; }
+  #hero-workspace-chip { display: inline-flex; align-items: center; gap: 4px; max-width: min(100%, 360px); min-height: 28px; padding: 0 8px; font: inherit; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--text); background: none; border: 0; border-radius: 8px; }
+  #hero-workspace-chip:hover, #hero-workspace-chip[aria-expanded='true'] { background: rgba(255, 255, 255, .08); }
+  #hero-workspace-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #hero-workspace-chip .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #hero-workspace-chip svg { flex: none; width: 16px; height: 16px; }
+  #hero-workspace-chip .chevron { width: 14px; height: 14px; color: var(--text-3); }
+  #hero-workspace-menu { position: fixed; z-index: 40; min-width: 200px; max-width: 360px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-menu); }
+  #hero-workspace-menu[hidden] { display: none; }
+  #hero-workspace-menu button { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 34px; padding: 6px 8px; font: inherit; font-size: 13px; text-align: left; color: var(--text); background: none; border: 0; border-radius: 12px; }
+  #hero-workspace-menu button:hover, #hero-workspace-menu button:focus-visible { background: rgba(255, 255, 255, .08); outline: none; }
+  #hero-workspace-menu button svg { flex: none; width: 16px; height: 16px; }
+  #hero-workspace-menu button .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #hero-workspace-menu button[aria-checked='false'] .check { visibility: hidden; }
+  #hero-workspace-menu [role='separator'] { height: 1px; margin: 4px 8px; background: var(--border); }
+  #hero-workspace-menu [role='status'] { padding: 6px 8px; font-size: 12px; color: var(--text-3); }
   #session-branch { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #ledger .when, #ledger .usage { opacity: .55; font-size: .76rem; }
   #ledger .usage.provider { color: #2fa36b; opacity: .9; }
@@ -2786,6 +2809,16 @@
   <button id="gutter-column-left" class="column-grip" data-side="left" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <button id="gutter-column" class="column-grip" data-side="right" type="button" role="separator" aria-orientation="vertical" aria-label="resize the conversation column" aria-valuemin="640" aria-valuemax="1200" tabindex="0"></button>
   <div id="composer">
+  <!--
+    The Session Intent hero's workspace picker (C36): DSH's hero row puts a workspace chip above the composer while the
+    conversation is blank, and choosing a workspace there moves the new session to it before its first prompt. Drawn
+    and judged by `paintHeroWorkspace` (the hero-picker block); hidden by default so a page without the script shows
+    nothing new.
+  -->
+  <div id="hero-workspace" hidden>
+    <button type="button" id="hero-workspace-chip" aria-label="Choose workspace" aria-haspopup="menu" aria-expanded="false" aria-controls="hero-workspace-menu"><span class="label">Choose workspace</span></button>
+    <div id="hero-workspace-menu" role="menu" aria-label="Choose workspace" hidden></div>
+  </div>
   <!--
     DSH's TodoPanel, measured live from its own rendered dock: a section labelled "To-dos" with a header button
     (`aria-expanded`) carrying a checklist glyph, the title, the per-status progress counts (zero-count segments
@@ -9972,6 +10005,365 @@ async function startNewSession() {
 document.getElementById('new-session').addEventListener('click', () => {
   void startNewSession()
 })
+
+/* hero-picker:begin */
+/**
+ * The Session Intent hero's workspace picker (C36) — its rules, pure, so `test/hero-picker.test.ts` judges them out of
+ * the page.
+ *
+ * DSH: `dsh-client-ui-conversation` lib/client.js:17742-17845 (`ConversationContent`: the hero row under a blank
+ * conversation, the chip's label `pendingWorkspace ?? sessionWorkspace`, `onPick` -> `selectWorkspace`), :17628-17652
+ * (`WorkspaceChip`: a button named `Choose workspace`, `aria-haspopup=menu`, `aria-expanded`), :19777-19795
+ * (`selectWorkspace` = `openWorkspace`, carrying the draft); `dsh-client-ui-workspace` lib/client.js:2569-2715
+ * (`WorkspacePickFlow`: every workspace with the current one checked, `Add workspace…` as the footer, and the add flow
+ * opened at once when there is no workspace to list).
+ */
+const HeroPicker = (() => {
+  const CHOOSE = 'Choose workspace'
+  function baseName(path) {
+    return path.split('/').filter(Boolean).pop() ?? path
+  }
+  /**
+   * The workspaces the menu offers, in the record's order, as DSH lists its catalog. An adopted (`auto`) root is drawn
+   * as Ungrouped rather than as a workspace, so it is not offered either.
+   */
+  function choices(workspaces) {
+    if (!Array.isArray(workspaces)) return []
+    return workspaces
+      .filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.id === 'string' && typeof entry.path === 'string' && entry.origin !== 'auto')
+      .map((entry) => ({
+        id: entry.id,
+        path: entry.path,
+        label: typeof entry.title === 'string' && entry.title.trim() !== '' ? entry.title : baseName(entry.path),
+        sessionIds: Array.isArray(entry.sessionIds) ? entry.sessionIds : [],
+      }))
+  }
+  /** The offered workspace a session belongs to — DSH's `sessionWorkspace`, the one whose `sessionIds` lists it. */
+  function ownerOf(workspaces, sessionId) {
+    if (typeof sessionId !== 'string') return null
+    return choices(workspaces).find((choice) => choice.sessionIds.includes(sessionId)) ?? null
+  }
+  /** Blank while no turn has started: no turns, not running, not archived, not a subagent's. */
+  function isBlank(meta) {
+    return (
+      meta !== null && typeof meta === 'object' && (meta.turns ?? 0) === 0 && meta.running !== true && meta.archived !== true &&
+      meta.parentSession === undefined && meta.origin !== 'subagent'
+    )
+  }
+  /**
+   * The session a pick reopens: the blank this page left in that workspace, while it is still blank and still that
+   * workspace's; `null` starts a new one. DSH's `openWorkspace` names a blank to reuse; heddle names only one this page
+   * had open, because a blank another client made is that client's and a pick must never land in it.
+   */
+  function reusable(leftId, workspace, sessions) {
+    if (typeof leftId !== 'string' || workspace === null || workspace === undefined) return null
+    if (!(Array.isArray(workspace.sessionIds) ? workspace.sessionIds : []).includes(leftId)) return null
+    const meta = (Array.isArray(sessions) ? sessions : []).find((entry) => entry?.id === leftId)
+    return isBlank(meta ?? null) ? leftId : null
+  }
+  /**
+   * DSH's menu keys: ArrowDown and ArrowUp move and wrap, Home and End jump, and from outside the list (`index` -1)
+   * ArrowDown lands on the first item and ArrowUp on the last. `null` for any other key.
+   */
+  function step(key, index, count) {
+    if (count <= 0) return null
+    if (key === 'Home') return 0
+    if (key === 'End') return count - 1
+    if (key !== 'ArrowDown' && key !== 'ArrowUp') return null
+    if (index < 0 || index >= count) return key === 'ArrowDown' ? 0 : count - 1
+    return (index + (key === 'ArrowDown' ? 1 : -1) + count) % count
+  }
+  /**
+   * Shown in the chat view while nothing is drawn: on the empty page, with a session open that is known to be blank, or
+   * while a pick is moving to another workspace. A session not yet known to be blank shows nothing rather than a guess.
+   */
+  function shown(state) {
+    if (state.view !== 'chat' || state.hasContent) return false
+    if (state.pending) return true
+    if (state.current === null) return state.emptyShown === true
+    return state.blank === true
+  }
+  /** The chip's words: the workspace being moved to, else the open session's, else DSH's call to action. */
+  function label(state) {
+    if (typeof state.pending === 'string' && state.pending !== '') return state.pending
+    if (state.current !== null && typeof state.owner === 'string' && state.owner !== '') return state.owner
+    return CHOOSE
+  }
+  return { CHOOSE, choices, ownerOf, isBlank, reusable, step, shown, label }
+})()
+/* hero-picker:end */
+
+/**
+ * The hero row's DOM: the chip, its menu, and the blank this page left in each workspace.
+ *
+ * No hook in the code that switches sessions: observers on the transcript (children, visibility), the invitation
+ * (visibility) and the header's title are the moments the answer can change, and whether the open session is blank is
+ * read from `/api/sessions` the first time it is seen.
+ */
+const heroRow = document.getElementById('hero-workspace')
+const heroChip = document.getElementById('hero-workspace-chip')
+const heroMenu = document.getElementById('hero-workspace-menu')
+let heroKnown = { id: null, blank: false, workspace: null, label: null }
+let heroLearning = null
+let heroPending = null
+let heroMenuTicket = 0
+/** Workspace id -> the blank session this page left there. */
+const heroLeft = new Map()
+let heroAdding = false
+let heroAddFrom = null
+
+function paintHeroWorkspace() {
+  const hasContent = log.childElementCount > 0
+  const known = current !== null && heroKnown.id === current ? heroKnown : null
+  if (known !== null && hasContent) known.blank = false
+  const emptyShown = document.getElementById('empty-state')?.hidden === false
+  const shown = HeroPicker.shown({ view, current, hasContent, emptyShown, blank: known?.blank ?? null, pending: heroPending !== null })
+  heroRow.hidden = !shown
+  if (!shown) closeHeroMenu(false)
+  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null })
+  const chosen = heroPending !== null || (current !== null && typeof known?.label === 'string')
+  const key = `${chosen}|${text}`
+  if (heroChip.dataset.painted !== key) {
+    heroChip.dataset.painted = key
+    const words = document.createElement('span')
+    words.className = 'label'
+    words.textContent = text
+    const chevron = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    chevron.setAttribute('class', 'chevron')
+    chevron.setAttribute('viewBox', '0 0 16 16')
+    chevron.setAttribute('aria-hidden', 'true')
+    const down = svgPath('M4 6.5 8 10.5l4-4')
+    down.setAttribute('fill', 'none')
+    down.setAttribute('stroke', 'currentColor')
+    down.setAttribute('stroke-width', '1.4')
+    down.setAttribute('stroke-linecap', 'round')
+    down.setAttribute('stroke-linejoin', 'round')
+    chevron.append(down)
+    /** DSH's chip: an open folder beside a workspace's name, a closed one beside the call to action. */
+    heroChip.replaceChildren(kindIcon('folder', chosen), words, chevron)
+  }
+  heroChip.setAttribute('aria-expanded', String(!heroMenu.hidden))
+  if (current !== null && known === null && !hasContent) void learnHeroSession(current)
+}
+
+/** Read whether one session is blank, and which workspace holds it, then paint again. */
+async function learnHeroSession(id) {
+  if (heroLearning === id) return
+  heroLearning = id
+  let next = { id, blank: false, workspace: null, label: null }
+  try {
+    const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
+    const workspaces = workspaceResponse.ok ? ((await workspaceResponse.json()).workspaces ?? []) : []
+    const sessions = sessionResponse.ok ? await sessionResponse.json() : []
+    const meta = (Array.isArray(sessions) ? sessions : []).find((entry) => entry?.id === id) ?? null
+    const owner = HeroPicker.ownerOf(workspaces, id)
+    next = { id, blank: HeroPicker.isBlank(meta), workspace: owner?.id ?? null, label: owner?.label ?? null }
+  } catch {
+    // Unknown is not blank: the row stays away rather than offering a move it cannot judge.
+  }
+  if (heroLearning === id) heroLearning = null
+  heroKnown = next
+  paintHeroWorkspace()
+}
+
+/** Above the chip when there is room, as the access menu opens, because the chip sits at the bottom of the window. */
+function placeHeroMenu() {
+  const chip = heroChip.getBoundingClientRect()
+  const menu = heroMenu.getBoundingClientRect()
+  const left = Math.max(8, Math.min(chip.left, window.innerWidth - menu.width - 8))
+  const above = chip.top - menu.height - 4
+  heroMenu.style.left = `${Math.round(left)}px`
+  heroMenu.style.top = `${Math.round(above >= 8 ? above : chip.bottom + 4)}px`
+}
+
+function heroMenuItem(role, label, glyph, checked, run) {
+  const item = document.createElement('button')
+  item.type = 'button'
+  item.setAttribute('role', role)
+  if (role === 'menuitemradio') item.setAttribute('aria-checked', String(checked))
+  const words = document.createElement('span')
+  words.className = 'label'
+  words.textContent = label
+  item.append(glyph, words)
+  if (role === 'menuitemradio') {
+    const check = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    check.setAttribute('class', 'check')
+    check.setAttribute('viewBox', '0 0 16 16')
+    check.setAttribute('aria-hidden', 'true')
+    const tick = svgPath('M3.4 8.3 6.3 11.2 12.6 4.9')
+    tick.setAttribute('fill', 'none')
+    tick.setAttribute('stroke', 'currentColor')
+    tick.setAttribute('stroke-width', '1.4')
+    tick.setAttribute('stroke-linecap', 'round')
+    tick.setAttribute('stroke-linejoin', 'round')
+    check.append(tick)
+    item.append(check)
+  }
+  item.addEventListener('click', (clickEvent) => {
+    clickEvent.stopPropagation()
+    run()
+  })
+  return item
+}
+
+/** Open the menu: DSH's `Loading workspaces…` while the list is read, then the workspaces and `Add workspace…`. */
+async function openHeroMenu() {
+  if (heroChip.getAttribute('aria-busy') === 'true') return
+  const ticket = ++heroMenuTicket
+  const status = document.createElement('div')
+  status.setAttribute('role', 'status')
+  status.textContent = 'Loading workspaces…'
+  heroMenu.replaceChildren(status)
+  heroMenu.hidden = false
+  heroChip.setAttribute('aria-expanded', 'true')
+  placeHeroMenu()
+  let workspaces = []
+  try {
+    const response = await fetch('/api/workspaces')
+    workspaces = response.ok ? ((await response.json()).workspaces ?? []) : []
+  } catch {
+    workspaces = []
+  }
+  if (ticket !== heroMenuTicket || heroMenu.hidden) return
+  const choices = HeroPicker.choices(workspaces)
+  if (choices.length === 0) {
+    /** DSH: when `Add workspace…` would be the only entry, the add flow opens without the menu. */
+    closeHeroMenu(false)
+    heroAddWorkspace()
+    return
+  }
+  const selected = heroPending?.id ?? (current !== null && heroKnown.id === current ? heroKnown.workspace : null)
+  const items = choices.map((choice) => heroMenuItem('menuitemradio', choice.label, kindIcon('folder', false), choice.id === selected, () => void heroPick(choice)))
+  const separator = document.createElement('div')
+  separator.setAttribute('role', 'separator')
+  const add = heroMenuItem('menuitem', 'Add workspace…', kindIcon('plus'), false, () => {
+    closeHeroMenu(false)
+    heroAddWorkspace()
+  })
+  heroMenu.replaceChildren(...items, separator, add)
+  placeHeroMenu()
+}
+
+function closeHeroMenu(restoreFocus) {
+  heroMenuTicket += 1
+  if (heroMenu.hidden) return
+  heroMenu.hidden = true
+  heroChip.setAttribute('aria-expanded', 'false')
+  if (restoreFocus) heroChip.focus()
+}
+
+/**
+ * Move the new session to the picked workspace — DSH's `selectWorkspace`: reopen the blank this page left there, or
+ * start one, and open it. The draft and its attachments are the composer's, so they travel with it untouched.
+ */
+async function heroPick(choice) {
+  closeHeroMenu(true)
+  const owner = current !== null && heroKnown.id === current ? heroKnown : null
+  if (owner !== null && owner.workspace === choice.id) return
+  const before = current
+  heroPending = { id: choice.id, label: choice.label }
+  heroChip.setAttribute('aria-busy', 'true')
+  paintHeroWorkspace()
+  try {
+    const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
+    const workspaces = workspaceResponse.ok ? ((await workspaceResponse.json()).workspaces ?? []) : []
+    const sessions = sessionResponse.ok ? await sessionResponse.json() : []
+    const target = HeroPicker.choices(workspaces).find((entry) => entry.id === choice.id)
+    if (target === undefined) {
+      setNote('that workspace is no longer registered')
+      return
+    }
+    if (owner !== null && owner.blank && owner.workspace !== null) heroLeft.set(owner.workspace, owner.id)
+    const reuse = HeroPicker.reusable(heroLeft.get(target.id), target, sessions)
+    if (reuse === null) {
+      await startSessionAt({ kind: 'workspace', path: target.path, label: target.label })
+    } else {
+      setNote('')
+      activeFolder = target.path
+      expanded.add(target.path)
+      rememberExpanded()
+      chooseSelected('session:' + reuse)
+      await showSession(reuse)
+      await renderTree()
+    }
+    /** What the pick made or reopened is blank and belongs to the target, so the chip need not ask again. */
+    if (current !== null && current !== before && log.childElementCount === 0) heroKnown = { id: current, blank: true, workspace: target.id, label: target.label }
+  } catch (error) {
+    setNote('could not open that workspace: ' + ((error && error.message) || error))
+  } finally {
+    heroPending = null
+    heroChip.removeAttribute('aria-busy')
+    paintHeroWorkspace()
+  }
+}
+
+/** `Add workspace…`: the page's own chooser; a workspace added from it is then picked, as DSH's flow adopts and picks. */
+function heroAddWorkspace() {
+  heroAddFrom = activeFolder
+  heroAdding = true
+  void openWorkspacePicker()
+}
+document.getElementById('workspace-picker')?.addEventListener('close', () => {
+  if (!heroAdding) return
+  heroAdding = false
+  const added = activeFolder
+  if (added === null || added === heroAddFrom) return
+  void currentWorkspaces().then((workspaces) => {
+    const choice = HeroPicker.choices(workspaces).find((entry) => entry.path === added)
+    if (choice !== undefined) return heroPick(choice)
+  })
+})
+
+heroChip.addEventListener('click', () => {
+  if (heroMenu.hidden) void openHeroMenu()
+  else closeHeroMenu(false)
+})
+/** DSH's menu keys while it is open; captured, so Escape closes this menu and nothing else. */
+document.addEventListener(
+  'keydown',
+  (keyEvent) => {
+    if (heroMenu.hidden || keyEvent.ctrlKey || keyEvent.altKey || keyEvent.metaKey) return
+    const active = document.activeElement
+    const inMenu = heroMenu.contains(active)
+    if (!inMenu && active !== heroChip) return
+    const items = [...heroMenu.querySelectorAll('button:not(:disabled)')]
+    if (keyEvent.key === 'Escape') {
+      keyEvent.preventDefault()
+      keyEvent.stopPropagation()
+      closeHeroMenu(true)
+      return
+    }
+    if (keyEvent.key === 'Tab') {
+      /** DSH: Shift+Tab closes back to the chip, Tab on an item chooses it, Tab from the chip enters the list. */
+      if (!keyEvent.shiftKey && !inMenu && items.length === 0) return
+      keyEvent.preventDefault()
+      if (keyEvent.shiftKey) closeHeroMenu(true)
+      else if (inMenu) active.click()
+      else items[0].focus()
+      return
+    }
+    const next = HeroPicker.step(keyEvent.key, items.indexOf(active), items.length)
+    if (next === null) return
+    keyEvent.preventDefault()
+    keyEvent.stopPropagation()
+    items[next].focus()
+  },
+  true,
+)
+document.addEventListener('pointerdown', (pointerEvent) => {
+  if (heroMenu.hidden) return
+  if (!heroMenu.contains(pointerEvent.target) && !heroChip.contains(pointerEvent.target)) closeHeroMenu(false)
+})
+window.addEventListener('resize', () => {
+  if (!heroMenu.hidden) placeHeroMenu()
+})
+const heroObserver = new MutationObserver(() => paintHeroWorkspace())
+heroObserver.observe(log, { childList: true, attributes: true, attributeFilter: ['hidden'] })
+for (const id of ['empty-state', 'session-title']) {
+  const target = document.getElementById(id)
+  if (target !== null) heroObserver.observe(target, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['hidden'] })
+}
+paintHeroWorkspace()
 
 /**
  * The Settings surface behind the panel's bottom area.
