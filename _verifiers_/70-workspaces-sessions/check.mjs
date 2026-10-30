@@ -2322,6 +2322,62 @@ test("a double-click on a session's title opens DSH's Rename session dialog, pre
   }
 })
 
+test("a session's first prompt is titled by the session's own model, not by the cut prompt", async (context) => {
+  /**
+   * R-developer-eight-12 (DSH parity C6). DSH mounts dsh-session-title with its first-prompt model provider in the base
+   * profile: on a session's first prompt the fallback name (the prompt's leading words) appears at once, then the session's
+   * own route is asked for a title (purpose session-title, the turn's endpoint and model) and the answer replaces the
+   * fallback. Heddle titled a session with the prompt cut to 48 characters and asked nothing. The scripted endpoint answers
+   * the title call with its session-title step, so the generated title is known here; the turn takes the untagged step.
+   * The title lands without delaying the turn, so it is read until it arrives rather than once.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  const h = harness('auto-title')
+  const generated = 'Northern revenue year on year'
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: 'a scripted answer' }] })
+  const folder = join(h.work, 'ws-title')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', folder, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const created = parseJson(made.stdout)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const turn = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: created.session, prompt }),
+    })
+    const stream = await turn.text()
+    assert.equal(turn.status, 200, `the first turn ran\n${stream}`)
+    assert.match(stream, /a scripted answer/, 'the turn was answered by the turn step, not the title step')
+
+    const titleNow = async () => {
+      const response = await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })
+      const listed = await response.json()
+      return listed.find((meta) => meta.id === created.session)?.title
+    }
+    let title = await titleNow()
+    for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 250))
+      title = await titleNow()
+    }
+    assert.notEqual(title, 'Please summarise the quarterly revenue figures…', 'the title is not the first prompt cut short')
+    assert.equal(title, generated, `the first line of the model's answer, its emphasis removed, is the session's title\nsaw: ${JSON.stringify(title)}`)
+    assert.equal((await sessionsOf(h)).find((meta) => meta.id === created.session)?.title, generated, 'and the store holds it')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session is pinned and archived in the store, and the tree follows both', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
