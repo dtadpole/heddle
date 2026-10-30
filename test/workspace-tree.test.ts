@@ -121,18 +121,23 @@ test('archived only drops a workspace with nothing archived, and its child rises
   assert.deepEqual(groups.map((group) => [group.key, group.depth]), [['w-child', 0]])
 })
 
-test('pinned sessions lead, the newest pin first, then the most recently updated', () => {
+test('pinned sessions lead, and each part is by last update alone: pin time does not order Last updated', () => {
+  /**
+   * DSH's README (*Reordering and view options*): Last updated "sorts each partition strictly by the latest user prompt or
+   * steer time, newest first; pin time does not affect it" (C17, R-developer-eight-20). This test asserted newest pin
+   * first until then; pin order is Manual's (test/workspace-order.test.ts).
+   */
   const sessions = [
     session('s-recent', 50),
-    session('s-pin-old', 1, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
-    session('s-pin-new', 2, { pinned: true, pinnedAt: '2026-10-28T09:30:00.000Z' }),
+    session('s-pin-old', 1, { pinned: true, pinnedAt: '2026-10-28T09:30:00.000Z' }),
+    session('s-pin-new', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
     session('s-pin-untimed', 3, { pinned: true }),
     session('s-older', 10),
     session('s-archived-pin', 60, { pinned: true, archived: true }),
   ]
   const order = [...sessions].sort(tree.sessionOrder).map((meta) => meta.id)
   /** An archived row carries no pin (DSH keeps the two sets exclusive), so it sorts by its age among the rest. */
-  assert.deepEqual(order, ['s-pin-new', 's-pin-old', 's-pin-untimed', 's-archived-pin', 's-recent', 's-older'])
+  assert.deepEqual(order, ['s-pin-untimed', 's-pin-new', 's-pin-old', 's-archived-pin', 's-recent', 's-older'])
 })
 
 test('Show more: five rows, raised to the last running or open session within fifty, five more per click', () => {

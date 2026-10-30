@@ -3102,8 +3102,9 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      */
     /**
      * DSH's View options, read from its own menu on 2026-10-17, is four groups: a `WorkSpace` heading, the grouping pair,
-     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, `Last updated` (the only
-     * order it has) and the archive trio, in DSH's order — asserted as the list, because the order is the claim.
+     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, the ordering pair
+     * (`Manual` / `Last updated`, since C17) and the archive trio, in DSH's order — asserted as the list, because the
+     * order is the claim.
      */
     assert.deepEqual(
       reading.viewItems.filter((item) => item.label !== null).map((item) => item.label),
@@ -3111,7 +3112,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
        * The grouping is DSH's three since the workspace tree (owner goal, 2026-10-28; DSH 0.2.1's `SessionGroupBy` is
        * `workspace-tree | workspace | flat`): `Workspace Tree`, `Workspace` (sibling sections) and `In one list`.
        */
-      ['Workspace Tree', 'Workspace', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
+      ['Workspace Tree', 'Workspace', 'In one list', 'Manual', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
       `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
     )
     assert.deepEqual(
