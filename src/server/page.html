@@ -1516,6 +1516,11 @@
   #tree .turns { font-size: .72rem; opacity: .5; }
   #tree li[data-kind='generated'] .label { opacity: .55; }
   #tree li[data-kind='folder'] .label { opacity: .8; }
+  /** C37: where a dragged workspace lands, a line above or below its whole section (DSH's workspaceDropBefore / After). */
+  #tree li[data-workspace-drop] { position: relative; }
+  #tree li[data-workspace-drop]::after { content: ''; position: absolute; left: 0; right: 4px; height: 2px; background: var(--accent); pointer-events: none; }
+  #tree li[data-workspace-drop='before']::after { top: -1px; }
+  #tree li[data-workspace-drop='after']::after { bottom: -1px; }
   #tree .empty { font-size: .78rem; opacity: .5; padding-left: 1.4rem; }
   /**
    * The workspace tree (G2), after DSH's workspace browser: a workspace whose subtree holds the open session tints its
@@ -10573,6 +10578,7 @@ function groupRow(group) {
   const li = nodeRow(node, group.depth)
   li.dataset.slot = 'group'
   if (WorkspaceTree.containsSession(group, current)) li.dataset.containsCurrent = 'true'
+  wireWorkspaceDrag(li, group)
   return li
 }
 
@@ -10632,6 +10638,129 @@ function paintSessionRows(list, group, depth) {
 /** Forget the watermarks of a group and everything under it — DSH resets them when a workspace folds. */
 function resetWatermarks(group) {
   for (const each of WorkspaceTree.flatten([group])) watermarks.delete(each.key)
+}
+
+/* workspace-drag:begin */
+/**
+ * Reordering workspaces by drag (C37) — DSH's workspace browser (dsh-client-ui-workspace lib/client.js:1971-1977,
+ * 3120-3138, 3155-3221) over the host's order (workspace/insertBefore, POST /api/workspaces/insertBefore).
+ *
+ * Pure, like the tree block above, so test/workspace-drag.test.ts loads it out of the page. A workspace row is dragged
+ * by its header; it may land only among its siblings — the workspaces drawn at the same level under the same parent
+ * (DSH compares parents, client.js:3155) — before or after the section the pointer is in, by which half of the whole
+ * section (header, child workspaces and sessions) it is over (client.js:3001-3004). Ungrouped is neither dragged nor
+ * a target. A drop that would leave the order as it is asks nothing.
+ */
+const WorkspaceDrag = (() => {
+  /** The level a group is drawn at: its parent's key (null at the top) and the registered sibling keys, in order. */
+  function level(groups, key, parent = null) {
+    const siblings = groups.filter((group) => group.workspace !== null && group.workspace !== undefined).map((group) => group.key)
+    if (siblings.includes(key)) return { parent, siblings }
+    for (const group of groups) {
+      const found = level(Array.isArray(group.children) ? group.children : [], key, group.key)
+      if (found !== null) return found
+    }
+    return null
+  }
+
+  /** Which half of a section a pointer at clientY is over. */
+  function half(clientY, rect) {
+    return clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+  }
+
+  /**
+   * What a drop asks the host for — DSH's commitWorkspaceDrag (client.js:3120-3138): before the target, or before the
+   * sibling after it (last when there is none); null when the source would stay where it is or is not a sibling.
+   * siblings are the level's keys, source the dragged key, over is {id, half}.
+   */
+  function dropRequest(siblings, source, over) {
+    const sourceIndex = siblings.indexOf(source)
+    const rowIndex = siblings.indexOf(over.id)
+    if (sourceIndex === -1 || rowIndex === -1) return null
+    const anchor = over.half === 'before' ? over.id : siblings[rowIndex + 1]
+    if (anchor === source) return null
+    const anchorIndex = anchor === undefined ? siblings.length : siblings.indexOf(anchor)
+    if (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1) return null
+    return anchor === undefined ? { workspaceId: source } : { workspaceId: source, beforeWorkspaceId: anchor }
+  }
+
+  return { level, half, dropRequest }
+})()
+/* workspace-drag:end */
+
+/** The workspace being dragged, with the level it may land at; null while no workspace drag is under way. */
+let workspaceDragging = null
+
+function clearWorkspaceDrop() {
+  for (const marked of treeList.querySelectorAll('li[data-workspace-drop]')) delete marked.dataset.workspaceDrop
+}
+
+/** Ask the host to move a workspace, then redraw from its answer; a refusal is said in the tree's note. */
+async function moveWorkspace(request) {
+  let failure = null
+  try {
+    const response = await fetch('/api/workspaces/insertBefore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
+    })
+    if (!response.ok) failure = (await response.json().catch(() => ({}))).error ?? `the server answered ${response.status}`
+  } catch (error) {
+    failure = error && error.message
+  }
+  await renderTree()
+  if (failure !== null) setNote('could not move the workspace: ' + failure)
+}
+
+/** Let a registered workspace's header be dragged, and its section take a drop from a sibling. */
+function wireWorkspaceDrag(li, group) {
+  if (group.workspace === null || group.workspace === undefined) return
+  const row = li.querySelector(':scope > .row')
+  if (row === null) return
+  row.draggable = true
+  row.addEventListener('dragstart', (event) => {
+    const at = WorkspaceDrag.level(treeGroups, group.key)
+    if (at === null) return
+    workspaceDragging = { id: group.key, parent: at.parent, siblings: at.siblings }
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', 'workspace:' + group.key)
+  })
+  row.addEventListener('dragend', () => {
+    workspaceDragging = null
+    clearWorkspaceDrop()
+  })
+  /** Whether this section takes the drag; when it does not and it is nested, the section above it is asked. */
+  const accepts = (event) => {
+    const drag = workspaceDragging
+    if (drag === null) return null
+    const at = WorkspaceDrag.level(treeGroups, group.key)
+    if (at !== null && at.parent === drag.parent) return drag
+    if (at === null || at.parent === null) {
+      event.stopPropagation()
+      clearWorkspaceDrop()
+    }
+    return null
+  }
+  li.addEventListener('dragover', (event) => {
+    if (accepts(event) === null) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+    const side = WorkspaceDrag.half(event.clientY, li.getBoundingClientRect())
+    if (li.dataset.workspaceDrop === side) return
+    clearWorkspaceDrop()
+    li.dataset.workspaceDrop = side
+  })
+  li.addEventListener('drop', (event) => {
+    const drag = accepts(event)
+    if (drag === null) return
+    event.preventDefault()
+    event.stopPropagation()
+    workspaceDragging = null
+    clearWorkspaceDrop()
+    const request = WorkspaceDrag.dropRequest(drag.siblings, drag.id, { id: group.key, half: WorkspaceDrag.half(event.clientY, li.getBoundingClientRect()) })
+    if (request !== null) void moveWorkspace(request)
+  })
 }
 
 function nodeRow(node, depth = 0) {
