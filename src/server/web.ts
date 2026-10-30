@@ -26,6 +26,7 @@ import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
+import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
@@ -715,6 +716,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       }
     })
     respond(response, 200, 'application/json', `${JSON.stringify(sessions, null, 2)}\n`)
+    return
+  }
+
+  /**
+   * Content search: DSH's `session.search` (dsh-api-session-controller lib/index.js:2010-2123), the sessions whose
+   * user or assistant messages hold `q` as a phrase, ranked, at most 20, each with its snippet, and `hasMore`. The
+   * rules live in `src/session/search.ts`; a refused query answers 400 with DSH's sentence. Matched before the
+   * `/api/sessions/<id>` routes below, which would otherwise answer it as "not a session id".
+   */
+  if (url.pathname === '/api/sessions/search' && request.method === 'GET') {
+    try {
+      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '')
+      respond(response, 200, 'application/json', `${JSON.stringify(page, null, 2)}\n`)
+    } catch (error) {
+      const refused = error instanceof SessionSearchQueryError
+      const message = refused ? error.message : `session search failed: ${String(error)}`
+      respond(response, refused ? 400 : 500, 'application/json', `${JSON.stringify({ error: message })}\n`)
+    }
     return
   }
 
