@@ -560,7 +560,7 @@ impl SessionTitles {
         let started = Instant::now();
         model.generate(
             request,
-            Box::new(move |answer| {
+            Box::new(move |answer: Result<TitleAnswer, String>| {
                 let Some(store) = store.upgrade() else {
                     return;
                 };
@@ -891,19 +891,19 @@ mod tests {
 
     #[test]
     fn a_failed_cut_off_empty_or_oversized_title_leaves_the_fallback() {
-        let answers: Vec<Answer> = vec![
-            Box::new(|| Err("provider down".to_string())),
-            Box::new(|| {
-                Ok(TitleAnswer {
-                    finish_reason: "length".to_string(),
-                    ..stop("Half a tit")
-                })
-            }),
-            Box::new(|| Ok(stop("   "))),
-        ];
-        for answer in answers {
+        for case in 0..3 {
             let dir = tempfile::tempdir().unwrap();
-            let fake = Fake::new(answer, false);
+            let fake = Fake::new(
+                move || match case {
+                    0 => Err("provider down".to_string()),
+                    1 => Ok(TitleAnswer {
+                        finish_reason: "length".to_string(),
+                        ..stop("Half a tit")
+                    }),
+                    _ => Ok(stop("   ")),
+                },
+                false,
+            );
             let service = service(&dir, &fake);
             let handle = start(&service, &dir);
             service.user(&handle, PROMPT, None).unwrap();
