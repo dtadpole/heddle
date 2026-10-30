@@ -50,6 +50,10 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-workspace-drag.mjs`](check-workspace-drag.mjs) — reordering workspaces by drag (DSH's
+  `workspace/insertBefore`, C37): a workspace header dragged onto a sibling's section lands before or after it with
+  the drop line drawn, the host stores the order (`GET /api/workspaces`) and a reload keeps it, while a nested
+  workspace or Ungrouped is not a place a top-level workspace can land.
 
 ## What it deliberately does not judge
 
