@@ -36,6 +36,15 @@ interface Tree {
   nextWatermark: (total: number, shown: number) => number
   overflow: (total: number, shown: number) => 'more' | 'less' | null
   sessionOrder: (left: unknown, right: unknown) => number
+  SEARCH_LIMIT: number
+  search: (
+    workspaces: unknown[],
+    sessions: unknown[],
+    query: string,
+    options?: Record<string, unknown>,
+  ) => { items: { meta: { id: string }; workspace: string }[]; hasMore: boolean }
+  chainTo: (groups: Group[], id: string) => Group[]
+  revealMark: (sessions: { id: string }[], id: string, watermark?: number) => number
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -158,4 +167,71 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+/**
+ * The sidebar search, DSH's local half (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169`): a
+ * case-insensitive substring of the session's **title or its workspace's name**, newest first, at most
+ * `SESSION_SEARCH_RESULT_LIMIT` = 20 rows (dsh-api-session-controller `lib/client.js:357`) with a bit saying more matched.
+ */
+const hits = (answer: { items: { meta: { id: string } }[] }) => answer.items.map((item) => item.meta.id)
+
+test('search matches a title or a workspace name, case-insensitively, and never the id', () => {
+  const workspaces = [
+    workspace('w-alpha', '/code/alphaproj', { sessionIds: ['s-kestrel', 's-notes'] }),
+    workspace('w-beta', '/code/b', { title: 'Beta Project', sessionIds: ['s-beta'] }),
+  ]
+  const sessions = [
+    session('s-kestrel', 3, { title: 'Kestrel migration plan', cwd: '/code/alphaproj' }),
+    session('s-notes', 2, { title: 'notes', cwd: '/code/alphaproj' }),
+    session('s-beta', 1, { title: 'Weekly sync', cwd: '/code/b' }),
+    session('s-loose', 4, { title: 'loose ends', cwd: '/tmp/scratchpad' }),
+  ]
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'KESTREL')), ['s-kestrel'], 'a title fragment, in any case')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, '  alphaPROJ ')), ['s-kestrel', 's-notes'], 'a workspace name finds every session in it')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'beta project')), ['s-beta'], 'by the workspace title, not its folder')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'scratchpad')), ['s-loose'], 'a session outside every workspace reads as its folder name')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 's-kestrel')), [], 'the id is not a name')
+  assert.deepEqual(tree.search(workspaces, sessions, '   '), { items: [], hasMore: false }, 'a blank query is no search')
+  const [first] = tree.search(workspaces, sessions, 'kestrel').items
+  assert.equal(first?.workspace, 'alphaproj', 'and each hit says which workspace it is in')
+  assert.equal(tree.search(workspaces, sessions, 'beta').items[0]?.workspace, 'Beta Project')
+})
+
+test('search follows the tree: subagent sessions never, archived per the filter, newest first', () => {
+  const workspaces = [workspace('w', '/w', { sessionIds: ['s-old', 's-new', 's-arch', 's-child'] })]
+  const sessions = [
+    session('s-old', 1, { title: 'plan a' }),
+    session('s-new', 9, { title: 'plan b' }),
+    session('s-arch', 5, { title: 'plan c', archived: true }),
+    session('s-child', 7, { title: 'plan d', origin: 'subagent' }),
+  ]
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'plan')), ['s-new', 's-old'], 'hide is the default, and a child is never a hit')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'plan', { archived: 'show' })), ['s-new', 's-arch', 's-old'])
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'plan', { archived: 'only' })), ['s-arch'])
+  const pinned = [session('s-pin', 1, { title: 'plan p', pinned: true }), session('s-late', 2, { title: 'plan q' })]
+  assert.deepEqual(hits(tree.search([], pinned, 'plan')), ['s-late', 's-pin'], 'recency alone orders hits; a pin does not lead them')
+})
+
+test('search lists at most twenty hits, and says when more matched', () => {
+  assert.equal(tree.SEARCH_LIMIT, 20)
+  const many = Array.from({ length: 22 }, (_, index) => session(`s-${String(index).padStart(2, '0')}`, index, { title: `capword item ${index + 1}` }))
+  const answer = tree.search([], many, 'capword')
+  assert.equal(answer.items.length, 20, 'capped at twenty')
+  assert.equal(answer.hasMore, true, 'with the bit that asks for a narrower query')
+  assert.equal(answer.items[0]?.meta.id, 's-21', 'the newest first')
+  const exact = tree.search([], many.slice(0, 20), 'capword')
+  assert.deepEqual([exact.items.length, exact.hasMore], [20, false], 'twenty matches exactly is not more')
+})
+
+test('opening a hit reveals its row: the groups down to it, and a watermark that reaches it', () => {
+  const workspaces = [workspace('w-child', '/r/c', { parent: 'w-root', sessionIds: ['s-deep'] }), workspace('w-root', '/r', { sessionIds: ['s-top'] })]
+  const groups = tree.deriveGroups(workspaces, [session('s-deep', 1), session('s-top', 2)])
+  assert.deepEqual(tree.chainTo(groups, 's-deep').map((group) => group.key), ['w-root', 'w-child'], 'every group from the top to the owner')
+  assert.deepEqual(tree.chainTo(groups, 's-top').map((group) => group.key), ['w-root'])
+  assert.deepEqual(tree.chainTo(groups, 's-missing'), [], 'nothing when no group draws it')
+  const rows = Array.from({ length: 60 }, (_, index) => session(`s-${index}`, index))
+  assert.equal(tree.revealMark(rows, 's-2', undefined), tree.INITIAL, 'a row already in view keeps the watermark')
+  assert.equal(tree.revealMark(rows, 's-57', 5), 58, 'a reveal reaches past fifty, which the automatic raise does not')
+  assert.equal(tree.revealMark(rows, 's-7', 15), 15, 'and never lowers a watermark a reader raised')
 })
