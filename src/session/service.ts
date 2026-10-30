@@ -5,11 +5,11 @@ import { readFileSync } from 'node:fs'
 
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
-import { existingSessionNames, findSessionDefinition, updateSessionDefinition, writeSessionDefinition, type SessionDefinition } from './definition.ts'
+import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 
-import { inheritsAnswer, SessionOwnedError, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
+import { inheritsAnswer, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
 
 export * from './store.ts'
 export * from './mode.ts'
@@ -70,49 +70,6 @@ export function forkTitle(base: string, taken: readonly string[]): string {
   const format = (value: number) => (ascii !== null ? `${prefix}(${value})` : fullWidth !== null ? `${prefix}（${value}）` : `${prefix} (${value})`)
   while (taken.includes(format(ordinal))) ordinal += 1
   return format(ordinal)
-}
-
-/**
- * What New session does with the blank session it names: DSH's `session.create` rule (dsh-api-session-controller
- * `lib/index.js:416-465`, the placement rule at `:755-770`, its README's `session.create` paragraph).
- *
- * - **refuse** — a subagent's session (`session/agent-busy`), or one bound to another folder (`session/conflict`), with
- *   DSH's sentences, checked in DSH's order before anything else;
- * - **create** — a session that is unknown, archived, or has started a turn (or is running one) stays as it is, and a new
- *   session is made instead;
- * - **reuse** — a blank one: no turn has started (`turns` is 0), in this folder, not archived.
- *
- * Pure, so the rule is judged without a store. The writer lock is the caller's last check: a blank another process is
- * writing is not reused either (DSH: "is not written by another owner").
- */
-export type BlankReuse =
-  | { readonly kind: 'reuse' }
-  | { readonly kind: 'create'; readonly reason: 'unknown' | 'archived' | 'started' }
-  | { readonly kind: 'refuse'; readonly code: 'session/agent-busy' | 'session/conflict'; readonly message: string }
-
-export function blankReuse(meta: SessionMeta | undefined, branch: string, options: { readonly running?: boolean } = {}): BlankReuse {
-  if (meta === undefined) return { kind: 'create', reason: 'unknown' }
-  if (meta.origin === 'subagent') return { kind: 'refuse', code: 'session/agent-busy', message: `session "${meta.id}" is owned by subagent routing` }
-  const wanted = canonicalPath(branch)
-  const recorded = typeof meta.cwd === 'string' && meta.cwd.trim().length > 0 ? canonicalPath(meta.cwd) : undefined
-  if (recorded === undefined) {
-    return { kind: 'refuse', code: 'session/conflict', message: `session "${meta.id}" records no cwd and cannot be adopted for "${wanted}"` }
-  }
-  if (recorded !== wanted) return { kind: 'refuse', code: 'session/conflict', message: `session "${meta.id}" belongs to "${recorded}", not "${wanted}"` }
-  if (meta.archived === true) return { kind: 'create', reason: 'archived' }
-  if ((meta.turns ?? 0) > 0 || options.running === true) return { kind: 'create', reason: 'started' }
-  return { kind: 'reuse' }
-}
-
-/** DSH's two refusals of a named session (`session/agent-busy`, `session/conflict`), which a route answers `409`. */
-export class SessionReuseRefused extends Error {
-  readonly code: 'session/agent-busy' | 'session/conflict'
-
-  constructor(code: 'session/agent-busy' | 'session/conflict', message: string) {
-    super(message)
-    this.name = 'SessionReuseRefused'
-    this.code = code
-  }
 }
 
 export class SessionService extends Service {
@@ -190,77 +147,6 @@ export class SessionService extends Service {
       ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
       ...(options.model !== undefined ? { model: options.model } : {}),
       ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-    })
-    return { handle, definition }
-  }
-
-  /**
-   * New session at a branch, **reusing** the blank session it names instead of making another (DSH's `session.create`;
-   * see {@link blankReuse}). Without `reuse`, or when the named one cannot be reused, this is {@link createAt}.
-   *
-   * Phase A measured why: each New session click left another blank session in the store and another definition folder
-   * in the workspace (four in one), while DSH shows one New session row. A reused session keeps its id, its log and its
-   * definition; one that has none yet is given one, so the answer always names a definition.
-   *
-   * @throws SessionReuseRefused for a subagent's session or one bound to another folder.
-   */
-  createOrReuseAt(
-    branch: string,
-    options: {
-      readonly reuse?: SessionId
-      readonly running?: (id: SessionId) => boolean
-      readonly title?: string
-      readonly endpoint?: string
-      readonly model?: string
-      readonly reasoningEffort?: string
-    } = {},
-  ): { readonly handle: SessionHandle; readonly definition: SessionDefinition; readonly reused: boolean } {
-    const { reuse, running, ...create } = options
-    const canonical = canonicalPath(branch)
-    if (reuse !== undefined) {
-      const meta = this.list().find((entry) => entry.id === reuse)
-      const decision = blankReuse(meta, canonical, { running: running?.(reuse) === true })
-      if (decision.kind === 'refuse') throw new SessionReuseRefused(decision.code, decision.message)
-      if (decision.kind === 'reuse') {
-        const reused = this.reuseBlank(reuse, canonical, create.title)
-        if (reused !== null) return { ...reused, reused: true }
-      }
-    }
-    return { ...this.createAt(canonical, create), reused: false }
-  }
-
-  /**
-   * Take a blank session back for New session, or `null` when it cannot be taken after all.
-   *
-   * DSH resumes a persisted blank "while retaining its writer lock" and re-checks blankness under it
-   * (`reuseSetup`, `lib/index.js:483-491`): taking the lock here drops the store's fold, so the record is read again, and
-   * a turn another process started and finished since the list was read makes this a new session instead.
-   */
-  private reuseBlank(id: SessionId, branch: string, title: string | undefined): { readonly handle: SessionHandle; readonly definition: SessionDefinition } | null {
-    const handle = this.store.open(id)
-    if (handle === null) return null
-    try {
-      this.store.claim(handle)
-    } catch (error) {
-      if (error instanceof SessionOwnedError) return null
-      throw error
-    }
-    const fresh = this.list().find((entry) => entry.id === id)
-    if (fresh === undefined || blankReuse(fresh, branch).kind !== 'reuse') return null
-    const named = title !== undefined && title.trim().length > 0 ? title : undefined
-    if (named !== undefined) this.store.rename(id, named)
-    const found = findSessionDefinition(branch, id)
-    if (found !== null) {
-      if (named !== undefined) updateSessionDefinition(found.dir, { title: named })
-      return { handle, definition: { ...found, log: handle.transcript } }
-    }
-    const definition = writeSessionDefinition(handle, branch, {
-      createdAt: fresh.created,
-      taken: existingSessionNames(branch),
-      ...(named !== undefined ? { title: named } : fresh.title !== undefined ? { title: fresh.title } : {}),
-      ...(fresh.endpoint !== undefined ? { endpoint: fresh.endpoint } : {}),
-      ...(fresh.model !== undefined ? { model: fresh.model } : {}),
-      ...(fresh.reasoningEffort !== undefined ? { reasoningEffort: fresh.reasoningEffort } : {}),
     })
     return { handle, definition }
   }

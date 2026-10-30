@@ -930,17 +930,12 @@ async fn create_session(State(state): State<AppState>, body: JsonBody) -> Respon
             format!("{} is not under any workspace root", branch.display()),
         );
     }
-    // `session` names a blank session to reuse, DSH's `session.create` `sessionId`: the answer names the
-    // session actually used and says whether it was reused. A running one is not blank.
-    let reuse = body.non_empty("session");
-    let running = reuse.is_some_and(|id| state.runs().is_running(id));
-    match state.harness().sessions.create_or_reuse_at(
-        &branch,
-        reuse,
-        running,
-        body.non_empty("title"),
-    ) {
-        Ok((created, reused)) => respond::json(
+    match state
+        .harness()
+        .sessions
+        .create_at(&branch, body.non_empty("title"))
+    {
+        Ok(created) => respond::json(
             StatusCode::OK,
             &json!({
                 "session": created.session,
@@ -948,17 +943,8 @@ async fn create_session(State(state): State<AppState>, body: JsonBody) -> Respon
                 "name": created.name,
                 "definition": created.definition,
                 "log": created.log,
-                "reused": reused,
             }),
         ),
-        Err(error)
-            if matches!(
-                error.code.as_deref(),
-                Some("session/agent-busy" | "session/conflict")
-            ) =>
-        {
-            service_refusal(error, StatusCode::CONFLICT)
-        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }

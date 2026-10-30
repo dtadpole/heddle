@@ -287,25 +287,6 @@ pub fn read_session_definition(dir: &str) -> Option<SessionDefinitionFields> {
     SessionDefinitionFields::from_value(value)
 }
 
-/// The definition a branch already holds for one session, read in name order (creation order, so a
-/// duplicate left by hand resolves to the oldest); `None` when none of its `_sessions_` folders names it.
-/// `log` is what the definition says (`""` when it says nothing). New session reuses a blank session
-/// (DSH's `session.create`), which answers with this definition rather than a second folder.
-pub fn find_session_definition(branch: &str, id: &str) -> Option<SessionDefinition> {
-    let sessions = canonical_path(Path::new(branch)).join(SESSIONS_FOLDER);
-    existing_session_names(branch).into_iter().find_map(|name| {
-        let dir = sessions.join(&name);
-        let dir_text = dir.to_string_lossy().into_owned();
-        let fields = read_session_definition(&dir_text)?;
-        (fields.id() == id).then(|| SessionDefinition {
-            name,
-            file: dir.join(DEFINITION_FILE).to_string_lossy().into_owned(),
-            dir: dir_text,
-            log: fields.log().unwrap_or("").to_string(),
-        })
-    })
-}
-
 /// Retitle a definition so the committed record and the label agree; a blank title deletes the key.
 /// `Ok(false)` when the folder holds no readable definition.
 pub fn update_session_definition(dir: &str, title: Option<&str>) -> Result<bool, SessionError> {
