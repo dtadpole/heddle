@@ -205,23 +205,37 @@ test('a fork is refused on a question with no answer, and allowed on a conversat
   assert.equal(inheritsAnswer(withDanglingTail), true, 'a dangling tail is cut away, not a refusal')
 })
 
-test('a session records when it was last written to, and a message and a turn boundary both move it', async () => {
+/**
+ * DSH's **Last updated** (C17, R-developer-eight-20): a row is dated by the latest prompt or steer a person wrote, never by
+ * what was written after it. `applySessionListMetadata` takes `lastPromptAt` from a `user/message` whose source is the
+ * user, as that event's own time (dsh-api-session-controller/lib/index.js:1872-1879), and the list's `updatedAt` is
+ * `max(createdAt, lastPromptAt)` (index.js:2124-2125); dsh-client-ui-workspace's README (*Reordering and view options*)
+ * says Last updated sorts by the latest user prompt or steer time. A message heddle's harness wrote carries a `source`.
+ */
+test("a session is Last updated by a person's latest prompt or steer, and nothing written after it moves the date", async () => {
   const { store: sessions } = store()
   const handle = sessions.create({ cwd: '/tmp/project' })
-  assert.equal(sessions.list().find((one) => one.id === handle.id)?.updated, undefined, 'a new session has no write time yet')
+  const meta = () => sessions.list().find((one) => one.id === handle.id)
+  const pause = () => new Promise((done) => setTimeout(done, 5))
+  assert.equal(meta()?.updated, undefined, 'a new session has no prompt time yet')
 
-  sessions.message(handle, { role: 'user', content: [{ type: 'text', text: 'a question' }] })
-  const afterMessage = sessions.list().find((one) => one.id === handle.id)
-  assert.match(String(afterMessage?.updated), /^\d{4}-\d{2}-\d{2}T/, 'a message records the time it was written')
-  assert.equal(afterMessage?.turns, 1, 'and counts the turn in the same record')
+  const prompt = sessions.message(handle, { role: 'user', content: [{ type: 'text', text: 'a question' }] })
+  assert.equal(meta()?.updated, prompt.at, "the prompt dates the row, with the prompt event's own time")
+  assert.equal(meta()?.turns, 1, 'and counts the turn in the same record')
 
-  /** A turn boundary is activity too: it is what makes a row age while the answer is being produced. */
-  await new Promise((done) => setTimeout(done, 5))
+  await pause()
+  sessions.message(handle, { role: 'assistant', content: [{ type: 'text', text: 'an answer' }] })
+  sessions.message(handle, { role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'a tool result' }] })
+  sessions.append(handle, { type: 'assistant/completed', text: 'an answer' })
+  sessions.append(handle, { type: 'context/note', message: { role: 'user', content: [{ type: 'text', text: 'a snapshot' }], source: { kind: 'time-context' } } })
   sessions.append(handle, { type: 'turn/completed' })
-  const afterTurn = sessions.list().find((one) => one.id === handle.id)
-  assert.match(String(afterTurn?.updated), /^\d{4}-\d{2}-\d{2}T/, 'a completed turn records its own time')
-  assert.ok(
-    Date.parse(String(afterTurn?.updated)) >= Date.parse(String(afterMessage?.updated)),
-    'and it is not older than the message that started it',
-  )
+  sessions.message(handle, { role: 'user', content: [{ type: 'text', text: 'goal round' }], source: { kind: 'goal', goalId: 'g', revision: 1, round: 1 } })
+  sessions.message(handle, { role: 'user', content: [{ type: 'text', text: 'a notice' }], source: { kind: 'subagent-settled', form: 'notice' } })
+  assert.equal(meta()?.updated, prompt.at, 'an answer, a tool result, a note, a turn boundary and a harness-written message leave the date')
+  assert.equal(meta()?.turns, 3, 'a harness-written user message still counts as a turn, as before')
+
+  await pause()
+  const steer = sessions.message(handle, { role: 'user', content: [{ type: 'text', text: 'a steer into the turn' }] })
+  assert.equal(meta()?.updated, steer.at, 'the next prompt or steer moves it')
+  assert.notEqual(steer.at, prompt.at)
 })

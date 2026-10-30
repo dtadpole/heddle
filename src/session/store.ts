@@ -108,11 +108,11 @@ export interface SessionMeta {
   readonly id: SessionId
   readonly created: string
   /**
-   * When the session was **last written to**, which is the age a row shows.
+   * When a **person last prompted or steered** the session, which is the age a row shows and what Last updated sorts by.
    *
-   * The reference's session rows are aged by their latest activity, not by their creation: a conversation that continues for
-   * an hour reads as live, while one created an hour ago and untouched reads as old. `created` is still kept for duration and
-   * ordering records; this field moves with the log.
+   * DSH's list dates a row `max(createdAt, lastPromptAt)` (dsh-api-session-controller/lib/index.js:2124-2125), where
+   * `lastPromptAt` is the time of the latest user-sourced `user/message`. So an answer, a tool result, a turn boundary or
+   * a harness-written message (one with a `source`) does not move it; absent until the first prompt, when `created` stands.
    */
   readonly updated?: string
   readonly cwd: string
@@ -962,12 +962,9 @@ export class SessionStore {
     appendFileSync(handle.transcript, this.load(handle).framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
     this.load(handle).events.push(record)
     /**
-     * A turn boundary is activity: the row's age moves while an answer is being produced, not only when a message is typed.
-     * Messages are touched by `message()` instead, which also counts the turn in the same write.
+     * No event here moves `updated`: DSH dates a row by the latest prompt or steer only (see `message()`), so an answer, a
+     * turn boundary or a harness note no longer re-dates it. This used to touch on those three types (R-developer-eight-20).
      */
-    if (record.type === 'turn/completed' || record.type === 'assistant/completed' || record.type === 'context/note') {
-      this.touch(handle)
-    }
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
@@ -1219,11 +1216,17 @@ export class SessionStore {
     return messages
   }
 
-  /** Record a message and keep the metadata's turn count honest. */
+  /** Record a message and keep the metadata's turn count and prompt time honest. */
   message(handle: SessionHandle, message: RecordedMessage): SessionEvent {
     const event = this.append(handle, { type: 'message', message })
-    /** One write for both facts: the age moved, and a user message is a turn. */
-    this.touch(handle, { bumpTurns: message.role === 'user' })
+    /**
+     * A user message is a turn; one a **person** wrote — a prompt or a steer, which is a user message with no `source` —
+     * also dates the row, with the event's own time, as DSH's `lastPromptAt` takes `event.time` from a `user/message`
+     * whose source is the user (dsh-api-session-controller/lib/index.js:1872-1879). One write for both facts.
+     */
+    if (message.role === 'user') {
+      this.touch(handle, { bumpTurns: true, ...(message.source === undefined ? { promptedAt: event.at } : {}) })
+    }
     return event
   }
 
@@ -1312,18 +1315,20 @@ export class SessionStore {
   }
 
   /**
-   * Record that the session was written to, and optionally count a user turn in the same write.
+   * Record a person's prompt time (`updated`) and/or count a user turn, in one meta write.
    *
    * The meta is a convenience beside the log: failing to write it must never lose the event that was just appended, which is
-   * why the catch swallows. `updated` is what a row's age reads, and `turns` what its tooltip counts.
+   * why the catch swallows. `updated` is what a row's age reads and what **Last updated** sorts by, and `turns` what its
+   * tooltip counts. A call with neither writes nothing.
    */
-  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean } = {}): void {
+  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean; readonly promptedAt?: string } = {}): void {
+    if (options.bumpTurns !== true && options.promptedAt === undefined) return
     const path = handle.meta
     try {
       const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
       const updated: SessionMeta = {
         ...meta,
-        updated: new Date().toISOString(),
+        ...(options.promptedAt !== undefined ? { updated: options.promptedAt } : {}),
         ...(options.bumpTurns === true ? { turns: (meta.turns ?? 0) + 1 } : {}),
       }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)

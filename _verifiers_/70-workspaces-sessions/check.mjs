@@ -4806,3 +4806,45 @@ test("a session's turn runs its tools in the session's own folder, through the s
     removeDir(h.work)
   }
 })
+
+test("a session is Last updated by a person's latest prompt, not by the answer or the tool work written after it", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * R-developer-eight-20 (DSH parity C17), DSH's Last updated: a row is dated by the latest prompt or steer a person
+   * wrote. DSH's list takes lastPromptAt from a user-sourced user/message, as that event's own time
+   * (dsh-api-session-controller/lib/index.js:1872-1879), and dates the row max(createdAt, lastPromptAt) (index.js:2124-2125).
+   * heddle dated it by its last write, so the answer and the turn boundary re-dated it. The turn here runs one scripted
+   * bash call that sleeps, so everything written after the prompt is measurably later than the prompt itself.
+   */
+  const h = harness('last-prompt')
+  scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 0.4' } } }, { text: 'answered after the pause' }] })
+  try {
+    const first = await runCli([...h.args, '--turn', 'the prompt that dates this row'], { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `the turn ran\n${first.stdout}${first.stderr}`)
+    const id = sessionsUnder(join(h.home, 'sessions'))[0]
+    assert.ok(id, 'the turn left a session')
+    /** The prompt is a user message with no source: a message the harness wrote carries one. */
+    const lastPrompt = () =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user' && event.message?.source === undefined)
+        .at(-1)
+    const events = readTranscript(join(h.home, 'sessions', id))
+    const prompt = lastPrompt()
+    const answered = events.filter((event) => event.type === 'assistant/completed' || event.type === 'turn/completed').at(-1)
+    assert.ok(prompt !== undefined && answered !== undefined, `the log holds the prompt and the answer\nsaw: ${events.map((event) => event.type).join(', ')}`)
+    assert.ok(Date.parse(answered.at) - Date.parse(prompt.at) >= 300, `the answer was written well after the prompt\nprompt ${prompt.at}, answer ${answered.at}`)
+    const listed = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(listed?.updated, prompt.at, `the session is dated by its prompt, not by what was written after it\nsaw: ${JSON.stringify(listed)}`)
+
+    /** The next prompt moves it. */
+    const second = await runCli([...h.args, '--turn', 'a second prompt', '--resume', id], { env: h.env, cwd: h.work })
+    assert.equal(second.code, 0, `the resumed turn ran\n${second.stdout}${second.stderr}`)
+    const again = lastPrompt()
+    assert.notEqual(again?.at, prompt.at, 'the second prompt is a new event')
+    const relisted = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(relisted?.updated, again?.at, `the next prompt re-dates it\nsaw: ${JSON.stringify(relisted)}`)
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
