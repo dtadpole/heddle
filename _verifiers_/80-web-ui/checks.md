@@ -50,6 +50,11 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
+  real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
+  relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
+  card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
+  none for Ungrouped; the card closing when the pointer leaves the list.
 
 ## What it deliberately does not judge
 
