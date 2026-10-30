@@ -19,6 +19,7 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
+import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame } from './transcript.ts'
 
 /**
@@ -614,6 +615,13 @@ export class SessionStore {
    */
   private readonly surfaceCache = new Map<string, { readonly count: number; readonly state: SurfaceState }>()
 
+  /**
+   * The automatic titles of this store's sessions (`./title.ts`, DSH's first-prompt title). Idle until a model is
+   * attached, which the session plugin does; it lives on the store so every service over this store shares one record
+   * of which call may still land.
+   */
+  readonly titles: SessionTitles = new SessionTitles(this)
+
   constructor(
     root: string = defaultSessionRoot(),
     options: { readonly onEvent?: (handle: SessionHandle, event: SessionEvent) => void } = {},
@@ -971,6 +979,8 @@ export class SessionStore {
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
+    /** A first prompt waits for a title, and the turn's `model/request` starts it (`./title.ts`); never throws. */
+    this.titles.observe(handle, record)
     return record
   }
 
