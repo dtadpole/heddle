@@ -50,6 +50,10 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
+  name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
+  four keystrokes, the session found only inside its answer joining the hits with its snippet, "No matching
+  sessions" only once the host has answered, and a content hit opening like any hit.
 
 ## What it deliberately does not judge
 
