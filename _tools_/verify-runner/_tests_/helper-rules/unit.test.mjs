@@ -23,7 +23,9 @@ import {
   EXIT_GRACE_MS,
   chatDouble,
   isTitleRequest,
+  endChild,
 } from '../../lib.mjs'
+import { spawn } from 'node:child_process'
 
 /**
  * The check helpers' own **component tests**.
@@ -266,4 +268,17 @@ test("a session's title request is refused by the doubles and left out of the re
   } finally {
     await double.close()
   }
+})
+
+test('endChild stops a harness within its bound: SIGTERM first, SIGKILL for one that ignores it', async () => {
+  const polite = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  assert.equal(await endChild(polite, { graceMs: 2000 }), 'exited', 'a harness that honours SIGTERM exits on it')
+  assert.equal(await endChild(polite), 'exited', 'a harness that already exited answers at once')
+
+  const stubborn = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] })
+  await new Promise((resolve) => stubborn.stdout.once('data', resolve))
+  const started = Date.now()
+  assert.equal(await endChild(stubborn, { graceMs: 300 }), 'killed', 'one that ignores SIGTERM is killed after the grace')
+  assert.ok(Date.now() - started < 3000, 'and the wait stays bounded')
+  assert.equal(stubborn.signalCode, 'SIGKILL')
 })

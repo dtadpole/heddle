@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { classify, collectNames, descendantsOf, tapCounts } from '../../run.mjs'
+import { classify, collectNames, descendantsOf, lastLines, tapCounts } from '../../run.mjs'
 
 /**
  * The runner's own **component tests**.
@@ -167,7 +167,9 @@ test('a runner told to stop ends every process its check started, a detached one
   /** Outside this test runner's own context: a nested `node --test` that inherits it reports to this run instead. */
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
-  const child = spawn(process.execPath, [runner, check, '--list'], { stdio: 'ignore', env })
+  const child = spawn(process.execPath, [runner, check, '--list'], { stdio: ['ignore', 'ignore', 'pipe'], env })
+  let stderr = ''
+  child.stderr.on('data', (chunk) => (stderr += chunk))
   const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
   let pids = []
   try {
@@ -178,6 +180,7 @@ test('a runner told to stop ends every process its check started, a detached one
     child.kill('SIGTERM')
     const result = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve('timed out'), 10_000))])
     assert.deepEqual(result, { code: 143, signal: null }, 'the runner exits at once, with the SIGTERM status')
+    assert.match(stderr, /run\.mjs: stopped by SIGTERM; the last TAP lines:/, 'and says where its check stood')
     const settled = Date.now()
     while (pids.some(alive) && Date.now() - settled < 3000) await new Promise((resolve) => setTimeout(resolve, 50))
     assert.deepEqual(pids.filter(alive), [], 'no child of the check outlives the runner')
@@ -186,4 +189,10 @@ test('a runner told to stop ends every process its check started, a detached one
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('a stopped runner reports the last non-empty TAP lines it saw', () => {
+  const text = ['TAP version 13', '# Subtest: one', 'ok 1 - one', '', '# Subtest: two', '  ', ''].join('\n')
+  assert.deepEqual(lastLines(text, 2), ['ok 1 - one', '# Subtest: two'])
+  assert.deepEqual(lastLines('', 8), [])
 })

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import process from 'node:process'
 
 /**
@@ -58,6 +59,14 @@ export function tapCounts(text, key) {
  * @param {string} check absolute path to a `*.check.mjs` file
  * @param {{list?: boolean, json?: boolean, allowSkip?: boolean}} options
  */
+/** The tail of the check's TAP stream so far, so a runner that is stopped can say where its check stood. */
+let progress = ''
+
+/** The last `count` non-empty lines of the TAP read so far. */
+export function lastLines(text, count = 8) {
+  return text.split('\n').filter((line) => line.trim() !== '').slice(-count)
+}
+
 export async function runCheck(check, options = {}) {
   const args = ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout', check]
 
@@ -73,6 +82,7 @@ export async function runCheck(check, options = {}) {
   child.stderr.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
     stdout += chunk
+    progress = (progress + chunk).slice(-8192)
   })
   child.stderr.on('data', (chunk) => {
     stderr += chunk
@@ -206,6 +216,17 @@ async function main() {
   for (const [signal, code] of [['SIGTERM', 143], ['SIGHUP', 129], ['SIGINT', 130]]) {
     process.once(signal, () => {
       endDescendants()
+      // Where the check stood, so the next time-out names its test and step. The lane cannot read a pipe after it
+      // stops the runner (measured: spawnSync keeps only what came before its timeout), so it names a file for this.
+      const report = `run.mjs: stopped by ${signal}; the last TAP lines:\n${lastLines(progress).map((line) => `  ${line}`).join('\n')}\n`
+      if (process.env.HEDDLE_RUN_STOP_REPORT) {
+        try {
+          writeFileSync(process.env.HEDDLE_RUN_STOP_REPORT, report)
+        } catch {
+          // The report is a courtesy; the exit must not wait on it.
+        }
+      }
+      process.stderr.write(report)
       process.exit(code)
     })
   }
