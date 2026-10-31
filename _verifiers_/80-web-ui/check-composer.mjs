@@ -1790,3 +1790,48 @@ test('a queued message runs as a turn with Stop on offer, and a message typed me
     await server.close()
   }
 })
+
+
+test('switching to idle Y keeps X queued messages moving and Y offers Send', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('session-queues', { holdOpenMs: 2500 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const door = await fetch(server.url, { redirect: 'manual' })
+    const cookie = String(door.headers.get('set-cookie') ?? '').split(';')[0]
+    const headers = { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' }
+    const post = (path, body) => fetch(new URL(path, server.url), { method: 'POST', headers, body: JSON.stringify(body) }).then((response) => response.json())
+    await post('/api/workspaces', { path: server.work })
+    const x = (await post('/api/sessions', { branch: server.work })).session
+    const y = (await post('/api/sessions', { branch: server.work })).session
+    assert.ok(typeof x === 'string' && typeof y === 'string')
+    await browser.goto(server.url)
+    const row = (id) => `document.querySelector('#tree li[data-kind=session][data-session-id=${JSON.stringify(id)}] > .row')`
+    const open = async (id) => {
+      await browser.waitFor(`${row(id)} !== null`, 15000)
+      await browser.evaluate(`${row(id)}.click()`)
+      await browser.waitFor(`document.querySelector('#tree li[data-session-id=${JSON.stringify(id)}]')?.getAttribute('aria-selected') === 'true'`, 10000)
+    }
+    await open(x)
+    await type(browser, 'FIRST-X')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor(`document.getElementById('log').innerText.includes('the answer')`, 15000)
+    await type(browser, 'QUEUED-X')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor(`document.getElementById('queue').innerText.includes('QUEUED-X')`, 10000)
+    await open(y)
+    assert.equal(await browser.evaluate(`document.getElementById('stop').hidden`), true, 'Refs #73: idle Y must not show Stop for X')
+    const deadline = Date.now() + 15000
+    let recorded = null
+    while (Date.now() < deadline) {
+      recorded = await fetch(new URL('/api/sessions/' + encodeURIComponent(x), server.url), { headers: { cookie } }).then((response) => response.json())
+      if (JSON.stringify(recorded).includes('QUEUED-X')) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.ok(JSON.stringify(recorded).includes('QUEUED-X'), 'Refs #72: X queue drains while Y is shown')
+    const other = await fetch(new URL('/api/sessions/' + encodeURIComponent(y), server.url), { headers: { cookie } }).then((response) => response.json())
+    assert.ok(!JSON.stringify(other).includes('QUEUED-X'), 'queued text stays in X')
+  } finally { browser.close(); await server.close() }
+})
