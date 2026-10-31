@@ -115,6 +115,14 @@ pub struct ChatTurn {
     /// An assistant turn's markdown rendered as a document; set by the session route, never by the fold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    /// A user message the harness wrote rather than a person - a goal round's `source` (`{kind: "goal", goalId,
+    /// revision, round}`) or another trigger's - so the page draws it as DSH's bordered notice, not a bubble.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Value>,
+    /// The exchange's token usage summed over its model rounds - DSH's per-Turn usage row - carried by the exchange's
+    /// last answer, and only when every round reported usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
 }
 
 impl ChatTurn {
@@ -136,8 +144,34 @@ impl ChatTurn {
             state: None,
             fork_seq: None,
             html: None,
+            trigger: None,
+            usage: None,
         }
     }
+}
+
+/// A message's `source` when it names a trigger kind: the harness, not a person, wrote that message.
+fn trigger_of(source: Option<&Value>) -> Option<Value> {
+    source
+        .filter(|source| {
+            source
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| !kind.is_empty())
+        })
+        .cloned()
+}
+
+/// A user message's text blocks as the person reads them: a paragraph each, as the TypeScript build's `blocksText`.
+/// A settled subagent's notice is three blocks (DSH's `createSettlementMessage`); joined with nothing, the page read
+/// them as one run-on line (live-testing draft developer-five-10). A person's message is one block and reads as before.
+fn blocks_text(content: &[Value]) -> String {
+    content
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// `encodeURIComponent`, for the leaf of an upload's route: the unreserved marks it keeps are
@@ -316,6 +350,51 @@ pub fn scope_attachment_urls(turns: &mut [ChatTurn], session: &str) {
     }
 }
 
+/// The four usage buckets, in the order the TypeScript `mergeTokenUsage` writes them.
+const USAGE_BUCKETS: [&str; 4] = [
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+];
+
+/// `mergeTokenUsage`: the first report as it came, then a bucket-by-bucket sum in which a bucket stays absent until a
+/// round reports it.
+fn merge_usage(previous: Option<Value>, next: &Value) -> Option<Value> {
+    let Some(next_buckets) = next.as_object() else {
+        return previous;
+    };
+    let Some(previous) = previous else {
+        return Some(next.clone());
+    };
+    let mut sum = serde_json::Map::new();
+    for key in USAGE_BUCKETS {
+        let (a, b) = (previous.get(key), next_buckets.get(key));
+        if a.is_none() && b.is_none() {
+            continue;
+        }
+        let whole = |value: Option<&Value>| value.map_or(Some(0), Value::as_u64);
+        let total = match (whole(a), whole(b)) {
+            (Some(a), Some(b)) => Value::from(a + b),
+            _ => Value::from(
+                a.and_then(Value::as_f64).unwrap_or(0.0) + b.and_then(Value::as_f64).unwrap_or(0.0),
+            ),
+        };
+        sum.insert(key.to_owned(), total);
+    }
+    Some(Value::Object(sum))
+}
+
+/// The exchange's usage account: its model rounds, the rounds that reported usage, and their sum.
+#[derive(Default)]
+struct UsageAccount {
+    rounds: u32,
+    reports: u32,
+    reported: bool,
+    sum: Option<Value>,
+    start: usize,
+}
+
 /// Fold a session's recorded events into the turns the page renders.
 pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut turns: Vec<ChatTurn> = Vec::new();
@@ -330,6 +409,7 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     // The write each call would make, by the index of its turn: (the exchange's start, its position there).
     let mut write_of_call: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut section_start: Option<usize> = None;
+    let mut usage = UsageAccount::default();
 
     let close_runs = |open_assistant: &mut Option<usize>, open_reasoning: &mut Option<usize>| {
         *open_assistant = None;
@@ -404,14 +484,19 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
             match message.get("role").and_then(Value::as_str).unwrap_or("") {
                 "user" => {
                     section_start = Some(turns.len());
+                    usage = UsageAccount {
+                        start: turns.len(),
+                        ..UsageAccount::default()
+                    };
                     let attachments = attachments_of(&content);
-                    let mut turn = ChatTurn::new(TurnKind::User, text);
+                    let mut turn = ChatTurn::new(TurnKind::User, blocks_text(&content));
                     if !attachments.is_empty() {
                         turn.attachments = Some(attachments);
                     }
                     if let Some(at) = event.get("at").and_then(Value::as_str) {
                         turn.time = Some(at.to_owned());
                     }
+                    turn.trigger = trigger_of(message.get("source"));
                     turns.push(turn);
                 }
                 "assistant" => turns.push(ChatTurn::new(TurnKind::Assistant, text)),
@@ -469,6 +554,25 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
             continue;
         }
 
+        if event_type == "model/request" {
+            usage.rounds += 1;
+            usage.reported = false;
+        }
+        if event_type == "turn/completed" {
+            // The exchange's usage belongs to its last answer, and only a complete account is shown.
+            if usage.rounds > 0 && usage.reports == usage.rounds && usage.sum.is_some() {
+                let last_answer = (usage.start + 1..turns.len())
+                    .rev()
+                    .take_while(|index| turns[*index].kind != TurnKind::User)
+                    .find(|index| turns[*index].kind == TurnKind::Assistant);
+                if let Some(index) = last_answer {
+                    turns[index].usage = usage.sum.clone();
+                }
+            }
+            usage.rounds = 0;
+            usage.reports = 0;
+            usage.sum = None;
+        }
         if event_type != "assistant/chunk" {
             if event_type == "assistant/completed"
                 && let Some(ended) = event.get("ended").and_then(Value::as_array)
@@ -541,6 +645,14 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
         let Some(chunk) = event.get("chunk") else {
             continue;
         };
+        if let Some(reported) = chunk.get("usage").filter(|value| value.is_object()) {
+            // One report per round, however many frames of that round carried usage.
+            if !usage.reported {
+                usage.reports += 1;
+            }
+            usage.reported = true;
+            usage.sum = merge_usage(usage.sum.take(), reported);
+        }
         let chunk_type = chunk.get("type").and_then(Value::as_str).unwrap_or("");
         match chunk_type {
             "text-delta" => {
@@ -732,6 +844,130 @@ mod tests {
         assert_eq!(turns[0].text, "hi");
         assert_eq!(turns[0].time.as_deref(), Some("2026-10-22T00:00:00.000Z"));
         assert_eq!(turns[1].text, "hello");
+    }
+
+    #[test]
+    fn a_goal_round_carries_its_trigger_and_a_persons_message_none() {
+        let source = json!({"kind": "goal", "goalId": "goal-1", "revision": 1, "round": 2});
+        let events = vec![
+            json!({"type": "message", "at": "2026-10-29T00:00:00.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "set a goal"}]}}),
+            json!({"type": "message", "at": "2026-10-29T00:00:01.000Z", "message": {"role": "user", "content": [{"type": "text", "text": "Continue working toward the goal."}], "source": source}}),
+            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "x"}], "source": {"note": "no kind"}}}),
+        ];
+        let turns = transcript_turns(&events);
+        assert_eq!(
+            turns[0].trigger, None,
+            "a person's message is not a trigger"
+        );
+        assert_eq!(
+            turns[1].trigger.as_ref(),
+            Some(&source),
+            "the round keeps its whole source"
+        );
+        assert_eq!(
+            turns[2].trigger, None,
+            "a source without a kind names no trigger"
+        );
+        let wire = serde_json::to_value(&turns[1]).unwrap();
+        assert_eq!(wire["trigger"]["round"], 2);
+        assert!(
+            serde_json::to_value(&turns[0])
+                .unwrap()
+                .get("trigger")
+                .is_none(),
+            "absent, not null"
+        );
+    }
+
+    #[test]
+    fn a_notices_text_blocks_read_as_paragraphs_and_a_persons_message_as_written() {
+        let source = json!({"kind": "subagent-settled", "form": "notice", "summary": "Background subagent s-1 finished."});
+        let events = vec![
+            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "one line\nand a second"}]}}),
+            json!({"type": "message", "message": {"role": "user", "source": source, "content": [
+                {"type": "text", "text": "Background subagent s-1 finished. It cannot receive follow-up messages."},
+                {"type": "text", "text": "Its closing message:"},
+                {"type": "text", "text": "pong"}
+            ]}}),
+            json!({"type": "message", "message": {"role": "user", "content": [
+                {"type": "text", "text": "see the picture"},
+                {"type": "image", "mimeType": "image/png", "path": "/work/a.png"}
+            ]}}),
+            json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}),
+        ];
+        let turns = transcript_turns(&events);
+        assert_eq!(
+            turns[0].text, "one line\nand a second",
+            "a person's message reads as written"
+        );
+        assert_eq!(
+            turns[1].text,
+            "Background subagent s-1 finished. It cannot receive follow-up messages.\n\nIts closing message:\n\npong",
+            "each block of a notice is its own paragraph"
+        );
+        assert_eq!(
+            turns[2].text, "see the picture",
+            "an attachment adds no text"
+        );
+        assert_eq!(
+            turns[3].text, "ab",
+            "an answer's text is joined as it streamed"
+        );
+    }
+
+    #[test]
+    fn a_completed_exchange_carries_its_usage_only_when_every_round_reported() {
+        let user = |text: &str| json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}});
+        let round = |usage: Option<Value>| {
+            let mut done = json!({"type": "done"});
+            if let Some(usage) = usage {
+                done["usage"] = usage;
+            }
+            vec![
+                json!({"type": "model/request"}),
+                json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "step "}}),
+                json!({"type": "assistant/chunk", "chunk": done}),
+            ]
+        };
+        let mut events = vec![user("two rounds, both reported")];
+        events.extend(round(Some(
+            json!({"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 900}),
+        )));
+        events.extend(round(Some(
+            json!({"inputTokens": 30, "outputTokens": 5, "cacheReadTokens": 1000}),
+        )));
+        events.push(json!({"type": "assistant/completed", "text": "step step "}));
+        events.push(json!({"type": "turn/completed", "rounds": 2}));
+        events.push(user("one round unreported"));
+        events.extend(round(Some(json!({"inputTokens": 10, "outputTokens": 1}))));
+        events.extend(round(None));
+        events.push(json!({"type": "assistant/completed", "text": "step step "}));
+        events.push(json!({"type": "turn/completed", "rounds": 2}));
+        let turns = transcript_turns(&events);
+        let second = turns
+            .iter()
+            .skip(1)
+            .position(|turn| turn.kind == TurnKind::User)
+            .unwrap()
+            + 1;
+        let carried: Vec<&ChatTurn> = turns[..second]
+            .iter()
+            .filter(|turn| turn.usage.is_some())
+            .collect();
+        assert_eq!(
+            carried.len(),
+            1,
+            "carried once, by the exchange's last answer"
+        );
+        assert_eq!(
+            serde_json::to_string(carried[0].usage.as_ref().unwrap()).unwrap(),
+            r#"{"inputTokens":130,"outputTokens":25,"cacheReadTokens":1900}"#,
+            "the sum of both rounds, with no bucket invented"
+        );
+        assert!(
+            turns[second..].iter().all(|turn| turn.usage.is_none()),
+            "a partial account shows no row"
+        );
     }
 
     #[test]

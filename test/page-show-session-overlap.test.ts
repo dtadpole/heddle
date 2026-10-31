@@ -99,6 +99,14 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function renderScheduleDrawer() {}
     async function refreshScheduleList() {}
     async function refreshScheduleCatalog() {}
+    // The conversation chain's pieces of an open (#76, C74): live events kept aside during the history read, tagged with
+    // the same showGeneration, and the reader's scroll place. The kept events are the page's own; drawing one is a stub.
+    let sessionLoading = null;
+    function rememberChatScroll() {}
+    function restoreChatScroll() {}
+    function drawSessionEvent() {}
+    ${source('keptToDraw')}
+    ${source('drawKeptEvents')}
     ${source('showSession')}
     ({
       show: showSession,

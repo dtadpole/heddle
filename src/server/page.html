@@ -658,6 +658,19 @@
   }
   .turn.user .actions { height: 28px; align-items: center; gap: 8px; margin: 0; }
   /**
+   * A non-human turn trigger (a goal round, a scheduled task): DSH keeps it an independent, bordered notice on a
+   * contrasting neutral background, the full width of the column, never a person's right-aligned bubble. The label
+   * says what started the turn; the prompt the harness wrote opens under it.
+   */
+  .turn.user[data-trigger] { align-self: stretch; align-items: stretch; }
+  .turn.user .trigger-notice { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text-2); font-size: 13px; line-height: 20px; }
+  .turn.user .trigger-notice summary { display: flex; align-items: center; gap: .5rem; padding: 8px 12px; cursor: pointer; list-style: none; }
+  .turn.user .trigger-notice summary::-webkit-details-marker { display: none; }
+  .turn.user .trigger-notice .trigger-label { flex: none; font-weight: 600; color: var(--text); }
+  .turn.user .trigger-notice .trigger-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+  .turn.user .trigger-notice[open] .trigger-first { display: none; }
+  .turn.user .trigger-notice .trigger-text { padding: 0 12px 10px; white-space: pre-wrap; }
+  /**
    * The turn's **Edited files** card, DSH's `ChangedFiles` (its `hz8-rW_*` module CSS, read 2026-10-17): a bordered
    * card at the 16px radius whose header is 60px tall with a 40×40 tile at a 10px radius, a 13px/20px 500 title, a
    * 10px/16px stat line in the code font, rows at least 24px tall with a 12px path, and a 44px expand toggle. DSH
@@ -713,6 +726,17 @@
     margin-top: 6px; padding: 2px 8px; font-size: 12px; line-height: 18px; color: var(--text-3);
     border-left: 2px solid color-mix(in oklab, #d9a441 55%, transparent);
   }
+  /**
+   * DSH's per-Turn token usage: a completed turn's own row, closed to its total and opening to the buckets the
+   * provider reported. It exists only when every model round of the turn reported usage (the transcript decides).
+   */
+  .turn-usage { margin-top: 6px; font-size: 12px; line-height: 18px; color: var(--text-3); }
+  .turn-usage summary { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; list-style: none; }
+  .turn-usage summary::-webkit-details-marker { display: none; }
+  .turn-usage summary::before { content: '›'; display: inline-block; transition: transform .12s; }
+  .turn-usage[open] summary::before { transform: rotate(90deg); }
+  .turn-usage .turn-usage-figures { display: flex; flex-wrap: wrap; gap: .25rem 1rem; padding: 4px 0 0 .9rem; }
+  .turn-usage .turn-usage-figures span b { font-weight: 500; color: var(--text-2); }
   .changed-files { margin-top: 8px; border: .5px solid var(--line); border-radius: 16px; background: var(--surface); overflow: hidden; }
   .changed-head {
     display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; height: 60px; padding: 8px 10px;
@@ -765,6 +789,16 @@
   .turn.assistant.markdown td, .turn.assistant.markdown th { font-size: 14px; line-height: 20px; }
   .turn.assistant.markdown pre { margin: 16px 0; padding: 10px 12px; background: var(--chat-code); border-radius: 8px; overflow-x: auto; }
   .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: 12.5px; line-height: 19px; background: none; padding: 0; }
+  /**
+   * A fenced block's language, DSH's code-block label: drawn from the block's own `data-lang` in its top-right corner,
+   * inside the padding, so it adds no height when the answer settles and is never part of what Copy yields.
+   */
+  .turn.assistant.markdown pre[data-lang] { position: relative; }
+  .turn.assistant.markdown pre[data-lang]::before {
+    content: attr(data-lang); position: absolute; top: 4px; right: 8px; padding: 0 4px; border-radius: 4px;
+    font-family: var(--code-font); font-size: 11px; line-height: 15px; color: var(--text-3); background: var(--chat-code);
+    text-transform: lowercase; pointer-events: none;
+  }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
   /**
    * **The live state is a shimmer on the words, never a band across the row.**
@@ -2237,6 +2271,44 @@
   #approval-reject { background: none; color: var(--text); border: 1px solid var(--border); }
   #approval-reject:hover { background: var(--hover); }
   #approval-allow { background: var(--text); color: #0f1115; border: 0; }
+  /**
+   * The question card (`ask_user_question`), DSH's attached card: it takes the place above the composer while the model
+   * waits for a person. A pager walks a batch, a single choice advances on click, free text sits under the choices,
+   * and Skip and the one batch submit are the actions; a timed wait shows its countdown and Take time.
+   */
+  #question-card {
+    width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto .35rem;
+    padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--radius);
+    background: color-mix(in oklab, var(--accent) 7%, var(--surface)); color: var(--text);
+  }
+  #question-card[hidden] { display: none; }
+  #question-card .head { display: flex; align-items: center; gap: .45rem; font-size: 13px; font-weight: 600; }
+  #question-card .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  #question-card[data-read-only='true'] .dot { background: var(--text-3); }
+  #question-card .badge { font-size: 11px; font-weight: 500; color: var(--text-3); border: 1px solid var(--border); border-radius: 6px; padding: 0 .35rem; }
+  #question-card .pager { margin-left: auto; display: flex; align-items: center; gap: .3rem; font-weight: 400; color: var(--text-3); }
+  #question-card .pager button { height: 22px; width: 22px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
+  #question-card .pager button:disabled { opacity: .35; cursor: default; }
+  #question-text { margin: .45rem 0 .5rem; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+  #question-options { display: flex; flex-direction: column; gap: .3rem; margin: 0 0 .5rem; }
+  #question-options .q-option {
+    display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; width: 100%; padding: .4rem .6rem; text-align: left;
+    font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+  }
+  #question-options .q-option:hover:not(:disabled) { background: var(--hover); }
+  #question-options .q-option[aria-pressed='true'] { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, var(--surface)); }
+  #question-options .q-option:disabled { cursor: default; opacity: .8; }
+  #question-options .q-option .desc { font-size: 12px; color: var(--text-3); }
+  #question-custom { width: 100%; box-sizing: border-box; height: 34px; padding: .35rem .5rem; font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  #question-skipped { margin: 0 0 .5rem; font-size: 12px; color: var(--text-3); }
+  #question-note { margin: .35rem 0 0; font-size: 12px; color: var(--text-3); }
+  #question-card .actions { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; margin-top: .5rem; }
+  #question-countdown { margin-right: auto; font-size: 12px; color: var(--text-3); }
+  #question-card .actions button { height: 32px; padding: 0 .8rem; font: inherit; font-size: 13px; border-radius: 10px; cursor: pointer; background: none; color: var(--text); border: 1px solid var(--border); }
+  #question-card .actions button:hover { background: var(--hover); }
+  #question-submit { background: var(--text) !important; color: #0f1115 !important; border: 0 !important; }
+  .turn.tool .question-open { margin: .35rem 0 0; height: 26px; padding: 0 .6rem; font: inherit; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; background: none; color: var(--text); cursor: pointer; }
+  .turn.user .bubble.question-answer { white-space: pre-wrap; }
   /** The status line under the card: only what the page can actually know. */
   #composer-status {
     display: flex; justify-content: center; align-items: center; gap: .75rem;
@@ -2706,6 +2778,10 @@
   }
   #timeline:empty { display: none; }
   .tr-lanes { position: relative; }
+  /** An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration. */
+  #timeline-tip { position: absolute; top: calc(100% + .25rem); z-index: 5; display: flex; flex-direction: column; gap: .1rem; max-width: 220px; padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
+  #timeline-tip[hidden] { display: none; }
+  #timeline-tip span { font-family: var(--mono); opacity: .75; }
   .tr-lane { position: relative; height: 15px; }
   .tr-lane-label {
     position: absolute;
@@ -3466,6 +3542,35 @@
   </div>
 
   <!--
+    DSH's question card for `ask_user_question`: drawn from `GET /api/questions` and the session's `question/*` events,
+    answered through `POST /api/questions/<id>`. The same card, read-only, is what a settled question's tool row opens.
+  -->
+  <div id="question-card" role="dialog" aria-labelledby="question-title" hidden>
+    <div class="head">
+      <span class="dot" aria-hidden="true"></span><span id="question-title">Question</span>
+      <span id="question-badge" class="badge" hidden></span>
+      <span class="pager" id="question-pager" hidden>
+        <button type="button" id="question-prev" aria-label="Previous question">‹</button>
+        <span id="question-position"></span>
+        <button type="button" id="question-next" aria-label="Next question">›</button>
+      </span>
+    </div>
+    <p id="question-text"></p>
+    <div id="question-options" role="group" aria-label="Choices"></div>
+    <p id="question-skipped" hidden>Skipped</p>
+    <!-- A single-line field, not a textarea: the page's composer is the document's first textarea, and checks and tools
+         that find it that way must keep finding the composer while a question is open. -->
+    <input type="text" id="question-custom" placeholder="Type another answer" aria-label="Your own answer" autocomplete="off">
+    <p id="question-note" hidden></p>
+    <div class="actions">
+      <span id="question-countdown" hidden></span>
+      <button type="button" id="question-take-time" hidden>Take time</button>
+      <button type="button" id="question-skip">Skip</button>
+      <button type="button" id="question-close" hidden>Close</button>
+      <button type="button" id="question-submit">Submit</button>
+    </div>
+  </div>
+  <!--
     DSH's approval card: an amber-bordered question above the composer, with the model's justification verbatim and
     one way to say no and one to allow exactly the call that asked. It is drawn from the server's
     `approval/request` event and answered through `POST /api/approvals/<id>`.
@@ -3891,6 +3996,34 @@ function scheduleTodoRefresh() {
   }, 120)
 }
 
+/**
+ * A non-human turn trigger as DSH draws it: an independent, bordered notice. The label names what started the turn - a
+ * goal round with its number, a scheduled task - and the prompt the harness wrote opens beneath it, closed by default
+ * with its first line as the hint, so a run of rounds reads as rounds rather than as a person repeating themselves.
+ */
+function triggerLabel(trigger) {
+  if (trigger.kind === 'goal') return Number.isInteger(trigger.round) ? `Goal round ${trigger.round}` : 'Goal round'
+  if (trigger.kind === 'schedule') return 'Scheduled task'
+  return trigger.kind.charAt(0).toUpperCase() + trigger.kind.slice(1)
+}
+function triggerNotice(trigger, text) {
+  const notice = document.createElement('details')
+  notice.className = 'trigger-notice'
+  const head = document.createElement('summary')
+  const label = document.createElement('span')
+  label.className = 'trigger-label'
+  label.textContent = triggerLabel(trigger)
+  const first = document.createElement('span')
+  first.className = 'trigger-first'
+  first.textContent = (text.split('\n').find((line) => line.trim() !== '') ?? '').trim()
+  head.append(label, first)
+  const body = document.createElement('div')
+  body.className = 'trigger-text'
+  body.textContent = text
+  notice.append(head, body)
+  return notice
+}
+
 function add(kind, text, merge = true, label, tool) {
   /**
    * An empty answer is normally nothing to draw — except when it carries something a reader must see: the stop
@@ -3953,6 +4086,7 @@ function add(kind, text, merge = true, label, tool) {
     node.classList.add('markdown')
     node.dataset.rendered = 'true'
     node.innerHTML = tool.html
+    decorateCodeBlocks(node)
     /**
      * A history row is settled by construction, so it gets its actions here — the same ones the live path
      * attaches; `dataset.copyText` is snapshotted before the button is inside the row.
@@ -3963,23 +4097,38 @@ function add(kind, text, merge = true, label, tool) {
     node.append(messageActions(node))
     if (tool !== undefined && Array.isArray(tool.files) && tool.files.length > 0) node.append(editedFilesPanel(tool.files))
     if (tool !== undefined && Array.isArray(tool.ended) && tool.ended.length > 0) node.append(turnNotice(tool.ended))
+    if (tool !== undefined && tool.usage !== null && typeof tool.usage === 'object') {
+      const usageRow = turnUsageRow(tool.usage)
+      if (usageRow !== null) node.append(usageRow)
+    }
   } else if (kind === 'user') {
     /**
      * A person's message is a **row**: the bubble, then the actions beneath it. History carries the event's own
      * `time`; a message typed here has no event yet, so it is stamped as it is drawn.
      */
-    if (tool !== undefined && Array.isArray(tool.attachments) && tool.attachments.length > 0) {
-      node.append(messageAttachments(tool.attachments))
+    const trigger = tool !== undefined && tool.trigger !== null && typeof tool.trigger === 'object' && typeof tool.trigger.kind === 'string' ? tool.trigger : null
+    if (trigger !== null) {
+      /** The harness wrote this message, so it is a notice that says what started the turn, not a person's bubble. */
+      node.dataset.trigger = trigger.kind
+      node.append(triggerNotice(trigger, text))
+      node.dataset.copyText = text
+    } else {
+      if (tool !== undefined && Array.isArray(tool.attachments) && tool.attachments.length > 0) {
+        node.append(messageAttachments(tool.attachments))
+      }
+      if (text !== '') {
+        const bubble = document.createElement('div')
+        bubble.className = 'bubble'
+        /** A late answer to a question arrives as DSH's JSON record; it is drawn as the questions and their answers. */
+        const answered = questionAnswerText(text)
+        if (answered !== null) bubble.classList.add('question-answer')
+        bubble.textContent = answered ?? text
+        node.append(bubble)
+      }
+      node.dataset.copyText = text
+      const sentAt = tool !== undefined && typeof tool.time === 'string' ? tool.time : new Date().toISOString()
+      node.append(userActions(node, sentAt))
     }
-    if (text !== '') {
-      const bubble = document.createElement('div')
-      bubble.className = 'bubble'
-      bubble.textContent = text
-      node.append(bubble)
-    }
-    node.dataset.copyText = text
-    const sentAt = tool !== undefined && typeof tool.time === 'string' ? tool.time : new Date().toISOString()
-    node.append(userActions(node, sentAt))
   } else {
     node.textContent = text
   }
@@ -4274,6 +4423,85 @@ function turnNotice(ended) {
   return notice
 }
 
+/**
+ * The loop's reason for a turn the person stopped (`ended` in both builds' loops), which the transcript replays as the
+ * turn's notice.
+ */
+const STOPPED_REASON = 'stopped by the caller'
+
+/**
+ * Mark the turn this page just stopped where it ended, the way a reload draws it from the transcript.
+ *
+ * The turn's stream ends `cancelled` with no reason, so the live page drew nothing, and a stopped answer read like one
+ * that had finished there, until a reload showed "Stopped by the caller" (live-testing draft developer-ten-8, issue
+ * #34). The notice goes on the turn's answer when it has one, as history puts it, and otherwise as its own row. A turn
+ * already marked is left alone.
+ */
+function markStopped() {
+  const last = lastTurnRow()
+  if (last === null) return
+  if (last.dataset.kind === 'assistant') {
+    if (last.querySelector(':scope > .turn-notice') === null) last.append(turnNotice([STOPPED_REASON]))
+    return
+  }
+  if (!last.classList.contains('turn-notice')) log.append(turnNotice([STOPPED_REASON]))
+}
+
+/**
+ * A completed turn's token usage, DSH's per-Turn usage row: closed it reads the total, open it lists the buckets the
+ * provider reported, and a bucket nobody reported is left out rather than shown as zero.
+ */
+const TURN_USAGE_BUCKETS = [
+  ['inputTokens', 'Input'],
+  ['cacheReadTokens', 'Cache read'],
+  ['cacheWriteTokens', 'Cache write'],
+  ['outputTokens', 'Output'],
+]
+function turnUsageRow(usage) {
+  const present = TURN_USAGE_BUCKETS.filter(([key]) => typeof usage[key] === 'number' && Number.isFinite(usage[key]))
+  if (present.length === 0) return null
+  const total = present.reduce((sum, [key]) => sum + usage[key], 0)
+  const row = document.createElement('details')
+  row.className = 'turn-usage'
+  row.dataset.turnUsage = String(total)
+  const head = document.createElement('summary')
+  head.textContent = `Tokens · ${total.toLocaleString('en-US')}`
+  const figures = document.createElement('div')
+  figures.className = 'turn-usage-figures'
+  for (const [key, label] of present) {
+    const figure = document.createElement('span')
+    figure.dataset.bucket = key
+    const value = document.createElement('b')
+    value.textContent = usage[key].toLocaleString('en-US')
+    figure.append(`${label} `, value)
+    figures.append(figure)
+  }
+  row.append(head, figures)
+  return row
+}
+/** The live turn's row, once it ends: the durable fold decides, so a live answer shows exactly what a reload shows. */
+async function attachTurnUsage() {
+  if (current === null) return
+  let data
+  try {
+    const response = await fetch('/api/sessions/' + encodeURIComponent(current))
+    if (!response.ok) return
+    data = await response.json()
+  } catch {
+    return
+  }
+  const turns = data.turns ?? []
+  let lastUser = -1
+  turns.forEach((turn, index) => { if (turn.kind === 'user') lastUser = index })
+  const answer = turns.slice(lastUser + 1).filter((turn) => turn.kind === 'assistant').at(-1)
+  if (answer === undefined || answer.usage === undefined) return
+  const row = [...log.querySelectorAll('.turn')].at(-1)
+  const last = row !== undefined && row.classList.contains('assistant') ? row : [...log.querySelectorAll('.turn.assistant')].at(-1)
+  if (last === undefined || last.querySelector('.turn-usage') !== null) return
+  const usageRow = turnUsageRow(answer.usage)
+  if (usageRow !== null) last.append(usageRow)
+}
+
 function basenameOf(path) {
   return path.split('/').pop() ?? path
 }
@@ -4358,30 +4586,51 @@ function editedFilesPanel(files) {
 }
 
 /**
- * Attach the cards to answers that do not have one yet.
+ * Attach the turn that just ended its Edited files card, under its own answer.
  *
  * Live rows are built from the stream, so their files are not in the page: the session's own projection is fetched
- * once the turn ends and each of its last answers takes the card by its place among the answers. This is one source
- * of truth — the same `files` the history render reads — rather than a second fold in the page.
+ * once the turn ends, and the files of **that turn's** exchange — the turns after the last message — go under the
+ * newest answer, which is the exchange's last. This is one source of truth, the same `files` the history render reads.
+ *
+ * Earlier turns are not touched: each got its card when it ended, or from the history render. Measured before this:
+ * the cards of every turn that ever edited were pinned to the last answers counted from the end, so after one write
+ * every later answer — a read, a listing, a failed command — showed that write's card, and it was added again under
+ * each new answer (live-testing draft developer-five-8). A turn that edited nothing now shows no card.
  */
 async function attachEditedFiles() {
-  if (current === null) return
+  const session = current
+  if (session === null) return
   let data
   try {
-    const response = await fetch('/api/sessions/' + encodeURIComponent(current))
+    const response = await fetch('/api/sessions/' + encodeURIComponent(session))
     if (!response.ok) return
     data = await response.json()
   } catch {
     return
   }
-  const withFiles = (data.turns ?? []).filter((turn) => turn.kind === 'assistant' && Array.isArray(turn.files) && turn.files.length > 0)
-  if (withFiles.length === 0) return
-  const answers = [...log.querySelectorAll('.turn.assistant')]
-  for (let index = 0; index < withFiles.length; index += 1) {
-    const row = answers[answers.length - withFiles.length + index]
-    if (row !== undefined && row.querySelector('[data-changed-files]') === null) row.append(editedFilesPanel(withFiles[index].files))
-  }
+  /** The reader may have moved to another session while this was asked; its rows are not this turn's. */
+  if (current !== session) return
+  const files = lastExchangeFiles(data.turns ?? [])
+  if (files === null) return
+  const row = [...log.querySelectorAll('.turn.assistant')].at(-1)
+  if (row === undefined || row.querySelector('[data-changed-files]') !== null) return
+  /** Where history puts it: after the message actions, before a stopped turn's notice and the usage row. */
+  row.insertBefore(editedFilesPanel(files), row.querySelector(':scope > :is(.turn-notice, .turn-usage)'))
 }
+
+/* edited-files:begin */
+/**
+ * The files the newest exchange edited — those on its last answer, where the session projection puts them — or `null`
+ * when it edited none. An exchange is the turns after the last message; an earlier exchange's files are not its own.
+ * Pure, and fenced by these markers, so test/page-edited-files.test.ts judges it directly.
+ */
+function lastExchangeFiles(turns) {
+  let lastUser = -1
+  turns.forEach((turn, index) => { if (turn.kind === 'user') lastUser = index })
+  const answer = turns.slice(lastUser + 1).filter((turn) => turn.kind === 'assistant').at(-1)
+  return answer !== undefined && Array.isArray(answer.files) && answer.files.length > 0 ? answer.files : null
+}
+/* edited-files:end */
 
 /**
  * The person's message actions: the **sent time**, then the copy button — DSH's IconActions row for a user
@@ -4413,9 +4662,66 @@ function userActions(row, iso) {
   return bar
 }
 
+/**
+ * An answer's code blocks, DSH's way: each fence names its language in a label, and is coloured by **one** highlighter
+ * whichever server drew it (C60). The two servers highlight on their own and were measured classifying the same tokens
+ * differently, so the page re-highlights a fence from its text with the highlight.js both servers serve under
+ * `/vendor/highlight/`, registering exactly the grammars and aliases `highlight.ts` registers - which is also what the
+ * TypeScript server's colours already are. A fence with no language is left as drawn. If the modules cannot be loaded,
+ * the server's own colours stay: the block is never left uncoloured or unreadable.
+ */
+const CODE_GRAMMARS = ['bash', 'c', 'cpp', 'css', 'diff', 'go', 'ini', 'java', 'javascript', 'json', 'markdown', 'php', 'plaintext', 'python', 'ruby', 'rust', 'sql', 'typescript', 'xml', 'yaml']
+const CODE_ALIASES = {
+  sh: 'bash', shell: 'bash', zsh: 'bash', console: 'bash',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', node: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', python3: 'python',
+  yml: 'yaml',
+  jsonc: 'json', json5: 'json',
+  html: 'xml', svg: 'xml', xhtml: 'xml',
+  md: 'markdown', mdown: 'markdown',
+  rs: 'rust', golang: 'go', 'c++': 'cpp', h: 'c', hpp: 'cpp',
+  rb: 'ruby', cfg: 'ini', conf: 'ini', text: 'plaintext', txt: 'plaintext', plain: 'plaintext',
+  toml: 'ini', properties: 'ini', env: 'ini',
+}
+let codeHighlighter = null
+function loadCodeHighlighter() {
+  codeHighlighter ??= (async () => {
+    const hljs = (await import('/vendor/highlight/core.js')).default
+    const grammars = await Promise.all(CODE_GRAMMARS.map(async (name) => [name, (await import(`/vendor/highlight/languages/${name}.js`)).default]))
+    for (const [name, grammar] of grammars) hljs.registerLanguage(name, grammar)
+    return hljs
+  })().catch(() => null)
+  return codeHighlighter
+}
+function decorateCodeBlocks(root) {
+  const blocks = []
+  for (const code of root.querySelectorAll('pre > code[class*="language-"]')) {
+    const requested = ([...code.classList].find((name) => name.startsWith('language-')) ?? '').slice('language-'.length)
+    if (requested === '') continue
+    code.parentElement.dataset.lang = requested
+    blocks.push([code, requested.toLowerCase()])
+  }
+  if (blocks.length === 0) return
+  void loadCodeHighlighter().then((hljs) => {
+    if (hljs === null) return
+    for (const [code, requested] of blocks) {
+      if (!code.isConnected || code.dataset.highlighted !== undefined) continue
+      const named = CODE_ALIASES[requested] ?? requested
+      const language = CODE_GRAMMARS.includes(named) ? named : 'plaintext'
+      try {
+        code.innerHTML = hljs.highlight(code.textContent, { language }).value
+      } catch {
+        code.innerHTML = hljs.highlight(code.textContent, { language: 'plaintext' }).value
+      }
+      code.dataset.highlighted = language
+    }
+  })
+}
+
 async function renderSettledAnswers() {
   for (const row of log.querySelectorAll('.turn.assistant:not([data-rendered])')) {
-    const text = row.textContent
+    const text = answerText(row)
     if (text === undefined || text.trim() === '') {
       row.dataset.rendered = 'empty'
       continue
@@ -4433,17 +4739,20 @@ async function renderSettledAnswers() {
       // can be handled before the answer's last text deltas. Drawing the snapshot then would erase those
       // deltas (80 check-chat-view #16), so a row that grew while its render was in flight is rendered
       // again from what it holds now.
-      if (row.textContent !== text) {
+      if (answerText(row) !== text) {
         delete row.dataset.rendered
         void renderSettledAnswers()
         return
       }
       if (body !== null && typeof body.html === 'string') {
+        const kept = [...row.querySelectorAll(`:scope > :is(${ANSWER_DECORATIONS})`)]
         row.classList.add('markdown')
         row.innerHTML = body.html
+        decorateCodeBlocks(row)
         row.dataset.rendered = 'true'
         /** What a copy should yield is the **drawn** answer, so the snapshot is refreshed after drawing. */
         row.dataset.copyText = row.innerText
+        row.append(messageActions(row), ...kept)
       } else {
         row.dataset.rendered = 'failed'
       }
@@ -4452,6 +4761,29 @@ async function renderSettledAnswers() {
     }
     if (row.querySelector('.actions') === null) row.append(messageActions(row))
   }
+}
+
+/**
+ * What a settled answer carries below its text: the Edited files card, the per-turn usage row, and the notice of a turn
+ * that stopped early. History draws them after the message actions; a live answer gets them when its turn ends, which
+ * can be while its markdown is still being drawn.
+ */
+const ANSWER_DECORATIONS = '[data-changed-files], .turn-usage, .turn-notice'
+
+/**
+ * An answer's own text, without the card, row and notice that hang below it.
+ *
+ * The markdown is drawn from this, and a row whose text grew while it was drawn is drawn again. Read from the whole
+ * row, a card attached in that interval looked like growth: its words were drawn into the answer and the card was
+ * wiped. The same held for a stopped turn's notice, which is attached just before the answer is drawn.
+ */
+function answerText(row) {
+  let text = ''
+  for (const child of row.childNodes) {
+    if (child instanceof Element && child.matches(ANSWER_DECORATIONS)) continue
+    text += child.textContent ?? ''
+  }
+  return text
 }
 
 /**
@@ -4861,6 +5193,8 @@ function addBlock(kind, text, merge, label, tool) {
     body.textContent = text
   }
   node.append(line, body)
+  /** A question's tool row reopens the question, read-only once it is answered (DSH's question card). */
+  if (kind === 'tool' && tool !== undefined && tool.name === 'ask_user_question') body.append(questionToolButton(node))
   if (kind === 'tool' && tool !== undefined && typeof tool.result === 'string') showToolError(node, tool.result)
   log.append(node)
   /** After the append: the card compares itself with the `todo_write` rows above it. */
@@ -5677,6 +6011,11 @@ async function showLedger(id) {
     if (ticket !== ledgerFetches) return
       renderLedger(body, body.timeline ?? { spans: [], durationMs: 0 })
   } catch (error) {
+    /**
+     * A failure is drawn only by the newest request, like a success. An older read that fails after a newer one has
+     * drawn would otherwise append its error under the new ledger (developer-two, reproduced in a component run).
+     */
+    if (ticket !== ledgerFetches) return
     const note = document.createElement('div')
     note.className = 'turn denied'
     note.textContent = 'could not read the ledger: ' + (error && error.message)
@@ -6243,12 +6582,35 @@ function timingSection(record, turn, step) {
   ])
 }
 
+/* timeline-tip:begin */
+/**
+ * What an overview tick says when hovered: its turn and kinds, then the clock it started at and how long it lasted
+ * (DSH's overview shows a span's exact clock and duration after a 500 ms hover). A running span shows only its start,
+ * because DSH's overview invents no elapsed time for work in flight. Positions are fractions of the timeline's domain,
+ * which starts at `startsAtMs` and lasts `totalMs`. Pure, and fenced so test/page-timeline-tip.test.ts judges it.
+ */
+function timelineTickText(span, totalMs, startsAtMs) {
+  const label = 'turn ' + span.turn + ' · ' + ((span.kinds ?? []).join(', ') || 'records')
+  const lasted = Math.max(0, (span.end - span.start) * totalMs)
+  const duration = lasted < 1000 ? Math.round(lasted) + ' ms' : lasted < 60_000 ? (lasted / 1000).toFixed(lasted < 10_000 ? 2 : 1) + ' s' : Math.floor(lasted / 60_000) + 'm ' + Math.round((lasted % 60_000) / 1000) + 's'
+  let clock = null
+  if (Number.isFinite(startsAtMs)) {
+    const at = new Date(startsAtMs + span.start * totalMs)
+    const two = (value) => String(value).padStart(2, '0')
+    clock = two(at.getHours()) + ':' + two(at.getMinutes()) + ':' + two(at.getSeconds()) + '.' + String(at.getMilliseconds()).padStart(3, '0')
+  }
+  const when = span.running ? [clock ?? 'start unknown', 'running'] : [clock, duration].filter((part) => part !== null)
+  return { label, when: when.join(' · ') }
+}
+/* timeline-tip:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   timeline.replaceChildren()
   const spans = timeline_?.spans ?? []
   if (spans.length === 0) return
   const total = timeline_?.durationMs ?? 0
+  const startsAtMs = Date.parse(timeline_?.startsAt ?? '')
   const lanes = ['input', 'model', 'tools']
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
@@ -6277,8 +6639,14 @@ function renderTimeline(timeline_, data = {}) {
       tick.style.left = (left * 100).toFixed(3) + '%'
       tick.style.width = (width * 100).toFixed(3) + '%'
       if (span.running) tick.dataset.running = 'true'
-      tick.title = 'turn ' + span.turn + ' · ' + (kinds.join(', ') || 'records')
-      tick.setAttribute('aria-label', tick.title)
+      /**
+       * The details wait for a 500 ms hover, as DSH's do, in the strip's own tip rather than a native title (which the
+       * browser shows on its own delay, with no clock); the same words are the tick's accessible name.
+       */
+      const text = timelineTickText(span, total, startsAtMs)
+      tick.dataset.tipLabel = text.label
+      tick.dataset.tipWhen = text.when
+      tick.setAttribute('aria-label', text.label + ' · ' + text.when)
       tick.addEventListener('click', (clickEvent) => {
         clickEvent.stopPropagation()
         const anchor = turnAnchors.get(span.turn)
@@ -6290,6 +6658,32 @@ function renderTimeline(timeline_, data = {}) {
     wrapper.append(laneBox)
   }
   timeline.append(wrapper)
+  /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
+  const tip = document.createElement('div')
+  tip.id = 'timeline-tip'
+  tip.hidden = true
+  timeline.append(tip)
+  let tipTimer = null
+  const hideTip = () => {
+    if (tipTimer !== null) clearTimeout(tipTimer)
+    tipTimer = null
+    tip.hidden = true
+  }
+  for (const tick of wrapper.querySelectorAll('.tr-tick')) {
+    tick.addEventListener('pointerenter', () => {
+      hideTip()
+      tipTimer = setTimeout(() => {
+        tipTimer = null
+        tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+        const strip = timeline.getBoundingClientRect()
+        const at = tick.getBoundingClientRect()
+        tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
+        tip.hidden = false
+      }, 500)
+    })
+    tick.addEventListener('pointerleave', hideTip)
+    tick.addEventListener('pointerdown', hideTip)
+  }
   /** Drag across the strip to focus a time window; rows outside it dim, as DSH does. */
   let dragging = false
   let startX = 0
@@ -6541,6 +6935,64 @@ function historyFailureText(status, statusText, failure) {
   return `Failed to load history: ${reason} (${status})`
 }
 
+/* chat-scroll:begin */
+/**
+ * Where a reader was in each session's transcript, DSH's scroll restoration: a reader who scrolled back, opened another
+ * session and came back finds the same place, while one who was following the tail keeps following it. Kept for the
+ * page's lifetime, keyed by session. Only a showing transcript is recorded, because a hidden one reads as scrolled to
+ * the top, and an empty one has no place to keep. Pure, and fenced by these markers, so a unit test
+ * (test/page-chat-scroll.test.ts) judges the decisions directly.
+ */
+const ChatScrollMemory = {
+  create() {
+    const places = new Map()
+    return {
+      /** Record `session`'s place; `false` when nothing was recorded. */
+      remember(session, { showing, rows, following, top }) {
+        if (session === null || session === undefined || !showing || rows === 0) return false
+        places.set(session, { following: following === true, top: Math.max(0, Number(top) || 0) })
+        return true
+      },
+      /** What to do on opening `session`: follow the tail, or stand where its reader left it. */
+      plan(session) {
+        const place = places.get(session)
+        return place === undefined || place.following ? { follow: true } : { follow: false, top: place.top }
+      },
+    }
+  },
+}
+/* chat-scroll:end */
+const chatScrollMemory = ChatScrollMemory.create()
+function rememberChatScroll() {
+  chatScrollMemory.remember(current, { showing: view === 'chat', rows: log.childElementCount, following: chatFollowing, top: log.scrollTop })
+}
+function restoreChatScroll(id) {
+  const plan = chatScrollMemory.plan(id)
+  if (plan.follow) {
+    followChatTail(true)
+    return
+  }
+  chatFollowing = false
+  log.dataset.following = 'false'
+  log.scrollTop = plan.top
+  /** Once more after layout has landed: a settled document or an image can change the height under the first try. */
+  requestAnimationFrame(() => {
+    if (current === id && !chatFollowing) log.scrollTop = plan.top
+  })
+}
+
+/**
+ * The live events kept aside while `showSession` reads the session's history, tagged with the open's `showGeneration`.
+ *
+ * `showSession` clears the transcript and then reads `/api/sessions/{id}`; the event stream keeps delivering in the
+ * meantime. An event that arrived during the read and was recorded before the answer was built is in that answer too,
+ * so drawing it live and again from history showed it twice. Measured on TS: a turn run while its session was opening
+ * was drawn whole, then again from history (live-testing draft developer-eleven-1). The answer's `seq` says how far it
+ * reaches, so the kept events past it are drawn and the rest dropped. A newer `showSession` takes the panel over (one
+ * counter, `showGeneration`, for both): the older one draws nothing when its read returns.
+ */
+let sessionLoading = null
+
 /**
  * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
  * be loaded and the column shows DSH's failure line instead (#56). It also resolves false when a later open replaced
@@ -6555,6 +7007,8 @@ function historyFailureText(status, statusText, failure) {
  */
 async function showSession(id) {
   const generation = ++showGeneration
+  /** Where the reader left the session being replaced, before anything below changes the view. */
+  rememberChatScroll()
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6608,11 +7062,13 @@ async function showSession(id) {
    * This is the half that was missing: selecting a session used to leave the right side empty, because
    * the only thing that ever wrote to it was the live stream and those events had already happened.
    */
+  sessionLoading = { id, generation, events: [] }
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
     if (generation !== showGeneration) return false
     if (!response.ok) {
+      if (sessionLoading?.generation === generation) sessionLoading = null
       /**
        * A session that is no longer there is **not** the session being shown.
        *
@@ -6709,11 +7165,15 @@ async function showSession(id) {
         log.append(note)
       }
     }
-    followChatTail(true)
+    /** The live events kept aside during the read: those the history already holds are dropped. */
+    drawKeptEvents(generation, typeof body.seq === 'number' ? body.seq : null)
+    /** Back where the reader left this session, or at its tail when they were following it (or never here). */
+    restoreChatScroll(id)
   } catch (error) {
     /** An older open's failed read says nothing in the conversation a later open is drawing. */
     if (generation !== showGeneration) return false
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
+    drawKeptEvents(generation, null)
     const note = document.createElement('div')
     note.className = 'turn denied'
     note.textContent = 'could not read this session: ' + (error && error.message)
@@ -7269,9 +7729,26 @@ events.addEventListener('session', (message) => {
       void renderSettledAnswers()
       /** DSH's turn tail exists only for a completed turn, so a turn's created-reminder cards land here. */
       renderScheduleCards()
+
+      /** A turn started elsewhere ends only here, and it may have edited files as well as the page's own. */
+      void attachEditedFiles()
     }
   }
   if (shown && payload.session !== shown) return
+  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
+  if (sessionLoading !== null && payload.session === sessionLoading.id) {
+    sessionLoading.events.push(payload)
+    return
+  }
+  drawSessionEvent(payload)
+})
+
+/**
+ * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
+ * the events kept aside while the session's history was read.
+ */
+function drawSessionEvent(payload) {
+  const event = payload.event
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
     void slashReady.then((commands) => commands?.draw(event))
@@ -7287,7 +7764,6 @@ events.addEventListener('session', (message) => {
   }
   if (event.type === 'assistant/chunk') {
     if (event.chunk.type === 'done') {
-      void attachEditedFiles()
       /**
        * A round's span closes at the frame that carries the provider's output tokens, which is what the durable
        * fold also uses once the turn ends. A round without reported tokens is not timed here either.
@@ -7340,6 +7816,8 @@ events.addEventListener('session', (message) => {
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
       attachments: contentAttachments(event.message.content, payload.session),
+      /** A goal round arrives live with its `source`, so it is drawn as the same notice a reload draws. */
+      ...(event.message.source && typeof event.message.source.kind === 'string' ? { trigger: event.message.source } : {}),
     })
   }
   else if (event.type === 'message' && event.message.role === 'tool') {
@@ -7361,7 +7839,27 @@ events.addEventListener('session', (message) => {
       void showLedger(current)
     }, 500)
   }
-})
+}
+
+/**
+ * Draw the events kept aside during a history read. When the answer said how far it reaches (`upTo`, its `seq`), only
+ * the events past it are drawn; an event without a `seq` is a live-only fragment the history's card already covers.
+ * Without a `seq` (a read that failed), every kept event is drawn, as the stream would have.
+ */
+function drawKeptEvents(generation, upTo) {
+  if (sessionLoading === null || sessionLoading.generation !== generation) return
+  const kept = sessionLoading.events
+  sessionLoading = null
+  for (const payload of keptToDraw(kept, upTo)) drawSessionEvent(payload)
+}
+
+/* kept-events:begin */
+/** The kept events to draw: all of them without `upTo`, else only those recorded past it. */
+function keptToDraw(kept, upTo) {
+  if (upTo === null) return kept
+  return kept.filter((payload) => typeof payload?.event?.seq === 'number' && payload.event.seq > upTo)
+}
+/* kept-events:end */
 
 /** Coalesces the burst of events one turn produces into a single ledger refetch. */
 let ledgerRefetchTimer = null
@@ -8592,6 +9090,12 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   const decoder = new TextDecoder()
   let buffer = ''
   /**
+   * The session this turn created, once adopted. The turn stream repeats its `session` event with the events it
+   * relays, and adopting on each one re-read the whole session (`fetchSessionAccess`) about five times a model round:
+   * measured on TS, 52 full reads in one test's two messages. A turn creates at most one session, so it is adopted once.
+   */
+  let adopted = null
+  /**
    * Blocks are separated by a **blank line** — two real newlines. Measured while writing this, and the reason
    * the literal is called out: it was written as `'\\n\\n'`, four characters rather than two, so the split
    * never matched and only the first block of the stream was ever read. The live view survived because the
@@ -8613,7 +9117,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * A turn with no session starts one, and the panel follows it: the queue that was loose while the
          * turn ran belongs to the session it created.
          */
-        if (target === null) {
+        if (target === null && adopted === null) {
+          adopted = payload.session
           /**
            * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
            * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
@@ -8646,7 +9151,21 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         liveUsage = undefined
         updateStatusBar()
         void refreshSessionStats()
-        for (const denial of payload.denials ?? []) add('denied', `${denial.tool}: ${denial.message}`)
+        /**
+         * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
+         *
+         * The turn's `done` comes on its own connection and can be handled before the answer's last deltas arrive on
+         * the event stream. A note appended then split the answer in two: the late text started a new row after the
+         * refusals (live-testing draft developer-five-9, seen on TS). With the answer as the newest row, each note goes
+         * just before it, so late text still lands in the answer. A turn with no answer row yet appends as before;
+         * its answer then follows the notes whole.
+         */
+        const answerRow = lastTurnRow()
+        for (const denial of payload.denials ?? []) {
+          add('denied', `${denial.tool}: ${denial.message}`)
+          const note = lastTurnRow()
+          if (answerRow !== null && answerRow.dataset.kind === 'assistant' && note !== null && note !== answerRow && note.dataset.kind === 'denied') answerRow.before(note)
+        }
         /**
          * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
          * reason travels on the completed event, so a reload shows it again from the transcript.
@@ -8663,6 +9182,11 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         void renderSettledAnswers()
         /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
         renderScheduleCards(true)
+
+        /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
+        void attachTurnUsage()
+        /** And DSH's ChangedFiles card, once per turn and only for a turn that edited something. */
+        void attachEditedFiles()
         /**
          * The turn may have created **this folder's** session, so both the tree and the list are
          * re-read.
@@ -8687,7 +9211,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         /** A question the stopped turn was waiting on has no answer to give now. */
         hideApproval()
         settleChat()
+        if (current === null || payload.session === current) markStopped()
         void renderSettledAnswers()
+        /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
+        void attachEditedFiles()
         if (typeof payload.session === 'string') {
           noteCompletion(payload.session, runningSessions.has(payload.session), false)
           runningSessions.delete(payload.session)
@@ -9442,11 +9969,16 @@ function attachTypeLabel(name) {
   return extension.length > 0 && extension.length <= 5 ? extension.toUpperCase() : 'FILE'
 }
 
-/** The text a message shows; attachments are drawn as cards beside it, not typed into it. */
+/**
+ * The text a message shows: its text blocks, a paragraph each, as the transcript route's `blocksText` folds them.
+ * Attachments are drawn as cards beside it, not typed into it. A settled subagent's notice is three blocks, and joined
+ * with nothing it read as one run-on line (live-testing draft developer-five-10).
+ */
 function messageContentText(content) {
   return (content ?? [])
     .map((part) => (part.type === 'image' || part.type === 'file' ? '' : part.text ?? ''))
-    .join('')
+    .filter((text) => text !== '')
+    .join('\n\n')
 }
 
 /** Draw the pending cards; hidden entirely when nothing is waiting. */
@@ -11670,8 +12202,12 @@ fileBody.addEventListener('click', async (clickEvent) => {
   if (path === null || path.length === 0) return
   clickEvent.preventDefault()
   const at = (anchor.getAttribute('href') ?? '').split('#')[1] ?? ''
-  await openPath(path)
-  if (at.length > 0) scrollToHeading(at)
+  /** The same ticket as a chat link's: only the newest open may place the reader (developer-two's review of #41). */
+  const opening = openPath(path)
+  const ticket = fileFetches
+  await opening
+  if (ticket !== fileFetches) return
+  if (at.length > 0) goToFragment(at)
   else fileBody.scrollTop = 0
 })
 
@@ -11692,9 +12228,127 @@ function decodeRawPath(href) {
   }
 }
 
+/* chat-links:begin */
+/**
+ * The file a link in a chat answer names, resolved against `folder` (the session's own), or `null` for a link that is
+ * not a file: a remote or `mailto:` address, a bare `#fragment`, or a protocol-relative URL.
+ *
+ * A model writes `README.md` or `src/app.ts` meaning the session's workspace, so a relative path is joined to the
+ * folder the session runs in, with `.` and `..` resolved; an absolute path is taken as written, and the file route's
+ * own sandbox decides whether it may be read. A link to this server's raw route names its file in the query. Pure, and
+ * fenced by these markers, so a unit test (test/page-chat-links.test.ts) judges it directly.
+ */
+function chatLinkPath(href, folder) {
+  if (href === '' || href.startsWith('#') || href.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(href)) return null
+  let target
+  try {
+    const raw = href.indexOf('/api/raw?path=')
+    target = raw !== -1
+      ? decodeURIComponent(href.slice(raw + '/api/raw?path='.length).split('#')[0].split('&')[0])
+      : decodeURIComponent(href.split('#')[0].split('?')[0])
+  } catch {
+    return null
+  }
+  if (target === '') return null
+  if (!target.startsWith('/')) {
+    if (typeof folder !== 'string' || folder === '') return null
+    target = `${folder.replace(/\/+$/, '')}/${target}`
+  }
+  const parts = []
+  for (const part of target.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
+
+/**
+ * The 1-based source line a link's `#fragment` names, or `null` when it names none.
+ *
+ * `#L24` and `#L24-L30` are GitHub's line anchors, the shape a model copies when it points at code, and DSH reads them
+ * the same way: both go to the first line named (dsh-client-ui-chat). Any other fragment is a heading's.
+ */
+function fragmentLine(fragment) {
+  const match = /^L(\d+)(?:-L?\d+)?$/.exec(fragment)
+  if (match === null) return null
+  const line = Number(match[1])
+  return line >= 1 ? line : null
+}
+/* chat-links:end */
+
+/**
+ * A file link in an answer opens the file in the page's preview (DSH opens a chat file link in its sidebar; heddle's
+ * one preview surface is the panel, by the owner's rule). Measured before this: a link to `README.md` in an answer
+ * navigated the whole page to the server's `not found`. A remote link keeps opening its own tab, which is DSH's
+ * behaviour without an in-app browser, and a modified click is left to the browser.
+ */
+log.addEventListener('click', (clickEvent) => {
+  const anchor = clickEvent.target instanceof Element ? clickEvent.target.closest('.turn.assistant a[href]') : null
+  if (anchor === null) return
+  if (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.shiftKey || clickEvent.altKey || clickEvent.button !== 0) return
+  const href = anchor.getAttribute('href') ?? ''
+  const path = chatLinkPath(href, activeFolder)
+  if (path === null) return
+  clickEvent.preventDefault()
+  const fragment = href.split('#')[1] ?? ''
+  /**
+   * showFile takes its ticket before its first await, so the ticket read here is this open's. Only the newest open may
+   * place the reader: a link clicked earlier whose file arrives late would otherwise scroll a newer file to its own line
+   * (developer-two's review of #41).
+   */
+  const opening = openPath(path)
+  const ticket = fileFetches
+  void opening.then(() => {
+    if (ticket !== fileFetches) return
+    if (fragment.length > 0) goToFragment(fragment)
+    else fileBody.scrollTop = 0
+  })
+})
+
 /** Open a file by its path, which is what a link names and what a tree row carries. */
 async function openPath(path) {
   await showFile({ path, label: path.split('/').pop() ?? path, kind: 'file' })
+}
+
+/** Take the reader to what a link's `#fragment` names in the open file: a source line, otherwise a heading. */
+function goToFragment(fragment) {
+  const line = fragmentLine(fragment)
+  if (line === null) scrollToHeading(fragment)
+  else scrollToLine(line)
+}
+
+/**
+ * Bring the open file's 1-based `line` to the top of the preview; a line past the end goes to the last one.
+ *
+ * DSH gives plain text and code source-line anchors and Markdown none (dsh-client-ui-sidebar-documentpreview), so a
+ * rendered document or page is left where it is. Code is drawn one `.line` per source line on both builds. Plain text
+ * is one text node, so the line's start is found by its newlines and a marker placed there for the scroll, then taken
+ * out again so the text the reader copies is unchanged.
+ */
+function scrollToLine(line) {
+  const renderer = fileBody.dataset.renderer
+  if (renderer === 'code') {
+    const rows = fileBody.querySelectorAll('.line')
+    if (rows.length > 0) rows[Math.min(line, rows.length) - 1].scrollIntoView({ block: 'start' })
+    return
+  }
+  if (renderer !== 'text') return
+  const node = fileBody.firstChild
+  if (node === null || node.nodeType !== Node.TEXT_NODE) return
+  let offset = 0
+  for (let at = 1; at < line; at += 1) {
+    const next = node.data.indexOf('\n', offset)
+    if (next === -1 || next + 1 >= node.data.length) break
+    offset = next + 1
+  }
+  const marker = document.createElement('span')
+  const range = document.createRange()
+  range.setStart(node, offset)
+  range.insertNode(marker)
+  marker.scrollIntoView({ block: 'start' })
+  marker.remove()
+  fileBody.normalize()
 }
 
 /**
@@ -20439,12 +21093,322 @@ setInterval(() => {
   void refreshApprovals(current !== null)
 }, 2000)
 
+/**
+ * The question card: DSH's answer surface for `ask_user_question`.
+ *
+ * A live card is one request from `GET /api/questions`; its draft (choices, free text, the question on show) is kept
+ * per request in browser storage, so a reload or a session switch restores it. A first choice marked Recommended starts
+ * selected. Submit sends the whole batch, a question with nothing chosen going as skipped; Skip skips the one on show.
+ * A timed wait shows its countdown, and Take time (or typing an answer) holds it. An answer the turn no longer waits
+ * for comes back as the user message to send, and is sent as a turn. A settled question opens read-only from its tool
+ * row: the same pager over the recorded answers, marked Answered.
+ */
+const questionCard = document.getElementById('question-card')
+const questionCustom = document.getElementById('question-custom')
+let questionShown = null
+let questionTimer = null
+const QUESTION_DRAFT_PREFIX = 'heddle.question-draft.'
+function questionDraftLoad(request) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(QUESTION_DRAFT_PREFIX + request.id) ?? 'null')
+    if (saved !== null && typeof saved === 'object' && saved.answers && typeof saved.answers === 'object') return saved
+  } catch {}
+  const answers = {}
+  for (const question of request.questions) {
+    const first = Array.isArray(question.options) ? question.options[0] : undefined
+    answers[question.id] = { selected: first !== undefined && /\(Recommended\)/.test(first.label) ? [first.label] : [], custom: '', skipped: false }
+  }
+  return { index: 0, answers }
+}
+function questionDraftSave() {
+  if (questionShown === null || questionShown.readOnly) return
+  try { localStorage.setItem(QUESTION_DRAFT_PREFIX + questionShown.request.id, JSON.stringify(questionShown.draft)) } catch {}
+}
+function questionDraftDrop(id) {
+  try { localStorage.removeItem(QUESTION_DRAFT_PREFIX + id) } catch {}
+}
+function renderQuestion() {
+  const shown = questionShown
+  if (shown === null) return
+  const { request, draft, readOnly } = shown
+  const total = request.questions.length
+  draft.index = Math.min(Math.max(0, draft.index), total - 1)
+  const question = request.questions[draft.index]
+  const answer = draft.answers[question.id] ?? (draft.answers[question.id] = { selected: [], custom: '', skipped: false })
+  questionCard.dataset.state = readOnly ? 'answered' : request.state
+  questionCard.dataset.readOnly = String(readOnly)
+  questionCard.dataset.id = request.id
+  document.getElementById('question-title').textContent = question.header || 'Question'
+  const badge = document.getElementById('question-badge')
+  badge.hidden = !readOnly && request.state !== 'pending' && request.state !== 'continued'
+  badge.textContent = readOnly ? 'Answered' : 'Answer later'
+  document.getElementById('question-pager').hidden = total < 2
+  document.getElementById('question-position').textContent = `${draft.index + 1} of ${total}`
+  document.getElementById('question-prev').disabled = draft.index === 0
+  document.getElementById('question-next').disabled = draft.index === total - 1
+  document.getElementById('question-text').textContent = question.question
+  const options = document.getElementById('question-options')
+  options.replaceChildren()
+  for (const option of question.options ?? []) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'q-option'
+    button.dataset.label = option.label
+    button.setAttribute('aria-pressed', String(answer.selected.includes(option.label)))
+    button.disabled = readOnly
+    const label = document.createElement('span')
+    label.textContent = option.label
+    button.append(label)
+    if (option.description) {
+      const description = document.createElement('span')
+      description.className = 'desc'
+      description.textContent = option.description
+      button.append(description)
+    }
+    button.addEventListener('click', () => questionChoose(option.label))
+    button.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void questionSubmit() }
+    })
+    options.append(button)
+  }
+  options.hidden = (question.options ?? []).length === 0
+  const skipped = readOnly && answer.selected.length === 0 && !answer.custom
+  document.getElementById('question-skipped').hidden = !skipped
+  if (questionCustom.value !== (answer.custom ?? '')) questionCustom.value = answer.custom ?? ''
+  questionCustom.disabled = readOnly
+  questionCustom.hidden = readOnly && !answer.custom
+  const note = document.getElementById('question-note')
+  if (!readOnly && (request.state === 'pending' || request.state === 'continued')) {
+    note.textContent = 'The turn went on without this answer; your answer will be sent to the model as a message.'
+    note.hidden = false
+  } else if (note.dataset.kind !== 'error') note.hidden = true
+  document.getElementById('question-skip').hidden = readOnly
+  document.getElementById('question-submit').hidden = readOnly
+  document.getElementById('question-close').hidden = !readOnly
+  renderQuestionClock()
+  questionCard.hidden = false
+}
+function renderQuestionClock() {
+  const shown = questionShown
+  const countdown = document.getElementById('question-countdown')
+  const take = document.getElementById('question-take-time')
+  clearInterval(questionTimer)
+  questionTimer = null
+  const live = shown !== null && !shown.readOnly && shown.request.state === 'waiting' && shown.request.timed
+  if (!live) { countdown.hidden = true; take.hidden = true; return }
+  if (shown.request.held || shown.request.deadline === null) {
+    countdown.textContent = 'Taking time: the model waits for your answer'
+    countdown.hidden = false
+    take.hidden = true
+    return
+  }
+  const tick = () => {
+    const left = Math.max(0, Math.round((Date.parse(shown.request.deadline) - Date.now()) / 1000))
+    countdown.textContent = `Continues without an answer in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
+    if (left === 0) { clearInterval(questionTimer); void refreshQuestions() }
+  }
+  tick()
+  questionTimer = setInterval(tick, 1000)
+  countdown.hidden = false
+  take.hidden = false
+}
+function questionChoose(label) {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const question = shown.request.questions[shown.draft.index]
+  const answer = shown.draft.answers[question.id]
+  answer.skipped = false
+  if (question.multi_select === true) {
+    answer.selected = answer.selected.includes(label) ? answer.selected.filter((entry) => entry !== label) : [...answer.selected, label]
+  } else {
+    /** A single choice replaces free text and moves on, as DSH's card does. */
+    answer.selected = [label]
+    answer.custom = ''
+    if (shown.draft.index < shown.request.questions.length - 1) shown.draft.index += 1
+  }
+  questionDraftSave()
+  renderQuestion()
+}
+function showQuestion(request, options = {}) {
+  if (request === null || typeof request !== 'object' || !Array.isArray(request.questions) || request.questions.length === 0) return
+  const readOnly = options.readOnly === true
+  if (!readOnly && questionShown !== null && !questionShown.readOnly && questionShown.request.id === request.id) {
+    /** The poll repaints only a change of state, hold or deadline, so a focused choice or a caret is not disturbed. */
+    const before = questionShown.request
+    questionShown.request = request
+    if (before.state !== request.state || before.held !== request.held || before.deadline !== request.deadline) renderQuestion()
+    return
+  }
+  questionShown = { request, readOnly, draft: readOnly ? options.draft : questionDraftLoad(request) }
+  const note = document.getElementById('question-note')
+  note.dataset.kind = ''
+  renderQuestion()
+}
+function hideQuestion() {
+  clearInterval(questionTimer)
+  questionTimer = null
+  questionShown = null
+  questionCard.hidden = true
+}
+function questionBatch() {
+  const { request, draft } = questionShown
+  return request.questions.map((question) => {
+    const answer = draft.answers[question.id] ?? { selected: [], custom: '' }
+    const custom = (answer.custom ?? '').trim()
+    return { id: question.id, selected: answer.skipped ? [] : answer.selected, ...(custom !== '' && !answer.skipped ? { custom } : {}) }
+  })
+}
+async function questionPost(path, body) {
+  const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  return { response, body: await response.json().catch(() => ({})) }
+}
+async function questionSubmit() {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const submit = document.getElementById('question-submit')
+  submit.disabled = true
+  const note = document.getElementById('question-note')
+  try {
+    const { response, body } = await questionPost('/api/questions/' + encodeURIComponent(shown.request.id), { session: shown.request.session, answers: questionBatch() })
+    if (!response.ok || body.answered !== true) {
+      note.textContent = body.error ?? 'that answer did not land'
+      note.dataset.kind = 'error'
+      note.hidden = false
+      await refreshQuestions()
+      return
+    }
+    questionDraftDrop(shown.request.id)
+    hideQuestion()
+    /**
+     * An answer the turn no longer waits for is the user message DSH sends. The composer delivers it: as a turn when
+     * nothing runs, and queued behind a turn that is still running - which is how a timed question's turn usually
+     * looks for a moment after its deadline. Steering it in was measured to lose it: a turn on its last step ends
+     * without another model call, so the answer sat in the log unanswered.
+     */
+    if (body.late === true && typeof body.message === 'string') {
+      if (anyRunning()) enqueue(body.message, 'queue')
+      else void sendNow(body.message)
+    }
+  } catch (error) {
+    note.textContent = `could not send the answer: ${(error && error.message) || error}`
+    note.dataset.kind = 'error'
+    note.hidden = false
+  } finally {
+    submit.disabled = false
+  }
+}
+async function questionHold() {
+  const shown = questionShown
+  if (shown === null || shown.readOnly || shown.request.held || !shown.request.timed || shown.request.state !== 'waiting') return
+  shown.request = { ...shown.request, held: true, deadline: null }
+  renderQuestionClock()
+  try {
+    const { response, body } = await questionPost('/api/questions/' + encodeURIComponent(shown.request.id) + '/hold', { session: shown.request.session })
+    if (response.ok && body.request && questionShown === shown) { shown.request = body.request; renderQuestionClock() }
+  } catch {}
+}
+async function refreshQuestions() {
+  if (current === null) { if (questionShown !== null && !questionShown.readOnly) hideQuestion(); return }
+  try {
+    const response = await fetch('/api/questions?session=' + encodeURIComponent(current))
+    if (!response.ok) return
+    const body = await response.json()
+    if (body.session !== current) return
+    const request = (body.requests ?? [])[0]
+    if (request !== undefined) showQuestion(request)
+    else if (questionShown !== null && !questionShown.readOnly) hideQuestion()
+  } catch {
+    // a page that cannot read the questions still answers the next one it is shown
+  }
+}
+document.getElementById('question-prev').addEventListener('click', () => { if (questionShown) { questionShown.draft.index -= 1; questionDraftSave(); renderQuestion() } })
+document.getElementById('question-next').addEventListener('click', () => { if (questionShown) { questionShown.draft.index += 1; questionDraftSave(); renderQuestion() } })
+document.getElementById('question-skip').addEventListener('click', () => {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const question = shown.request.questions[shown.draft.index]
+  shown.draft.answers[question.id] = { selected: [], custom: '', skipped: true }
+  if (shown.draft.index < shown.request.questions.length - 1) shown.draft.index += 1
+  questionDraftSave()
+  renderQuestion()
+})
+document.getElementById('question-submit').addEventListener('click', () => void questionSubmit())
+document.getElementById('question-close').addEventListener('click', () => hideQuestion())
+document.getElementById('question-take-time').addEventListener('click', () => void questionHold())
+questionCustom.addEventListener('input', () => {
+  const shown = questionShown
+  if (shown === null || shown.readOnly) return
+  const question = shown.request.questions[shown.draft.index]
+  const answer = shown.draft.answers[question.id]
+  answer.custom = questionCustom.value
+  answer.skipped = false
+  /** Free text replaces a single choice, as DSH makes it exclusive; editing also holds a timed wait. */
+  if (question.multi_select !== true && questionCustom.value.trim() !== '') answer.selected = []
+  questionDraftSave()
+  for (const button of document.querySelectorAll('#question-options .q-option')) button.setAttribute('aria-pressed', String(answer.selected.includes(button.dataset.label)))
+  void questionHold()
+})
+events.addEventListener('session', (message) => {
+  try {
+    const payload = JSON.parse(message.data)
+    if (payload.session === current && typeof payload.event?.type === 'string' && payload.event.type.startsWith('question/')) void refreshQuestions()
+  } catch {}
+})
+setInterval(() => {
+  if (document.hidden) return
+  void refreshQuestions()
+}, 2000)
+/**
+ * A settled question opens from its tool row, read-only: the batch from the call's arguments and the answers from its
+ * result. The button reads both when clicked, so a row drawn before its result landed still opens the answered card.
+ */
+function questionToolButton(node) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'question-open'
+  button.textContent = 'Open question'
+  button.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    let args = {}
+    let result = {}
+    try { args = JSON.parse(node.querySelector('[data-args]')?.textContent ?? '{}') } catch {}
+    try { result = JSON.parse(node.querySelector('[data-result]')?.textContent ?? '{}') } catch {}
+    const questions = Array.isArray(args.questions) ? args.questions : []
+    if (questions.length === 0) return
+    if (!Array.isArray(result.answers)) { void refreshQuestions(); return }
+    const answers = {}
+    for (const question of questions) {
+      const given = result.answers.find((entry) => entry.id === question.id) ?? { selected: [] }
+      answers[question.id] = { selected: Array.isArray(given.selected) ? given.selected : [], custom: given.custom ?? '', skipped: false }
+    }
+    showQuestion({ id: node.dataset.toolCallId ?? 'settled', session: current, questions, state: 'answered', timed: false }, { readOnly: true, draft: { index: 0, answers } })
+  })
+  return button
+}
+/** A late answer's user message, DSH's `answer_to_pending_question`, drawn as the questions and the answers given. */
+function questionAnswerText(text) {
+  if (typeof text !== 'string' || !text.startsWith('{"kind":"answer_to_pending_question"')) return null
+  try {
+    const record = JSON.parse(text)
+    if (record.kind !== 'answer_to_pending_question' || !Array.isArray(record.questions)) return null
+    return record.questions.map((question) => {
+      const answer = (record.answers ?? []).find((entry) => entry.id === question.id) ?? { selected: [] }
+      const given = [...(answer.selected ?? []), ...(answer.custom ? [answer.custom] : [])].join(', ')
+      return `${question.question}\n→ ${given || 'Skipped'}`
+    }).join('\n')
+  } catch {
+    return null
+  }
+}
+
 await loadEndpoints()
 await loadStatus()
 growComposer()
 /** A reload reopens the session that was open (C28), before the tree is drawn so the tree marks it. */
 await restoreSelection()
 void refreshApprovals()
+void refreshQuestions()
 document.getElementById('session-search').addEventListener('input', applySearch)
 const firstTree = renderTree().then(() => initializeDefaultWorkspace())
 /**

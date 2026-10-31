@@ -153,6 +153,13 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if !rows.is_empty() {
         harness.activity = Some(Arc::new(RowActivities(rows)));
     }
+    // The questions row: the page's question card reads and answers through /api/questions.
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_questions::QuestionService>>("questions")
+    {
+        harness.questions = Some(Arc::new(Questions { service }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -1292,6 +1299,23 @@ impl heddle_server::services::GoalService for Goals {
         };
         view.map(|view| GoalAnswer::Goal(to_json(view)))
             .map_err(goal_refusal)
+    }
+}
+
+/// `heddle-questions` behind the server's port: its answers are already the TypeScript route's bytes.
+struct Questions {
+    service: Arc<heddle_questions::QuestionService>,
+}
+
+impl heddle_server::services::QuestionService for Questions {
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String) {
+        let answer = heddle_questions::get_questions(Some(&self.service), session, all);
+        (answer.status, answer.body)
+    }
+
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String) {
+        let answer = heddle_questions::post_question(Some(&self.service), id, hold, body);
+        (answer.status, answer.body)
     }
 }
 

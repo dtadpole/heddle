@@ -646,6 +646,7 @@ dependencies = [
  "heddle-jobs",
  "heddle-llm",
  "heddle-plan",
+ "heddle-questions",
  "heddle-sandbox",
  "heddle-schedule",
  "heddle-server",
@@ -808,6 +809,23 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "heddle-questions"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "futures",
+ "heddle-config",
+ "heddle-session",
+ "heddle-tools",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
