@@ -4,6 +4,7 @@ import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
+import { killProcessGroup } from '../sandbox/process-group.ts'
 import type { SandboxService } from '../sandbox/service.ts'
 import type { ToolDefinition, ToolResult } from './service.ts'
 
@@ -49,12 +50,40 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
 
+/** The default for `bashMaxTimeoutMs`: the most wall time a call may ask for, DSH's `maxTimeoutMs` (ten minutes). */
+export const BASH_MAX_TIMEOUT_MS = 600_000
+
+/**
+ * The longest delay one Node timer can hold (2^31-1 ms, about 24.8 days). `setTimeout` runs a larger one after a
+ * millisecond, so no cap or request may exceed it: the setting refuses a larger `bashMaxTimeoutMs`, and the wall time is
+ * cut to it here as well (developer-five's review of #13; DSH bounds its grace by the same `MAX_TIMER_DELAY_MS`).
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
+ *
+ * DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the default; a
+ * value that is not a finite positive number is refused; a larger one is cut to the cap. Before it, the value went
+ * straight into `setTimeout`, which runs `0`, a negative delay or one above 2^31-1 ms after one millisecond, so the
+ * command was killed before it ran and the result claimed it had timed out (live-testing issue #13).
+ */
+export function bashWallTime(requested: unknown, defaultMs: number, maxMs: number): { readonly ms: number } | { readonly refusal: string } {
+  const cap = Math.min(maxMs, MAX_TIMER_DELAY_MS)
+  if (requested === undefined || requested === null) return { ms: Math.min(defaultMs, cap) }
+  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+    return { refusal: `invalid timeoutMs: expected a positive number, got ${JSON.stringify(requested)}` }
+  }
+  return { ms: Math.min(Math.max(1, Math.round(requested)), cap) }
+}
+
 /** Build the standard tools around one sandbox. */
 export function builtinTools(
   sandbox: SandboxService,
-  options: { readonly bashTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
+  options: { readonly bashTimeoutMs?: number; readonly bashMaxTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
 ): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  const maxTimeoutMs = Math.min(options.bashMaxTimeoutMs ?? BASH_MAX_TIMEOUT_MS, MAX_TIMER_DELAY_MS)
   /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
   const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)
@@ -144,7 +173,7 @@ export function builtinTools(
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Command line, run through sh -c.' },
-          timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
+          timeoutMs: { type: 'number', description: `Wall time before the command is killed, in milliseconds; default ${timeoutMs}, at most ${maxTimeoutMs}.` },
           ...escalation,
         },
         required: ['command'],
@@ -154,6 +183,9 @@ export function builtinTools(
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
+      const wallTime = bashWallTime(args.timeoutMs, timeoutMs, maxTimeoutMs)
+      if ('refusal' in wallTime) return { output: '', error: { code: 'BAD_ARGS', message: wallTime.refusal } }
+      const limit = wallTime.ms
       const mode = context.mode
 
       /**
@@ -182,15 +214,23 @@ export function builtinTools(
       // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
       const cwd = context.cwd
-      const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
-        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
+        /**
+         * The command leads its own process group (`detached`), so a Stop or the wall time reaches everything it
+         * started, as DSH's launcher does. Killing only the shell left its children running orphaned, and the turn
+         * waited for them because they still held the output pipes (live-testing draft developer-five-5).
+         */
+        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' }, detached: true })
         let stdout = ''
         let stderr = ''
         let timedOut = false
+        let stopped = false
+        const stop = () => {
+          if (!killProcessGroup(child.pid)) child.kill('SIGKILL')
+        }
         const timer = setTimeout(() => {
           timedOut = true
-          child.kill('SIGKILL')
+          stop()
         }, limit)
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString()
@@ -198,7 +238,14 @@ export function builtinTools(
         child.stderr.on('data', (chunk: Buffer) => {
           stderr += chunk.toString()
         })
-        context.signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true })
+        context.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true
+            stop()
+          },
+          { once: true },
+        )
         child.on('error', (error) => {
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
@@ -209,6 +256,15 @@ export function builtinTools(
           const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
+          /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
+          if (stopped) {
+            resolve({
+              output: trimmed,
+              error: { code: 'INTERRUPTED', message: 'the command was stopped before it finished' },
+              data: { sandbox: { ...sandboxFacts, denied: false } },
+            })
+            return
+          }
           if (timedOut) {
             resolve({
               output: trimmed,
