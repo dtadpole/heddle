@@ -1322,6 +1322,12 @@ async fn flags_session(
     // `archiveSession`, `details.activity`): the turn in progress and the running subagent descendants, which
     // the page's stop-and-archive dialog lists. A turn is running when this server started it or the agent
     // runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
+    // A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs`
+    // lib/index.js:19-31, which puts its `{ kind: "job", items }` ahead of the rest): they block the archive
+    // the same way, are listed in the refusal (also as `jobs`), and with `stop: true` are stopped once the
+    // archive is written.
+    let activity = state.harness().activity.clone();
+    let stop = archived == Some(true) && body.bool("stop") == Some(true);
     if archived == Some(true) {
         let runs = state.runs();
         let runner = state.harness().turns.clone();
@@ -1338,20 +1344,44 @@ async fn flags_session(
                     .and_then(heddle_session::LineageMeta::from_map)
             })
             .collect();
-        let activity = heddle_session::session_activity(id.as_str(), &metas, is_running);
-        if !activity.is_empty() {
-            if body.bool("stop") != Some(true) {
-                return respond::json(
-                    StatusCode::CONFLICT,
-                    &json!({
-                        "error": format!("session {id} is running; pass stop: true to stop it and archive"),
-                        "code": "active",
-                        "running": runs.running(id.as_str()),
-                        "activity": activity,
-                    }),
+        let work = heddle_session::session_activity(id.as_str(), &metas, is_running);
+        let jobs: Vec<Value> = activity
+            .as_ref()
+            .map(|activity| activity.active(id.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.kind == crate::services::ActivityKind::Job)
+            .map(|item| json!({ "id": item.id, "label": item.label }))
+            .collect();
+        if !work.is_empty() || !jobs.is_empty() {
+            if !stop {
+                let error = if !work.is_empty() {
+                    format!("session {id} is running; pass stop: true to stop it and archive")
+                } else {
+                    format!(
+                        "session {id} has running background jobs; pass stop: true to stop them and archive"
+                    )
+                };
+                let mut listed: Vec<Value> = Vec::new();
+                if !jobs.is_empty() {
+                    listed.push(json!({ "kind": "job", "items": jobs.clone() }));
+                }
+                listed.extend(
+                    work.iter()
+                        .filter_map(|entry| serde_json::to_value(entry).ok()),
                 );
+                let mut refusal = json!({
+                    "error": error,
+                    "code": "active",
+                    "running": runs.running(id.as_str()),
+                    "activity": listed,
+                });
+                if !jobs.is_empty() {
+                    refusal["jobs"] = Value::Array(jobs);
+                }
+                return respond::json(StatusCode::CONFLICT, &refusal);
             }
-            for session in heddle_session::activity_sessions(id.as_str(), &activity) {
+            for session in heddle_session::activity_sessions(id.as_str(), &work) {
                 runs.abort(&session);
                 runner.interrupt(&session);
             }
@@ -1363,7 +1393,12 @@ async fn flags_session(
         .set_flags(id.as_str(), FlagPatch { pinned, archived })
     {
         Ok(None) => respond::no_session(id.as_str()),
-        Ok(Some(meta)) => respond::json(StatusCode::OK, &meta),
+        Ok(Some(meta)) => {
+            if let (true, Some(activity)) = (stop, activity.as_ref()) {
+                activity.stop(id.as_str());
+            }
+            respond::json(StatusCode::OK, &meta)
+        }
         Err(error) => {
             let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
@@ -3714,6 +3749,81 @@ mod tests {
         );
         let _ = runner.hub.set(builder.events());
         builder.into_router(3082).expect("the test router")
+    }
+
+    /// The jobs row's archive admission, as a double: one live job until it is stopped.
+    #[derive(Default)]
+    struct OneJob {
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for OneJob {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                vec![crate::services::ActivityItem {
+                    kind: crate::services::ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }]
+            }
+        }
+        fn stop(&self, session: &str) {
+            self.stopped.lock().unwrap().push(session.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_background_job_blocks_the_archive_until_stop_and_stop_kills_it_after_the_write()
+    {
+        let activity = Arc::new(OneJob::default());
+        let mut with_jobs = harness();
+        with_jobs.activity = Some(activity.clone());
+        let (router, _) = ServerBuilder::new(
+            with_jobs,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-jobs")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let flags = "/api/sessions/session-00000000-0000-0000-0000-000000000001/flags";
+
+        let (status, bytes) = post_json(&router, flags, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refusal["code"], "active");
+        assert_eq!(
+            refusal["error"],
+            "session session-00000000-0000-0000-0000-000000000001 has running background jobs; pass stop: true to stop them and archive"
+        );
+        assert_eq!(refusal["running"], 0);
+        assert_eq!(
+            refusal["jobs"],
+            json!([{ "id": "bash-0123456789abcdef", "label": "sleep 30" }])
+        );
+        assert!(
+            activity.stopped.lock().unwrap().is_empty(),
+            "nothing stopped without stop: true"
+        );
+
+        let (status, _) =
+            post_json(&router, flags, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *activity.stopped.lock().unwrap(),
+            ["session-00000000-0000-0000-0000-000000000001"]
+        );
+
+        // Pinning is not archiving: it never consults the activity.
+        let (status, _) = post_json(&router, flags, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(activity.stopped.lock().unwrap().len(), 1);
     }
 
     /// The agent runtime's live-turn registry, as a double: one turn this server did not start.

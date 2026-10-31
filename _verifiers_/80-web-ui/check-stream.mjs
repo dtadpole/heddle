@@ -438,19 +438,29 @@ test('the page shows it is reconnecting while the server is down, and a session 
     assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), false, 'and shows it')
 
     /**
-     * A session made while the page cannot hear about it, written to the same store from outside the server. It is
-     * titled: an untitled session with no turn is DSH's blank, and among blank sessions only the open one is a row
-     * (`sessionVisible`, C2), so an untitled one would rightly never appear. The TypeScript store writes the log format
-     * both builds read, as check-workspace-tree's restore check does.
+     * A session made while the page cannot hear about it: the CLI writes the same store. It is given a turn there too.
+     * DSH draws only the open blank (`sessionVisible`). An untitled session with no turn that another client made is a
+     * blank this page never opened, so under stack 1's blank rule it rightly has no row. A session someone worked in
+     * while the page was away is one DSH draws. `heddle session new` takes no title in either build, so a turn is what
+     * makes this session one a person made.
      */
-    const { SessionStore } = await import('../../src/session/store.ts')
-    const made = new SessionStore(join(server.home, 'sessions')).create({ cwd: server.work, title: 'made while away' })
-    assert.equal(typeof made.id, 'string', 'a session was made while the server was down')
+    // From the checkout, as the server runs: the TypeScript CLI composes its layers from its working folder.
+    const sessionRoot = join(server.home, 'sessions')
+    const made = await runCli(['session', 'new', server.work, '--session-root', sessionRoot], { env: server.env })
+    assert.equal(made.code, 0, `the CLI made a session while the server was down: ${made.stderr}`)
+    const madeId = /heddle: session (\S+) at /.exec(made.stdout)?.[1]
+    assert.ok(madeId !== undefined, `the CLI named the session it made: ${made.stdout}`)
+    const worked = await runCli(
+      ['--endpoint', 'scripted', '--session-root', sessionRoot, '--sandbox-root', server.work, '--resume', madeId, '--turn', 'made while away'],
+      { env: server.env },
+    )
+    assert.equal(worked.code, 0, `the CLI ran a turn in it while the server was down: ${worked.stderr}`)
 
     server = await restartServer(server)
     const sessions = await api(server, cookie, 'GET', '/api/sessions')
-    const fresh = sessions.json.find((entry) => entry.title === 'made while away')
+    const fresh = sessions.json.find((entry) => entry.id === madeId)
     assert.ok(fresh !== undefined, 'the restarted server lists the session made while it was down')
+    assert.ok((fresh.turns ?? 0) > 0, `and counts the turn run in it: ${JSON.stringify(fresh)}`)
     assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 20_000), 'the page reconnects on its own')
     assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), true, 'and the notice goes')
     assert.ok(
