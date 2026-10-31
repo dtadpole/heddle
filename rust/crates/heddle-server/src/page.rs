@@ -283,6 +283,33 @@ mod tests {
     }
 
     #[test]
+    fn the_served_page_carries_dshs_session_search() {
+        // C14, in the document this binary embeds: DSH's title-or-workspace search with its 20-row bound
+        // (dsh-api-session-controller `SESSION_SEARCH_RESULT_LIMIT`), its two status lines, and the reveal of a
+        // chosen hit. The derivation itself is judged in `test/workspace-tree.test.ts`.
+        let served = page();
+        assert!(served.contains("const SEARCH_LIMIT = 20"));
+        assert!(served.contains("Narrow your search."));
+        assert!(served.contains("No matching sessions"));
+        assert!(served.contains("id=\"search-more\""));
+        assert!(served.contains("async function revealSession(id)"));
+    }
+
+    #[test]
+    fn the_served_page_carries_dshs_content_search() {
+        // C15 (R-developer-eight-19), in the document this binary embeds: the 250 ms debounced host query
+        // (dsh-client-ui-workspace `SEARCH_DEBOUNCE_MS`) against this crate's `GET /api/sessions/search`, the merge
+        // into the name matches, the snippet on a hit and DSH's pending status. The rules themselves are judged in
+        // `test/content-search-page.test.ts`.
+        let served = page();
+        assert!(served.contains("/* content-search:begin */"));
+        assert!(served.contains("const DEBOUNCE_MS = 250"));
+        assert!(served.contains("/api/sessions/search?q="));
+        assert!(served.contains("Searching session history…"));
+        assert!(served.contains("quote.className = 'hit-snippet'"));
+    }
+
+    #[test]
     fn page_access_tells_missing_from_stale() {
         assert_eq!(
             page_access(true, false),

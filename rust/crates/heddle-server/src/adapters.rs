@@ -84,6 +84,10 @@ fn failure(error: heddle_session::SessionError) -> ServiceError {
         unwritable @ heddle_session::SessionError::Unwritable { .. } => {
             ServiceError::with_code(unwritable.to_string(), "session/unwritable")
         }
+        // A session's folder that is gone is a 400 the page reads by its code (#56).
+        missing @ heddle_session::SessionError::MissingFolder { .. } => {
+            ServiceError::with_code(missing.to_string(), "session/folder-missing")
+        }
         other => ServiceError::new(other.to_string()),
     }
 }
@@ -184,6 +188,10 @@ impl SessionService for StoreSessions {
             Ok(heddle_session::ForkOutcome::NotFound) => ForkOutcome::NotFound,
             Ok(heddle_session::ForkOutcome::NoSuchEvent { at_seq, last_seq }) => {
                 ForkOutcome::NoSuchEvent { at_seq, last_seq }
+            }
+            // The source's folder is gone (#56): its own sentence, not "no completed turn".
+            Err(error @ heddle_session::SessionError::MissingFolder { .. }) => {
+                ForkOutcome::Refused(failure(error))
             }
             Ok(heddle_session::ForkOutcome::Unavailable) | Err(_) => ForkOutcome::Unavailable {
                 code: "unavailable".to_owned(),
@@ -652,6 +660,55 @@ mod tests {
             sessions.fork("no-such-session", None),
             ForkOutcome::NotFound
         );
+    }
+
+    /// #56: a fork whose source folder is gone is refused with the store's own sentence and code (the route
+    /// answers it `400 { error, code }`), not as "no completed turn", and the folder is not recreated.
+    #[test]
+    fn a_fork_whose_folder_is_gone_is_refused_with_its_sentence() {
+        let scratch = Scratch::new("fork-gone");
+        let sessions = store_at(&scratch.0.join("sessions"), None);
+        let folder = scratch.0.join("w");
+        std::fs::create_dir_all(&folder).unwrap();
+        let id = sessions.open_at(&folder, OpenAt::default()).unwrap();
+        let handle = sessions.handle(&id).unwrap();
+        sessions.service.user(&handle, "a question", None).unwrap();
+        sessions
+            .service
+            .store()
+            .message(
+                &handle,
+                heddle_session::Message {
+                    role: heddle_session::Role::Assistant,
+                    tool_call_id: None,
+                    content: vec![heddle_session::ContentPart::Text {
+                        text: "the answer".into(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        sessions
+            .service
+            .store()
+            .append(
+                &handle,
+                heddle_session::NewEvent::new("turn/completed"),
+                Default::default(),
+            )
+            .unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        for at_seq in [None, Some(0)] {
+            assert_eq!(
+                sessions.fork(&id, at_seq),
+                ForkOutcome::Refused(ServiceError::with_code(
+                    "This workspace's folder no longer exists: \"w\"",
+                    "session/folder-missing"
+                ))
+            );
+        }
+        assert!(!folder.exists(), "the deleted folder is not recreated");
     }
 
     #[test]
