@@ -41,6 +41,13 @@ pub trait ComponentCatalog {
     /// What is known about the component `row` names. `anchor` is the directory relative names resolve
     /// against ([`crate::anchor_dir`]), or `None` when every layer was supplied in memory.
     fn lookup(&self, row: &EntryRow, anchor: Option<&Path>) -> SchemaLookup;
+
+    /// The row's schema as DSH's form projection, for `GET /api/settings` (issue #123): the binary answers its
+    /// built-ins with the projections generated from the TypeScript `Config`s ([`crate::builtin_form`]). `None` falls
+    /// back to the plain schema [`ComponentCatalog::lookup`] finds.
+    fn form(&self, _row: &EntryRow, _anchor: Option<&Path>) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// A catalog that answers from a fixed table of names, for tests and for a binary with only built-ins.
