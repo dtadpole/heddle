@@ -649,7 +649,7 @@ pub struct Harness {
     /// The agent presets (inventory A96), from the optional `presets` row: `GET /api/presets` answers them, and a
     /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
     /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
-    pub presets: Option<Arc<heddle_config::PresetRoster>>,
+    pub presets: Option<Arc<heddle_config::LivePresets>>,
     /// The live-turn registry a Stop also asks; `None`: the server's own runs are the only turns it stops.
     pub interrupter: Option<Arc<dyn TurnInterrupter>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
@@ -939,7 +939,7 @@ impl HarnessBuilder {
     }
 
     /// The profile's agent presets (inventory A96).
-    pub fn presets(mut self, roster: Arc<heddle_config::PresetRoster>) -> Self {
+    pub fn presets(mut self, roster: Arc<heddle_config::LivePresets>) -> Self {
         self.harness.presets = Some(roster);
         self
     }

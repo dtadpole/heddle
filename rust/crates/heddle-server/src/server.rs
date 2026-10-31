@@ -1047,15 +1047,18 @@ async fn status(State(state): State<AppState>) -> Response {
 }
 
 /// The roster requests are checked against, and whether it is the implicit one of a profile without the `presets` row
-/// (inventory A96), which declares only `standard`.
-fn preset_roster_of(state: &AppState) -> (heddle_config::PresetRoster, bool) {
+/// (inventory A96), which declares only `standard`. A request takes one snapshot and passes it down, so a settings
+/// write to the row (slice 3) cannot split one request's checks between two rosters.
+fn preset_roster_of(state: &AppState) -> (Arc<heddle_config::PresetRoster>, bool) {
     match state.harness().presets.as_ref() {
-        Some(roster) => ((**roster).clone(), false),
+        Some(live) => (live.snapshot(), false),
         None => (
-            heddle_config::preset_roster(None).unwrap_or_else(|_| heddle_config::PresetRoster {
-                default: heddle_config::standard_preset().id,
-                presets: vec![heddle_config::standard_preset()],
-            }),
+            Arc::new(heddle_config::preset_roster(None).unwrap_or_else(|_| {
+                heddle_config::PresetRoster {
+                    default: heddle_config::standard_preset().id,
+                    presets: vec![heddle_config::standard_preset()],
+                }
+            })),
             true,
         ),
     }
@@ -1067,7 +1070,7 @@ fn preset_roster_of(state: &AppState) -> (heddle_config::PresetRoster, bool) {
 async fn list_presets(State(state): State<AppState>) -> Response {
     let (roster, implicit) = preset_roster_of(&state);
     let mut body = Map::new();
-    body.insert("default".into(), Value::String(roster.default));
+    body.insert("default".into(), Value::String(roster.default.clone()));
     body.insert(
         "presets".into(),
         serde_json::to_value(&roster.presets).unwrap_or(Value::Array(Vec::new())),
@@ -1081,11 +1084,14 @@ async fn list_presets(State(state): State<AppState>) -> Response {
 /// The agent preset a request names (inventory A96), checked before anything is written: `Ok(None)` when it names
 /// none (absent, not a string, or blank), the declared id, or the sentence a `400` answers — DSH's
 /// dsh-agent-preset-registry `Unknown agent preset: <id>`, with what is declared.
-fn requested_preset(state: &AppState, body: &JsonBody) -> Result<Option<String>, String> {
+fn requested_preset(
+    roster: &heddle_config::PresetRoster,
+    body: &JsonBody,
+) -> Result<Option<String>, String> {
     let Some(wanted) = body.trimmed("preset") else {
         return Ok(None);
     };
-    let declared = preset_roster_of(state).0.ids();
+    let declared = roster.ids();
     if !declared.iter().any(|id| id == wanted) {
         return Err(format!(
             "Unknown agent preset: {wanted}; declared: {}",
@@ -1108,14 +1114,14 @@ fn preset_fixed(recorded: &str) -> Response {
 
 /// The preset a new session is created under: the one the request named, else the profile's default (none for a
 /// profile without the `presets` row).
-fn new_session_preset(state: &AppState, named: Option<&str>) -> Option<String> {
-    named.map(str::to_owned).or_else(|| {
-        state
-            .harness()
-            .presets
-            .as_ref()
-            .map(|roster| roster.default.clone())
-    })
+fn new_session_preset(
+    roster: &heddle_config::PresetRoster,
+    implicit: bool,
+    named: Option<&str>,
+) -> Option<String> {
+    named
+        .map(str::to_owned)
+        .or_else(|| (!implicit).then(|| roster.default.clone()))
 }
 
 fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
@@ -1139,11 +1145,12 @@ async fn create_session(State(state): State<AppState>, body: JsonBody) -> Respon
             format!("{} is not under any workspace root", branch.display()),
         );
     }
-    let named = match requested_preset(&state, &body) {
+    let (roster, implicit) = preset_roster_of(&state);
+    let named = match requested_preset(&roster, &body) {
         Ok(named) => named,
         Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal),
     };
-    let preset = new_session_preset(&state, named.as_deref());
+    let preset = new_session_preset(&roster, implicit, named.as_deref());
     match state
         .harness()
         .sessions
@@ -2076,11 +2083,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     }
 
     // The agent preset the request names (inventory A96), checked before a session exists, as the endpoint is.
-    let named_preset = match requested_preset(&state, &body) {
+    let (roster, implicit) = preset_roster_of(&state);
+    let named_preset = match requested_preset(&roster, &body) {
         Ok(named) => named,
         Err(refusal) => return respond::text(StatusCode::BAD_REQUEST, format!("{refusal}\n")),
     };
-    let born_preset = new_session_preset(&state, named_preset.as_deref());
+    let born_preset = new_session_preset(&roster, implicit, named_preset.as_deref());
     let born = SessionSelection {
         endpoint: requested_endpoint.map(str::to_owned),
         model: requested_model.map(str::to_owned),
@@ -5862,23 +5870,27 @@ mod tests {
     // over the real session store. ----
 
     /// The test's `presets` row: `standard` (every tool, the default) and `reader` (one tool and a persona).
-    fn preset_roster() -> Arc<heddle_config::PresetRoster> {
-        Arc::new(
-            heddle_config::preset_roster(Some(&json!({
-                "default": "standard",
-                "presets": [
-                    { "id": "standard", "name": "Standard" },
-                    { "id": "reader", "name": "Reader", "tools": ["read_file"], "persona": "You review." }
-                ]
-            })))
-            .unwrap(),
-        )
+    fn preset_roster() -> Arc<heddle_config::LivePresets> {
+        Arc::new(heddle_config::LivePresets::new(
+            heddle_config::preset_roster(Some(&preset_row("standard"))).unwrap(),
+        ))
+    }
+
+    /// The test's `presets` row with `default` as its default.
+    fn preset_row(default: &str) -> Value {
+        json!({
+            "default": default,
+            "presets": [
+                { "id": "standard", "name": "Standard" },
+                { "id": "reader", "name": "Reader", "tools": ["read_file"], "persona": "You review." }
+            ]
+        })
     }
 
     /// A router over a real store in a scratch folder, every folder owned, with `presets` as the profile's roster.
     async fn preset_app(
         label: &str,
-        presets: Option<Arc<heddle_config::PresetRoster>>,
+        presets: Option<Arc<heddle_config::LivePresets>>,
     ) -> (Router, crate::adapters::StoreSessions, PathBuf, String) {
         let scratch = std::env::temp_dir().join(format!(
             "heddle-server-presets-{label}-{}-{}",
@@ -5923,6 +5935,63 @@ mod tests {
         sessions
             .meta(id)
             .and_then(|meta| meta.preset().map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn a_written_default_reaches_the_route_and_new_sessions_while_an_existing_session_keeps_its_preset()
+     {
+        // A96, slice 3: the server reads the live holder a settings write to the `presets` row replaces.
+        let live = preset_roster();
+        let (router, sessions, scratch, cookie) =
+            preset_app("live-default", Some(Arc::clone(&live))).await;
+        let new_session = |before: Vec<String>| {
+            sessions
+                .list()
+                .into_iter()
+                .map(|meta| meta.id)
+                .find(|id| !before.contains(id))
+                .expect("a new session")
+        };
+        let ids = || {
+            sessions
+                .list()
+                .into_iter()
+                .map(|meta| meta.id)
+                .collect::<Vec<_>>()
+        };
+
+        let before = ids();
+        let (status, _) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"first"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let existing = new_session(before);
+        assert_eq!(preset_of(&sessions, &existing).as_deref(), Some("standard"));
+
+        live.set_config(&preset_row("reader")).unwrap();
+        let (_, _, bytes) = call(&router, Method::GET, "/api/presets", Some(&cookie)).await;
+        let listed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            listed["default"], "reader",
+            "the route answers the written default at once"
+        );
+
+        let before = ids();
+        let (status, _) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"second"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let fresh = new_session(before);
+        assert_eq!(
+            preset_of(&sessions, &fresh).as_deref(),
+            Some("reader"),
+            "a new session records the written default"
+        );
+        let again = json!({"prompt": "again", "session": existing});
+        let (status, _) = post_json(&router, "/api/turn", &cookie, &again.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            preset_of(&sessions, &existing).as_deref(),
+            Some("standard"),
+            "a session keeps the preset it recorded"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     #[tokio::test]

@@ -1205,7 +1205,9 @@ impl Component for PresetsComponent {
         // The roster's own sentences already name the row (`presets: …`).
         let roster =
             heddle_config::preset_roster(Some(config)).map_err(|error| error.to_string())?;
-        services.provide("presets", Arc::new(roster));
+        // One live holder (A96, slice 3): the turn, `/api/presets` and a settings write to this row share it, so a
+        // written default is the next new session's without a restart, as the TypeScript loader's re-created plugin.
+        services.provide("presets", Arc::new(heddle_config::LivePresets::new(roster)));
         Ok(())
     }
 }

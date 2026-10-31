@@ -30,7 +30,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use heddle_config::{PresetDefinition, PresetResolution, PresetRoster, missing_preset_message};
+use heddle_config::{LivePresets, PresetDefinition, PresetResolution, missing_preset_message};
 use heddle_tools::{LogSink, ToolArgs, ToolContext, ToolRegistry, ToolResult, ToolSpec, codes};
 
 use crate::ports::{
@@ -95,7 +95,7 @@ pub struct AgentRuntime {
     /// The agent presets (inventory A96), from the optional `presets` row: each turn runs under its session's preset,
     /// which narrows the tools it is offered and the persona its system prompt is written from. `None` — a profile
     /// without the row — runs every session with every tool and the caller's own system prompt, as before.
-    pub presets: Option<Arc<PresetRoster>>,
+    pub presets: Option<Arc<LivePresets>>,
 }
 
 /// The cap on a turn's model-plus-tools rounds.
@@ -540,9 +540,11 @@ fn session_preset(
     runtime: &AgentRuntime,
     session: &SessionHandle,
 ) -> Result<Option<PresetDefinition>, TurnError> {
-    let Some(roster) = runtime.presets.as_ref() else {
+    let Some(live) = runtime.presets.as_ref() else {
         return Ok(None);
     };
+    // One snapshot for the whole decision: a settings write to the row mid-turn cannot split it (A96, slice 3).
+    let roster = live.snapshot();
     let recorded = match runtime.session.recorded_preset(session) {
         Some(recorded) => recorded,
         None => runtime
@@ -4046,8 +4048,8 @@ pub(crate) mod tests {
     const READER_PERSONA: &str = "You are a careful reviewer who never edits.";
 
     /// The test's `presets` row: `standard` (every tool) and `reader` (one tool and a persona), under `default`.
-    fn preset_roster(default: &str) -> Arc<PresetRoster> {
-        Arc::new(
+    fn preset_roster(default: &str) -> Arc<LivePresets> {
+        Arc::new(LivePresets::new(
             heddle_config::preset_roster(Some(&serde_json::json!({
                 "default": default,
                 "presets": [
@@ -4056,7 +4058,7 @@ pub(crate) mod tests {
                 ]
             })))
             .unwrap(),
-        )
+        ))
     }
 
     /// `read_tool` and `write_tool`, each noting in `ran` that it ran.
@@ -4119,7 +4121,7 @@ pub(crate) mod tests {
         model: Arc<ScriptedModel>,
         session: &Arc<RecordingSession>,
         tools: Arc<ToolRegistry>,
-        presets: Option<Arc<PresetRoster>>,
+        presets: Option<Arc<LivePresets>>,
     ) -> (AgentRuntime, Arc<SystemContext>) {
         let context = Arc::new(SystemContext {
             inner: SurfaceContext {
