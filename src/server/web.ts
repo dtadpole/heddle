@@ -40,6 +40,7 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
+import { flagVerb, storeWriteFailure, type SessionWriteError } from '../session/write-failure.ts'
 import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import type { ScheduleService } from '../schedule/service.ts'
@@ -1806,6 +1807,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message, code })}\n`)
         return
       }
+      /** A write the store could not save is DSH's `gateway/internal`, in words and without the store's path (#149). */
+      const failed = storeWriteFailure(flagVerb({ pinned, archived }), id, error)
+      if (failed !== undefined) {
+        respondWriteFailure(response, failed)
+        return
+      }
       throw error
     }
     if (meta === null) {
@@ -1868,7 +1875,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         return
       }
     }
-    const meta = ctx.session.rename(id, body.title)
+    /**
+     * A rename the store could not save is DSH's `gateway/internal` with DSH's sentence (`failed to rename session
+     * "<id>": …`, dsh-api-session-controller lib/index.js:839), the reason in words and never the store's path (#149).
+     * It is not "no session": the Rust build said so for it, and the Rename dialog showed it.
+     */
+    let meta
+    try {
+      meta = ctx.session.rename(id, body.title)
+    } catch (error) {
+      const failed = storeWriteFailure('rename', id, error)
+      if (failed === undefined) throw error
+      respondWriteFailure(response, failed)
+      return
+    }
     if (meta === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
@@ -3499,6 +3519,11 @@ function respond(
 ): void {
   response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', ...extra })
   response.end(body)
+}
+
+/** `500 { error, code: 'gateway/internal' }`: a change the session store could not save (#149, `../session/write-failure.ts`). */
+function respondWriteFailure(response: ServerResponse, failed: SessionWriteError): void {
+  respond(response, 500, 'application/json', `${JSON.stringify({ error: failed.message, code: failed.code })}\n`)
 }
 
 /** The page. One file, no build step, and no framework — the same choice DSH makes. */

@@ -6,6 +6,12 @@
 
 use thiserror::Error;
 
+/// DSH's code for a failure that is not the caller's: the store could not save a change (#149). DSH's rename wraps a
+/// storage fault in it (`dsh-api-session-controller` lib/index.js:839), and its gateway answers its pin's and archive's
+/// with it (`rpcFailure`, `dsh-api-gateway` lib/index.js:1673-1690). `WRITE_FAILED_CODE` in
+/// `src/session/write-failure.ts`.
+pub const WRITE_FAILED_CODE: &str = "gateway/internal";
+
 /// A flag the store refuses for a reason that is not "no such session".
 ///
 /// Pinning and archiving are mutually exclusive in the reference, and a route has to tell a `404` (no
@@ -176,11 +182,104 @@ impl SessionError {
         self
     }
 
+    /// The reason a store write failed, in words and never with the path (#149); `None` for an error that is not an I/O
+    /// failure, such as a refusal. The path is left out because a store folder's name is the working folder spelled out,
+    /// home directory included (#106, #130). EACCES and EPERM are both `PermissionDenied` here, and both "permission
+    /// denied" in the TypeScript build's `writeFailureReason`, word for word.
+    pub fn write_reason(&self) -> Option<&'static str> {
+        let SessionError::Io { source, .. } = self else {
+            return None;
+        };
+        Some(match source.kind() {
+            std::io::ErrorKind::PermissionDenied => "permission denied",
+            std::io::ErrorKind::ReadOnlyFilesystem => "read-only file system",
+            std::io::ErrorKind::StorageFull => "no space left on device",
+            _ => "the session store could not be written",
+        })
+    }
+
+    /// `failed to <verb> session "<id>": <reason>` for a store write that failed — DSH's rename sentence
+    /// (`dsh-api-session-controller` lib/index.js:839) for every verb, with [`SessionError::write_reason`] — or `None` for
+    /// an error that is not one. Answered beside [`WRITE_FAILED_CODE`].
+    pub fn write_failure(&self, verb: &str, id: &str) -> Option<String> {
+        self.write_reason()
+            .map(|reason| format!("failed to {verb} session \"{id}\": {reason}"))
+    }
+
     /// Wrap an I/O failure with the path it happened on.
     pub fn io(path: impl Into<String>, source: std::io::Error) -> Self {
         SessionError::Io {
             path: path.into(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    fn io(kind: ErrorKind) -> SessionError {
+        SessionError::io(
+            "/home/someone/.heddle/sessions/--home-someone-work--/session-x.json",
+            Error::from(kind),
+        )
+    }
+
+    #[test]
+    fn a_write_the_store_cannot_save_is_reasoned_in_words_never_with_its_path() {
+        // #149: the Rust build answered a rename `404 no session` and a pin `409 code: "archived"` for a store it
+        // could not write, with the store's absolute path. The words are `writeFailureReason` in
+        // src/session/write-failure.ts, word for word.
+        assert_eq!(
+            io(ErrorKind::PermissionDenied).write_reason(),
+            Some("permission denied")
+        );
+        assert_eq!(
+            io(ErrorKind::ReadOnlyFilesystem).write_reason(),
+            Some("read-only file system")
+        );
+        assert_eq!(
+            io(ErrorKind::StorageFull).write_reason(),
+            Some("no space left on device")
+        );
+        assert_eq!(
+            io(ErrorKind::Other).write_reason(),
+            Some("the session store could not be written")
+        );
+        let refusal = SessionError::Flag(SessionFlagError::Archived { id: "s".into() });
+        assert_eq!(
+            refusal.write_reason(),
+            None,
+            "a refusal is not a write failure"
+        );
+        assert_eq!(SessionError::EmptyId.write_reason(), None);
+
+        let sentence = io(ErrorKind::PermissionDenied)
+            .write_failure("rename", "session-00000000-0000-0000-0000-000000000001")
+            .expect("an I/O failure is a write failure");
+        assert_eq!(
+            sentence,
+            "failed to rename session \"session-00000000-0000-0000-0000-000000000001\": permission denied",
+            "DSH's rename sentence (dsh-api-session-controller lib/index.js:839)"
+        );
+        assert!(!sentence.contains("/home/"), "and no path: {sentence}");
+        assert_eq!(refusal.write_failure("pin", "s"), None);
+        assert_eq!(WRITE_FAILED_CODE, "gateway/internal", "DSH's code for it");
+    }
+
+    #[test]
+    fn a_flags_patch_names_the_write_it_saves() {
+        let verb = |pinned, archived| crate::FlagPatch { pinned, archived }.verb();
+        assert_eq!(verb(Some(true), None), "pin");
+        assert_eq!(verb(Some(false), None), "unpin");
+        assert_eq!(verb(None, Some(true)), "archive");
+        assert_eq!(verb(None, Some(false)), "unarchive");
+        assert_eq!(
+            verb(Some(true), Some(true)),
+            "archive",
+            "an archive change names a write that changes both, as flagVerb does"
+        );
     }
 }

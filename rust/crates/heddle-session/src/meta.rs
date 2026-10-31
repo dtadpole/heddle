@@ -239,6 +239,19 @@ pub struct FlagPatch {
     pub archived: Option<bool>,
 }
 
+impl FlagPatch {
+    /// The write this patch saves, as a failure names it (#149): an archive change names a write that changes both, else
+    /// the pin change. `flagVerb` in `src/session/write-failure.ts`.
+    pub fn verb(&self) -> &'static str {
+        match (self.archived, self.pinned) {
+            (Some(true), _) => "archive",
+            (Some(false), _) => "unarchive",
+            (None, Some(false)) => "unpin",
+            (None, _) => "pin",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

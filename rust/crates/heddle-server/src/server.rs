@@ -1470,11 +1470,25 @@ async fn flags_session(
             }
             respond::json(StatusCode::OK, &meta)
         }
+        // A write the store could not save is DSH's `gateway/internal`, answered `500` as web.ts answers it (#149):
+        // it was answered here as a refusal coded `archived`.
+        Err(error) if is_write_failure(&error) => store_write_failure(error),
         Err(error) => {
             let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
         }
     }
+}
+
+/// Whether a session service's error is a write the store could not save (#149, [`heddle_session::WRITE_FAILED_CODE`]).
+fn is_write_failure(error: &ServiceError) -> bool {
+    error.code.as_deref() == Some(heddle_session::WRITE_FAILED_CODE)
+}
+
+/// `500 {"error", "code": "gateway/internal"}`: a change the store could not save, in the adapter's words (#149), as
+/// web.ts's `respondWriteFailure` answers it.
+fn store_write_failure(error: ServiceError) -> Response {
+    service_refusal(error, StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// The activity port's items as the families `heddle_session::session_activity` places in DSH's order: each
@@ -1532,9 +1546,12 @@ async fn title_session(
             format!("{} does not hold {id}", folder.display()),
         );
     }
+    // A rename the store could not save is DSH's `gateway/internal` with DSH's sentence (#149), never "no session",
+    // which the Rename dialog showed for it.
     match state.harness().sessions.rename(id.as_str(), &title) {
-        None => respond::no_session(id.as_str()),
-        Some(meta) => {
+        Err(error) => store_write_failure(error),
+        Ok(None) => respond::no_session(id.as_str()),
+        Ok(Some(meta)) => {
             if let Some(folder) = folder.as_ref()
                 && let Err(error) = state
                     .harness()
@@ -3044,12 +3061,22 @@ mod tests {
         flags: FlagsAnswer,
     }
 
-    /// A flags write's outcome: the record, no such session, or the store's refusal of a pin on an archived session.
+    /// A flags write's outcome: the record, no such session, the store's refusal of a pin on an archived session, or
+    /// a write the store could not save (#149), as the adapter reports it. A rename answers `Failed` the same way.
     #[derive(Clone, Copy, Debug)]
     enum FlagsAnswer {
         Written,
         Missing,
         Refused,
+        Failed,
+    }
+
+    /// The adapter's report of a write the store could not save: DSH's code beside heddle-session's sentence (#149).
+    fn write_failed(verb: &str, id: &str) -> ServiceError {
+        ServiceError::with_code(
+            format!("failed to {verb} session \"{id}\": permission denied"),
+            "gateway/internal",
+        )
     }
 
     impl Sessions {
@@ -3113,7 +3140,7 @@ mod tests {
         fn set_flags(
             &self,
             id: &str,
-            _patch: FlagPatch,
+            patch: FlagPatch,
         ) -> Result<Option<SessionMeta>, ServiceError> {
             match self.flags {
                 FlagsAnswer::Written => Ok(self.metas.first().cloned()),
@@ -3122,10 +3149,22 @@ mod tests {
                     format!("session {id} is archived and cannot be pinned"),
                     "archived",
                 )),
+                FlagsAnswer::Failed => Err(write_failed(
+                    heddle_session::FlagPatch {
+                        pinned: patch.pinned,
+                        archived: patch.archived,
+                    }
+                    .verb(),
+                    id,
+                )),
             }
         }
-        fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
-            self.metas.first().cloned()
+        fn rename(&self, id: &str, _title: &str) -> Result<Option<SessionMeta>, ServiceError> {
+            match self.flags {
+                FlagsAnswer::Failed => Err(write_failed("rename", id)),
+                FlagsAnswer::Missing => Ok(None),
+                _ => Ok(self.metas.first().cloned()),
+            }
         }
         fn definition_id(&self, _folder: &Path) -> Option<String> {
             None
@@ -5572,6 +5611,7 @@ mod tests {
         for (answer, expected) in [
             (FlagsAnswer::Refused, StatusCode::CONFLICT),
             (FlagsAnswer::Missing, StatusCode::NOT_FOUND),
+            (FlagsAnswer::Failed, StatusCode::INTERNAL_SERVER_ERROR),
             (FlagsAnswer::Written, StatusCode::OK),
         ] {
             let mut sessions = Sessions::with_one();
@@ -5637,10 +5677,14 @@ mod tests {
                     );
                     assert_eq!(*port.stopped.lock().unwrap(), [parent]);
                 }
-                FlagsAnswer::Refused | FlagsAnswer::Missing => {
+                FlagsAnswer::Refused | FlagsAnswer::Missing | FlagsAnswer::Failed => {
                     if let FlagsAnswer::Refused = answer {
                         let body: Value = serde_json::from_slice(&bytes).unwrap();
                         assert_eq!(body["code"], "archived", "{body}");
+                    }
+                    if let FlagsAnswer::Failed = answer {
+                        let body: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(body["code"], "gateway/internal", "{body}");
                     }
                     assert!(!guard.is_cancelled(), "{answer:?}: the turn keeps running");
                     assert!(
@@ -5654,6 +5698,60 @@ mod tests {
                 }
             }
             drop(guard);
+        }
+    }
+
+    /// #149: a rename, pin or archive the store could not save is DSH's `gateway/internal`
+    /// (dsh-api-session-controller lib/index.js:839; dsh-api-gateway `rpcFailure`, lib/index.js:1673-1690), answered
+    /// `500` as web.ts answers it, in the adapter's words. It was a rename's `404 no session` and a pin's `409 code:
+    /// "archived"`, the store's absolute path in the sentence.
+    #[tokio::test]
+    async fn a_write_the_store_could_not_save_is_a_500_with_dshs_code_never_no_session_or_archived()
+    {
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let mut sessions = Sessions::with_one();
+        sessions.flags = FlagsAnswer::Failed;
+        let harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        let (router, _state) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("write-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        for (route, body, verb) in [
+            ("title", r#"{"title":"A new name"}"#, "rename"),
+            ("flags", r#"{"pinned":true}"#, "pin"),
+            ("flags", r#"{"pinned":false}"#, "unpin"),
+            ("flags", r#"{"archived":true}"#, "archive"),
+            ("flags", r#"{"archived":false}"#, "unarchive"),
+        ] {
+            let uri = format!("/api/sessions/{id}/{route}");
+            let (status, bytes) = post_json(&router, &uri, &cookie, body).await;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{verb}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"failed to {verb} session \\\"{id}\\\": permission denied\",\"code\":\"gateway/internal\"}}\n"
+                ),
+                "{verb}: the compact {{error, code}} web.ts writes"
+            );
         }
     }
 

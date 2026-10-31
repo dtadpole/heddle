@@ -65,7 +65,7 @@ pub use definition::{
     read_session_definition, require_folder, session_name, update_session_definition,
     write_session_definition,
 };
-pub use error::{SessionError, SessionFlagError};
+pub use error::{SessionError, SessionFlagError, WRITE_FAILED_CODE};
 pub use event::{
     AppendOptions, Events, NewEvent, SessionEvent, SessionHandle, SessionId, SurfaceOp,
 };

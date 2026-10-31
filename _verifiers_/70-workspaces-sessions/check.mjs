@@ -6313,6 +6313,96 @@ test('pin, archive and fork refuse what the reference refuses, and record their 
   }
 })
 
+test("a rename, pin or archive the session store cannot save answers 500 gateway/internal in words, never no session, archived or the store's path (#149)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /** A read-only folder does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * Issue #149. With the session store read-only, as a full disk or a permission mistake leaves it, the tree's Rename, Pin
+   * and Archive requests answered a raw `500 internal error: EACCES … open '<absolute path into the store>'` on TS, and on
+   * Rust a rename `404 no session <id>` and a pin or archive `409 { code: 'archived' }` carrying the path. DSH reports a
+   * storage fault as `gateway/internal` — its rename as `failed to rename session "<id>": …`
+   * (dsh-api-session-controller lib/index.js:839), its pin's and archive's through the gateway (dsh-api-gateway
+   * lib/index.js:1673-1690; dsh-workspace lib/index.js:609-612, "storage faults never masquerade as an unknown session").
+   * Both builds answer `500 { error: 'failed to <verb> session "<id>": permission denied', code: 'gateway/internal' }`, the
+   * reason in words, since a store folder's name spells out the working folder. The store is made read-only as the issue
+   * does it (`chmod -R a-w`), and given back in `finally` before the fixture is removed.
+   */
+  const { chmodSync, readdirSync, statSync } = await import('node:fs')
+  const writable = (path, on) => {
+    const stat = statSync(path)
+    if (stat.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name), on)
+    chmodSync(path, stat.isDirectory() ? (on ? 0o755 : 0o555) : on ? 0o644 : 0o444)
+  }
+  const h = harness('write-failure')
+  const store = join(h.home, 'sessions')
+  let live
+  try {
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', store], { ...h.env, HOME: h.home })
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, body) => {
+      const response = await fetch(new URL(path, live.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      return { status: response.status, type: response.headers.get('content-type') ?? '', text: await response.text() }
+    }
+    const metas = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    assert.equal((await call('/api/workspaces', { path: h.work })).status, 200, 'the workspace is registered')
+    const turn = await call('/api/turn', { prompt: 'a session to rename, pin and archive', folder: h.work })
+    assert.equal(turn.status, 200, `a turn made the session (${turn.text.slice(0, 200)})`)
+    const work = realpathSync(h.work)
+    const before = (await metas()).find((meta) => meta.cwd === work)
+    assert.ok(before !== undefined, 'and it is listed')
+    const id = before.id
+
+    writable(store, false)
+    const answers = []
+    try {
+      for (const [route, body, verb] of [
+        ['title', { title: 'A new name' }, 'rename'],
+        ['flags', { pinned: true }, 'pin'],
+        ['flags', { pinned: false }, 'unpin'],
+        ['flags', { archived: true }, 'archive'],
+        ['flags', { archived: false }, 'unarchive'],
+      ]) {
+        answers.push({ verb, ...(await call(`/api/sessions/${id}/${route}`, body)) })
+      }
+    } finally {
+      writable(store, true)
+    }
+    for (const { verb, status, type, text } of answers) {
+      assert.equal(status, 500, `${verb}: the store could not save it, which is neither "no session" nor a refusal\n${text}`)
+      assert.match(type, /^application\/json/, `${verb}: answered as JSON, as every refusal is`)
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      assert.deepEqual(body, { error: `failed to ${verb} session "${id}": permission denied`, code: 'gateway/internal' }, `${verb}: DSH's code and sentence, the reason in words`)
+      for (const leak of [h.home, realpathSync(h.home), store, work, process.env.HOME].filter((path) => typeof path === 'string' && path.length > 1)) {
+        assert.ok(!text.includes(leak), `${verb}: no path into the store (${leak})`)
+      }
+    }
+    const after = (await metas()).find((meta) => meta.id === id)
+    assert.deepEqual(
+      { title: after?.title, pinned: after?.pinned === true, archived: after?.archived === true },
+      { title: before.title, pinned: false, archived: false },
+      'and nothing was changed',
+    )
+    const renamed = await call(`/api/sessions/${id}/title`, { title: 'A new name' })
+    assert.equal(renamed.status, 200, `once the store can be written again, the same rename is saved (${renamed.text.slice(0, 200)})`)
+  } finally {
+    live?.kill()
+    try {
+      writable(store, true)
+    } catch {
+      // never made
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('archiving a session with running work is refused with the work named, and stop: true stops it and archives', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**

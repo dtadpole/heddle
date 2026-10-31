@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.5.0
+version: 1.6.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -43,6 +43,11 @@ current user or assistant messages hold a phrase, ranked and quoted as DSH's SQL
 SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-generate.ts`](unicode61-generate.ts) into
 [`unicode61.ts`](unicode61.ts) and its Rust twin, and the search is a scan that re-reads a log only when it changed
 (R-developer-eight-19).
+
+[`write-failure.ts`](write-failure.ts) says a **rename, pin or archive the store could not save** — a read-only or full
+store — as DSH reports a storage fault: code `gateway/internal` beside its rename sentence, `failed to <verb> session
+"<id>": <reason>`, the reason in words and never the store's path (#149). The Web routes answer it `500`; the Rust
+build's `SessionError::write_failure` is the same sentence.
 
 [`activity.ts`](activity.ts) names the **running work** a plain archive is refused for, in DSH's
 `workspace/session-activity` shape and DSH's listener order: the session's own turn, its live background jobs (the

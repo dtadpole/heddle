@@ -223,8 +223,9 @@ pub trait SessionService: Send + Sync {
     /// `409` with its code (`archived` when the store gave none).
     fn set_flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError>;
 
-    /// Retitle; the empty string clears the title. `None` is an unknown session.
-    fn rename(&self, id: &str, title: &str) -> Option<SessionMeta>;
+    /// Retitle; the empty string clears the title. `Ok(None)` is an unknown session; `Err` is a write the store
+    /// could not save (#149), never reported as an unknown session.
+    fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, ServiceError>;
 
     /// The id of the session whose definition lives in `folder`, if any.
     fn definition_id(&self, folder: &Path) -> Option<String>;
@@ -835,8 +836,8 @@ impl SessionService for UnavailableSessions {
     fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
-    fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
-        None
+    fn rename(&self, _id: &str, _title: &str) -> Result<Option<SessionMeta>, ServiceError> {
+        Ok(None)
     }
     fn definition_id(&self, _folder: &Path) -> Option<String> {
         None

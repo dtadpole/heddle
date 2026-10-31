@@ -92,6 +92,17 @@ fn failure(error: heddle_session::SessionError) -> ServiceError {
     }
 }
 
+/// A rename, pin or archive the store could not save (#149): DSH's `gateway/internal` beside
+/// `failed to <verb> session "<id>": <reason>`, the reason in words and never the store's path
+/// ([`heddle_session::SessionError::write_failure`]). It is neither "no session" nor a refusal coded `archived`, which
+/// the routes answered it as. Any other error is [`failure`]'s.
+fn write_failure(verb: &str, id: &str, error: heddle_session::SessionError) -> ServiceError {
+    match error.write_failure(verb, id) {
+        Some(sentence) => ServiceError::with_code(sentence, heddle_session::WRITE_FAILED_CODE),
+        None => failure(error),
+    }
+}
+
 impl SessionService for StoreSessions {
     fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
         let Some(handle) = self.service.open(id) else {
@@ -209,25 +220,21 @@ impl SessionService for StoreSessions {
     }
 
     fn set_flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {
+        let patch = heddle_session::FlagPatch {
+            pinned: patch.pinned,
+            archived: patch.archived,
+        };
         self.service
-            .flags(
-                id,
-                heddle_session::FlagPatch {
-                    pinned: patch.pinned,
-                    archived: patch.archived,
-                },
-            )
+            .flags(id, patch)
             .map(|meta| meta.as_ref().map(meta_of))
-            .map_err(failure)
+            .map_err(|error| write_failure(patch.verb(), id, error))
     }
 
-    fn rename(&self, id: &str, title: &str) -> Option<SessionMeta> {
+    fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, ServiceError> {
         self.service
             .rename(id, title)
-            .ok()
-            .flatten()
-            .as_ref()
-            .map(meta_of)
+            .map(|meta| meta.as_ref().map(meta_of))
+            .map_err(|error| write_failure("rename", id, error))
     }
 
     fn definition_id(&self, folder: &Path) -> Option<String> {
@@ -564,7 +571,10 @@ mod tests {
             Some(created.session.as_str())
         );
         sessions.update_definition_title(folder, "renamed").unwrap();
-        let renamed = sessions.rename(&created.session, "renamed").unwrap();
+        let renamed = sessions
+            .rename(&created.session, "renamed")
+            .unwrap()
+            .unwrap();
         assert_eq!(renamed.title.as_deref(), Some("renamed"));
     }
 
@@ -709,6 +719,74 @@ mod tests {
             );
         }
         assert!(!folder.exists(), "the deleted folder is not recreated");
+    }
+
+    /// `chmod -R a-w` (or back to writable) over a tree.
+    #[cfg(unix)]
+    fn writable(path: &Path, on: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = path.is_dir();
+        if directory {
+            for entry in std::fs::read_dir(path).unwrap() {
+                writable(&entry.unwrap().path(), on);
+            }
+        }
+        let mode = match (directory, on) {
+            (true, true) => 0o755,
+            (true, false) => 0o555,
+            (false, true) => 0o644,
+            (false, false) => 0o444,
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// #149: a rename, pin or archive the store cannot save — its folder read-only, as `chmod -R a-w` leaves it — is
+    /// reported with DSH's `gateway/internal` and `failed to <verb> session "<id>": permission denied`, never as no such
+    /// session (the rename's `None` was the route's `404 no session`) and never as a refusal coded `archived`, and the
+    /// store's path is not in the sentence. Root ignores the mode, so the check stands down there.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_the_store_cannot_save_is_dshs_internal_failure_in_words() {
+        let scratch = Scratch::new("write-failed");
+        let root = scratch.0.join("sessions");
+        let sessions = store_at(&root, None);
+        let id = sessions
+            .start(StartSession {
+                cwd: Some(scratch.0.clone()),
+                title: Some("first".into()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        writable(&root, false);
+        if std::fs::write(root.join("probe"), "").is_ok() {
+            writable(&root, true);
+            eprintln!("skipped: a read-only folder is still writable here (root)");
+            return;
+        }
+        let failed = |verb: &str| {
+            ServiceError::with_code(
+                format!("failed to {verb} session \"{id}\": permission denied"),
+                "gateway/internal",
+            )
+        };
+        let flags = |pinned, archived| sessions.set_flags(&id, FlagPatch { pinned, archived });
+        let answers = [
+            ("rename", sessions.rename(&id, "A new name").map(|_| ())),
+            ("pin", flags(Some(true), None).map(|_| ())),
+            ("unpin", flags(Some(false), None).map(|_| ())),
+            ("archive", flags(None, Some(true)).map(|_| ())),
+            ("unarchive", flags(None, Some(false)).map(|_| ())),
+        ];
+        writable(&root, true);
+        for (verb, answer) in answers {
+            assert_eq!(answer, Err(failed(verb)), "{verb}");
+        }
+        let meta = sessions.meta(&id).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("first"), "nothing was changed");
+        assert!(!meta.rest.contains_key("pinned") && !meta.rest.contains_key("archived"));
+        // Writable again, the same rename is saved; an unknown session is still `None`, the route's 404.
+        assert!(sessions.rename(&id, "A new name").unwrap().is_some());
+        assert_eq!(sessions.rename("no-such-session", "x"), Ok(None));
     }
 
     #[test]
