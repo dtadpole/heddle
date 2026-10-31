@@ -7022,9 +7022,7 @@ async function showSession(id) {
    * opened a running session: developer-ten's N1 open in `runTurn`'s `session` frame, a click on a running row, the
    * stream's reset reopening the open one. Any other session opens with none.
    */
-  const running = runningSessions.has(id) ? turnRounds.get(id) : undefined
-  liveRounds = running?.rounds ?? 0
-  liveRoundStartedAt = running?.startedAt ?? null
+  ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
   liveUsage = undefined
   liveTurns = 0
   liveGenerationMs = 0
@@ -7061,6 +7059,11 @@ async function showSession(id) {
   await refreshSessions()
   /** A later open started while the list was read. That open empties and fills the log, so this one must not touch it. */
   if (generation !== showGeneration) return false
+  /**
+   * Taken again after the read: it ends a turn whose end the page missed (the server says it no longer runs), and then
+   * its rounds are the fold's, not live (developer-ten's N2). A round counted meanwhile is in both, so nothing is lost.
+   */
+  ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
   syncSelectionToSession()
   if (view === 'trajectory') await showLedger(id)
   if (generation !== showGeneration) return false
@@ -7308,6 +7311,16 @@ function noteRound(session, wasRunning) {
   liveRoundStartedAt = startedAt
   liveRounds += 1
   updateStatusBar()
+}
+
+/**
+ * The live rounds of `id`'s running turn as this page counted them, `{ rounds, startedAt }`, or none when its turn is not
+ * running: what the dock adds to the session's fold, which counts a turn's rounds only once it ends. `showSession`, the
+ * end of this page's own turn and a re-read of the statistics all take the open session's from here.
+ */
+function liveRoundsOf(id) {
+  const seen = id !== null && runningSessions.has(id) ? turnRounds.get(id) : undefined
+  return { rounds: seen?.rounds ?? 0, startedAt: seen?.startedAt ?? null }
 }
 
 async function refreshSessions() {
@@ -9305,7 +9318,13 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         /** What the provider said the turn cost, and how long it took, if it said anything. */
         stopRequested = false
         stopButton.disabled = false
-        liveRounds = 0
+        /**
+         * This turn is over, so its rounds are the fold's now. The dock is the open session's, which may be another
+         * session with a turn of its own still running: its rounds stay (developer-ten's N1 on a5b90f28, where this
+         * zeroed them and M's dock dropped to its fold mid-turn when this page's turn in N ended).
+         */
+        if (typeof payload.session === 'string') turnRounds.delete(payload.session)
+        liveRounds = liveRoundsOf(current).rounds
         liveUsage = undefined
         updateStatusBar()
         void refreshSessionStats()
@@ -9943,11 +9962,11 @@ async function refreshSessionStats() {
     if (id !== current) return
     sessionStats = body.stats ?? null
     liveUsage = undefined
-    liveRounds = 0
+    /** The fold has no rounds of a turn still running, so the open session's running turn keeps its own (N1). */
+    ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
     liveTurns = 0
     liveGenerationMs = 0
     liveDecodeTokens = 0
-    liveRoundStartedAt = null
     updateStatusBar()
   } catch {
     // A stats read that fails leaves the last drawn figures rather than blanking the dock.

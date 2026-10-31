@@ -111,6 +111,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function drawSessionEvent() {}
     ${source('keptToDraw')}
     ${source('drawKeptEvents')}
+    ${source('liveRoundsOf')}
     ${source('showSession')}
     ({
       show: showSession,

@@ -51,7 +51,7 @@ interface Dock {
   endTurn(id: string): void
 }
 
-function harness(): Dock {
+function harness(options: { onRefresh?: (running: Set<string>, rounds: Map<string, unknown>) => void } = {}): Dock {
   return runInNewContext(
     `
     let current = null, composerKey = '__none__', unavailableSession = null, selectedPath = null, view = 'chat';
@@ -72,7 +72,8 @@ function harness(): Dock {
     const performance = { now: () => (clock += 10) };
     // The session's history answer: N's first prompt is in the log, its running turn's rounds are not in the fold yet.
     const fetch = async (url) => ({ ok: true, status: 200, json: async () => ({ id: decodeURIComponent(url.split('/').pop()), turns: [{ kind: 'user', text: 'hello' }], stats: { turns: 1, steps: 0 } }) });
-    async function refreshSessions() {}
+    /** The sessions read: a test may have it end a turn whose turn/completed the page missed, as the real read does. */
+    async function refreshSessions() { ON_REFRESH(runningSessions, turnRounds) }
     function markRunning(id) { runningSessions.add(id) }
     function noteCompletion() {}
     function paintRunningMarks() {}
@@ -110,6 +111,7 @@ function harness(): Dock {
     function restoreChatScroll() {}
     function drawKeptEvents() {}
     ${optional('noteRound')}
+    ${optional('liveRoundsOf')}
     function onModelRequest(payload, event) {
     ${modelRequestBranch()}
     }
@@ -123,7 +125,7 @@ function harness(): Dock {
       endTurn: (id) => { runningSessions.delete(id); turnRounds.delete(id) },
     })
     `,
-    { JSON, Promise, Map, Set, Array, Object, String, Number, Date, Math, Error },
+    { ON_REFRESH: options.onRefresh ?? (() => {}), JSON, Promise, Map, Set, Array, Object, String, Number, Date, Math, Error },
   ) as Dock
 }
 
@@ -172,7 +174,51 @@ test('a session whose turn is not running opens with no live rounds, and a turn 
 })
 
 test('every place the page ends a running turn forgets its rounds', () => {
-  const ends = (page.match(/runningSessions\.delete\(/g) ?? []).length
-  assert.ok(ends > 0)
-  assert.equal((page.match(/turnRounds\.delete\(/g) ?? []).length, ends, 'one turnRounds.delete beside each runningSessions.delete')
+  const lines = page.split('\n')
+  const ends = lines.flatMap((line, index) => (/runningSessions\.delete\(/.test(line) ? [index] : []))
+  assert.ok(ends.length > 0)
+  for (const index of ends) {
+    assert.ok(lines.slice(index, index + 4).some((line) => /turnRounds\.delete\(/.test(line)), `a turnRounds.delete beside the runningSessions.delete on line ${index + 1}`)
+  }
+})
+
+test('an open whose sessions read ends the turn the page thought was running counts no live rounds for it (N2)', async () => {
+  /**
+   * developer-ten's N2 on a5b90f28: showSession took the opened session's rounds before its sessions read, and that read
+   * ends a turn whose turn/completed the page missed (refreshSessions drops the running mark and forgets the rounds).
+   * The dock then added rounds the fold already counts.
+   */
+  const dock = harness({
+    onRefresh: (running, rounds) => {
+      running.delete(N)
+      rounds.delete(N)
+    },
+  })
+  dock.setCurrent(X)
+  dock.round(N)
+  await dock.show(N)
+  assert.deepEqual({ ...dock.read() }, { current: N, steps: 0, liveRounds: 0, roundStarted: false }, 'the read said the turn was over: none live')
+})
+
+test('a re-read of the open session\'s statistics keeps its running turn\'s rounds (N1)', async () => {
+  /**
+   * developer-ten's N1 on a5b90f28: refreshSessionStats zeroed liveRounds for the open session. It runs at the end of
+   * this page's turn in another session, while the open one may still be running; its fold has no running rounds.
+   */
+  const reread = (running: boolean) =>
+    runInNewContext(
+      `
+      let current = M, sessionStats = null, liveRounds = 3, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = 5
+      const runningSessions = new Set(RUNNING ? [M] : [])
+      const turnRounds = new Map(RUNNING ? [[M, { rounds: 3, startedAt: 5 }]] : [])
+      function updateStatusBar() {}
+      const fetch = async () => ({ ok: true, json: async () => ({ stats: { turns: 2, steps: 4 } }) })
+      ${optional('liveRoundsOf')}
+      ${source('refreshSessionStats')}
+      refreshSessionStats().then(() => JSON.stringify({ steps: sessionStats.steps + liveRounds, roundStarted: liveRoundStartedAt !== null }))
+      `,
+      { M: 'session-dddddddd-dddd-4ddd-8ddd-dddddddddddd', RUNNING: running, JSON, Promise, Map, Set, Array, Object, String },
+    ) as Promise<string>
+  assert.deepEqual(JSON.parse(await reread(true)), { steps: 7, roundStarted: true }, 'the fold\'s four steps and the three of the turn still running')
+  assert.deepEqual(JSON.parse(await reread(false)), { steps: 4, roundStarted: false }, 'with no turn running, the fold alone')
 })
