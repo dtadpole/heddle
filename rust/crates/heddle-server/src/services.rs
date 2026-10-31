@@ -182,6 +182,12 @@ pub trait SessionService: Send + Sync {
     /// Every session's meta, in the store's order.
     fn list(&self) -> Vec<SessionMeta>;
 
+    /// Append one record to a session's log — the turn route's `turn/failed`, which web.ts writes through
+    /// `ctx.session.store.append`. An implementation that keeps no log writes nothing and answers `Ok`.
+    fn record(&self, _id: &str, _kind: &str, _fields: Value) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
     /// One session's meta.
     fn meta(&self, id: &str) -> Option<SessionMeta> {
         self.list().into_iter().find(|meta| meta.id == id)

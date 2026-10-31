@@ -444,6 +444,26 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
             {
                 last.fork_seq = Some(seq);
             }
+            // A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the
+            // notice row a stopped turn uses — web.ts's transcriptTurns does the same.
+            if event_type == "turn/failed" {
+                let message = event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or("unknown error");
+                let reason = format!("the turn failed: {message}");
+                match turns.last_mut() {
+                    Some(last) if last.kind == TurnKind::Assistant => {
+                        last.ended.get_or_insert_with(Vec::new).push(reason);
+                    }
+                    _ => {
+                        let mut turn = ChatTurn::new(TurnKind::Assistant, String::new());
+                        turn.ended = Some(vec![reason]);
+                        turns.push(turn);
+                    }
+                }
+            }
             close_runs(&mut open_assistant, &mut open_reasoning);
             continue;
         }
@@ -562,6 +582,35 @@ fn append(turns: &mut Vec<ChatTurn>, kind: TurnKind, text: &str, index: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_turn_is_the_answers_stop_reason_as_in_typescript() {
+        let events = vec![
+            serde_json::json!({"seq": 0, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}}),
+            serde_json::json!({"seq": 1, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "partial"}}),
+            serde_json::json!({"seq": 2, "type": "turn/failed", "message": "upstream answered 502"}),
+        ];
+        let turns = transcript_turns(&events);
+        let last = turns.last().expect("an answer row");
+        assert_eq!(last.kind, TurnKind::Assistant);
+        assert_eq!(
+            last.ended.as_deref(),
+            Some(&["the turn failed: upstream answered 502".to_owned()][..])
+        );
+
+        let alone = transcript_turns(&[
+            serde_json::json!({"seq": 0, "type": "turn/failed", "message": ""}),
+        ]);
+        assert_eq!(
+            alone.len(),
+            1,
+            "a failure with no answer gets a row of its own"
+        );
+        assert_eq!(
+            alone[0].ended.as_deref(),
+            Some(&["the turn failed: unknown error".to_owned()][..])
+        );
+    }
     use serde_json::json;
 
     fn kinds(turns: &[ChatTurn]) -> Vec<TurnKind> {
