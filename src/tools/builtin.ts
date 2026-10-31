@@ -4,6 +4,7 @@ import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
+import { killProcessGroup } from '../sandbox/process-group.ts'
 import type { SandboxService } from '../sandbox/service.ts'
 import type { ToolDefinition, ToolResult } from './service.ts'
 
@@ -184,13 +185,22 @@ export function builtinTools(
       const cwd = context.cwd
       const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
-        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
+        /**
+         * The command leads its own process group (`detached`), so a Stop or the wall time reaches everything it
+         * started, as DSH's launcher does. Killing only the shell left its children running orphaned, and the turn
+         * waited for them because they still held the output pipes (live-testing draft developer-five-5).
+         */
+        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' }, detached: true })
         let stdout = ''
         let stderr = ''
         let timedOut = false
+        let stopped = false
+        const stop = () => {
+          if (!killProcessGroup(child.pid)) child.kill('SIGKILL')
+        }
         const timer = setTimeout(() => {
           timedOut = true
-          child.kill('SIGKILL')
+          stop()
         }, limit)
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString()
@@ -198,7 +208,14 @@ export function builtinTools(
         child.stderr.on('data', (chunk: Buffer) => {
           stderr += chunk.toString()
         })
-        context.signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true })
+        context.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true
+            stop()
+          },
+          { once: true },
+        )
         child.on('error', (error) => {
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
@@ -209,6 +226,15 @@ export function builtinTools(
           const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
+          /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
+          if (stopped) {
+            resolve({
+              output: trimmed,
+              error: { code: 'INTERRUPTED', message: 'the command was stopped before it finished' },
+              data: { sandbox: { ...sandboxFacts, denied: false } },
+            })
+            return
+          }
           if (timedOut) {
             resolve({
               output: trimmed,
