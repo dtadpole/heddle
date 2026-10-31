@@ -5,11 +5,12 @@
  */
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -285,6 +286,96 @@ test('a resumed session carries the earlier turns', async (context) => {
     assert.ok(texts.includes('what did I ask you to remember'), 'the second turn was appended to it')
     assert.equal(sessionsUnder(join(h.home, 'sessions')).length, 1, 'resuming did not start a second session')
   } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+/**
+ * A local chat endpoint that streams each answer as **several deltas**, one SSE frame per fragment, and keeps every
+ * request body it was sent.
+ *
+ * The scripted endpoint cannot stand in here: it yields a step's whole text as one text-delta, so a session it wrote
+ * holds one delta per answer and the defect below cannot appear. A provider splits an answer wherever its stream does,
+ * and this double does the same on purpose.
+ */
+async function fragmentingChatDouble(answers) {
+  const requests = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
+        response.writeHead(404, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: 'no model list' }))
+        return
+      }
+      requests.push(body)
+      const fragments = answers[Math.min(requests.length, answers.length) - 1]
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      for (const content of fragments) {
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
+      }
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}/ds`,
+    requests,
+    close: () =>
+      new Promise((resolvePromise) => {
+        server.close(() => resolvePromise())
+        server.closeAllConnections()
+      }),
+  }
+}
+
+test('a resumed session sends an earlier streamed answer back as one piece of text, not one line per fragment', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Live-testing draft developer-five-2, measured on both builds: an answer that streamed as several deltas was derived
+   * from the log as one text part per delta, and the chat adapter joins text parts with a newline, so every later
+   * request handed the model its own earlier answer broken wherever the stream split it ("value\n-\n6"). DSH assembles a
+   * stream per block (dsh-llm BlockAssembler.push appends every text delta of a block to one partial), so the model
+   * gets its answer back as it wrote it. The first answer here streams as four fragments; the second turn's request is
+   * read off the wire.
+   */
+  const fragments = ['The word ', 'you asked ', 'me to remember is lo', 'om.']
+  const double = await fragmentingChatDouble([fragments, ['noted']])
+  const h = harness('whole-answer')
+  const config = httpConfig({ home: h.home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: h.home, HEDDLE_CONFIG: config }
+  try {
+    const first = await runCli([...h.args, '--turn', 'remember the word loom'], { env })
+    assert.equal(first.code, 0, `the first turn ran\n${first.stdout}${first.stderr}`)
+    const id = sessionsUnder(join(h.home, 'sessions'))[0]
+    assert.ok(id, 'the first run created a session')
+    const deltas = readTranscript(join(h.home, 'sessions', id)).filter(
+      (event) => event.type === 'assistant/chunk' && event.chunk?.type === 'text-delta',
+    )
+    assert.deepEqual(
+      deltas.map((event) => event.chunk.text),
+      fragments,
+      'the answer reached the session as the four fragments it streamed in, one logged delta each (the log is unchanged)',
+    )
+
+    const second = await runCli([...h.args, '--turn', 'what was the word', '--resume', id], { env })
+    assert.equal(second.code, 0, `the resumed turn ran\n${second.stdout}${second.stderr}`)
+    assert.equal(double.requests.length, 2, 'each turn made one model call')
+    const sent = parseJson(double.requests[1])
+    const answers = (sent?.messages ?? []).filter((message) => message.role === 'assistant')
+    assert.deepEqual(
+      answers.map((message) => message.content),
+      [fragments.join('')],
+      `the second request carries the first answer once, whole, with no line break where the stream split it\nsent: ${JSON.stringify(answers)}`,
+    )
+  } finally {
+    await double.close()
     removeDir(h.home)
     removeDir(h.work)
   }
