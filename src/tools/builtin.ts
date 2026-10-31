@@ -126,7 +126,7 @@ function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string |
         try {
           io.close(fd)
         } catch {
-          // Best effort: the descriptor is gone either way.
+          // Best effort: a close that fails here is not retried, and the answer is still (unavailable).
         }
       }
       try {
