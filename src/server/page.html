@@ -336,6 +336,13 @@
   #settings-server dt { color: var(--text-3); }
   #settings-server dd { margin: 0; overflow-wrap: anywhere; }
   /** A setting a person changes: its label on the left, its control on the right, as DSH's General rows are laid out. */
+  #settings-presets { list-style: none; margin: .3rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+  .settings-preset { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .45rem .6rem; border-radius: 8px; background: var(--surface); font-size: .875rem; }
+  .settings-preset .what { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+  .settings-preset .meta { color: var(--text-3); font-size: .8rem; overflow-wrap: anywhere; }
+  .settings-preset .badge { flex: none; padding: 0 .45rem; border-radius: 6px; background: var(--hover); color: var(--text-2); font-size: .75rem; line-height: 1.5rem; }
+  .settings-preset button { flex: none; padding: .2rem .6rem; border: .5px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
+  .settings-preset button:hover { background: var(--hover); }
   .settings-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .35rem 0; font-size: .875rem; }
   .settings-row select {
     height: 32px;
@@ -3550,6 +3557,17 @@
       </div>
       <p id="settings-language-note" class="meta" hidden></p>
     </section>
+    <!--
+      Agent presets (A96, slice 3), DSH's Settings section of the same name: each preset with what it offers, the
+      default for new tasks marked, and Set as new task default on the others, written to the presets row (which
+      applies to the running server). A profile without the row has one implicit preset and nothing to set.
+    -->
+    <section id="settings-presets-section" hidden>
+      <h3 data-i18n="presets.nav">Agent presets</h3>
+      <p class="meta" data-i18n="presets.intro">Choose the agent’s tools and how it works.</p>
+      <ul id="settings-presets"></ul>
+      <p id="settings-presets-note" class="meta" role="status" hidden></p>
+    </section>
     <section>
       <h3 data-i18n="settings.server">Server</h3>
       <dl id="settings-server"></dl>
@@ -3690,6 +3708,13 @@ const MESSAGES = Object.freeze({
     'presets.seatHint': 'Choose the agent preset for your new task',
     'presets.headerHint': 'The agent preset chosen when this task started',
     'presets.standard': 'Standard mode',
+    'presets.nav': 'Agent presets',
+    'presets.intro': 'Choose the agent’s tools and how it works.',
+    'presets.inUse': 'New task default',
+    'presets.setDefault': 'Set as new task default',
+    'presets.allTools': 'Every tool',
+    'presets.tools': 'Tools: {tools}',
+    'presets.restart': 'Saved; it applies when the server restarts.',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3705,6 +3730,13 @@ const MESSAGES = Object.freeze({
     'presets.seatHint': '选择新任务使用的 Agent 预设',
     'presets.headerHint': '本任务的 Agent 预设，在任务开始时确定',
     'presets.standard': '标准模式',
+    'presets.nav': 'Agent 预设',
+    'presets.intro': '选择 Agent 的工具和工作方式。',
+    'presets.inUse': '新任务默认',
+    'presets.setDefault': '设为新任务默认',
+    'presets.allTools': '全部工具',
+    'presets.tools': '工具：{tools}',
+    'presets.restart': '已保存；服务器重启后生效。',
   }),
 })
 
@@ -6505,6 +6537,80 @@ async function loadPresets() {
     presetRoster = null
   }
   paintPresetSeat()
+  paintPresetSettings()
+}
+
+/**
+ * Settings' Agent presets section (A96, slice 3): every preset, by name, with what it offers; the default for new tasks
+ * badged as DSH badges it, and the others offering Set as new task default. An implicit roster (no presets row) has
+ * nothing to write, so it shows its one preset without a button.
+ */
+function paintPresetSettings() {
+  const section = document.getElementById('settings-presets-section')
+  const list = document.getElementById('settings-presets')
+  if (section === null || list === null) return
+  const presets = Array.isArray(presetRoster?.presets) ? presetRoster.presets : []
+  section.hidden = presets.length === 0
+  list.replaceChildren(
+    ...presets.map((preset) => {
+      const item = document.createElement('li')
+      item.className = 'settings-preset'
+      item.dataset.preset = preset.id
+      const what = document.createElement('span')
+      what.className = 'what'
+      const name = document.createElement('span')
+      name.className = 'name'
+      name.textContent = presetName(preset.id)
+      const offers = document.createElement('span')
+      offers.className = 'meta'
+      offers.textContent = Array.isArray(preset.tools)
+        ? t('presets.tools', { tools: preset.tools.length > 0 ? preset.tools.join(', ') : '—' })
+        : t('presets.allTools')
+      what.append(name, offers)
+      item.append(what)
+      if (preset.id === presetRoster.default) {
+        const badge = document.createElement('span')
+        badge.className = 'badge'
+        badge.textContent = t('presets.inUse')
+        item.append(badge)
+      } else if (presetRoster.implicit !== true) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.textContent = t('presets.setDefault')
+        button.addEventListener('click', () => void setDefaultPreset(preset.id))
+        item.append(button)
+      }
+      return item
+    }),
+  )
+}
+
+/**
+ * Make `id` the default for new tasks: the presets row's `default`, through the settings route. A session keeps the
+ * preset it started with. A write the server keeps but cannot apply, or one that applies at restart, says so.
+ */
+async function setDefaultPreset(id) {
+  const note = document.getElementById('settings-presets-note')
+  note.hidden = true
+  note.textContent = ''
+  const say = (text) => {
+    note.textContent = text
+    note.hidden = false
+  }
+  try {
+    const response = await fetch('/api/settings/presets', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ update: { default: id } }),
+    })
+    const body = await response.json().catch(() => null)
+    if (!response.ok) say(body !== null && typeof body.error === 'string' ? body.error : `the server answered ${response.status}`)
+    else if (body !== null && typeof body.applyError === 'string') say(body.applyError)
+    else if (body !== null && body.applies === 'restart') say(t('presets.restart'))
+  } catch (error) {
+    say((error && error.message) || String(error))
+  }
+  await loadPresets()
 }
 
 function presetName(id) {
@@ -6548,6 +6654,7 @@ document.getElementById('preset-select')?.addEventListener('change', (changeEven
 window.addEventListener('heddle:locale', () => {
   paintPresetSeat()
   paintSessionPreset(shownPreset)
+  paintPresetSettings()
 })
 
 async function showSession(id) {
