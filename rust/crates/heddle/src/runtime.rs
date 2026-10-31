@@ -100,7 +100,7 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
         hooks,
         turns: services.get::<heddle_agent::TurnRegistry>("turns"),
         // The agent presets (inventory A96): optional, as the live-turn registry is.
-        presets: services.get::<Arc<heddle_config::PresetRoster>>("presets"),
+        presets: services.get::<Arc<heddle_config::LivePresets>>("presets"),
     })
 }
 
@@ -330,8 +330,9 @@ mod tests {
 
         let roster = boot
             .services
-            .get::<Arc<heddle_config::PresetRoster>>("presets")
-            .expect("the presets row provides its roster");
+            .get::<Arc<heddle_config::LivePresets>>("presets")
+            .expect("the presets row provides its roster")
+            .snapshot();
         assert_eq!(roster.default, "standard");
         assert_eq!(
             roster.presets[0].tools, None,
@@ -405,8 +406,9 @@ mod tests {
             .expect("an empty row is the implicit roster");
         assert_eq!(
             services
-                .get::<Arc<heddle_config::PresetRoster>>("presets")
+                .get::<Arc<heddle_config::LivePresets>>("presets")
                 .expect("the roster")
+                .snapshot()
                 .ids(),
             ["standard"]
         );

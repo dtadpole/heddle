@@ -54,7 +54,7 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     // The agent presets (inventory A96): `GET /api/presets`, and the preset a session the page creates runs under.
     harness.presets = boot
         .services
-        .get::<Arc<heddle_config::PresetRoster>>("presets");
+        .get::<Arc<heddle_config::LivePresets>>("presets");
     if let Some(service) = boot
         .services
         .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
@@ -452,6 +452,8 @@ fn settings_router(args: &Args, invocation: &Invocation, boot: &Boot) -> Option<
 ///   holds the written configuration.
 /// - The locale row (issue #80): the server's held preference is replaced, and the next page request reads it, so a
 ///   language chosen in Settings is the `<html lang>` of the next page without a restart.
+/// - The presets row (A96, slice 3): the one held roster the turn and `/api/presets` read is replaced, so a written
+///   default is the next new session's; a session keeps the preset it recorded.
 fn with_live_rows(
     service: heddle_config::SettingsService,
     boot: &Boot,
@@ -474,13 +476,18 @@ fn with_live_rows(
         .services
         .get::<Arc<heddle_config::LiveLocale>>("locale")
         .map(|live| (rows_of(crate::builtins::Builtin::Locale), live));
-    if model.is_none() && locale.is_none() {
+    let presets = boot
+        .services
+        .get::<Arc<heddle_config::LivePresets>>("presets")
+        .map(|live| (rows_of(crate::builtins::Builtin::Presets), live));
+    if model.is_none() && locale.is_none() && presets.is_none() {
         return service;
     }
     let live: Vec<String> = model
         .iter()
         .flat_map(|(ids, _)| ids.clone())
         .chain(locale.iter().flat_map(|(ids, _)| ids.clone()))
+        .chain(presets.iter().flat_map(|(ids, _)| ids.clone()))
         .collect();
     service.with_live(
         live,
@@ -491,6 +498,11 @@ fn with_live_rows(
                 return source.set_row_config(config);
             }
             if let Some((ids, live)) = &locale
+                && ids.iter().any(|id| id == ns)
+            {
+                return live.set_config(config);
+            }
+            if let Some((ids, live)) = &presets
                 && ids.iter().any(|id| id == ns)
             {
                 return live.set_config(config);
@@ -949,6 +961,27 @@ impl ServerSandbox for Sandbox {
         heddle_sandbox::permission_transition(current, requested, confirm)
             .map(|change| change.mode.to_string())
             .map_err(|refusal| refusal.reason().to_owned())
+    }
+
+    /// `rootFor`, the folder a session's calls (and its page terminals, #85) run in.
+    fn root_for(&self, folder: Option<&std::path::Path>) -> std::path::PathBuf {
+        self.service.root_for(folder)
+    }
+
+    /// A page terminal is wrapped as a bash call is: the same backend and policy, rooted at the session's folder.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &std::path::Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let mode = heddle_sandbox::SandboxMode::parse(mode)
+            .ok_or_else(|| format!("'{mode}' is not a sandbox mode"))?;
+        self.service
+            .rooted_at(root)
+            .confine(argv, mode)
+            .map(|confined| confined.argv)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1841,7 +1874,7 @@ mod tests {
         std::fs::create_dir_all(&profile).unwrap();
         std::fs::write(
             profile.join("cordis.yml"),
-            "- insert:\n    - id: model\n      name: ./src/plugins/model.ts\n    - id: tools\n      name: ./src/plugins/tools.ts\n    - id: locale\n      name: ./src/plugins/locale.ts\n",
+            "- insert:\n    - id: model\n      name: ./src/plugins/model.ts\n    - id: tools\n      name: ./src/plugins/tools.ts\n    - id: locale\n      name: ./src/plugins/locale.ts\n    - id: presets\n      name: ./src/plugins/presets.ts\n      config:\n        default: standard\n        presets:\n          - id: standard\n            name: Standard\n          - id: reader\n            name: Reader\n",
         )
         .unwrap();
         let machine = root.join("heddle.json");
@@ -1874,6 +1907,14 @@ mod tests {
         boot.services.provide("model-row", Arc::clone(&source));
         let locale = Arc::new(heddle_config::LiveLocale::default());
         boot.services.provide("locale", Arc::clone(&locale));
+        let presets = Arc::new(heddle_config::LivePresets::new(
+            heddle_config::preset_roster(Some(&serde_json::json!({
+                "default": "standard",
+                "presets": [{"id": "standard", "name": "Standard"}, {"id": "reader", "name": "Reader"}],
+            })))
+            .unwrap(),
+        ));
+        boot.services.provide("presets", Arc::clone(&presets));
         let catalog = crate::builtins::BuiltinCatalog::new(env.clone(), root.clone());
         let service = with_live_rows(
             heddle_config::SettingsService::new(&options, &[], env.clone(), Box::new(catalog))
@@ -1921,6 +1962,46 @@ mod tests {
             locale.get().for_request(Some("en-US")),
             "zh",
             "the next page is served in the language just written"
+        );
+        // The presets row (A96, slice 3): a written default replaces the held roster's; one nothing declares is
+        // persisted but not applied, and says why, as the TypeScript loader's failed re-create does.
+        assert_eq!(applies("presets").as_deref(), Some("live"));
+        let mut fields = serde_json::Map::new();
+        fields.insert("default".to_owned(), serde_json::json!("reader"));
+        let entry = service
+            .write(
+                "presets",
+                &heddle_config::SettingsWrite::Update(fields),
+                None,
+            )
+            .unwrap();
+        assert_eq!(entry.apply_error, None);
+        assert_eq!(
+            presets.snapshot().default,
+            "reader",
+            "the next new session starts under the written default"
+        );
+        let mut fields = serde_json::Map::new();
+        fields.insert("default".to_owned(), serde_json::json!("writer"));
+        let entry = service
+            .write(
+                "presets",
+                &heddle_config::SettingsWrite::Update(fields),
+                None,
+            )
+            .unwrap();
+        assert!(
+            entry
+                .apply_error
+                .as_deref()
+                .is_some_and(|error| error.contains("writer")),
+            "{:?}",
+            entry.apply_error
+        );
+        assert_eq!(
+            presets.snapshot().default,
+            "reader",
+            "a refused roster leaves the one in force"
         );
         std::fs::remove_dir_all(&root).ok();
     }

@@ -853,6 +853,7 @@ dependencies = [
  "heddle-config",
  "heddle-session",
  "http-body-util",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

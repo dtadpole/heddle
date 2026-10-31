@@ -534,6 +534,17 @@ async function runWeb(args: Args): Promise<void> {
       pluginModuleNames: declaredModuleNames(app),
     })
     /**
+     * The sessions the startup sweeps read: every listed one whose log reads whole. A log that does not is named once
+     * and left out (`SessionStore.loads`), because these sweeps run after the listener is up and before the login line:
+     * one throw here used to unwind this function into `app.dispose()`, leaving a listener with every plugin gone and
+     * no link printed (#130).
+     */
+    const sweepHandles = () =>
+      app.ctx.session
+        .list()
+        .map((meta) => app.ctx.session.store.open(meta.id))
+        .filter((handle): handle is NonNullable<typeof handle> => handle !== null && app.ctx.session.store.loads(handle))
+    /**
      * A restarted harness picks up the goals it finds still active.
      *
      * Only the **server** does this: a one-shot command (`heddle tree`, `--turn`) must not start model calls
@@ -542,10 +553,7 @@ async function runWeb(args: Args): Promise<void> {
      * the startup edge that asks it.
      */
     if (app.ctx.goalDriver !== undefined) {
-      const handles = app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const handles = sweepHandles()
       const resumed = await app.ctx.goalDriver.resumeAtStart(handles)
       if (resumed.requested > 0) process.stdout.write(`heddle web: resuming ${resumed.requested} active goal(s)\n`)
     }
@@ -555,10 +563,7 @@ async function runWeb(args: Args): Promise<void> {
      * turns for teams it is not working on.
      */
     if (app.ctx.team !== undefined) {
-      const handles = app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const handles = sweepHandles()
       const recovered = await app.ctx.team.recoverAll(handles)
       if (recovered.recovered > 0 || recovered.failed > 0) {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
