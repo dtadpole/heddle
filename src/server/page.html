@@ -5396,6 +5396,8 @@ async function showSession(id) {
    */
   log.replaceChildren()
   try {
+    /** The view's place in this page's order of events, so its steer list is read against rows accepted later. */
+    const viewAsked = ++steerClock
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
     if (!response.ok) {
       /**
@@ -5416,7 +5418,7 @@ async function showSession(id) {
     }
     const body = await response.json()
     /** The dock's steering rows follow the view's waiting steers (#31): a reload or a second tab sees them too. */
-    reconcileSteers(id, body)
+    reconcileSteers(id, body, viewAsked)
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6457,62 +6459,117 @@ async function steerQueue() {
 }
 
 /**
- * Steer ids whose claim arrived on the stream before the request that queued them answered, per session.
- *
- * The loop can claim a steer at a step boundary before its 200 reaches this page; without this, `claimSteer` found no
- * row then, and the row the answer installed stayed "Steering…" for good (developer-twelve's review of #31).
+ * This page's own clock: each steer answer and each view request takes the next tick, so a view can be read against
+ * the rows accepted after it was asked for (developer-twelve's re-review of bbddf7aa).
  */
-const earlyClaims = new Map()
+let steerClock = 0
 
-/** A row the running turn accepted as a steer: kept as "steering" until its claim arrives, or retired at once. */
+/**
+ * Steer ids known to be claimed, per session: from a claim on the stream and from the claimed user rows of a view.
+ *
+ * Never forgotten. A late answer to the request that queued a steer, or a view that was asked for before the claim,
+ * can then never draw that steer again; an earlier version cleared this on every reconcile and lost a claim that
+ * landed between the request and its answer.
+ */
+const claimedSteers = new Map()
+
+function claimedFor(session) {
+  let claimed = claimedSteers.get(session)
+  if (claimed === undefined) {
+    claimed = new Set()
+    claimedSteers.set(session, claimed)
+  }
+  return claimed
+}
+
+/** Mark a steer claimed and retire every row that carries it; `true` when a row went. */
+function retireSteer(session, steerId) {
+  claimedFor(session).add(steerId)
+  const queue = queues.get(session)
+  if (queue === undefined) return false
+  let removed = false
+  for (let at = queue.length - 1; at >= 0; at -= 1) {
+    if (queue[at].steerId === steerId) {
+      queue.splice(at, 1)
+      removed = true
+    }
+  }
+  return removed
+}
+
+/**
+ * A row the running turn accepted as a steer: kept as "steering" until its claim arrives, or retired at once when
+ * the server wrote it directly, when it is already known claimed, or when a view already drew a row for the same id.
+ */
 function settleSteered(queue, key, id, steerId) {
   const at = queue.findIndex((entry) => entry.id === id)
   if (at === -1) return
-  const claimed = earlyClaims.get(key)
-  if (steerId === '' || claimed?.has(steerId) === true) {
-    claimed?.delete(steerId)
-    queue.splice(at, 1)
-  } else {
+  const drawn = steerId !== '' && queue.some((entry, index) => index !== at && entry.steerId === steerId)
+  if (steerId === '' || claimedFor(key).has(steerId) || drawn) queue.splice(at, 1)
+  else {
     queue[at].status = 'steering'
     queue[at].steerId = steerId
+    queue[at].acceptedAt = ++steerClock
   }
   if (keyOfQueue(queue, key) === composerKey) renderQueue()
 }
 
 /**
- * Make a session's steering rows agree with its view (`GET /api/sessions/{id}`): a row stays only while its steer
- * still waits (`pendingSteers`), and a waiting steer this page has no row for gets one.
+ * Make a session's steering rows agree with its view (`GET /api/sessions/{id}`), asked for at `askedAt` on this
+ * page's clock.
+ *
+ * - The view's claimed user rows (`steerId`) join the known claims, and every row they name retires.
+ * - A waiting steer (`pendingSteers`) that is not known claimed and has no row gets one, once.
+ * - A row the view does not list retires only when the view was asked for after the row was accepted: the server
+ *   queues a steer before it answers, so such a view would list it if it still waited. An older view's silence
+ *   proves nothing and is ignored.
  *
  * Called when a session is opened and after the event stream reconnects, so a claim missed while the stream was down,
  * a reload, or a second tab all end with the dock DSH's queue would show.
  */
-function reconcileSteers(session, body) {
+function reconcileSteers(session, body, askedAt) {
   if (typeof session !== 'string' || session === QUEUE_KEY_NONE) return
-  const pending = Array.isArray(body?.pendingSteers) ? body.pendingSteers.filter((entry) => typeof entry?.steerId === 'string') : []
+  const claimed = claimedFor(session)
+  for (const turn of Array.isArray(body?.turns) ? body.turns : []) {
+    if (turn?.kind === 'user' && typeof turn.steerId === 'string') claimed.add(turn.steerId)
+  }
+  const pending = (Array.isArray(body?.pendingSteers) ? body.pendingSteers : []).filter(
+    (entry) => typeof entry?.steerId === 'string' && !claimed.has(entry.steerId),
+  )
   const waiting = new Set(pending.map((entry) => entry.steerId))
   const queue = queues.get(session) ?? (pending.length > 0 ? queueOf(session) : undefined)
   if (queue === undefined) return
   let changed = false
   for (let at = queue.length - 1; at >= 0; at -= 1) {
-    if (queue[at].status === 'steering' && !waiting.has(queue[at].steerId)) {
+    const row = queue[at]
+    if (row.status !== 'steering') continue
+    const vanished = !waiting.has(row.steerId) && typeof askedAt === 'number' && typeof row.acceptedAt === 'number' && askedAt > row.acceptedAt
+    if (claimed.has(row.steerId) || vanished) {
       queue.splice(at, 1)
       changed = true
     }
   }
   for (const entry of [...pending].reverse()) {
-    if (queue.some((item) => item.steerId === entry.steerId)) continue
-    queue.unshift({ id: `queued-${++queueSeq}`, text: String(entry.text ?? ''), attachments: [], status: 'steering', steerId: entry.steerId })
+    if (queue.some((row) => row.steerId === entry.steerId)) continue
+    queue.unshift({
+      id: `queued-${++queueSeq}`,
+      text: String(entry.text ?? ''),
+      attachments: [],
+      status: 'steering',
+      steerId: entry.steerId,
+      acceptedAt: typeof askedAt === 'number' ? askedAt : undefined,
+    })
     changed = true
   }
-  earlyClaims.delete(session)
   if (changed && session === composerKey) renderQueue()
 }
 
 async function refreshSteers(session) {
   if (typeof session !== 'string' || session === QUEUE_KEY_NONE) return
+  const askedAt = ++steerClock
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(session)}`)
-    if (response.ok) reconcileSteers(session, await response.json())
+    if (response.ok) reconcileSteers(session, await response.json(), askedAt)
   } catch {
     // The next reconnect or opening tries again.
   }
@@ -6526,20 +6583,8 @@ async function refreshSteers(session) {
 function claimSteer(session, message) {
   const steerId = message?.source?.kind === 'steer' ? message.source.steerId : undefined
   if (typeof steerId !== 'string') return
-  const queue = queues.get(session)
-  const at = queue === undefined ? -1 : queue.findIndex((entry) => entry.steerId === steerId)
-  if (at === -1) {
-    // Claimed before its request answered: remembered, so the answer retires the row instead of installing it.
-    let claimed = earlyClaims.get(session)
-    if (claimed === undefined) {
-      claimed = new Set()
-      earlyClaims.set(session, claimed)
-    }
-    claimed.add(steerId)
-    return
-  }
-  queue.splice(at, 1)
-  if (session === composerKey) renderQueue()
+  // Remembered even with no row yet (claimed before its request answered), and every row carrying it retires.
+  if (retireSteer(session, steerId) && session === composerKey) renderQueue()
 }
 
 function removeItem(id) {

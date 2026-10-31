@@ -15,10 +15,14 @@ import { runInNewContext } from 'node:vm'
  */
 const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src/server/page.html'), 'utf8')
 /** Functions a page from before this change lacks; a stub keeps the older behaviour measurable (the before reading). */
-const OPTIONAL = new Set(['reconcileSteers'])
+const OPTIONAL = new Map([
+  ['reconcileSteers', 'function reconcileSteers() {}'],
+  ['retireSteer', 'function retireSteer() { return false }'],
+  ['claimedFor', 'function claimedFor() { return new Set() }'],
+])
 function source(name: string): string {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
-  if (start < 0 && OPTIONAL.has(name)) return `function ${name}() {}`
+  if (start < 0 && OPTIONAL.has(name)) return OPTIONAL.get(name) as string
   assert.ok(start >= 0, `the page defines ${name}`)
   const end = page.indexOf('\n}', start)
   assert.ok(end > start, name)
@@ -34,7 +38,9 @@ interface Dock {
   steerItem(id: string): Promise<void>
   steerQueue(): Promise<void>
   claim(session: string, steerId: string): void
-  reconcile(session: string, body: unknown): void
+  reconcile(session: string, body: unknown, askedAt?: number): void
+  /** A view request issued now: its place on the page's clock. */
+  ask(): number
   requests: { url: string; prompt: string }[]
   answer(reply: { status: number; steerId?: string }): void
 }
@@ -71,10 +77,12 @@ function harness(): Dock {
     let queueSeq = 0;
     const queues = new Map();
     const earlyClaims = new Map();
+    let steerClock = 0;
+    const claimedSteers = new Map();
     function renderQueue() {}
     function add() {}
     function pumpQueue() {}
-    ${['queueOf', 'keyOfQueue', 'enqueue', 'steerNow', 'deliverSteered', 'steerItem', 'steerQueue', 'settleSteered', 'claimSteer', 'reconcileSteers'].map(source).join('\n')}
+    ${['queueOf', 'keyOfQueue', 'enqueue', 'steerNow', 'deliverSteered', 'steerItem', 'steerQueue', 'claimedFor', 'retireSteer', 'settleSteered', 'claimSteer', 'reconcileSteers'].map(source).join('\n')}
     ({
       setKey(key) { composerKey = key },
       queue(key) { return queueOf(key) },
@@ -83,6 +91,7 @@ function harness(): Dock {
       steerItem, steerQueue,
       claim(session, steerId) { claimSteer(session, { role: 'user', source: { kind: 'steer', steerId } }) },
       reconcile: reconcileSteers,
+      ask() { return ++steerClock },
       requests, answer,
     })
   `,
@@ -182,4 +191,59 @@ test('#31: a steer a Stop left waiting stays steering, and the next turn claims 
   dock.claim('X', 's1')
   dock.reconcile('X', { turns: [{ kind: 'user', steerId: 's1' }], pendingSteers: [] })
   assert.equal(dock.queue('X').length, 0, 'claimed once, never drawn again')
+})
+
+test('#31: a view asked for before a steer was accepted cannot remove its row; a later view that lacks it can', async () => {
+  const dock = harness()
+  const early = dock.ask()
+  const sent = dock.deliverSteered('accepted after the view was asked')
+  dock.answer({ status: 200, steerId: 's1' })
+  await sent
+  dock.reconcile('X', { turns: [], pendingSteers: [] }, early)
+  assert.deepEqual(shape(dock.queue('X')), ['accepted after the view was asked:steering'], 'an older view says nothing about it')
+  const later = dock.ask()
+  dock.reconcile('X', { turns: [], pendingSteers: [] }, later)
+  assert.equal(dock.queue('X').length, 0, 'a view asked for after the steer was queued, without it, retires it')
+})
+
+test('#31: a view asked for before the claim but answered after it does not draw the claimed steer again', async () => {
+  const dock = harness()
+  const sent = dock.deliverSteered('claimed on the stream')
+  dock.answer({ status: 200, steerId: 's1' })
+  await sent
+  const asked = dock.ask()
+  dock.claim('X', 's1')
+  dock.reconcile('X', { turns: [], pendingSteers: [{ steerId: 's1', text: 'claimed on the stream' }] }, asked)
+  assert.equal(dock.queue('X').length, 0, 'no permanent row from a stale pending list')
+})
+
+test('#31: request, claim on the stream, a reconcile, then the 200: the claim is kept and no row is left', async () => {
+  const dock = harness()
+  // The session already has a queue (a message waits), as on a live page, so the reconcile walks it.
+  dock.push('X', 'waiting behind')
+  const sent = dock.deliverSteered('fast boundary')
+  dock.claim('X', 's1')
+  dock.reconcile('X', { turns: [{ kind: 'user', steerId: 's1' }], pendingSteers: [] }, dock.ask())
+  dock.answer({ status: 200, steerId: 's1' })
+  await sent
+  assert.deepEqual(shape(dock.queue('X')), ['waiting behind:pending'], 'the reconcile did not forget the claim')
+})
+
+test('#31: a view that drew the steer before its 200 leaves one row, and the claim retires every copy', async () => {
+  const dock = harness()
+  const sent = dock.deliverSteered('drawn by the view first')
+  dock.reconcile('X', { turns: [], pendingSteers: [{ steerId: 's1', text: 'drawn by the view first' }] }, dock.ask())
+  dock.answer({ status: 200, steerId: 's1' })
+  await sent
+  assert.deepEqual(shape(dock.queue('X')), ['drawn by the view first:steering'], 'upserted by id, not duplicated')
+
+  dock.push('X', 'row')
+  const single = dock.steerItem('row')
+  dock.reconcile('X', { turns: [], pendingSteers: [{ steerId: 's1', text: 'drawn by the view first' }, { steerId: 's2', text: 'row' }] }, dock.ask())
+  dock.answer({ status: 200, steerId: 's2' })
+  await single
+  assert.deepEqual(shape(dock.queue('X')).sort(), ['drawn by the view first:steering', 'row:steering'], 'the row a view drew replaces the one being sent')
+  dock.claim('X', 's1')
+  dock.claim('X', 's2')
+  assert.equal(dock.queue('X').length, 0, 'every copy retires on its claim')
 })
