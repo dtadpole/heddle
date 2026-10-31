@@ -11578,7 +11578,15 @@ log.addEventListener('click', (clickEvent) => {
   if (path === null) return
   clickEvent.preventDefault()
   const fragment = href.split('#')[1] ?? ''
-  void openPath(path).then(() => {
+  /**
+   * showFile takes its ticket before its first await, so the ticket read here is this open's. Only the newest open may
+   * place the reader: a link clicked earlier whose file arrives late would otherwise scroll a newer file to its own line
+   * (developer-two's review of #41).
+   */
+  const opening = openPath(path)
+  const ticket = fileFetches
+  void opening.then(() => {
+    if (ticket !== fileFetches) return
     if (fragment.length > 0) goToFragment(fragment)
     else fileBody.scrollTop = 0
   })
