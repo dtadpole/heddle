@@ -781,3 +781,61 @@ test('a chat link whose file arrives after a newer link opened leaves the newer 
     await server.close()
   }
 })
+
+test('a link in the preview whose file arrives after a newer selection leaves the newer file where it is', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * developer-two's review of #41, the preview's own handler: a link in a previewed document placed the reader after
+   * awaiting openPath, with no ticket, so a newer selection made meanwhile was scrolled to the old link's line.
+   */
+  const server = await startServer('preview-link-race', () => [{ text: 'ok' }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    writeFileSync(join(server.work, 'code.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    writeFileSync(join(server.work, 'guide.md'), '# Guide\n\nSee [the notes](notes.txt#L120).\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    /** Files open from the tree, as a reader opens them. */
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((row) => (row.dataset.path ?? '').endsWith(${JSON.stringify('/' + name)}))`
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(await browser.waitFor(`${row('guide.md')} !== undefined && ${row('code.ts')} !== undefined`, 10_000), 'the tree lists the guide and the code')
+    await browser.evaluate(`${row('guide.md')}.click()`)
+    const link = `[...document.querySelectorAll('#file-body a')].find((anchor) => anchor.textContent === 'the notes')`
+    assert.ok(await browser.waitFor(`${link} !== undefined`, 10_000), 'the guide shows its link to the notes')
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('/api/file') && address.includes('notes.txt')) {
+          held = false
+          return new Promise((resolve) => { window.__releaseNotes = () => resolve(original(input, init)) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${link}.click()`)
+    assert.ok(await browser.waitFor('typeof window.__releaseNotes === "function"', 10_000), 'the notes are in flight')
+    await browser.evaluate(`${row('code.ts')}.click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes('value200')`, 10_000), 'the newer selection opened its file')
+    assert.equal(Number(await browser.evaluate(TOP_LINE)), 1, 'it opens at the top')
+    await browser.evaluate('window.__releaseNotes()')
+    await new Promise((done) => setTimeout(done, 800))
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({ code: document.getElementById('file-body').innerText.includes('value200'), top: ${TOP_LINE} })`))
+    assert.ok(state.code, 'the newer file is still the one shown')
+    assert.equal(Number(state.top), 1, `the late preview link does not scroll the newer file to its line (top line ${state.top})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
