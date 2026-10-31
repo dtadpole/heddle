@@ -506,12 +506,28 @@ async fn settings_answer(
     axum::extract::State(service): axum::extract::State<Arc<heddle_config::SettingsService>>,
     method: axum::http::Method,
     uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let path = uri.path().to_owned();
+    // The native open action (A95) is offered only to a page on this machine, as DSH's Host withholds it otherwise.
+    let loopback = heddle_config::loopback_host(
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok()),
+    );
     let answer = tokio::task::spawn_blocking(move || {
-        heddle_config::handle_settings_request(&service, method.as_str(), &path, &body)
+        heddle_config::handle_settings_request_with(
+            &service,
+            method.as_str(),
+            &path,
+            &body,
+            &heddle_config::SettingsRequestContext {
+                loopback,
+                opener: None,
+            },
+        )
     })
     .await
     .ok()
@@ -1592,6 +1608,7 @@ mod tests {
                 axum::extract::State(service),
                 method,
                 path.parse().unwrap(),
+                axum::http::HeaderMap::new(),
                 axum::body::Bytes::from(body.to_owned()),
             ));
             let status = response.status().as_u16();

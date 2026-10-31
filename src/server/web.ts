@@ -29,7 +29,7 @@ import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } fro
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
 import { type InventoryLoader, readPluginInventory } from '../config/plugin-inventory.ts'
-import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
+import { handleSettingsRequest, loopbackHost, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
@@ -903,7 +903,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     const body = request.method === 'POST' ? await readText(request, response) : ''
     if (body === null) return
-    const answer = await handleSettingsRequest(state.settings, request.method ?? 'GET', url.pathname, body)
+    // The native open action (A95) is offered only to a page on this machine, as DSH's Host withholds it otherwise.
+    const answer = await handleSettingsRequest(state.settings, request.method ?? 'GET', url.pathname, body, { loopback: loopbackHost(request.headers.host) })
     if (answer !== undefined) {
       respond(response, answer.status, 'application/json', `${JSON.stringify(answer.body, null, 2)}\n`)
       return
