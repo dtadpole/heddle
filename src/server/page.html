@@ -10113,44 +10113,66 @@ function settingsEndpoint(endpoint) {
   return item
 }
 
-/** Fill the dialog from the three routes it needs, each tolerating a profile that does not load it. */
+/** A list note in the dialog's muted style: an empty section, or a section that could not be read. */
+function settingsNote(text) {
+  const note = document.createElement('li')
+  note.className = 'meta'
+  note.textContent = text
+  return note
+}
+
+/**
+ * Fill the dialog from the three routes it needs, each tolerating a profile that does not load it.
+ *
+ * A route the profile does not load (404) is an empty section, because that is what the profile has. A read that
+ * **failed** is not (issue #60): with the server unreachable, every route used to read as empty, and the dialog stated
+ * "no endpoint is configured" and "no workspace root is registered yet" about a configuration that was intact. A failed
+ * section now says it could not be read and why, in the words the tree already uses ("could not read the workspaces:
+ * Failed to fetch"), as DSH's surfaces report a failed read rather than an empty answer.
+ */
 async function fillSettings() {
   const server = document.getElementById('settings-server')
   const models = document.getElementById('settings-models')
   const workspaces = document.getElementById('settings-workspaces')
+  /** `{ body }` on success, `{ missing: true }` for a route the profile does not load, `{ failure }` otherwise. */
   const read = async (path) => {
     try {
       const response = await fetch(path)
-      return response.ok ? await response.json() : null
+      if (response.ok) return { body: await response.json() }
+      if (response.status === 404) return { missing: true }
+      return { failure: `the server answered ${response.status}` }
     } catch (error) {
-      return null
+      return { failure: (error && error.message) || String(error) }
     }
   }
-  const [status, endpoints, tree] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
+  const [statusRead, endpointsRead, treeRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
 
-  const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
-  server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
-  server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
-
-  const list = endpoints === null || !Array.isArray(endpoints.endpoints) ? [] : endpoints.endpoints
-  if (list.length === 0) {
-    const note = document.createElement('li')
-    note.className = 'meta'
-    note.textContent = 'no endpoint is configured in this profile'
-    models.append(note)
+  if (statusRead.failure !== undefined) {
+    server.append(...settingsTerm('Status', `could not read the server status: ${statusRead.failure}`))
+  } else {
+    const status = statusRead.body ?? null
+    const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
+    server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
+    server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
   }
+
+  if (endpointsRead.failure !== undefined) {
+    models.append(settingsNote(`could not read the endpoint list: ${endpointsRead.failure}`))
+  }
+  const endpoints = endpointsRead.body ?? null
+  const list = endpoints === null || !Array.isArray(endpoints.endpoints) ? [] : endpoints.endpoints
+  if (list.length === 0 && endpointsRead.failure === undefined) models.append(settingsNote('no endpoint is configured in this profile'))
   for (const endpoint of list) models.append(settingsEndpoint(endpoint))
 
-  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
-  if (roots.length === 0) {
-    const note = document.createElement('li')
-    note.className = 'meta'
-    note.textContent = 'no workspace root is registered yet'
-    workspaces.append(note)
+  if (treeRead.failure !== undefined) {
+    workspaces.append(settingsNote(`could not read the workspaces: ${treeRead.failure}`))
   }
+  const tree = treeRead.body ?? null
+  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
+  if (roots.length === 0 && treeRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
   for (const root of roots) {
     const item = document.createElement('li')
     item.className = 'settings-workspace'
