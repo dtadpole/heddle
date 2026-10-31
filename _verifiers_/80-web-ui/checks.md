@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-31T07:30:00Z
 level: L3
-version: 1.1.0
+version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -50,6 +50,12 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-browser-tab.mjs`](check-browser-tab.mjs) — the right sidebar's Browser tab (#86), opt-in as DSH's Web
+  profile ships it: a default server reports no `browser` on `/api/status` and shows no entry point; with
+  `HEDDLE_WEB_BROWSER=1` the tab refuses `javascript:`, `file:`, `data:` and `blob:` input, credentials and the
+  application's own origin before anything reaches the network, frames a loopback page in DSH's default sandbox with
+  no referrer, keeps its own Back and Forward, marks a page that moved itself unknown, and covers the window at phone
+  width.
 
 ## What it deliberately does not judge
 

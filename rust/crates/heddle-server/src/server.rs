@@ -131,6 +131,10 @@ pub struct ServerOptions {
     pub default_endpoint: Option<String>,
     /// Installation roots searched for `node_modules/dompurify` ([`crate::preview::purify_path`]).
     pub asset_roots: Vec<PathBuf>,
+    /// Whether the page may offer its Browser tab (#86; `HEDDLE_WEB_BROWSER=1`). Off by default, as
+    /// DSH's Web profile ships it. The server only reports the choice on `/api/status`; it never
+    /// fetches, proxies or probes a page.
+    pub browser: bool,
 }
 
 impl ServerOptions {
@@ -929,13 +933,15 @@ async fn search_sessions(
 }
 
 async fn status(State(state): State<AppState>) -> Response {
-    respond::json(
-        StatusCode::OK,
-        &json!({
-            "sandbox": {"mode": state.harness().sandbox.default_mode()},
-            "cwd": state.harness().sandbox.workspace_root(),
-        }),
-    )
+    let mut body = json!({
+        "sandbox": {"mode": state.harness().sandbox.default_mode()},
+        "cwd": state.harness().sandbox.workspace_root(),
+    });
+    // Present only when the operator enabled the Browser tab, so a default answer keeps its bytes.
+    if state.options().browser {
+        body["browser"] = json!(true);
+    }
+    respond::json(StatusCode::OK, &body)
 }
 
 fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
@@ -2902,6 +2908,29 @@ mod tests {
             body_text(&bytes),
             "{\n  \"sandbox\": {\n    \"mode\": \"workspace-write\"\n  },\n  \"cwd\": \"/work\"\n}\n"
         );
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_browser_tab_only_when_the_operator_enabled_it() {
+        // #86: the page's Browser tab is opt-in; the default answer above carries no `browser` key.
+        let (router, _) = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("status-browser")),
+                browser: true,
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/status", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["browser"], serde_json::json!(true));
+        assert_eq!(body["sandbox"]["mode"], "workspace-write");
     }
 
     #[tokio::test]

@@ -76,6 +76,9 @@ pub struct Context<'a> {
     pub notes: Vec<String>,
     /// Cancelled by the binary on SIGINT or SIGTERM; the server then closes, streams and all.
     pub shutdown: CancellationToken,
+    /// Whether the page may offer its Browser tab: the binary sets it from `HEDDLE_WEB_BROWSER=1`, as
+    /// `runWeb` does, so this crate still reads no process globals (#86).
+    pub browser: bool,
 }
 
 /// Run `command`. Returns the process exit code: `0` done, `1` with `heddle: <sentence>` on `err`.
@@ -101,6 +104,7 @@ pub fn options_for(args: &Args, context: &Context<'_>) -> ServerOptions {
         token: None,
         default_endpoint: args.endpoint.clone(),
         asset_roots: context.asset_roots.clone(),
+        browser: context.browser,
     }
 }
 
@@ -190,6 +194,7 @@ mod tests {
             secret_path: Some(secret(label)),
             notes: Vec::new(),
             shutdown: CancellationToken::new(),
+            browser: false,
         }
     }
 

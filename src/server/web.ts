@@ -118,6 +118,13 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * Whether the page may offer its Browser tab (#86), which frames HTTP(S) pages beside the conversation.
+   *
+   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
+   * The server only reports the choice on `/api/status`; it never fetches, proxies or probes a page.
+   */
+  readonly browser?: boolean
 }
 
 export interface WebServer {
@@ -264,6 +271,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      browser: options.browser === true,
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
         try {
@@ -386,6 +394,8 @@ interface RequestState {
   readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
+  /** Whether the operator enabled the page's Browser tab (`HEDDLE_WEB_BROWSER=1`). */
+  readonly browser: boolean
 }
 
 /** One request, routed and fenced. */
@@ -2055,13 +2065,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * reports while no session is open. A session that switched does not appear here — its own mode travels
    * with `GET /api/sessions/<id>`, because a server-wide answer would misreport every session that chose
    * otherwise.
+   *
+   * `browser: true` appears only when the operator enabled the page's Browser tab, so a default server's answer is
+   * the same bytes it always was.
    */
   if (url.pathname === '/api/status' && request.method === 'GET') {
     respond(
       response,
       200,
       'application/json',
-      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot })}\n`,
+      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot, ...(state.browser ? { browser: true } : {}) })}\n`,
     )
     return
   }

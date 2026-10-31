@@ -519,6 +519,8 @@ async function runWeb(args: Args): Promise<void> {
       // The endpoint the flag named becomes the server's default, so a turn posted without one
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
+      // The page's Browser tab is opt-in, as DSH's Web profile ships it (#86); exactly `1` enables it.
+      browser: process.env.HEDDLE_WEB_BROWSER === '1',
     })
     /**
      * A restarted harness picks up the goals it finds still active.
