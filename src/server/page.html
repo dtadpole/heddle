@@ -3484,6 +3484,19 @@ const MESSAGES = Object.freeze({
     'nav.tree': 'workspace folders',
     'nav.searchResults': 'search results',
     'nav.settingsTitle': 'Settings (⌥⌘,)',
+    'settings.status': 'Status',
+    'settings.statusFailed': 'could not read the server status: {reason}',
+    'settings.sandbox': 'Sandbox',
+    'settings.cwd': 'Working directory',
+    'settings.unknown': 'unknown',
+    'settings.serverAnswered': 'the server answered {status}',
+    'settings.endpointsFailed': 'could not read the endpoint list: {reason}',
+    'settings.noEndpoints': 'no endpoint is configured in this profile',
+    'settings.workspacesFailed': 'could not read the workspaces: {reason}',
+    'settings.noWorkspaces': 'no workspace root is registered yet',
+    'settings.tokens': '{count} tokens',
+    'settings.credentialSet': 'credential set',
+    'settings.noCredential': 'no credential',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3521,6 +3534,19 @@ const MESSAGES = Object.freeze({
     'nav.tree': '工作区文件夹',
     'nav.searchResults': '搜索结果',
     'nav.settingsTitle': '设置 (⌥⌘,)',
+    'settings.status': '状态',
+    'settings.statusFailed': '无法读取服务器状态：{reason}',
+    'settings.sandbox': '沙箱',
+    'settings.cwd': '工作目录',
+    'settings.unknown': '未知',
+    'settings.serverAnswered': '服务器返回 {status}',
+    'settings.endpointsFailed': '无法读取端点列表：{reason}',
+    'settings.noEndpoints': '此配置未配置任何端点',
+    'settings.workspacesFailed': '无法读取工作区：{reason}',
+    'settings.noWorkspaces': '尚未注册任何工作区根目录',
+    'settings.tokens': '{count} 个 token',
+    'settings.credentialSet': '已设置凭据',
+    'settings.noCredential': '未设置凭据',
   }),
 })
 
@@ -11115,8 +11141,8 @@ function settingsEndpoint(endpoint) {
   const facts = [
     endpoint.kind,
     endpoint.model,
-    endpoint.contextWindow === undefined ? null : String(endpoint.contextWindow) + ' tokens',
-    endpoint.credential === 'set' ? 'credential set' : 'no credential',
+    endpoint.contextWindow === undefined ? null : t('settings.tokens', { count: String(endpoint.contextWindow) }),
+    endpoint.credential === 'set' ? t('settings.credentialSet') : t('settings.noCredential'),
     Array.isArray(endpoint.capabilities) ? endpoint.capabilities.join(' · ') : null,
   ].filter((fact) => typeof fact === 'string' && fact.length > 0)
   for (const fact of facts) {
@@ -11155,7 +11181,7 @@ async function fillSettings() {
       const response = await fetch(path)
       if (response.ok) return { body: await response.json() }
       if (response.status === 404) return { missing: true }
-      return { failure: `the server answered ${response.status}` }
+      return { failure: t('settings.serverAnswered', { status: response.status }) }
     } catch (error) {
       return { failure: (error && error.message) || String(error) }
     }
@@ -11166,28 +11192,28 @@ async function fillSettings() {
   workspaces.replaceChildren()
 
   if (statusRead.failure !== undefined) {
-    server.append(...settingsTerm('Status', `could not read the server status: ${statusRead.failure}`))
+    server.append(...settingsTerm(t('settings.status'), t('settings.statusFailed', { reason: statusRead.failure })))
   } else {
     const status = statusRead.body ?? null
     const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
-    server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
-    server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
+    server.append(...settingsTerm(t('settings.sandbox'), sandbox ?? t('settings.unknown')))
+    server.append(...settingsTerm(t('settings.cwd'), status === null || typeof status.cwd !== 'string' ? t('settings.unknown') : status.cwd))
   }
 
   if (endpointsRead.failure !== undefined) {
-    models.append(settingsNote(`could not read the endpoint list: ${endpointsRead.failure}`))
+    models.append(settingsNote(t('settings.endpointsFailed', { reason: endpointsRead.failure })))
   }
   const endpoints = endpointsRead.body ?? null
   const list = endpoints === null || !Array.isArray(endpoints.endpoints) ? [] : endpoints.endpoints
-  if (list.length === 0 && endpointsRead.failure === undefined) models.append(settingsNote('no endpoint is configured in this profile'))
+  if (list.length === 0 && endpointsRead.failure === undefined) models.append(settingsNote(t('settings.noEndpoints')))
   for (const endpoint of list) models.append(settingsEndpoint(endpoint))
 
   if (workspacesRead.failure !== undefined) {
-    workspaces.append(settingsNote(`could not read the workspaces: ${workspacesRead.failure}`))
+    workspaces.append(settingsNote(t('settings.workspacesFailed', { reason: workspacesRead.failure })))
   }
   const views = workspacesRead.body ?? null
   const records = views === null || !Array.isArray(views.workspaces) ? [] : views.workspaces
-  if (records.length === 0 && workspacesRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
+  if (records.length === 0 && workspacesRead.failure === undefined) workspaces.append(settingsNote(t('settings.noWorkspaces')))
   for (const { record, depth } of settingsWorkspaceOrder(records)) {
     const item = document.createElement('li')
     item.className = 'settings-workspace'
@@ -11233,6 +11259,11 @@ function settingsWorkspaceOrder(records) {
   for (const record of records) visit(record, 0)
   return ordered
 }
+
+/** A language chosen while Settings is open redraws its rows in that language (#80; developer-ten's N2). */
+window.addEventListener('heddle:locale', () => {
+  if (settingsDialog.open) void fillSettings()
+})
 
 async function showSettings() {
   fillLanguageRow()
