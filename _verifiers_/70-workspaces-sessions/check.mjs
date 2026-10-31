@@ -5889,9 +5889,11 @@ test('archiving a session with running work is refused with the work named, and 
     const refusal = await refused.json()
     assert.equal(refusal.code, 'active', `and the refusal says why\n${JSON.stringify(refusal)}`)
     /**
-     * The foreground bash step is a background job from its start (DSH's promoteOnTimeout: every bash call registers
-     * an owned job, dsh-tool-bash lib/index.js:386-410), so DSH's list names the turn and then that job: each listener
-     * puts its family before the rest, and the turn's registered first (src/session/activity.ts).
+     * DSH's list names every family of work. The turn's running bash call is a job as well: dsh-tool-bash registers every
+     * call's process as an owned job as it starts (promoteOnTimeout; dsh-tool-bash lib/index.js:386-410), so the refusal
+     * names the turn and the job 'sleep 40'. Judged in DSH's exact order — turn, job, subagent, schedule: each listener
+     * puts its family before the rest, and the turn's is registered first (src/session/activity.ts). Stack-2 judged this
+     * list as a set until this branch fixed the server's order.
      */
     assert.deepEqual(
       (refusal.activity ?? []).map((entry) => [entry.kind, (entry.items ?? []).map((item) => item.label)]),
