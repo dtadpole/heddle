@@ -15,6 +15,9 @@ grounded_in:
 ## What decides it
 
 - [`check.mjs`](check.mjs) — the port, the page, the API and the live stream.
+- [`check-session-id.mjs`](check-session-id.mjs) — Copy Session ID at DSH parity (row C20): the session row's menu
+  ends with it, pressing it closes the menu and gives the clipboard the complete id with the Toast "Session ID
+  copied", and a refused clipboard shows "Copy failed. Try again." instead.
 - [`check-team-view.mjs`](check-team-view.mjs) — a Lead's team as the Web UI shows it: the roster with live status,
   the shared board with its revisions and the mailbox ledger, read from the same `/api/team` projection the
   tools use; and no panel at all for a session with no team.

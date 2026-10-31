@@ -1509,6 +1509,18 @@
   .menu .menu-glyph { display: inline-flex; flex: none; width: 16px; height: 16px; opacity: .75; }
   .menu .menu-glyph svg { width: 16px; height: 16px; }
   .menu .menu-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /**
+   * DSH's Toast (its primitives' `Toast`): centred 40px below the top, above everything, held three seconds and then faded
+   * over one. Copy Session ID reports through it, as DSH's `sessionIdCopied` and `sessionIdCopyFailed` notices do.
+   */
+  #session-toast {
+    position: fixed; top: 40px; left: 50%; transform: translateX(-50%); z-index: 1100; pointer-events: none;
+    width: max-content; max-width: min(640px, calc(100vw - 48px)); box-sizing: border-box; padding: 12px 16px;
+    font-size: 14px; line-height: 22px; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow-menu); animation: session-toast-fade 1s ease 3s forwards;
+  }
+  #session-toast[data-tone='warning'] { border-color: color-mix(in oklab, #d29922 45%, var(--border)); }
+  @keyframes session-toast-fade { to { opacity: 0; } }
   /** A floating menu is in the viewport now, so its own height has to fit it. */
   .menu { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 40; }
   /** A section name inside a menu, as DSH's View options has for its `WorkSpace` group. */
@@ -9191,6 +9203,86 @@ function setNote(text) {
   treeNote.hidden = text === undefined || text === null || text === ''
 }
 
+/* session-id-copy:begin */
+/**
+ * Copy Session ID — DSH's last session-row menu item, `session-id` (dsh-client-ui-workspace `lib/client.js:4730-4740`,
+ * registered after Archive at order 450, `:5283`): it closes the menu, writes the **complete** id to the clipboard and
+ * reports one of two notices (`:4590-4605`; the en words at `:4929-4931`). The write is DSH's `writeClipboard`:
+ * `navigator.clipboard.writeText` when the browser has it, else a hidden read-only textarea and `execCommand('copy')`.
+ *
+ * Pure apart from the `navigator` and `document` it is handed, so `test/session-id-copy.test.ts` loads it out of the page.
+ */
+const SessionIdCopy = (() => {
+  const TEXT = { menu: 'Copy Session ID', copied: 'Session ID copied', failed: 'Copy failed. Try again.' }
+  /** The primitives' Toast: held three seconds, then a one-second fade. */
+  const HOLD_MS = 3000
+  const FADE_MS = 1000
+
+  /** Write the text; true when it reached the clipboard. */
+  async function write(text, env) {
+    const clipboard = env?.navigator?.clipboard
+    if (typeof clipboard?.writeText === 'function') {
+      try {
+        await clipboard.writeText(text)
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+    const doc = env?.document
+    if (typeof doc?.execCommand !== 'function') return false
+    const area = doc.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    doc.body.appendChild(area)
+    area.select()
+    try {
+      return doc.execCommand('copy') === true
+    } catch (error) {
+      return false
+    } finally {
+      area.remove()
+    }
+  }
+
+  /** Copy one session's id and answer with the notice: DSH's `sessionIdCopied` (success) or `sessionIdCopyFailed` (warning). */
+  async function copy(sessionId, env) {
+    return (await write(String(sessionId), env))
+      ? { kind: 'sessionIdCopied', text: TEXT.copied, tone: 'success' }
+      : { kind: 'sessionIdCopyFailed', text: TEXT.failed, tone: 'warning' }
+  }
+
+  return { TEXT, HOLD_MS, FADE_MS, copy }
+})()
+/* session-id-copy:end */
+
+/** The Toast seat, drawn on demand and replaced by the next notice, so a second copy restarts its three seconds. */
+let sessionToastTimer = null
+function showSessionToast(notice) {
+  if (sessionToastTimer !== null) clearTimeout(sessionToastTimer)
+  document.getElementById('session-toast')?.remove()
+  const toast = document.createElement('div')
+  toast.id = 'session-toast'
+  toast.setAttribute('role', 'alert')
+  toast.dataset.kind = notice.kind
+  toast.dataset.tone = notice.tone
+  toast.textContent = notice.text
+  document.body.append(toast)
+  sessionToastTimer = setTimeout(() => {
+    toast.remove()
+    sessionToastTimer = null
+  }, SessionIdCopy.HOLD_MS + SessionIdCopy.FADE_MS)
+}
+
+/** The row menu's Copy Session ID: the session's full id to the clipboard, and DSH's notice for how it went. */
+async function copySessionId(node) {
+  const id = node.session?.id
+  if (typeof id !== 'string' || id.length === 0) return
+  showSessionToast(await SessionIdCopy.copy(id, { navigator, document }))
+}
+
 const FOLDER_PATH = 'M2 4.6A1.6 1.6 0 0 1 3.6 3h2.6l1.6 2h4.6A1.6 1.6 0 0 1 14 6.6v4.8A1.6 1.6 0 0 1 12.4 13H3.6A1.6 1.6 0 0 1 2 11.4z'
 /** The one mark that distinguishes a type folder from a plain one: the braces around its name. */
 const TYPE_MARK = 'M6.3 7.4 5 9.5l1.3 2.1M9.7 7.4 11 9.5l-1.3 2.1'
@@ -9273,6 +9365,8 @@ function kindIcon(kind, open = false) {
     clock: 'M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11M8 5v3.2l2.2 1.3',
     'archive-restore': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M8 2.5v4M6 4.5L8 2.5l2 2',
     'archive-only': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M6 3.5h4',
+    /** Two sheets, the front one whole: DSH's copy mark (`IconCopyOutlineRegular`) in this menu's stroke. */
+    copy: 'M5.5 5.5h7.5v8H5.5zM3 10.5V2.5h7.5v3',
   }
   if (menuMarks[kind] !== undefined) {
     const mark = document.createElementNS('http://www.w3.org/2000/svg', 'path')
@@ -9771,6 +9865,8 @@ function menuItemsFor(node) {
     items.push({ label: 'Rename', glyph: 'rename', run: () => renameSession(node) })
     items.push({ label: 'Fork session', glyph: 'fork', run: () => forkSession(node) })
     items.push({ label: node.archived ? 'Unarchive session' : 'Archive session', glyph: 'archive', run: () => archiveSession(node) })
+    /** DSH's last item, on every session row, archived ones too (`session-id`, order 450). */
+    items.push({ label: SessionIdCopy.TEXT.menu, glyph: 'copy', run: () => copySessionId(node) })
   }
   if (node.kind === 'instance') {
     /**

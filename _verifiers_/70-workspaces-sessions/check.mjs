@@ -2882,12 +2882,13 @@ test('a session is renamed from its own menu, and the row and its definition fol
 
     assert.equal(reading.error, undefined, `the session row offers its menu\nsaw: ${JSON.stringify(reading)}`)
     /**
-     * DSH's names, verbatim — that is the parity claim, so the check names all four rather than just the one it clicks.
-     * A menu that drifts back to `Pin` / `Rename…` / `Fork` / `Archive` is a menu nobody who knows DSH recognises.
+     * DSH's names, verbatim — that is the parity claim, so the check names every item rather than just the one it clicks.
+     * A menu that drifts back to `Pin` / `Rename…` / `Fork` / `Archive` is a menu nobody who knows DSH recognises. DSH's
+     * menu ends with `Copy Session ID` (row C20; judged by 80's check-session-id.mjs).
      */
     assert.deepEqual(
       reading.items,
-      ['Pin session', 'Rename', 'Fork session', 'Archive session'],
+      ['Pin session', 'Rename', 'Fork session', 'Archive session', 'Copy Session ID'],
       `the menu reads what DSH's reads\nsaw: ${reading.items.join(', ')}`,
     )
     assert.match(reading.label, /^session-\d{8}-\d{4}$/, 'the row starts with the folder name, because nothing has named it yet')
