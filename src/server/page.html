@@ -7615,6 +7615,17 @@ const TurnFailure = {
   shows(event) {
     return !(event !== null && typeof event === 'object' && event.reason !== null && typeof event.reason === 'object' && event.reason.kind === 'blocked')
   },
+  /**
+   * Whether the page's own turn draws the `ended` notice its `done` frame carries (#139, live against reload; developer-ten's
+   * review of follow-up 2). A turn the gate blocked before its first step (`finishReason: 'blocked'`, no round) ran
+   * nothing and wrote no answer, and a reload draws nothing for it (`shows` above; the transcript adds nothing for a
+   * `blocked` end in both builds), but `runTurn` hung `ARCHIVED_BLOCKED` under the previous turn's answer. A turn
+   * blocked at a later step has rounds and an answer record of its own carrying the reason, so it keeps the notice.
+   */
+  endedNotice(done) {
+    if (done === null || typeof done !== 'object' || !Array.isArray(done.ended) || done.ended.length === 0) return false
+    return !(done.finishReason === 'blocked' && (done.rounds ?? 0) === 0)
+  },
 }
 /* turn-failure:end */
 let lastTurnFailure = null
@@ -9317,7 +9328,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
          * reason travels on the completed event, so a reload shows it again from the transcript.
          */
-        if (Array.isArray(payload.ended) && payload.ended.length > 0) {
+        if (TurnFailure.endedNotice(payload)) {
           const last = lastTurnRow()
           if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
           else log.append(turnNotice(payload.ended))
