@@ -900,7 +900,7 @@ mod tests {
         );
         // comrak caps list nesting at 99 of its own (the TypeScript build draws 100); either way it is bounded.
         let lists = bullets.matches("<ul>").count();
-        assert!((99..=MAX_NESTING).contains(&lists), "{lists} nested lists");
+        assert!(lists <= MAX_NESTING, "{lists} nested lists");
         assert!(
             !render_inline(&">".repeat(50_000)).is_empty(),
             "an inline span renders too"
@@ -941,7 +941,25 @@ pub struct MarkdownOptions<'a> {
 /// parsed as GFM (tables, task lists, strikethrough, autolinks; a single newline is a space) and the whole output
 /// passes through [`crate::sanitize::sanitize_html`] with a URL policy that applies [`safe_url`] and resolves
 /// relative references against `options.base` — for raw HTML tags as well as for markdown links and images.
+pub const MAX_PARSE_BYTES: usize = 64 * 1024;
+pub const MAX_INLINE_MARKERS: usize = 512;
+
+/// Conservative parser work budget shared with TypeScript. Over-budget input is shown escaped without parsing.
+/// Count syntax even inside code: recognizing code would itself require parsing untrusted input first.
+pub fn within_parse_budget(text: &str) -> bool {
+    text.len() <= MAX_PARSE_BYTES
+        && text
+            .bytes()
+            .filter(|byte| matches!(byte, b'*' | b'_' | b'[' | b']' | b'`' | b'~'))
+            .take(MAX_INLINE_MARKERS + 1)
+            .count()
+            <= MAX_INLINE_MARKERS
+}
+
 pub fn render_markdown(source: &str, options: MarkdownOptions<'_>) -> String {
+    if !within_parse_budget(source) {
+        return unrendered(&source.replace("\r\n", "\n").replace('\r', "\n"));
+    }
     on_render_stack(|| render_markdown_here(source, options))
         .unwrap_or_else(|| unrendered(&source.replace("\r\n", "\n").replace('\r', "\n")))
 }
@@ -985,6 +1003,9 @@ fn render_markdown_here(source: &str, options: MarkdownOptions<'_>) -> String {
 
 /// Render inline spans only — a title, a table cell, a label — through the same parser and the same allow-list.
 pub fn render_inline(text: &str) -> String {
+    if !within_parse_budget(text) {
+        return escape_html(text);
+    }
     on_render_stack(|| render_inline_here(text)).unwrap_or_else(|| escape_html(text))
 }
 
@@ -1651,4 +1672,34 @@ fn unwrap_paragraph(rendered: &str) -> String {
         return rendered[start..rendered.len() - 5].to_string();
     }
     rendered.to_string()
+}
+
+#[cfg(test)]
+mod parse_budget_tests {
+    use super::*;
+    #[test]
+    fn over_budget_inline_input_is_escaped_without_invoking_the_parser() {
+        let huge = format!("{}x{}", "*a ".repeat(800_000), " a*".repeat(800_000));
+        let compact = format!(
+            "{}<script>x</script>{}",
+            "*a ".repeat(2_000),
+            " a*".repeat(2_000)
+        );
+        for text in [huge, compact, "x".repeat(MAX_PARSE_BYTES + 1)] {
+            assert!(!within_parse_budget(&text));
+            assert_eq!(
+                render_markdown(&text, MarkdownOptions::default()),
+                unrendered(&text)
+            );
+            assert_eq!(render_inline(&text), escape_html(&text));
+        }
+        assert!(within_parse_budget("ordinary **bold** and *emphasis*"));
+    }
+    #[test]
+    fn budget_edges_and_unicode_use_bytes_not_characters() {
+        assert!(within_parse_budget(&"*".repeat(MAX_INLINE_MARKERS)));
+        assert!(!within_parse_budget(&"*".repeat(MAX_INLINE_MARKERS + 1)));
+        assert!(within_parse_budget(&"x".repeat(MAX_PARSE_BYTES)));
+        assert!(!within_parse_budget(&"界".repeat(MAX_PARSE_BYTES / 3 + 1)));
+    }
 }

@@ -242,6 +242,22 @@ function boundLine(line: string): string {
  * parser's stack, and in JavaScript that is a `RangeError` this build can catch, where it used to fail the whole
  * session view (live issue developer-two-16).
  */
+/**
+ * Conservative parser work budget, shared with Rust. Recursive inline parsing can exhaust a stack or heap before
+ * an exception is recoverable. Over-budget documents remain readable as escaped original text, without parsing.
+ * Count syntax even in code: recognizing code first would itself require trusting a parser on hostile input.
+ */
+export const MAX_PARSE_BYTES = 64 * 1024
+export const MAX_INLINE_MARKERS = 512
+export function withinParseBudget(text: string): boolean {
+  if (text.length > MAX_PARSE_BYTES || Buffer.byteLength(text, 'utf8') > MAX_PARSE_BYTES) return false
+  let markers = 0
+  for (const character of text) {
+    if ('*_[]`~'.includes(character) && ++markers > MAX_INLINE_MARKERS) return false
+  }
+  return true
+}
+
 function unrendered(text: string): string {
   return `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`
 }
@@ -362,6 +378,7 @@ export function renderInline(text: string): string {
   /** An inline span is never a document's preview: its images follow an answer's rule, whatever parsed last. */
   imageBase = undefined
   remoteImagesAllowed = false
+  if (!withinParseBudget(String(text ?? ''))) return escapeHtml(String(text ?? ''))
   try {
     return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(boundNesting(String(text ?? '')))) as string, {
       url: (value, at) => {
@@ -385,6 +402,7 @@ export function renderMarkdown(source: string, options: { readonly base?: string
   /** Only a document's preview asks for remote images; an answer, which has no `base`, never does. */
   remoteImagesAllowed = options.remoteImages === true
   const text = String(source ?? '').replace(/\r\n?/g, '\n')
+  if (!withinParseBudget(text)) return unrendered(text)
   const front = /^---\n([\s\S]*?)\n---\n?/.exec(text)
   const body = front === null ? text : text.slice(front[0].length)
   const frontHtml =

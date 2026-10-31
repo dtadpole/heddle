@@ -2298,3 +2298,24 @@ test('a deeply nested answer, file or text renders, and the server keeps answeri
     await server.close()
   }
 })
+
+
+test('over-budget inline markdown is escaped promptly and the server keeps answering', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('inline-budget')
+  try {
+    const cookie = await cookieFor(server.url)
+    for (const text of ['*a '.repeat(2000) + 'x' + ' a*'.repeat(2000), '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)]) {
+      const start = Date.now()
+      const response = await fetch(new URL('/api/markdown', server.url), {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ text }), signal: AbortSignal.timeout(5000),
+      })
+      assert.equal(response.status, 200)
+      const rendered = await response.json()
+      assert.ok(String(rendered.html).startsWith('<pre class="unrendered"><code>'), 'over-budget text is not parsed')
+      assert.ok(Date.now() - start < 5000, 'rendering stays within the response budget')
+      assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2000) })).status, 200)
+    }
+  } finally { await server.close() }
+})

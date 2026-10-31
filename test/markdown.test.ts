@@ -383,3 +383,14 @@ test('a text the parser cannot render is shown as its own escaped words, not as 
   assert.ok(html.startsWith('<pre class="unrendered"><code>'), 'the words are kept in a plain block')
   assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && !html.includes('<b>'), 'escaped, so nothing in them runs')
 })
+
+
+test('parser work budget preserves hostile inline input as escaped text without recursion', () => {
+  const huge = '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)
+  const compact = '*a '.repeat(2000) + '<script>x</script>' + ' a*'.repeat(2000)
+  for (const text of [huge, compact, 'x'.repeat(65537)]) {
+    assert.equal(renderMarkdown(text), `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`)
+    assert.equal(renderInline(text), escapeHtml(text))
+  }
+  assert.match(renderMarkdown('ordinary **bold** and *emphasis*'), /<strong>bold<\/strong>/)
+})
