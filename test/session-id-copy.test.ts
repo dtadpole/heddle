@@ -98,7 +98,8 @@ test('without the Clipboard API the id goes through a hidden textarea and execCo
 })
 
 test('the session row menu ends with Copy Session ID, after Archive, on archived rows too', () => {
-  const archive = page.indexOf("items.push({ label: node.archived ? 'Unarchive session' : 'Archive session'")
+  // The labels go through the page's t() since #80's header section; either form is the archive item.
+  const archive = Math.max(page.indexOf("items.push({ label: node.archived ? 'Unarchive session' : 'Archive session'"), page.indexOf("items.push({ label: node.archived ? t('tree.unarchive') : t('tree.archive')"))
   const copy = page.indexOf("items.push({ label: SessionIdCopy.TEXT.menu, glyph: 'copy', run: () => copySessionId(node) })")
   assert.ok(archive > 0 && copy > archive, 'the item is pushed after the archive item')
   const between = page.slice(archive, copy)
