@@ -78,10 +78,11 @@ export async function openBrowser(options = {}) {
      * session they had open: the page's saved selection (`heddle.sessions.current`, `{ sessionId }`, DSH's
      * `dsh.sessions.current`) is written first, so the page's startup restores it.
      *
-     * The page opens nothing on its own beyond that: with nothing saved, a load starts a fresh session (#17, DSH's
-     * `restoreSelection`), so a check that seeds a session and wants it on screen names it here rather than relying
-     * on it being the newest. The entry is written from `/healthz`, a document of the same origin that runs none of
-     * the page's script, so no load before it starts a session of its own; then the page loads once.
+     * The page opens nothing on its own beyond that: with nothing saved, a load opens no session and creates none
+     * (#17, #142; DSH's `restoreSelection` would create one), so a check that seeds a session and wants it on screen
+     * names it here rather than relying on it being the newest. The entry is written from `/healthz`, a document of the
+     * same origin that runs none of the page's script, so the page's first load already finds it; then the page loads
+     * once.
      */
     async gotoSession(url, sessionId, timeoutMs = 20_000) {
       if (typeof sessionId !== 'string' || sessionId.length === 0) throw new Error(`gotoSession needs a session id, not ${JSON.stringify(sessionId)}`)

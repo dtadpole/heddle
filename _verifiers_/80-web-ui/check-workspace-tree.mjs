@@ -17,8 +17,10 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * selected session's workspace tints its folder; a workspace's `+` starts a session there; New session starts in the
  * open session's workspace even when that session is archived and its row is not drawn (#119); the `Workspace` grouping
  * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
- * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
- * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
+ * child; a first visit opens no session and creates none, never the newest session someone else is in, and with two
+ * workspaces and nothing remembered aims the composer nowhere ("Choose a workspace to start"), while after a person
+ * worked in A it is aimed at A (#142); a New session pressed at once opens a blank row, selected, that offers no
+ * actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
  * with the composer disabled, not to a blank page that takes a message (#56); first use's Default workspace stays the
  * new conversation's place across a reload, named so by the hero and the note, and a message with no workspace to go
  * to is refused rather than run in the server's start folder (#134); Archived only with nothing archived says DSH's
@@ -221,8 +223,7 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > ul > li[data-kind="workspace"] > .row').click()`)
     await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]')].some((li) => li.textContent.includes('app session'))`, 10_000)
     /**
-     * Judged by a row that was not drawn before, not by a count: the first visit started its fresh New session in this
-     * workspace, the most recently active one (#17), and that blank stops being a row once another session is open
+     * Judged by a row that was not drawn before, not by a count: a blank stops being a row once another session is open
      * (DSH's sessionVisible), which the page's next redraw may do while the + is being pressed.
      */
     const nestedRows = `[...document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]')]`
@@ -749,16 +750,18 @@ test('a new session reads New Session in the tree, shows no id in the header, an
   }
 })
 
-test('a reload reopens the session that was open, never a hidden subagent child, and a saved one that is gone starts fresh (C28, C33)', async (context) => {
+test('a reload reopens the session that was open, never a hidden subagent child, and a saved one that is gone is forgotten with nothing created (C28, C33, #142)', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
    * DSH keeps the open session in localStorage (`dsh.sessions.current`, dsh-client-ui-workspace lib/client.js:1369,
    * :1662-1665) and its restoreSelection reopens it on load (:1605-1616); a saved blank is reopened by its own id
-   * (:1451-1458, :1619); a saved session that is gone starts a fresh one in the most recently active workspace (:1620,
-   * :1626, :1694-1710). Phase A (C28, C33) measured both builds opening `/api/sessions`[0] on every load, there a
-   * subagent's child the tree hides: the session a person had open was gone after a reload, and a folded workspace no
-   * longer tinted its folder.
+   * (:1451-1458, :1619); a saved session that is gone leaves DSH creating a fresh one in its recentWorkspace (:1620,
+   * :1626, :1694-1710). heddle creates nothing on such a load (#142): DSH is single-user, and on heddle's shared server
+   * that start went to whichever workspace was active last. With this fixture's one workspace the composer is aimed at
+   * it, and the first message would start the session there. Phase A (C28, C33) measured both builds opening
+   * `/api/sessions`[0] on every load, there a subagent's child the tree hides: the session a person had open was gone
+   * after a reload, and a folded workspace no longer tinted its folder.
    *
    * The store is written before the server starts, by the TypeScript store (the log format's implementation, as the
    * team-view check does), so the child is the newest session in both builds.
@@ -793,18 +796,18 @@ test('a reload reopens the session that was open, never a hidden subagent child,
     assert.equal(first[0]?.id, child.id, `the newest session is the subagent's child, the one a load used to open\nsaw: ${JSON.stringify(first.map((meta) => [meta.title, meta.origin ?? null]))}`)
 
     const title = `(document.getElementById('session-title')?.textContent ?? null)`
-    /**
-     * A New session shows no title in the header, as DSH's does while a session is blank (#24, page-polish): that, with
-     * the saved id, is how a load is seen to have opened the fresh session rather than nothing ("No session").
-     */
-    const blankOpen = `(document.getElementById('session-title')?.hidden === true)`
+    /** Nothing open: the header says so, and the hero chip names where the first message would start one (#134, #142). */
+    const nothingOpen = `(document.getElementById('session-title')?.hidden === false && document.getElementById('session-title').textContent === 'No session')`
+    const chip = `(document.querySelector('#hero-workspace-chip .label')?.textContent ?? null)`
     const workspaceRow = `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
     const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
     const state = () =>
       browser.evaluate(`JSON.stringify({
         title: ${title},
         titleHidden: document.getElementById('session-title')?.hidden ?? null,
+        chip: ${chip},
         saved: localStorage.getItem('heddle.sessions.current'),
+        last: localStorage.getItem('heddle.workspace.last'),
         selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
         workspace: (() => { const li = ${workspaceRow}?.closest('li'); return li === undefined || li === null ? null : { open: li.dataset.open ?? null, tinted: li.dataset.containsCurrent ?? null } })(),
       })`)
@@ -821,15 +824,14 @@ test('a reload reopens the session that was open, never a hidden subagent child,
     }
 
     /**
-     * A first visit has nothing saved: a fresh New session opens, as DSH's does (#17), never the newest conversation nor the
-     * hidden child that is newer still.
+     * A first visit has nothing saved: nothing opens, never the newest conversation nor the hidden child that is newer still
+     * (#17), and nothing is created (#142). With exactly one workspace, the composer is aimed at it: the hero chip names it.
      */
-    const seeded = JSON.stringify(first.map((meta) => meta.id))
     await load()
-    await until(
-      `(() => { const id = ${saved}; return typeof id === 'string' && !${seeded}.includes(id) && ${blankOpen} })()`,
-      'a first visit opens a fresh New session, not the newest conversation and not the hidden subagent child',
-    )
+    await new Promise((done) => setTimeout(done, 1_000))
+    assert.deepEqual((await listed()).map((meta) => meta.id), first.map((meta) => meta.id), `a first visit creates no session\nsaw: ${await state()}`)
+    await until(`${saved} === null && ${nothingOpen}`, 'and opens none: not the newest conversation and not the hidden subagent child')
+    await until(`${chip} === ${JSON.stringify(record.title)}`, 'with one workspace, the new conversation is aimed at it (#142)')
 
     /** Open alpha from its row, reload: alpha is open again and its row is the selected one. */
     await until(`document.querySelector('#tree li[data-session-id="${alpha.id}"] > .row') !== null`, 'alpha\'s row is drawn')
@@ -849,25 +851,25 @@ test('a reload reopens the session that was open, never a hidden subagent child,
       'the folded workspace stays folded and tints its folder as the one holding the open session',
     )
 
-    /** A saved session that is gone: a fresh session starts in the most recently active workspace, and the fold stays. */
+    /**
+     * A saved session that is gone: the entry is forgotten and nothing is created (#142); the composer is aimed at the
+     * workspace this browser last worked in, where alpha was opened, and the fold stays.
+     */
+    assert.equal(JSON.parse((await browser.evaluate(`localStorage.getItem('heddle.workspace.last')`)) ?? '{}').path, record.path, 'opening alpha kept its workspace as this browser\'s last (#142)')
     await browser.evaluate(`localStorage.setItem('heddle.sessions.current', JSON.stringify({ sessionId: 'session-00000000-0000-4000-8000-000000000000' }))`)
     const before = (await listed()).map((meta) => meta.id)
     await load()
-    await until(
-      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify(before)}.includes(id) && ${blankOpen} })()`,
-      'a saved session that is gone starts a fresh one, which is open and kept',
-    )
-    const fresh = await browser.evaluate(saved)
-    const after = await listed()
-    assert.equal(after.length, before.length + 1, 'exactly one session started')
-    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === record.id)
-    assert.ok(owner?.sessionIds?.includes(fresh), `in the most recently active workspace\nsaw: ${JSON.stringify(owner)}`)
+    await until(`${saved} === null && ${nothingOpen}`, 'a saved session that is gone is forgotten, and nothing opens')
+    await new Promise((done) => setTimeout(done, 1_000))
+    assert.deepEqual((await listed()).map((meta) => meta.id), before, `and nothing is created in its place\nsaw: ${await state()}`)
+    await until(`${chip} === ${JSON.stringify(record.title)}`, 'the new conversation is aimed at the workspace')
     assert.notEqual(await browser.evaluate(`${workspaceRow}.closest('li').dataset.open ?? null`), 'true', 'and the workspace the person folded stays folded')
 
-    /** That New session is saved like any other: the next reload reopens it rather than starting another. */
+    /** The next reload is the same: still nothing saved, still nothing created. */
     await load()
-    await until(`${saved} === ${JSON.stringify(fresh)} && ${blankOpen}`, 'a reload reopens the saved New session')
-    assert.equal((await listed()).length, after.length, 'and starts no other session')
+    await until(`${saved} === null && ${nothingOpen}`, 'a second reload opens nothing either')
+    await new Promise((done) => setTimeout(done, 1_000))
+    assert.deepEqual((await listed()).map((meta) => meta.id), before, 'and creates nothing')
   } finally {
     browser.close()
     server.kill()
@@ -875,23 +877,29 @@ test('a reload reopens the session that was open, never a hidden subagent child,
   }
 })
 
-test('a first visit opens a fresh New session, never the newest session someone else is in, and the blank row offers no actions (#17, #79)', async (context) => {
+test('a first visit creates no session and aims at no one else\'s workspace: with two workspaces and another client\'s recent activity it says Choose a workspace to start, and New session pressed at once selects its blank, which offers no actions (#142, #17, #79)', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
-   * DSH's restoreSelection with nothing saved starts a fresh Session in the most recently active workspace
-   * (dsh-client-ui-workspace lib/client.js:1611-1613, :1620, :1626 -> connectBlank :1406, recentWorkspace :1694-1710); it
-   * never opens an existing session on its own. #17: on a shared server this page opened the newest session in the store,
-   * another person's, showed their transcript, and a message typed without looking went into their conversation. A fresh
-   * browser profile is that first visit: nothing is saved. The open blank's row draws no row actions (SessionNodeItem,
-   * `!row.blank &&`, :2317-2323) and no double-click rename (:2311), and its fork chord is blocked with
-   * `shortcut.noCompletedTurn` (:161-164, :4881). #79: the row offered the full menu and the hover buttons, and Fork came
-   * back as the server's refusal with the raw session id in it.
+   * DSH's restoreSelection with nothing saved creates a Session in its recentWorkspace, the workspace whose sessions were
+   * written last (dsh-client-ui-workspace lib/client.js:1611-1613, :1620, :1626 -> connectBlank :1403-1406,
+   * recentWorkspace :1694-1710). DSH is single-user, so that is the person's own workspace. #142 (developer-ten, both
+   * builds at 6a22ab76): heddle's port of it, on a shared server, left a blank session in whichever workspace was active
+   * last, another person's, on every load, and aimed the composer at their folder; and a New session pressed within about
+   * 1.5 s of load left no row selected, because the boot's own start chose its blank after the press. Now a first visit
+   * creates nothing, and with two workspaces and nothing this browser remembers, the composer is DSH's inert one: "Choose
+   * a workspace to start" (placeholder.workspace, dsh-client-ui-conversation lib/client.js:16409, inert at :17819), Send
+   * disabled, the hero chip the call to action. #17: it never opens the newest session either. A fresh browser profile is
+   * that first visit; a reload with nothing saved is one again.
+   *
+   * The blank a person then starts draws no row actions (SessionNodeItem, `!row.blank &&`, :2317-2323) and no
+   * double-click rename (:2311), and its fork chord is blocked with `shortcut.noCompletedTurn` (:161-164, :4881). #79:
+   * the row offered the full menu and the hover buttons, and Fork came back as the server's refusal with the raw id.
    */
   const home = isolatedHome('tree-first-visit')
   const mine = fixtureDir('tree-first-visit-mine')
   const theirs = fixtureDir('tree-first-visit-theirs')
-  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const { config } = scriptedConfig({ home, steps: Array.from({ length: 4 }, () => ({ text: 'an answer' })) })
   const server = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
@@ -905,10 +913,11 @@ test('a first visit opens a fresh New session, never the newest session someone 
       assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
       records.push(added.body.record)
     }
-    const theirsRecord = records[1]
+    const [mineRecord, theirsRecord] = records
     const mineMade = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: mine, title: 'my notes' }) })
     assert.equal(mineMade.status, 200, `my own session (${JSON.stringify(mineMade.body)})`)
-    /** Another person's session, in their workspace, with a finished turn: the newest session on the server. */
+    await new Promise((done) => setTimeout(done, 20))
+    /** Another client's session, in their workspace, with a finished turn: the newest activity on the server. */
     const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'their own work', folder: theirs, new: true }) })
     assert.equal(turn.status, 200, `their turn ran (${turn.status})`)
     const listed = async () => {
@@ -918,41 +927,87 @@ test('a first visit opens a fresh New session, never the newest session someone 
     const before = await listed()
     const other = before[0]
     assert.ok(
-      other !== undefined && other.id !== mineMade.body.session && (other.turns ?? 0) > 0,
-      `the newest session is the other person's, with a turn\nsaw: ${JSON.stringify(before.map((meta) => [meta.id, meta.title ?? null, meta.turns ?? 0]))}`,
+      other !== undefined && other.id !== mineMade.body.session && (other.turns ?? 0) > 0 && other.cwd === theirsRecord.path,
+      `the newest session is the other client's, in their workspace, with a turn\nsaw: ${JSON.stringify(before.map((meta) => [meta.id, meta.title ?? null, meta.turns ?? 0, meta.cwd]))}`,
     )
+    const ids = (list) => list.map((meta) => meta.id).sort()
 
+    const field = `document.querySelector('#prompt textarea')`
     const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const openId = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
     const state = () =>
       browser.evaluate(`JSON.stringify({
         saved: ${saved},
-        titleHidden: document.getElementById('session-title')?.hidden ?? null,
-        title: document.getElementById('session-title')?.textContent ?? null,
+        title: document.getElementById('session-title')?.hidden === false ? document.getElementById('session-title').textContent : null,
+        chip: document.querySelector('#hero-workspace-chip .label')?.textContent ?? null,
+        note: document.getElementById('tree-note')?.hidden === false ? document.getElementById('tree-note').textContent : '',
+        placeholder: ${field}?.placeholder ?? null,
+        send: document.getElementById('send')?.disabled ?? null,
         turns: document.querySelectorAll('#log .turn').length,
         selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
       })`)
-    await browser.goto(server.url)
-    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
-    const known = JSON.stringify(before.map((meta) => meta.id))
-    const opened = await browser
-      .waitFor(`(() => { const id = ${saved}; return typeof id === 'string' && !${known}.includes(id) && document.getElementById('session-title')?.hidden === true })()`, 15_000)
-      .catch(() => false)
-    const first = JSON.parse(await state())
-    assert.ok(opened, `a first visit opens a fresh New session, not the newest session on the server\nsaw: ${JSON.stringify(first)}\nnewest: ${other.id}`)
-    assert.notEqual(first.saved, other.id, "never the other person's session")
-    assert.equal(first.turns, 0, 'and none of their conversation is on screen')
-    const after = await listed()
-    assert.equal(after.length, before.length + 1, 'exactly one session started')
-    assert.equal(after.find((meta) => meta.id === first.saved)?.turns ?? 0, 0, 'and it is blank')
-    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === theirsRecord.id)
-    assert.ok(owner?.sessionIds?.includes(first.saved), `in the most recently active workspace, DSH's recentWorkspace\nsaw: ${JSON.stringify(owner)}`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
 
-    /** The blank's row, beside the other session's, in the workspace that holds both (opened only if it is folded). */
+    /** The first visit: nothing is created on load, counted by the server's own list. */
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await new Promise((done) => setTimeout(done, 1_500))
+    const afterLoad = await listed()
+    assert.deepEqual(
+      ids(afterLoad),
+      ids(before),
+      `a first visit creates no session, in the other client's workspace or anywhere (#142)\nnew: ${JSON.stringify(afterLoad.filter((meta) => !before.some((known) => known.id === meta.id)).map((meta) => [meta.id, meta.cwd]))}\nsaw: ${await state()}`,
+    )
+    const first = JSON.parse(await state())
+    assert.equal(first.saved, null, `nothing is open or kept (#17)\nsaw: ${JSON.stringify(first)}`)
+    assert.equal(first.title, 'No session', 'the header says nothing is open, never their conversation')
+    assert.equal(first.turns, 0, 'and none of their conversation is on screen')
+    await until(`${field}.placeholder === 'Choose a workspace to start'`, 'with two workspaces and nothing remembered, the composer says DSH\'s placeholder.workspace (#142)')
+    assert.equal(await browser.evaluate(`document.querySelector('#hero-workspace-chip .label')?.textContent`), 'Choose workspace', 'the hero chip is the call to action, not the other client\'s workspace')
+    assert.doesNotMatch((await browser.evaluate(`document.getElementById('tree-note')?.textContent ?? ''`)) ?? '', /a new conversation in/, 'and the note names no place for it')
+    await browser.evaluate(`(() => { const box = ${field}; box.value = 'where does this run'; box.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    assert.equal(await browser.evaluate(`document.getElementById('send').disabled`), true, `Send is disabled with a draft\nsaw: ${await state()}`)
+    await browser.evaluate(`(() => { const box = ${field}; box.value = ''; box.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+
+    /**
+     * A reload, still with nothing saved, and New session in my workspace pressed the moment its row is drawn: the press
+     * the issue made within 1.5 s of load. Its blank opens, and its row is the selected one, and stays so.
+     */
+    const mineRow = `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(mineRecord.path)})`
+    const plus = `(${mineRow}?.querySelector('button[aria-label="New session in ${mineRecord.title}"]') ?? null)`
+    await browser.goto(server.url)
+    const loaded = Date.now()
+    await until(`${plus} !== null`, 'my workspace\'s New session is drawn')
+    await browser.evaluate(`${plus}.click()`)
+    const pressedAfter = Date.now() - loaded
+    context.diagnostic(`New session in ${mineRecord.title} pressed ${pressedAfter} ms after the reload's document loaded`)
+    await until(
+      `(() => { const id = ${openId}; return id !== null && !${JSON.stringify(ids(before))}.includes(id) })()`,
+      `New session pressed ${pressedAfter} ms after load opens its blank as the selected row (#142's side effect)`,
+    )
+    const blankId = await browser.evaluate(openId)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await new Promise((done) => setTimeout(done, 1_500))
+    const settled = JSON.parse(await state())
+    assert.deepEqual(settled.selected, [blankId], `and once the load has settled it is still the one selected row\nsaw: ${JSON.stringify(settled)}`)
+    assert.equal(settled.saved, blankId, 'and the open, kept session')
+    const afterPress = await listed()
+    assert.deepEqual(ids(afterPress), ids([...before, { id: blankId }]), 'exactly one session was created, by the press')
+    assert.equal(afterPress.find((meta) => meta.id === blankId)?.cwd, mineRecord.path, 'in my workspace')
+    assert.equal(afterPress.find((meta) => meta.id === blankId)?.turns ?? 0, 0, 'and it is blank')
+
+    /** The blank's row, and the other client's row in their workspace (opened only if it is folded). */
     const rowOf = (id) => `document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]')`
     await browser.evaluate(
       `(async () => {
         const wait = (ms) => new Promise((done) => setTimeout(done, ms))
-        for (let attempt = 0; attempt < 40 && (${rowOf(first.saved)} === null || ${rowOf(other.id)} === null); attempt += 1) {
+        for (let attempt = 0; attempt < 40 && (${rowOf(blankId)} === null || ${rowOf(other.id)} === null); attempt += 1) {
           const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(theirsRecord.path)})
           if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
           await wait(250)
@@ -961,7 +1016,7 @@ test('a first visit opens a fresh New session, never the newest session someone 
       })()`,
       15_000,
     )
-    assert.ok(await browser.waitFor(`${rowOf(first.saved)} !== null && ${rowOf(other.id)} !== null`, 10_000).catch(() => false), `both rows are drawn\nsaw: ${await state()}`)
+    assert.ok(await browser.waitFor(`${rowOf(blankId)} !== null && ${rowOf(other.id)} !== null`, 10_000).catch(() => false), `both rows are drawn\nsaw: ${await state()}`)
     const actions = (id) => `(() => {
       const li = ${rowOf(id)}
       /** The tree item is the row's one Tab stop (#92, F4); its focus draws the row's controls. */
@@ -976,19 +1031,19 @@ test('a first visit opens a fresh New session, never the newest session someone 
       li.blur()
       return read
     })()`
-    const blank = JSON.parse(await browser.evaluate(actions(first.saved)))
+    const blank = JSON.parse(await browser.evaluate(actions(blankId)))
     assert.deepEqual(
       blank,
       { label: 'New Session', selected: 'true', menu: false, quick: [], buttons: [] },
       `the open blank's row offers no menu, no Archive and no Pin, as DSH's blank row (#79)\nsaw: ${JSON.stringify(blank)}`,
     )
     const theirsRow = JSON.parse(await browser.evaluate(actions(other.id)))
-    assert.equal(theirsRow.selected, 'false', `the other person's row is not the open one\nsaw: ${JSON.stringify(theirsRow)}`)
+    assert.equal(theirsRow.selected, 'false', `the other client's row is not the open one\nsaw: ${JSON.stringify(theirsRow)}`)
     assert.equal(theirsRow.menu, true, 'while a session that ran a turn keeps its menu')
     assert.deepEqual(theirsRow.quick, ['Archive session', 'Pin session'], 'and its Archive and Pin')
 
     /** No rename by double-click on the blank's title. */
-    await browser.evaluate(`${rowOf(first.saved)}.querySelector(':scope > .row > .label').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))`)
+    await browser.evaluate(`${rowOf(blankId)}.querySelector(':scope > .row > .label').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))`)
     await new Promise((done) => setTimeout(done, 300))
     assert.equal(await browser.evaluate(`document.getElementById('session-rename')?.open === true`), false, 'a double-click on its title opens no Rename')
 
@@ -1000,11 +1055,118 @@ test('a first visit opens a fresh New session, never the newest session someone 
     assert.ok(said, `the fork chord on a blank says DSH's shortcut.noCompletedTurn\nsaw: ${JSON.stringify(note)}`)
     assert.doesNotMatch(String(note), /session-/, 'and never shows a session id')
     await new Promise((done) => setTimeout(done, 500))
-    assert.equal((await listed()).length, after.length, 'and nothing was forked')
+    assert.equal((await listed()).length, afterPress.length, 'and nothing was forked')
   } finally {
     browser.close()
     server.kill()
     for (const dir of [home, mine, theirs]) removeDir(dir)
+  }
+})
+
+test('after a person opens a session in A, a reload with the saved entry cleared aims at A though B was active last, creates nothing, and the first message runs in A as a new conversation (#142)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The memory a first visit is aimed by: the workspace this browser last worked in, kept beside the open session's entry
+   * (`heddle.workspace.last`) whenever a session is opened or started in a workspace. DSH needs none: it is single-user,
+   * and its recentWorkspace (dsh-client-ui-workspace lib/client.js:1694-1710) is the person's own. On heddle's shared
+   * server the most recent activity is another client's, here a turn in B newer than anything in A (#142). With the
+   * saved session cleared, the reload creates nothing, the hero chip and the note name A, and the first message starts a
+   * new session in A (`new: true`, #134), never in B and never in the session already in A.
+   */
+  const home = isolatedHome('tree-last-workspace')
+  const first = fixtureDir('tree-last-workspace-a')
+  const second = fixtureDir('tree-last-workspace-b')
+  const { config } = scriptedConfig({ home, steps: Array.from({ length: 4 }, () => ({ text: 'an answer' })) })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const register = async (path) => {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      return added.body.record
+    }
+    const a = await register(first)
+    const b = await register(second)
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: a.path, title: 'notes in a' }) })
+    assert.equal(made.status, 200, `a session in A (${JSON.stringify(made.body)})`)
+    const inA = made.body.session
+    await new Promise((done) => setTimeout(done, 20))
+    const theirs = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'their own work', folder: b.path, new: true }) })
+    assert.equal(theirs.status, 200, `another client's turn ran in B (${theirs.status})`)
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+    assert.equal((await listed())[0]?.cwd, b.path, 'the newest activity on the server is in B')
+
+    const workspaceRow = (record) => `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
+    const chip = `(document.querySelector('#hero-workspace-chip .label')?.textContent ?? null)`
+    const note = `(document.getElementById('tree-note')?.hidden === false ? document.getElementById('tree-note').textContent : '')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        title: document.getElementById('session-title')?.textContent ?? null,
+        chip: ${chip},
+        note: ${note},
+        placeholder: document.querySelector('#prompt textarea')?.placeholder ?? null,
+        saved: localStorage.getItem('heddle.sessions.current'),
+        last: localStorage.getItem('heddle.workspace.last'),
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+
+    /** A first visit, then the person opens the session in A from its row. */
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`${workspaceRow(a)} !== undefined && ${workspaceRow(b)} !== undefined`, 'both workspaces are drawn')
+    await browser.evaluate(`(() => { const row = ${workspaceRow(a)}; if (row.closest('li').dataset.open !== 'true') row.click() })()`)
+    await until(`document.querySelector('#tree li[data-session-id="${inA}"] > .row') !== null`, 'the session in A is drawn')
+    await browser.evaluate(`document.querySelector('#tree li[data-session-id="${inA}"] > .row').click()`)
+    await until(`document.getElementById('session-title').textContent === 'notes in a'`, 'the session in A opens')
+    await until(
+      `(() => { try { return JSON.parse(localStorage.getItem('heddle.workspace.last') ?? '{}').path === ${JSON.stringify(a.path)} } catch { return false } })()`,
+      'opening it keeps A as the workspace this browser last worked in',
+    )
+
+    /** The saved session is cleared, and the page reloads. */
+    await browser.evaluate(`localStorage.removeItem('heddle.sessions.current')`)
+    const before = (await listed()).map((meta) => meta.id).sort()
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page reloads')
+    await new Promise((done) => setTimeout(done, 1_500))
+    assert.deepEqual((await listed()).map((meta) => meta.id).sort(), before, `the reload creates no session\nsaw: ${await state()}`)
+    await until(`document.getElementById('session-title').textContent === 'No session'`, 'and opens none')
+    await until(`${chip} === ${JSON.stringify(a.title)}`, 'the hero chip names A, the workspace this browser last worked in, not B where the server was active last')
+    await until(`${note} === ${JSON.stringify(`a new conversation in ${a.title}`)}`, 'and so does the note')
+    assert.notEqual(await browser.evaluate(`document.querySelector('#prompt textarea').placeholder`), 'Choose a workspace to start', 'the composer is aimed, not inert')
+
+    /** The first message, sent the way a person sends it, starts a new session in A. */
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'where does this run'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await until(`document.getElementById('send').disabled === false`, 'Send is offered for the draft')
+    await browser.evaluate(`document.getElementById('send').click()`)
+    let ran = null
+    for (let attempt = 0; attempt < 60 && ran === null; attempt += 1) {
+      ran = (await listed()).find((meta) => !before.includes(meta.id) && (meta.turns ?? 0) > 0) ?? null
+      if (ran === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(ran !== null, `the message ran in a new session\nsaw: ${await state()}`)
+    assert.equal(ran.cwd, a.path, `in A, not in B (${b.path})`)
+    const after = await listed()
+    assert.equal(after.find((meta) => meta.id === inA)?.turns ?? 0, 0, 'not in the session already in A, which stays as it was')
+    assert.equal(after.length, before.length + 1, 'and one session was created, by the message')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, first, second]) removeDir(dir)
   }
 })
 
@@ -1204,10 +1366,10 @@ test('a session row whose session can no longer be read opens to DSH\'s failure 
    * conversation with the composer enabled, and a message sent from there was answered 500. Ported from developer-six's
    * 4cd4cafb (R-developer-six-4).
    *
-   * The page opens the kept session by name (gotoSession), so no first-visit blank is involved. The doomed session's log
-   * and metadata are then moved out of this server's store behind its back while the page still draws its row, and the row
-   * is opened. A reload afterwards is a boot restore, not an open: the saved selection was emptied, so a fresh New session
-   * starts (#17), and no failure line is shown.
+   * The page opens the kept session by name (gotoSession). The doomed session's log and metadata are then moved out of
+   * this server's store behind its back while the page still draws its row, and the row is opened. A reload afterwards is
+   * a boot restore, not an open: the saved selection was emptied, so nothing opens and nothing is created (#17, #142), no
+   * failure line is shown, and the composer, aimed at the one workspace, takes a message.
    */
   const home = isolatedHome('tree-unavailable')
   const work = fixtureDir('tree-unavailable-work')
@@ -1327,17 +1489,20 @@ test('a session row whose session can no longer be read opens to DSH\'s failure 
     assert.deepEqual(tried.lines, seen.lines, 'and the conversation still shows only the failure line')
     assert.deepEqual((await listed()).map((meta) => meta.id), before, 'and no session was started or written')
 
-    /** A reload is a boot restore, not an open: nothing is saved, so a fresh New session starts and nothing says it failed. */
+    /**
+     * A reload is a boot restore, not an open: nothing is saved, so nothing opens, nothing is created (#142), and nothing
+     * says it failed.
+     */
     await browser.goto(server.url)
     await until('document.body.dataset.ready === "true"', 'the page reloads')
-    await until(
-      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify([...before, doomed])}.includes(id) && document.getElementById('session-title')?.hidden === true })()`,
-      'a reload starts a fresh New session, as a first visit does',
-    )
+    await until(`${saved} === null && document.getElementById('session-title')?.textContent === 'No session'`, 'a reload opens nothing, as a first visit does')
+    await new Promise((done) => setTimeout(done, 1_000))
+    assert.deepEqual((await listed()).map((meta) => meta.id), before, `and creates nothing (#142)\nsaw: ${await state()}`)
     const fresh = JSON.parse(await state())
-    assert.equal(fresh.lines.some((line) => line.includes('Failed to load history')), false, `no failure line on the fresh session\nsaw: ${JSON.stringify(fresh)}`)
-    assert.equal(fresh.disabled, false, 'its composer takes a message')
+    assert.equal(fresh.lines.some((line) => line.includes('Failed to load history')), false, `no failure line\nsaw: ${JSON.stringify(fresh)}`)
+    assert.equal(fresh.disabled, false, 'the composer takes a message')
     assert.notEqual(fresh.placeholder, 'Session unavailable')
+    assert.notEqual(fresh.placeholder, 'Choose a workspace to start', 'aimed at the one workspace')
     assert.equal(fresh.doomedRow, false, 'and the gone session is not drawn')
   } finally {
     browser.close()
@@ -1471,8 +1636,8 @@ test('a session dragged above another switches the order to Manual, and the orde
       return JSON.stringify(checked)
     })()`
     /**
-     * Opened on one of the sessions by name: a plain first visit starts a fresh New session (#17) in the workspace these
-     * rows are in, and the open blank leads its group, ahead of the rows this check orders. Opening writes nothing.
+     * Opened on one of the sessions by name, so a session is open as a person's would be (a plain first visit opens none
+     * and creates none, #17, #142). Opening writes nothing.
      */
     await browser.gotoSession(fixture.url, fixture.created[0])
     await ready()

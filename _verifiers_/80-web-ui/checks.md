@@ -60,10 +60,10 @@ grounded_in:
   *Rename* or *Delete workspace* on a row another client already removed says *This workspace was already removed.*
   (never the server's `no workspace <absolute path>`), leaves nothing to confirm and redraws the tree without the row.
 - [`check-subagents.mjs`](check-subagents.mjs) — a subagent's session at DSH parity (R-developer-eight-26, -1, -28,
-  -2): a delegated one-shot child, the newest session in the store, is never what a first start opens (a fresh New
-  session is, #17), the search and the one-column list leave it out as the tree does, a reload reopens the session
-  that was open, and the child, opened, shows DSH's read-only record (*One-shot subagent record*) in place of the
-  composer, which an ordinary session gets back.
+  -2): a delegated one-shot child, the newest session in the store, is never what a first start opens (it opens and
+  creates none, #17, #142), the search and the one-column list leave it out as the tree does, a reload reopens the
+  session that was open, and the child, opened, shows DSH's read-only record (*One-shot subagent record*) in place of
+  the composer, which an ordinary session gets back.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
@@ -76,13 +76,17 @@ grounded_in:
   as it is written;
   and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
   workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
-  new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh
-  New session in the most recently active workspace, never the newest session another person is in, on a blank row
-  that offers no menu, no Archive or Pin and no double-click rename, whose fork chord says DSH's *This session has no
-  completed turn* (#79); and a session row whose session can no longer be read (its log and metadata moved out of the
+  new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17, #142) opening no
+  session and creating none, counted by `/api/sessions`, never the newest session another person is in, and with two
+  workspaces and another client's newer activity in one of them the composer reading *Choose a workspace to start*;
+  after a person opened a session in A, a reload with the saved entry cleared aiming the hero, the note and the first
+  message at A (`heddle.workspace.last`), not at B where the server was active last; with one workspace, aiming at it;
+  a New session pressed the moment the reloaded page draws its row opening a blank, the one selected row, that offers
+  no menu, no Archive or Pin and no double-click rename, whose fork chord says DSH's *This session has no completed
+  turn* (#79); and a session row whose session can no longer be read (its log and metadata moved out of the
   store under an open page) opening to DSH's one line *Failed to load history: {message} (404)*, the header and the
   disabled composer reading *Session unavailable*, no request sent by a draft, Enter, submit or Send, the stale row let
-  go, and a reload starting a fresh New session rather than showing the failure again (#56, ported from
+  go, and a reload opening and creating nothing rather than showing the failure again (#56, ported from
   developer-six's 4cd4cafb); and first use on an empty home (#134): the hero chip and the note naming *Default
   workspace* on the first load and again after a reload before anything is sent, and the first message running in
   `<home>/default-workspace` with a row under Default workspace and the header naming it, never in the server's start
@@ -144,9 +148,10 @@ grounded_in:
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every
-run read and wrote the real `~/.heddle/workspaces.json` (a leak older than #17); once a first visit started a fresh
-session in the most recently active workspace (#17), that session's definition landed in a real folder. It now has its
-own, and the checks that isolated only `HOME` name `HEDDLE_HOME` too, so an exported one cannot reach the real store.
+run read and wrote the real `~/.heddle/workspaces.json` (a leak older than #17); while a first visit started a fresh
+session in the most recently active workspace (#17, until #142), that session's definition landed in a real folder. It
+now has its own, and the checks that isolated only `HOME` name `HEDDLE_HOME` too, so an exported one cannot reach the
+real store.
 
 ## What it deliberately does not judge
 
