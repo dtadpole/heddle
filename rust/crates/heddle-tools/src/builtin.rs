@@ -149,6 +149,11 @@ pub fn truncate_output(combined: &str) -> String {
 /// and names its spill file (`dsh-tool-bash` streamText). Stated differences: the combined stdout and stderr are cut,
 /// by characters, where DSH cuts each stream at 64,000 bytes.
 pub fn truncate_output_at(combined: &str, limit: usize) -> String {
+    truncate_output_spilling(combined, limit, BASH_SPILL_MAX_BYTES)
+}
+
+/// [`truncate_output_at`] with the full-output file capped at `spill_max_bytes`.
+pub fn truncate_output_spilling(combined: &str, limit: usize, spill_max_bytes: usize) -> String {
     let total = combined.chars().count();
     if total <= limit {
         return combined.to_owned();
@@ -157,19 +162,27 @@ pub fn truncate_output_at(combined: &str, limit: usize) -> String {
         .char_indices()
         .nth(total - limit)
         .map_or(combined.len(), |(index, _)| index);
-    let path = spill_output(combined).unwrap_or_else(|| "(unavailable)".to_owned());
+    let path =
+        spill_output(combined, spill_max_bytes).unwrap_or_else(|| "(unavailable)".to_owned());
     format!(
         "{}\n[output truncated; full output: {path}]",
         &combined[start..]
     )
 }
 
-/// Write a command's whole output to a private temporary file, at most [`BASH_SPILL_MAX_BYTES`]; its path, or
-/// `None` when it could not be written.
-fn spill_output(full: &str) -> Option<String> {
+/// Write a command's whole output to a private temporary file and return its path, or `None`.
+///
+/// Only a complete copy is ever named: an output over `spill_max_bytes` gets no file, and a write that fails removes
+/// what it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the
+/// marker never points at a partial file (developer-five's review of #83). A completed file stays in the temporary
+/// directory, as DSH's do.
+fn spill_output(full: &str, spill_max_bytes: usize) -> Option<String> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    if full.len() > spill_max_bytes {
+        return None;
+    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
@@ -184,9 +197,11 @@ fn spill_output(full: &str) -> Option<String> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&path).ok()?;
-    let bytes = full.as_bytes();
-    file.write_all(&bytes[..bytes.len().min(BASH_SPILL_MAX_BYTES)])
-        .ok()?;
+    if file.write_all(full.as_bytes()).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
     Some(path.display().to_string())
 }
 
@@ -1116,6 +1131,18 @@ mod tests {
             outside
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_output_beyond_the_spill_cap_names_no_file() {
+        // developer-five's review of #83: DSH discards a spill past its cap, so no marker names a partial copy.
+        assert_eq!(
+            truncate_output_spilling(&"x".repeat(100), 10, 50),
+            format!(
+                "{}\n[output truncated; full output: (unavailable)]",
+                "x".repeat(10)
+            )
+        );
     }
 
     #[test]

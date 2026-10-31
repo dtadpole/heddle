@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
@@ -62,23 +62,31 @@ export const BASH_SPILL_MAX_BYTES = 64 * 1024 * 1024
  * be written). Stated differences: heddle cuts the combined stdout and stderr, by characters (`bashOutputLimit`),
  * where DSH cuts each stream at 64,000 bytes.
  */
-export function tailOutput(combined: string, limit: number): string {
+export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH_SPILL_MAX_BYTES): string {
   if (combined.length <= limit) return combined
   let tail = combined.slice(combined.length - limit)
   // Never start on the second half of a surrogate pair.
   const first = tail.charCodeAt(0)
   if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1)
-  return `${tail}\n[output truncated; full output: ${spillOutput(combined) ?? '(unavailable)'}]`
+  return `${tail}\n[output truncated; full output: ${spillOutput(combined, spillMaxBytes) ?? '(unavailable)'}]`
 }
 
-/** Write a command's whole output to a private temporary file, at most `BASH_SPILL_MAX_BYTES`; its path, or none. */
-function spillOutput(full: string): string | undefined {
+/**
+ * Write a command's whole output to a private temporary file and return its path, or none.
+ *
+ * Only a complete copy is ever named: an output over `spillMaxBytes` gets no file, and a write that fails removes what
+ * it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the marker never
+ * points at a partial file (developer-five's review of #83). A completed file stays in the temporary directory, as DSH's do.
+ */
+function spillOutput(full: string, spillMaxBytes: number): string | undefined {
+  const bytes = Buffer.from(full, 'utf8')
+  if (bytes.length > spillMaxBytes) return undefined
+  const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
   try {
-    const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
-    const bytes = Buffer.from(full, 'utf8')
-    writeFileSync(path, bytes.length > BASH_SPILL_MAX_BYTES ? bytes.subarray(0, BASH_SPILL_MAX_BYTES) : bytes, { mode: 0o600 })
+    writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' })
     return path
   } catch {
+    rmSync(path, { force: true })
     return undefined
   }
 }

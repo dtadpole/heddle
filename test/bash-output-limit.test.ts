@@ -61,3 +61,8 @@ test('output within the limit is untouched, and the default is the old fixed 20,
   assert.equal(kept, 'c'.repeat(20_000))
   rmSync(path, { force: true })
 })
+
+test('an output beyond the full-output cap names no file rather than a partial one (#83 review)', () => {
+  // DSH discards a spill past its cap, so the marker never points at an incomplete copy.
+  assert.equal(tailOutput('x'.repeat(100), 10, 50), `${'x'.repeat(10)}\n[output truncated; full output: (unavailable)]`)
+})
