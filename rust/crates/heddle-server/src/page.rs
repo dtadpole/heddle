@@ -53,12 +53,12 @@ pub fn marked_page(html: &str) -> String {
     marked
 }
 
-/// The page as served: [`marked_page`] of [`PAGE_SOURCE`], computed once per process.
 /// The page with its `<html lang>` set to `lang` (issue #80); the marker stays the file's own.
 pub fn with_language(page: &str, lang: &str) -> String {
     page.replacen("<html lang=\"en\">", &format!("<html lang=\"{lang}\">"), 1)
 }
 
+/// The page as served: [`marked_page`] of [`PAGE_SOURCE`], computed once per process.
 pub fn page() -> &'static str {
     static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PAGE.get_or_init(|| marked_page(PAGE_SOURCE))
