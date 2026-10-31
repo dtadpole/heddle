@@ -151,7 +151,7 @@ test('choosing 中文 in Settings shows the dialog in Chinese at once, and the s
     await choose(browser, 'en')
     assert.ok(await browser.waitFor(`document.getElementById('settings-title').textContent === 'Settings'`, 5_000), 'English comes back at once')
     assert.equal(await browser.evaluate(`document.documentElement.getAttribute('lang')`), 'en')
-    assert.ok(await browser.waitFor(`(async () => (await (await fetch('/')).text()).includes('<html lang="en">'))()`, 5_000), 'and the server serves English again')
+    assert.ok(await browser.waitFor(`(async () => (await (await fetch('/')).text()).includes('<html lang="en"'))()`, 5_000), 'and the server serves English again')
   } finally {
     browser.close()
     server.kill()

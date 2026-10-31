@@ -70,7 +70,7 @@ async function startServer(label, patches = []) {
 async function servedLanguage(server, acceptLanguage) {
   const response = await fetch(new URL('/', server.url), { headers: { cookie: server.cookie, 'accept-language': acceptLanguage } })
   assert.equal(response.status, 200)
-  return /<html lang="([^"]+)">/.exec(await response.text())?.[1]
+  return /<html lang="([^"]+)"/.exec(await response.text())?.[1]
 }
 
 test('with no stored choice, the page is in the first supported language the browser asks for, else English', async () => {
