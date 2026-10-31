@@ -694,9 +694,15 @@ mod tests {
             serde_json::json!({"seq": 3, "type": "turn/completed"}),
         ];
         let mut blocked = answered.clone();
-        blocked.push(serde_json::json!({"seq": 4, "type": "turn/failed", "reason": {"kind": "blocked"}}));
+        blocked.push(
+            serde_json::json!({"seq": 4, "type": "turn/failed", "reason": {"kind": "blocked"}}),
+        );
         let turns = transcript_turns(&blocked);
-        assert_eq!(turns.len(), transcript_turns(&answered).len(), "no row of its own");
+        assert_eq!(
+            turns.len(),
+            transcript_turns(&answered).len(),
+            "no row of its own"
+        );
         let last = turns.last().expect("the answer row");
         assert_eq!(last.text, "HERON-58");
         assert_eq!(last.ended, None, "and nothing on the previous answer");

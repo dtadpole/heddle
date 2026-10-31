@@ -168,19 +168,34 @@ impl JsonBody {
     }
 }
 
-/// The request body parsed as JSON, `None` when it is empty: `413 request too large` over
-/// [`MAX_JSON_BODY`], `400 the body must be JSON` when it does not parse (both `text/plain`).
-async fn json_value(request: Request) -> Result<Option<Value>, Response> {
-    let bytes = match to_bytes(request.into_body(), MAX_JSON_BODY).await {
-        Ok(bytes) => bytes,
-        Err(_) => return Err(text(StatusCode::PAYLOAD_TOO_LARGE, "request too large\n")),
-    };
+/// Why a request body could not be read as JSON.
+enum BodyRefusal {
+    TooLarge,
+    NotJson,
+}
+
+impl BodyRefusal {
+    /// `413 request too large` over [`MAX_JSON_BODY`], `400 the body must be JSON` when it does not
+    /// parse, both `text/plain`, as `readJson` answers them.
+    fn response(self) -> Response {
+        match self {
+            BodyRefusal::TooLarge => text(StatusCode::PAYLOAD_TOO_LARGE, "request too large\n"),
+            BodyRefusal::NotJson => text(StatusCode::BAD_REQUEST, "the body must be JSON\n"),
+        }
+    }
+}
+
+/// The request body parsed as JSON, `None` when it is empty.
+async fn json_value(request: Request) -> Result<Option<Value>, BodyRefusal> {
+    let bytes = to_bytes(request.into_body(), MAX_JSON_BODY)
+        .await
+        .map_err(|_| BodyRefusal::TooLarge)?;
     if bytes.is_empty() {
         return Ok(None);
     }
     serde_json::from_slice::<Value>(&bytes)
         .map(Some)
-        .map_err(|_| text(StatusCode::BAD_REQUEST, "the body must be JSON\n"))
+        .map_err(|_| BodyRefusal::NotJson)
 }
 
 impl<S: Send + Sync> FromRequest<S> for JsonBody {
@@ -188,7 +203,7 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let _ = state;
-        match json_value(request).await? {
+        match json_value(request).await.map_err(BodyRefusal::response)? {
             Some(Value::Object(map)) => Ok(JsonBody(map)),
             // A non-object reads as `{}`: property reads on an array, a number or `null` gave the
             // TypeScript routes nothing to read.
@@ -210,7 +225,7 @@ impl<S: Send + Sync> FromRequest<S> for JsonObject {
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let _ = state;
-        match json_value(request).await? {
+        match json_value(request).await.map_err(BodyRefusal::response)? {
             None => Ok(JsonObject(JsonBody(Map::new()))),
             Some(Value::Object(map)) => Ok(JsonObject(JsonBody(map))),
             Some(_) => Err(text(

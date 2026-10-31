@@ -55,7 +55,8 @@ test('a session that cannot be loaded shows the failure line, is not kept, and l
   assert.match(refused, /selectedPath = null[\s\S]*await renderTree\(\)[\s\S]*markSelection\(\)/, 'the tree is read again and the selection dropped')
   assert.match(refused, /return false/, 'and the caller is told the session did not open')
   assert.match(show, /if \(unavailableSession !== null\) \{\n\s+unavailableSession = null/, 'opening any session clears the state')
-  assert.match(show, /\n {2}return true\n}\n$/, 'a session whose history was read resolves true')
+  /** True when the session asked for is the one shown at the end, which a later open of another session changes (N3). */
+  assert.match(show, /\n {2}return current === id\n}\n$/, 'a session whose history was read resolves true while it is the one shown')
 })
 
 test('the header names a session that could not be loaded, not "No session"', () => {
