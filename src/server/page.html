@@ -1474,6 +1474,11 @@
     #tree .status-dot .spinner-motion, #tree .status-dot .spinner-arc { animation: none; }
     #tree .status-dot .spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
   }
+  /** The still states, from the same `StateDot`: a filled dot at 20% inset, warning while a person is awaited, done until read. */
+  #tree .status-dot:is([data-state='warning'], [data-state='done']) { position: relative; }
+  #tree .status-dot:is([data-state='warning'], [data-state='done'])::after { content: ''; position: absolute; inset: 20%; border-radius: 50%; background: currentColor; }
+  #tree .status-dot[data-state='warning'] { color: #b7791f; }
+  #tree .status-dot[data-state='done'] { color: #2fa36b; }
 
   /* hover-card-style:begin */
   /**
@@ -5643,6 +5648,8 @@ async function showSession(id) {
   /** A reload comes back here (`SessionRules.startupSession`), and a one-shot child's composer is a record. */
   rememberCurrent(id)
   paintComposerAccess()
+  /** Opening a session is what reads its completion (DSH's `reconcileStatus`, `client.js:965`). */
+  if (unreadSessions.delete(id)) paintRunningMarks()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
   applySessionAccess(null)
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
@@ -5794,6 +5801,7 @@ async function refreshSessions() {
     let changed = false
     for (const id of [...runningSessions]) {
       if (!live.has(id)) {
+        noteCompletion(id, true, false)
         runningSessions.delete(id)
         runningSince.delete(id)
         changed = true
@@ -5803,6 +5811,7 @@ async function refreshSessions() {
       if (id.length === 0) continue
       if (!runningSessions.has(id)) {
         runningSessions.add(id)
+        noteCompletion(id, false, true)
         changed = true
       }
       /**
@@ -5899,6 +5908,7 @@ events.addEventListener('session', (message) => {
      */
     const wasRunning = runningSessions.has(payload.session)
     runningSessions.add(payload.session)
+    noteCompletion(payload.session, wasRunning, true)
     if (!wasRunning || !runningSince.has(payload.session)) {
       const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
       runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
@@ -5918,8 +5928,11 @@ events.addEventListener('session', (message) => {
     }
   }
   else if (event.type === 'turn/completed') {
+    noteCompletion(payload.session, runningSessions.has(payload.session), false)
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
+    /** A turn that ended waits on nobody; the approval poll would say so within two seconds, the end says it now. */
+    pendingInteractions.delete(payload.session)
     paintRunningMarks()
     if (payload.session === (current ?? composerKey)) {
       liveRounds = 0
@@ -7114,8 +7127,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         settleChat()
         void renderSettledAnswers()
         if (typeof payload.session === 'string') {
+          noteCompletion(payload.session, runningSessions.has(payload.session), false)
           runningSessions.delete(payload.session)
           runningSince.delete(payload.session)
+          pendingInteractions.delete(payload.session)
           paintRunningMarks()
         }
         renderComposerState()
@@ -7125,8 +7140,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         add('denied', payload.message)
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
         if (typeof payload.session === 'string') {
+          noteCompletion(payload.session, runningSessions.has(payload.session), false)
           runningSessions.delete(payload.session)
           runningSince.delete(payload.session)
+          pendingInteractions.delete(payload.session)
           paintRunningMarks()
         }
         renderComposerState()
@@ -9217,22 +9234,75 @@ function runningMark() {
   return mark
 }
 
+/**
+ * Sessions awaiting a person (`id → 'approval'`, from `/api/approvals` and the `approval` stream event) and sessions whose
+ * turn ended while they were off screen — DSH's `pendingInteraction` and `completionUnread`, kept by the page as DSH's
+ * client keeps them (`UiSession`, dsh-client-ui-session `client.js:773-775`): in memory, so a reload starts clean.
+ */
+const pendingInteractions = new Map()
+const unreadSessions = new Set()
+
+/** Keep one session's completion reminder in step with a running edge; the panel's own session is never unread. */
+function noteCompletion(id, wasRunning, running) {
+  const unread = WorkspaceTree.completionUnread(unreadSessions.has(id), { wasRunning, running, viewing: id === (current ?? composerKey) })
+  if (unread) unreadSessions.add(id)
+  else unreadSessions.delete(id)
+}
+
+/** A session row's status; an archived row keeps its cell blank, as DSH's does (`client.js:2306`). */
+function sessionRowStatus(node) {
+  const id = node.session.id
+  if (node.archived) return WorkspaceTree.rowStatus()
+  return WorkspaceTree.rowStatus({ pending: pendingInteractions.get(id), running: runningSessions.has(id), completed: unreadSessions.has(id) })
+}
+
+/** DSH's `StateDot` for a still state: a filled dot at 20% inset, warning for a pending interaction, done for unread. */
+function statusMark(status) {
+  if (status.state === 'ongoing') return runningMark()
+  const mark = document.createElement('span')
+  mark.className = 'status-dot'
+  mark.dataset.state = status.state
+  mark.setAttribute('role', 'img')
+  mark.setAttribute('aria-label', status.label)
+  mark.title = status.label
+  return mark
+}
+
+/** Paint one row's mark after its glyph, and put a pending interaction's word where its time is. */
+function paintRowStatus(row, status) {
+  const existing = row.querySelector(':scope > .status-dot')
+  const wanted = status.state === 'idle' ? null : status.label
+  if ((existing === null ? null : existing.getAttribute('aria-label')) !== wanted) {
+    existing?.remove()
+    if (wanted !== null) {
+      const mark = statusMark(status)
+      row.querySelector(':scope > .icon')?.after(mark)
+      /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
+      for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
+    }
+  }
+  const age = row.querySelector(':scope > .row-right > .age')
+  if (age === null) return
+  if (status.trailingLabel !== undefined) {
+    age.textContent = status.trailingLabel
+    age.dataset.trailing = 'true'
+    age.setAttribute('aria-hidden', 'true')
+  } else if (age.dataset.trailing === 'true') {
+    delete age.dataset.trailing
+    age.removeAttribute('aria-hidden')
+    age.textContent = relativeAge(age.dataset.stamp)
+  }
+}
+
 function paintRunningMarks() {
+  /** A status change can raise a group's watermark first, so a row it brings into view is drawn before it is painted. */
+  raiseOpenGroups()
   for (const entry of rowIndex.values()) {
     const { node, li } = entry
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
     const row = li.querySelector(':scope > .row')
     if (row === null) continue
-    const existing = row.querySelector(':scope > .status-dot')
-    const running = runningSessions.has(node.session.id)
-    if (running && existing === null) {
-      const mark = runningMark()
-      row.querySelector(':scope > .icon')?.after(mark)
-      /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
-      for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
-    } else if (!running && existing !== null) {
-      existing.remove()
-    }
+    paintRowStatus(row, sessionRowStatus(node))
   }
 }
 
@@ -9543,7 +9613,7 @@ function svgPath(d) {
  * stop saying it without a reload. One interval repaints the text only — it does not re-fetch or redraw the tree.
  */
 function paintAges() {
-  for (const cell of document.querySelectorAll('#tree .age[data-stamp]')) {
+  for (const cell of document.querySelectorAll('#tree .age[data-stamp]:not([data-trailing])')) {
     cell.textContent = relativeAge(cell.dataset.stamp)
   }
 }
@@ -11324,9 +11394,11 @@ function workspaceDisplayTitle(title) {
  *   before the parent's own sessions); `workspace` keeps every group a sibling section (DSH's `WorkSpace`).
  * - **Rows**: subagent-origin sessions are hidden (DSH hides `origin: 'subagent'`); the archive filter is DSH's three
  *   states; the order is pinned first (newest pin first), then last updated, newest first, then id.
- * - **Show more**: an open group shows 5 conversations, raised to cover the last running or open one within the first 50,
- *   plus the open New session placeholder, which takes none of the places; the control reads `Show {n} more sessions`
- *   and each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
+ * - **Show more**: an open group shows 5 conversations, raised to cover the last one within the first 50 that is running,
+ *   has a running subagent, awaits the person, carries an unread completion or is open, plus the open New session
+ *   placeholder, which takes none of the places; a raise is kept until `Show less` or a fold; the control reads
+ *   `Show {n} more sessions` and each click adds 5. The number lives with the page, never in storage, as DSH's
+ *   watermark does.
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -11503,22 +11575,60 @@ const WorkspaceTree = (() => {
 
   /**
    * How many of a group's **conversations** are drawn: the watermark (5 until `Show more`), raised to cover the last
-   * running or open conversation among the first 50, never more than there are. A New session placeholder is not one of
-   * them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
+   * conversation among the first 50 that needs to be seen, never more than there are. A New session placeholder is not
+   * one of them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
    * `dsh-client-ui-workspace` `lib/client.js:2803-2833`), so the open blank never takes one of the five places (#54).
+   *
+   * What raises it is DSH's `requiredWatermark` (`:2830`), clause for clause: a conversation that is **running**
+   * (`options.running`, or the list's own `running`), has a **running child** (`options.runningChildren`, the parents
+   * `parentsRunning` names), **awaits the person** (`options.pending`, id → kind, counting the three kinds
+   * `visiblePendingKind` keeps, `:1048-1055`), carries an **unread completion** (`options.unread`, DSH's `completed`,
+   * `:1068`), or is **open** (`options.current`). The waiting and unread clauses are #62.
    */
   function shownCount(sessions, watermark, options = {}) {
     const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
     const running = options.running instanceof Set ? options.running : new Set()
+    const runningChildren = options.runningChildren instanceof Set ? options.runningChildren : new Set()
+    const pending = options.pending instanceof Map ? options.pending : new Map()
+    const unread = options.unread instanceof Set ? options.unread : new Set()
     const current = options.current ?? null
+    const awaits = (id) => Object.hasOwn(PENDING, String(pending.get(id)))
     let total = 0
     let required = 0
     for (const meta of sessions) {
       if (placeholder(meta)) continue
       total += 1
-      if (total <= REACH && (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current))) required = total
+      if (total > REACH) continue
+      const id = meta.id
+      if (running.has(id) || meta.running === true || runningChildren.has(id) || awaits(id) || unread.has(id) || (current !== null && id === current)) required = total
     }
     return Math.min(total, Math.max(mark, required))
+  }
+
+  /**
+   * The watermark a group keeps after it is drawn: the stored one raised to what its rows now require, and never lowered —
+   * DSH's `raiseWatermarks` over its baselines (`lib/client.js:2834-2842`, `:3088`, `:3095-3096`). The watermark is a
+   * row count that does not fall on its own, so a row stays in view after its run, its question or its reminder ends
+   * (README: "the rows stay visible after a run or notification ends"); only `Show less` and folding the workspace lower
+   * it, which the page does by forgetting the stored mark. `stored` undefined is a group with none yet.
+   */
+  function raisedWatermark(stored, sessions, options = {}) {
+    const mark = Number.isFinite(stored) ? Math.max(0, stored) : INITIAL
+    return Math.max(mark, shownCount(sessions, INITIAL, options))
+  }
+
+  /**
+   * The sessions with a running **subagent** child, from `/api/sessions` (each child names its `parentSession`): DSH's
+   * `runningChildCount` over the parent's subagent catalog (`lib/client.js:1056-1058`). A fork also names its source as
+   * `parentSession`, but it is a conversation of its own, not a child, so only `origin: 'subagent'` counts.
+   */
+  function parentsRunning(sessions, running = new Set()) {
+    const parents = new Set()
+    for (const meta of Array.isArray(sessions) ? sessions : []) {
+      if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent' || typeof meta.parentSession !== 'string') continue
+      if (running.has(meta.id) || meta.running === true) parents.add(meta.parentSession)
+    }
+    return parents
   }
 
   /**
@@ -11569,7 +11679,34 @@ const WorkspaceTree = (() => {
     return !(node?.kind === 'session' && node.archived === true)
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, watermarkRows, nextWatermark, overflow, overflowLabel, ARCHIVED_NOT_OPENABLE, opensOnClick }
+  /**
+   * A session row's primary status, DSH's `sessionStatuses` (dsh-client-ui-workspace `client.js:2068-2117`): a pending
+   * interaction outranks running, which outranks an unread completion; otherwise idle. A pending one's `trailingLabel`
+   * takes the time's place on the row. `{ pending: 'approval' | 'plan-review' | 'question' | undefined, running, completed }`.
+   */
+  const PENDING = {
+    approval: { state: 'warning', label: 'Waiting for approval', trailingLabel: 'Approval' },
+    'plan-review': { state: 'warning', label: 'Plan awaiting review', trailingLabel: 'Plan review' },
+    question: { state: 'warning', label: 'Waiting for answer', trailingLabel: 'Answer' },
+  }
+  function rowStatus(facts = {}) {
+    if (Object.hasOwn(PENDING, String(facts.pending))) return { ...PENDING[facts.pending] }
+    if (facts.running === true) return { state: 'ongoing', label: 'Running' }
+    if (facts.completed === true) return { state: 'done', label: 'Completed' }
+    return { state: 'idle', label: 'Idle' }
+  }
+
+  /**
+   * Whether a session's completion is unread after a running edge, DSH's `observeRunning` and `reconcileStatus`
+   * (dsh-client-ui-session `client.js:948-965`): a turn that stops while the session is not on screen marks it, and
+   * running again or being on screen clears it. `{ wasRunning, running, viewing }`.
+   */
+  function completionUnread(unread, change = {}) {
+    if (change.running === true || change.viewing === true) return false
+    return change.wasRunning === true ? true : unread === true
+  }
+
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, raisedWatermark, parentsRunning, watermarkRows, nextWatermark, overflow, overflowLabel, rowStatus, completionUnread, ARCHIVED_NOT_OPENABLE, opensOnClick }
 })()
 /* workspace-tree:end */
 
@@ -11661,6 +11798,8 @@ const SessionArchive = (() => {
  */
 let treeGroups = []
 const watermarks = new Map()
+/** The subagent sessions `/api/sessions` last listed (not rows themselves): their runs raise their parents' rows. */
+let childSessions = []
 const definitionOf = new Map()
 /** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
 let listedSessions = new Set()
@@ -11763,10 +11902,13 @@ function paintSessionRows(list, group, depth) {
   const anchor = groupRows.length > 0 ? groupRows[groupRows.length - 1].nextSibling : list.firstChild
   /**
    * DSH's arithmetic (`lib/client.js:3156-3158`): the open New session placeholder is drawn on top of the watermark's
-   * conversations rather than in one of their places, and the control names how many it hides (#54).
+   * conversations rather than in one of their places, and the control names how many it hides (#54). The raise is kept
+   * (`:3095-3096`), so a row a question or a finished turn brought into view stays there once it is answered and read.
    */
-  const raise = { running: runningSessions, current }
-  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, raise)
+  const raise = watermarkFacts()
+  const kept = WorkspaceTree.raisedWatermark(watermarks.get(group.key), group.sessions, raise)
+  if (kept !== (watermarks.get(group.key) ?? WorkspaceTree.INITIAL)) watermarks.set(group.key, kept)
+  const shown = WorkspaceTree.shownCount(group.sessions, kept, raise)
   const baseline = WorkspaceTree.shownCount(group.sessions, WorkspaceTree.INITIAL, raise)
   const drawn = WorkspaceTree.watermarkRows(group.sessions, shown)
   const total = drawn.conversations
@@ -11937,6 +12079,41 @@ function wireWorkspaceDrag(li, group) {
   })
 }
 
+/**
+ * What raises a watermark right now, in `WorkspaceTree.shownCount`'s terms: the running sessions, the parents of a running
+ * subagent, the sessions awaiting a person, the unread completions, and the open session (DSH's `requiredWatermark`).
+ */
+function watermarkFacts() {
+  return {
+    running: runningSessions,
+    runningChildren: WorkspaceTree.parentsRunning(childSessions, runningSessions),
+    pending: pendingInteractions,
+    unread: unreadSessions,
+    current,
+  }
+}
+
+/**
+ * Redraw the session rows of every open group whose rows now need a higher watermark than it keeps — a question, a run
+ * or an unread completion below the fold. DSH re-derives its baselines on every status change (`lib/client.js:3088-3096`),
+ * so such a row comes into view at once; the page's stream handlers only repaint the marks of rows already drawn, so
+ * they call this from `paintRunningMarks`. A group already high enough is left alone, which is also what ends the
+ * recursion through `paintSessionRows`.
+ */
+function raiseOpenGroups() {
+  const facts = watermarkFacts()
+  for (const { node, li } of [...rowIndex.values()]) {
+    const group = node.group
+    if (group === undefined || !li.isConnected || li.dataset.open !== 'true') continue
+    const list = li.querySelector(':scope > ul[role="group"]')
+    if (list === null) continue
+    const stored = watermarks.get(group.key) ?? WorkspaceTree.INITIAL
+    if (WorkspaceTree.raisedWatermark(stored, group.sessions, facts) <= stored) continue
+    paintSessionRows(list, group, Number(li.style.getPropertyValue('--tree-depth') || '0') + 1)
+    markSelection()
+  }
+}
+
 function nodeRow(node, depth = 0) {
   /** The row's right-hand slot, declared before anything appends to it: a later `const` was a TDZ error that took
    * every session row out of the tree while its branch still rendered. */
@@ -11980,15 +12157,10 @@ function nodeRow(node, depth = 0) {
   icon.append(kindIcon(node.kind, false))
   row.append(icon)
   /**
-   * A running session carries the reference's **spinner** before its name — not a word: `StateDot`'s ongoing state is a
-   * rotating ring with a breathing arc, and the row repaints it from `runningSessions` (fed by `model/request` and
-   * `turn/completed` on the stream) so the mark says "still working" without a re-fetch.
+   * A session's status mark goes before its name — not a word: `StateDot`'s ongoing spinner while it runs, a warning dot
+   * while it waits on a person, a done dot for a completion not yet seen. `paintRowStatus` draws it once the row is
+   * built (below) and again from `paintRunningMarks` whenever the stream changes a state, without a re-fetch.
    */
-  if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
-    const mark = runningMark()
-    row.append(mark)
-    for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
-  }
   if (node.badge) {
     const badge = document.createElement('span')
     badge.className = 'badge'
@@ -12151,6 +12323,7 @@ function nodeRow(node, depth = 0) {
   /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
   if (rowTools.children.length > 0) rowRight.append(rowTools)
   if (rowRight.children.length > 0) row.append(rowRight)
+  if (node.kind === 'session' && node.session !== undefined && node.session !== null) paintRowStatus(row, sessionRowStatus(node))
   row.onclick = async () => {
     /**
      * Three kinds of row, three different acts — the owner's rules of 2026-10-11.
@@ -13299,6 +13472,7 @@ async function renderTree() {
   }
   rowIndex.clear()
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
+  childSessions = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta?.origin === 'subagent')
   treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode, current })
   /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
   treeTops = WorkspaceTree.flatten(treeGroups)
@@ -13886,6 +14060,7 @@ async function answerApproval(outcome) {
     const body = await response.json().catch(() => ({}))
     if (response.ok && body.answered === true) {
       hideApproval()
+      void refreshApprovals(false)
       return
     }
     note.textContent = body.error ?? 'that answer did not land: the question is no longer waiting'
@@ -13903,16 +14078,40 @@ document.getElementById('approval-allow').addEventListener('click', () => void a
 document.getElementById('approval-reject').addEventListener('click', () => void answerApproval('rejected'))
 events.addEventListener('approval', (message) => {
   try {
-    showApproval(JSON.parse(message.data))
+    const request = JSON.parse(message.data)
+    /** Every session's question marks its row, the panel's own or not — DSH's `Approval` in place of the time. */
+    if (typeof request?.session === 'string' && !pendingInteractions.has(request.session)) {
+      pendingInteractions.set(request.session, 'approval')
+      paintRunningMarks()
+    }
+    showApproval(request)
   } catch {
     // a frame that is not a question is not this card's business
   }
 })
-async function refreshApprovals() {
+/** The rows' pending marks, rebuilt from the waiting list: an answer from anywhere, a stop or a timeout clears one. */
+function notePendingApprovals(requests) {
+  const waiting = new Set(requests.filter((entry) => typeof entry?.session === 'string').map((entry) => entry.session))
+  let changed = false
+  for (const [id, kind] of pendingInteractions) {
+    if (kind !== 'approval' || waiting.has(id)) continue
+    pendingInteractions.delete(id)
+    changed = true
+  }
+  for (const id of waiting) {
+    if (pendingInteractions.has(id)) continue
+    pendingInteractions.set(id, 'approval')
+    changed = true
+  }
+  if (changed) paintRunningMarks()
+}
+async function refreshApprovals(card = true) {
   try {
     const response = await fetch('/api/approvals')
     if (!response.ok) return
     const body = await response.json()
+    notePendingApprovals(Array.isArray(body.requests) ? body.requests : [])
+    if (!card) return
     const request = (body.requests ?? []).find((entry) => entry.session === undefined || entry.session === current)
     if (request !== undefined) showApproval(request)
   } catch {
@@ -13923,8 +14122,8 @@ async function refreshApprovals() {
 /** Questions wait for a person, so the card is discovered from the pending list as well as pushed by the stream. */
 setInterval(() => {
   if (document.hidden) return
-  if (current === null) return
-  void refreshApprovals()
+  /** The rows need the list even with no session open; the card only for an open one. */
+  void refreshApprovals(current !== null)
 }, 2000)
 
 await loadEndpoints()

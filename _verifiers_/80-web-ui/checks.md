@@ -38,7 +38,10 @@ grounded_in:
   view does not draw them as turns, so a reader after the fact can see the expectation changed and what it became.
 - [`check-approval.mjs`](check-approval.mjs) — the approval card as a control: it appears when a call asks for a
   wider mode, carries the model's justification verbatim, Allow once runs the one denied call, Reject leaves it
-  undone, and the session's own mode never moves.
+  undone, and the session's own mode never moves; and the session rows: a waiting session says `Approval` with a
+  warning dot, a turn that ends off screen leaves a done dot until the session is opened, and a session below the
+  fold of a long workspace comes into view while it waits and stays there after its turn ends (DSH's Show more
+  watermark, raised by an attention-bearing row and never lowered on its own).
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.
