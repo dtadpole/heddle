@@ -179,7 +179,11 @@ test('New session asks for a new session every time and names none it found in t
   const start = page.indexOf('async function startSessionAt(node) {')
   assert.ok(start > 0, 'the one New session path is in the page')
   const body = page.slice(start, page.indexOf('\n}\n', start))
-  assert.match(body, /body: JSON\.stringify\(\{ branch: node\.path \}\)/, 'the request names the folder and nothing else')
+  assert.match(
+    body,
+    /body: JSON\.stringify\(\{ branch: node\.path(, \.\.\.\(stagedPreset !== null \? \{ preset: stagedPreset \} : \{\}\))? \}\)/,
+    'the request names the folder, and the agent preset staged for the new session (A96), and nothing else',
+  )
   assert.doesNotMatch(body, /session: |blankToReuse\(/, 'no session id, found or remembered, rides along')
 })
 
