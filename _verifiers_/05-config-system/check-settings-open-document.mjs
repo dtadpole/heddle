@@ -127,6 +127,8 @@ test('Open configuration file opens the profile patch for a page on this machine
     assert.ok(other.status === 403, `a page on another host is refused (${other.status} ${other.text.slice(0, 200)})`)
     const wrong = await call(server, 'POST', '/api/settings', { open: 'folder' })
     assert.equal(wrong.status, 400, 'only the document opens')
+    const pathed = await call(server, 'POST', '/api/settings', { open: 'document', path: join(home, 'elsewhere.txt') })
+    assert.equal(pathed.status, 400, 'and the request is pathless: a body naming a path is refused')
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
     assert.equal(opened().length, 1, 'neither refusal started the opener')
   } finally {

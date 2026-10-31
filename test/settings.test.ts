@@ -288,6 +288,7 @@ test('Open configuration file: only for a page on this machine, pathless, and an
     const ask = (loopback: boolean, body: unknown) => handleSettingsRequest(f.service(), 'POST', '/api/settings', JSON.stringify(body), { loopback, opener })
     assert.equal((await ask(false, { open: 'document' }))?.status, 403)
     assert.equal((await ask(true, { open: 'folder' }))?.status, 400)
+    assert.equal((await ask(true, { open: 'document', path: '/etc/passwd' }))?.status, 400, 'pathless: a body naming anything else is refused')
     assert.deepEqual(opened, [], 'nothing opened for a refusal')
     assert.equal(existsSync(f.patchFile), false)
     assert.deepEqual(await ask(true, { open: 'document' }), { status: 200, body: { opened: true } })

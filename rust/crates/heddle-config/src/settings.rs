@@ -626,7 +626,8 @@ pub fn open_document(env: &Env, path: &std::path::Path) -> Result<(), String> {
         }
         None if cfg!(windows) => {
             let mut command = std::process::Command::new("cmd");
-            command.args(["/c", "start", "\"\""]);
+            // `start` takes its first quoted argument as a window title; an empty argument goes out as "".
+            command.args(["/c", "start", ""]);
             command
         }
         None => std::process::Command::new("xdg-open"),
@@ -637,7 +638,12 @@ pub fn open_document(env: &Env, path: &std::path::Path) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(|_| ())
+        .map(|mut child| {
+            // Reap it when it exits, so a click leaves no zombie behind (developer-ten N3).
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -752,9 +758,13 @@ fn open_document_request(
         status,
         body: serde_json::json!({ "code": code, "error": error }),
     };
+    // Exactly {"open": "document"}: the request is pathless, so a body that names anything else is refused.
     let asked = serde_json::from_slice::<Value>(body)
         .ok()
-        .is_some_and(|request| request.get("open").and_then(Value::as_str) == Some("document"));
+        .is_some_and(|request| {
+            request.as_object().is_some_and(|object| object.len() == 1)
+                && request.get("open").and_then(Value::as_str) == Some("document")
+        });
     if !asked {
         return fail(
             400,
@@ -2273,6 +2283,11 @@ mod tests {
             "nothing opened for another host"
         );
         assert_eq!(ask(true, r#"{"open": "folder"}"#).status, 400);
+        assert_eq!(
+            ask(true, r#"{"open": "document", "path": "/etc/passwd"}"#).status,
+            400,
+            "pathless: a body naming anything else is refused"
+        );
         let answer = ask(true, r#"{"open": "document"}"#);
         assert_eq!(answer.status, 200, "{}", answer.body);
         assert_eq!(

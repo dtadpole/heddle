@@ -313,7 +313,8 @@ async function openDocumentRequest(
   } catch {
     request = undefined
   }
-  if (request === null || typeof request !== 'object' || (request as Record<string, unknown>).open !== 'document') {
+  // Exactly {"open": "document"}: the request is pathless, so a body that names anything else is refused (developer-ten B1).
+  if (request === null || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).length !== 1 || (request as Record<string, unknown>).open !== 'document') {
     return fail(400, 'bad-request', 'send {"open": "document"} to open the configuration file')
   }
   if (context.loopback !== true) return fail(403, 'bad-request', 'the configuration file opens only from a page on this machine')
@@ -340,11 +341,12 @@ export function documentOpener(env: NodeJS.ProcessEnv = process.env, platform: N
       : platform === 'darwin'
         ? ['open', ['-t']]
         : platform === 'win32'
-          ? ['cmd', ['/c', 'start', '""']]
+          ? ['cmd', ['/c', 'start', '']]
           : ['xdg-open', []]
   return (path) =>
     new Promise((resolvePromise, reject) => {
-      const child = spawn(command, [...args, path], { stdio: 'ignore', detached: true })
+      // Windows' `start` takes its first quoted argument as a window title; the empty one goes out as "" (developer-ten B2).
+      const child = spawn(command, [...args, path], { stdio: 'ignore', detached: true, windowsHide: true })
       child.once('error', reject)
       child.once('spawn', () => {
         child.unref()
