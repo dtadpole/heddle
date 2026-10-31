@@ -23,6 +23,7 @@ import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } f
 import { renderMarkdown } from './markdown.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
+import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
@@ -33,6 +34,8 @@ import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
+import { handleJobsRoute } from '../jobs/http.ts'
+import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -119,6 +122,11 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
+   * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
+   */
+  readonly settings?: SettingsService
 }
 
 export interface WebServer {
@@ -181,6 +189,11 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
     for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
+  })
+
+  // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+  ctx.on('jobs/changed', () => {
+    for (const client of subscribers) client.write('event: jobs\ndata: {}\n\n')
   })
 
   /**
@@ -265,6 +278,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
         try {
@@ -346,6 +360,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 }
 
 interface RequestState {
+  /** The settings surface, when the server was started with one. */
+  readonly settings?: SettingsService
   readonly token: string
   readonly secret: string
   readonly host: string
@@ -776,6 +792,25 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the route reuses it: a key, a key *path* and a header value are all secrets that can live in an
    * endpoint, and none of them may reach a browser.
    */
+  /**
+   * Settings: the active profile's patch, read and written the way DSH's settings controller does it. Every
+   * answer is `src/config/settings.ts`'s (the Rust port's twin is `heddle-config`), behind the fence and the
+   * token like every other route.
+   */
+  if (url.pathname === '/api/settings' || url.pathname.startsWith('/api/settings/')) {
+    if (state.settings === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ code: 'settings-rejected', error: 'this server was started without a settings surface' })}\n`)
+      return
+    }
+    const body = request.method === 'POST' ? await readText(request, response) : ''
+    if (body === null) return
+    const answer = await handleSettingsRequest(state.settings, request.method ?? 'GET', url.pathname, body)
+    if (answer !== undefined) {
+      respond(response, answer.status, 'application/json', `${JSON.stringify(answer.body, null, 2)}\n`)
+      return
+    }
+  }
+
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
     const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
@@ -938,6 +973,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    */
   // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
   if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+  // The background-job routes: DSH's job controller (list, follow, kill), answered by the jobs module.
+  if (await handleJobsRoute(ctx.get('jobs') as JobRegistry | undefined, url, request, response)) return
 
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
@@ -2178,6 +2215,19 @@ export function rejectUntrusted(request: { headers: Record<string, string | stri
  * failure mode of a helper that both reports and returns is a second response written onto a socket
  * that is already finished.
  */
+/** A request body as text, or `null` once a 413 has been sent. */
+async function readText(request: IncomingMessage, response: ServerResponse): Promise<string | null> {
+  let raw = ''
+  for await (const chunk of request) {
+    raw += chunk
+    if (raw.length > 10 * 1024 * 1024) {
+      respond(response, 413, 'text/plain', 'request too large\n')
+      return null
+    }
+  }
+  return raw
+}
+
 async function readJson(request: IncomingMessage, response: ServerResponse): Promise<Record<string, unknown> | null> {
   let raw = ''
   for await (const chunk of request) {
@@ -2453,12 +2503,17 @@ export function sessionRequestSelection(
       return
     }
   }
+  /**
+   * A session this route opens is born **untitled**, as DSH's is (#68): its first message writes the fallback name and
+   * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
+   * read as a person's name, and no title would ever be generated.
+   */
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
       ? ctx.session.start({ resume: body.session })
       : folder !== null
-        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), title: body.prompt.slice(0, 60), ...born })
-        : ctx.session.start({ cwd: process.cwd(), title: body.prompt.slice(0, 60), ...born })
+        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
+        : ctx.session.start({ cwd: process.cwd(), ...born })
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
   /**
    * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it

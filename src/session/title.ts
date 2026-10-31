@@ -16,7 +16,10 @@ import type { SessionEvent, SessionHandle } from './store.ts'
  *   visible text — in a session that has no title and no parent (`dsh-session-title` `onUserMessage`, lib/index.js:380-404:
  *   `parentSession === undefined && count === 1 && get(session) === undefined`). The call starts only once the turn's
  *   own request is on record, with that request's endpoint and model (`onRequestHeader`, :406-416) — here the
- *   `model/request` event the loop writes before each model call.
+ *   `model/request` event the loop writes before each model call. DSH titles nothing when a session is created, so
+ *   every path that opens a session for a turn — a blank row, the turn route, the CLI's `--turn` — opens it untitled
+ *   (#68: the turn route and the CLI used to name it with the prompt cut to 60 characters, which read as a person's
+ *   name, so no call ever started). A title given at creation (`session new --title`, a definition) is a person's.
  * - **What it sends**: the first-prompt provider's system prompt and its JSON framing of the one message
  *   (`dsh-session-title-first-prompt-llm` lib/index.js:44-56), at most `maxInputBytes` of input, `maxOutputTokens` of
  *   output, `timeoutMs` end to end, tagged `purpose: 'session-title'` (`dsh-session-title-llm` lib/index.js:160-220).
