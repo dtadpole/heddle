@@ -50,12 +50,32 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
 
+/** The default for `bashMaxTimeoutMs`: the most wall time a call may ask for, DSH's `maxTimeoutMs` (ten minutes). */
+export const BASH_MAX_TIMEOUT_MS = 600_000
+
+/**
+ * The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
+ *
+ * DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the default; a
+ * value that is not a finite positive number is refused; a larger one is cut to the cap. Before it, the value went
+ * straight into `setTimeout`, which runs `0`, a negative delay or one above 2^31-1 ms after one millisecond, so the
+ * command was killed before it ran and the result claimed it had timed out (live-testing issue #13).
+ */
+export function bashWallTime(requested: unknown, defaultMs: number, maxMs: number): { readonly ms: number } | { readonly refusal: string } {
+  if (requested === undefined || requested === null) return { ms: Math.min(defaultMs, maxMs) }
+  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+    return { refusal: `invalid timeoutMs: expected a positive number, got ${JSON.stringify(requested)}` }
+  }
+  return { ms: Math.min(Math.max(1, Math.round(requested)), maxMs) }
+}
+
 /** Build the standard tools around one sandbox. */
 export function builtinTools(
   sandbox: SandboxService,
-  options: { readonly bashTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
+  options: { readonly bashTimeoutMs?: number; readonly bashMaxTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
 ): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  const maxTimeoutMs = options.bashMaxTimeoutMs ?? BASH_MAX_TIMEOUT_MS
   /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
   const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)
@@ -145,7 +165,7 @@ export function builtinTools(
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Command line, run through sh -c.' },
-          timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
+          timeoutMs: { type: 'number', description: `Wall time before the command is killed, in milliseconds; default ${timeoutMs}, at most ${maxTimeoutMs}.` },
           ...escalation,
         },
         required: ['command'],
@@ -155,6 +175,9 @@ export function builtinTools(
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
+      const wallTime = bashWallTime(args.timeoutMs, timeoutMs, maxTimeoutMs)
+      if ('refusal' in wallTime) return { output: '', error: { code: 'BAD_ARGS', message: wallTime.refusal } }
+      const limit = wallTime.ms
       const mode = context.mode
 
       /**
@@ -183,7 +206,6 @@ export function builtinTools(
       // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
       const cwd = context.cwd
-      const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
         /**
          * The command leads its own process group (`detached`), so a Stop or the wall time reaches everything it
