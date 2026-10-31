@@ -10209,7 +10209,8 @@ function menuItemsFor(node) {
       run: () => openDeleteWorkspace(node),
     })
   }
-  if (node.kind === 'session' && node.session) {
+  /** The open New session placeholder offers nothing, as DSH's blank row has no menu (`WorkspaceTree.rowOffersActions`, #79). */
+  if (node.kind === 'session' && node.session && node.blank !== true) {
     /**
      * A session's row offers what DSH's own session menu offers — pin, rename, fork, archive — because that is the
      * set a person expects from this control. The `node.session` guard is load-bearing: a `_sessions_` folder written
@@ -10404,12 +10405,29 @@ document.getElementById('session-rename-confirm').addEventListener('click', () =
 /**
  * Fork a session: DSH's item and DSH's naming — `<title> (1)` — appearing beside its parent, with the view left
  * where it was, because a fork is a branch rather than a departure.
+ *
+ * A session that has not run a turn is refused here, before the request, and a refusal is said in DSH's words, never in
+ * the server's, which carry the raw session id (`WorkspaceTree.forkBlocked`, `forkRefusal`, #79). The row menu of a
+ * New session placeholder no longer offers Fork at all; the menu of a titled session with no turn, and the chord, still
+ * reach this.
  */
 async function forkSession(node) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
-  const body = await response.json().catch(() => ({}))
+  const blocked = WorkspaceTree.forkBlocked(node.session)
+  if (blocked !== null) {
+    setNote(blocked)
+    return
+  }
+  let response
+  let body
+  try {
+    response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    setNote(WorkspaceTree.FORK_FAILED)
+    return
+  }
   if (!response.ok) {
-    setNote(body.error ?? 'could not fork that session')
+    setNote(WorkspaceTree.forkRefusal(body))
     return
   }
   setNote('')
@@ -11538,6 +11556,41 @@ const WorkspaceTree = (() => {
     return current !== undefined && placeholder(meta) && meta.id !== current
   }
 
+  /**
+   * Whether a session row offers its actions: the `…` menu, the Archive and Pin hover buttons, and Rename on a
+   * double-click of its title. A New session placeholder offers none, as DSH's blank row draws no `rowActions` and no
+   * rename (`SessionNodeItem`, `!row.blank &&` and `row.blank ? void 0 :`, `dsh-client-ui-workspace` `lib/client.js:2311`,
+   * `:2317-2323`), by the predicate `hiddenBlank` uses. #79: the open blank offered the full menu, and its Fork came back
+   * as the server's refusal with the raw session id in it.
+   */
+  function rowOffersActions(meta) {
+    return meta !== null && typeof meta === 'object' && !placeholder(meta)
+  }
+
+  /** DSH's `shortcut.noCompletedTurn` (`lib/client.js:4881`): why a session that never finished a turn cannot be forked. */
+  const NO_COMPLETED_TURN = 'This session has no completed turn'
+  /** DSH's `shortcut.forkFailed` (`lib/client.js:4882`), for a fork refused for any other reason. */
+  const FORK_FAILED = 'Could not fork the session. Try again.'
+
+  /**
+   * Why Fork is refused before it is asked for, or `null` when it may be asked: a session that has not run a turn has
+   * none to fork from, which DSH's fork shortcut answers `blocked` with `shortcut.noCompletedTurn` (`:161-164`) rather
+   * than sending the request (#79). The server still judges a running first turn, below.
+   */
+  function forkBlocked(meta) {
+    return meta !== null && typeof meta === 'object' && (meta.turns ?? 0) > 0 ? null : NO_COMPLETED_TURN
+  }
+
+  /**
+   * What a refused fork says: the server's `unavailable` (no completed turn to cut at) in DSH's own sentence, as its
+   * notice maps `reason === "unavailable"` to `shortcut.noCompletedTurn` (`:4647`, from `session/fork-unavailable`,
+   * `:169-170`), and any other refusal as DSH's `shortcut.forkFailed`. Never the server's text, which names the session
+   * by its raw id (#79). Both servers answer that refusal `409` with `code: 'unavailable'`.
+   */
+  function forkRefusal(body) {
+    return body !== null && typeof body === 'object' && body.code === 'unavailable' ? NO_COMPLETED_TURN : FORK_FAILED
+  }
+
   /** A session's stored title when it has one that is not blank, else `undefined`. */
   function storedTitle(meta) {
     return meta !== null && typeof meta === 'object' && typeof meta.title === 'string' && meta.title.trim().length > 0 ? meta.title : undefined
@@ -11952,6 +12005,11 @@ const WorkspaceTree = (() => {
     containsSession,
     placeholder,
     hiddenBlank,
+    rowOffersActions,
+    NO_COMPLETED_TURN,
+    FORK_FAILED,
+    forkBlocked,
+    forkRefusal,
     storedTitle,
     sessionLabel,
     rowLabel,
@@ -12119,6 +12177,8 @@ function sessionNode(meta) {
     ...(meta.pinned === true ? { pinned: true } : {}),
     ...(meta.pinnedAt !== undefined ? { pinnedAt: meta.pinnedAt } : {}),
     ...(meta.archived === true ? { archived: true } : {}),
+    /** A New session placeholder: its row draws no menu, no hover buttons and no double-click rename (#79). */
+    ...(WorkspaceTree.rowOffersActions(meta) ? {} : { blank: true }),
   }
 }
 
@@ -12446,8 +12506,9 @@ function nodeRow(node, depth = 0) {
    * DSH's session row opens the Rename session dialog on a **double-click on its title** (`onDoubleClick` →
    * `onRenameRequest`), the same request its menu's `Rename` and the chord raise. Here it is wired on the rows whose menu
    * offers `Rename`, and the event stops at the title, as DSH's does; the two clicks before it open the session as usual.
+   * A New session placeholder has neither, as DSH's blank row (`onDoubleClick: row.blank ? void 0 : …`, #79).
    */
-  if (node.kind === 'session' && node.session) {
+  if (node.kind === 'session' && node.session && node.blank !== true) {
     label.addEventListener('dblclick', (event) => {
       event.stopPropagation()
       renameSession(node)
@@ -12527,7 +12588,8 @@ function nodeRow(node, depth = 0) {
     }
     return button
   }
-  if (node.kind === 'session' && node.session) {
+  /** None on a New session placeholder: DSH draws a blank row's `rowActions` not at all (`lib/client.js:2323`, #79). */
+  if (node.kind === 'session' && node.session && node.blank !== true) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))

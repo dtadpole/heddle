@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T06:07:00Z
+modified: 2026-10-31T07:30:00Z
 level: L3
 version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -55,9 +55,10 @@ grounded_in:
   *Rename* or *Delete workspace* on a row another client already removed says *This workspace was already removed.*
   (never the server's `no workspace <absolute path>`), leaves nothing to confirm and redraws the tree without the row.
 - [`check-subagents.mjs`](check-subagents.mjs) — a subagent's session at DSH parity (R-developer-eight-26, -1, -28,
-  -2): a delegated one-shot child, the newest session in the store, is never what a first start opens, the search and
-  the one-column list leave it out as the tree does, a reload reopens the session that was open, and the child, opened,
-  shows DSH's read-only record (*One-shot subagent record*) in place of the composer, which an ordinary session gets back.
+  -2): a delegated one-shot child, the newest session in the store, is never what a first start opens (a fresh New
+  session is, #17), the search and the one-column list leave it out as the tree does, a reload reopens the session
+  that was open, and the child, opened, shows DSH's read-only record (*One-shot subagent record*) in place of the
+  composer, which an ordinary session gets back.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
@@ -68,7 +69,11 @@ grounded_in:
   header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written;
   and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
   workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
-  new session and its draft so the first prompt runs in the picked workspace.
+  new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh
+  New session in the most recently active workspace, never the newest session another person is in, on a blank row
+  that offers no menu, no Archive or Pin and no double-click rename, whose fork chord says DSH's *This session has no
+  completed turn* (#79). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's

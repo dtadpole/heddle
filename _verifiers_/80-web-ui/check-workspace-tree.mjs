@@ -15,8 +15,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  * registered workspace owns trails under **Ungrouped**; an open workspace shows five sessions and a `Show {n} more
  * sessions` control (the open New session on top of the five, not in one of their places); the
  * selected session's workspace tints its folder; a workspace's `+` starts a session there; the `Workspace` grouping
- * draws every workspace as a sibling section; and a reload reopens the session that was open, never a hidden subagent
- * child.
+ * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
+ * child; and a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
+ * offers no actions.
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -746,5 +747,137 @@ test('a reload reopens the session that was open, never a hidden subagent child,
     browser.close()
     server.kill()
     for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('a first visit opens a fresh New session, never the newest session someone else is in, and the blank row offers no actions (#17, #79)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's restoreSelection with nothing saved starts a fresh Session in the most recently active workspace
+   * (dsh-client-ui-workspace lib/client.js:1611-1613, :1620, :1626 -> connectBlank :1406, recentWorkspace :1694-1710); it
+   * never opens an existing session on its own. #17: on a shared server this page opened the newest session in the store,
+   * another person's, showed their transcript, and a message typed without looking went into their conversation. A fresh
+   * browser profile is that first visit: nothing is saved. The open blank's row draws no row actions (SessionNodeItem,
+   * `!row.blank &&`, :2317-2323) and no double-click rename (:2311), and its fork chord is blocked with
+   * `shortcut.noCompletedTurn` (:161-164, :4881). #79: the row offered the full menu and the hover buttons, and Fork came
+   * back as the server's refusal with the raw session id in it.
+   */
+  const home = isolatedHome('tree-first-visit')
+  const mine = fixtureDir('tree-first-visit-mine')
+  const theirs = fixtureDir('tree-first-visit-theirs')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const records = []
+    for (const path of [mine, theirs]) {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      records.push(added.body.record)
+    }
+    const theirsRecord = records[1]
+    const mineMade = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: mine, title: 'my notes' }) })
+    assert.equal(mineMade.status, 200, `my own session (${JSON.stringify(mineMade.body)})`)
+    /** Another person's session, in their workspace, with a finished turn: the newest session on the server. */
+    const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'their own work', folder: theirs, new: true }) })
+    assert.equal(turn.status, 200, `their turn ran (${turn.status})`)
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+    const before = await listed()
+    const other = before[0]
+    assert.ok(
+      other !== undefined && other.id !== mineMade.body.session && (other.turns ?? 0) > 0,
+      `the newest session is the other person's, with a turn\nsaw: ${JSON.stringify(before.map((meta) => [meta.id, meta.title ?? null, meta.turns ?? 0]))}`,
+    )
+
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        saved: ${saved},
+        titleHidden: document.getElementById('session-title')?.hidden ?? null,
+        title: document.getElementById('session-title')?.textContent ?? null,
+        turns: document.querySelectorAll('#log .turn').length,
+        selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
+      })`)
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    const known = JSON.stringify(before.map((meta) => meta.id))
+    const opened = await browser
+      .waitFor(`(() => { const id = ${saved}; return typeof id === 'string' && !${known}.includes(id) && document.getElementById('session-title')?.hidden === true })()`, 15_000)
+      .catch(() => false)
+    const first = JSON.parse(await state())
+    assert.ok(opened, `a first visit opens a fresh New session, not the newest session on the server\nsaw: ${JSON.stringify(first)}\nnewest: ${other.id}`)
+    assert.notEqual(first.saved, other.id, "never the other person's session")
+    assert.equal(first.turns, 0, 'and none of their conversation is on screen')
+    const after = await listed()
+    assert.equal(after.length, before.length + 1, 'exactly one session started')
+    assert.equal(after.find((meta) => meta.id === first.saved)?.turns ?? 0, 0, 'and it is blank')
+    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === theirsRecord.id)
+    assert.ok(owner?.sessionIds?.includes(first.saved), `in the most recently active workspace, DSH's recentWorkspace\nsaw: ${JSON.stringify(owner)}`)
+
+    /** The blank's row, beside the other session's, in the workspace that holds both (opened only if it is folded). */
+    const rowOf = (id) => `document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]')`
+    await browser.evaluate(
+      `(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        for (let attempt = 0; attempt < 40 && (${rowOf(first.saved)} === null || ${rowOf(other.id)} === null); attempt += 1) {
+          const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(theirsRecord.path)})
+          if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+          await wait(250)
+        }
+        return true
+      })()`,
+      15_000,
+    )
+    assert.ok(await browser.waitFor(`${rowOf(first.saved)} !== null && ${rowOf(other.id)} !== null`, 10_000).catch(() => false), `both rows are drawn\nsaw: ${await state()}`)
+    const actions = (id) => `(() => {
+      const li = ${rowOf(id)}
+      li.querySelector(':scope > .row').focus()
+      const read = JSON.stringify({
+        label: li.querySelector(':scope > .row > .label')?.textContent ?? null,
+        selected: li.getAttribute('aria-selected'),
+        menu: li.querySelector(':scope > .row .menu-wrap') !== null,
+        quick: [...li.querySelectorAll(':scope > .row .session-actions button')].map((button) => button.getAttribute('aria-label')),
+        buttons: [...li.querySelectorAll(':scope > .row button')].map((button) => button.getAttribute('aria-label') ?? button.textContent),
+      })
+      li.querySelector(':scope > .row').blur()
+      return read
+    })()`
+    const blank = JSON.parse(await browser.evaluate(actions(first.saved)))
+    assert.deepEqual(
+      blank,
+      { label: 'New Session', selected: 'true', menu: false, quick: [], buttons: [] },
+      `the open blank's row offers no menu, no Archive and no Pin, as DSH's blank row (#79)\nsaw: ${JSON.stringify(blank)}`,
+    )
+    const theirsRow = JSON.parse(await browser.evaluate(actions(other.id)))
+    assert.equal(theirsRow.selected, 'false', `the other person's row is not the open one\nsaw: ${JSON.stringify(theirsRow)}`)
+    assert.equal(theirsRow.menu, true, 'while a session that ran a turn keeps its menu')
+    assert.deepEqual(theirsRow.quick, ['Archive session', 'Pin session'], 'and its Archive and Pin')
+
+    /** No rename by double-click on the blank's title. */
+    await browser.evaluate(`${rowOf(first.saved)}.querySelector(':scope > .row > .label').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))`)
+    await new Promise((done) => setTimeout(done, 300))
+    assert.equal(await browser.evaluate(`document.getElementById('session-rename')?.open === true`), false, 'a double-click on its title opens no Rename')
+
+    /** The fork chord on the open blank is refused in DSH's words, with no session id, and forks nothing. */
+    await browser.evaluate(`(() => { const note = document.getElementById('tree-note'); note.textContent = ''; note.hidden = true; return true })()`)
+    await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F', code: 'KeyF', shiftKey: true, metaKey: true, bubbles: true, cancelable: true }))`)
+    const said = await browser.waitFor(`document.getElementById('tree-note').textContent === 'This session has no completed turn'`, 5_000).catch(() => false)
+    const note = await browser.evaluate(`document.getElementById('tree-note').textContent`)
+    assert.ok(said, `the fork chord on a blank says DSH's shortcut.noCompletedTurn\nsaw: ${JSON.stringify(note)}`)
+    assert.doesNotMatch(String(note), /session-/, 'and never shows a session id')
+    await new Promise((done) => setTimeout(done, 500))
+    assert.equal((await listed()).length, after.length, 'and nothing was forked')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, mine, theirs]) removeDir(dir)
   }
 })

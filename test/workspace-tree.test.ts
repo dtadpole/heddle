@@ -41,6 +41,12 @@ interface Tree {
   overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
+  placeholder: (meta: unknown) => boolean
+  rowOffersActions: (meta: unknown) => boolean
+  NO_COMPLETED_TURN: string
+  FORK_FAILED: string
+  forkBlocked: (meta: unknown) => string | null
+  forkRefusal: (body: unknown) => string
   ARCHIVED_NOT_OPENABLE: string
   opensOnClick: (node: unknown) => boolean
   rowStatus: (facts?: { pending?: string; running?: boolean; completed?: boolean }) => { state: string; label: string; trailingLabel?: string }
@@ -534,6 +540,45 @@ test('with nothing saved a load starts a fresh session in the most recently acti
   )
 })
 
+test('a New session placeholder offers no row actions, and Fork without a completed turn says so in DSH\'s words, never with an id (#79)', () => {
+  /**
+   * DSH's blank row draws no `rowActions` (the menu and the hover buttons) and no double-click rename (SessionNodeItem,
+   * dsh-client-ui-workspace lib/client.js:2311, :2317-2323), by the rule that hides every other blank (`hiddenBlank`).
+   * Its fork shortcut is blocked on a blank with `shortcut.noCompletedTurn` (:161-164, :4881), and a fork the host refuses
+   * as unavailable is reported in the same sentence (:169-170, :4647); any other refusal is `shortcut.forkFailed` (:4882).
+   */
+  const blank = session('s-blank', 9, { turns: 0 })
+  assert.equal(tree.rowOffersActions(blank), false, 'the open blank offers nothing to act on')
+  assert.equal(tree.rowOffersActions(blank), !tree.placeholder(blank), 'by the placeholder predicate hiddenBlank uses')
+  for (const [what, meta] of [
+    ['a session that ran a turn', session('s-talked', 5)],
+    ['a titled zero-turn session', session('s-titled', 4, { turns: 0, title: 'named on purpose' })],
+    ['a pinned zero-turn session', session('s-pinned', 3, { turns: 0, pinned: true })],
+    ['an archived zero-turn session', session('s-archived', 2, { turns: 0, archived: true })],
+    ['a running first turn', session('s-running', 1, { turns: 0, running: true })],
+  ] as const) {
+    assert.equal(tree.rowOffersActions(meta), true, `${what} is a row a person acted on, with its actions`)
+  }
+  assert.equal(tree.rowOffersActions(null), false)
+
+  assert.equal(tree.NO_COMPLETED_TURN, 'This session has no completed turn')
+  assert.equal(tree.FORK_FAILED, 'Could not fork the session. Try again.')
+  assert.equal(tree.forkBlocked(blank), tree.NO_COMPLETED_TURN, 'a blank is blocked before any request')
+  assert.equal(tree.forkBlocked(session('s-titled', 4, { turns: 0, title: 'named on purpose' })), tree.NO_COMPLETED_TURN, 'so is a titled session that never ran a turn')
+  assert.equal(tree.forkBlocked({ id: 's-unknown' }), tree.NO_COMPLETED_TURN)
+  assert.equal(tree.forkBlocked(session('s-talked', 5)), null, 'a session that ran a turn may be forked')
+
+  /** A session id in the server's shape, put together here so no id-shaped literal sits in the repository. */
+  const raw = ['session', 'f'.repeat(8), 'f'.repeat(4), '4fff', '8fff', 'f'.repeat(12)].join('-')
+  const refused = { error: `session ${raw} has no completed turn to fork from`, code: 'unavailable' }
+  assert.equal(tree.forkRefusal(refused), tree.NO_COMPLETED_TURN, 'the server\'s unavailable is DSH\'s sentence')
+  for (const body of [refused, { error: `no session ${raw}` }, {}, null]) {
+    assert.doesNotMatch(tree.forkRefusal(body), /session-|[0-9a-f]{8}-/, `no refusal shows a raw session id (${JSON.stringify(body)})`)
+  }
+  assert.equal(tree.forkRefusal({ error: 'no session session-x' }), tree.FORK_FAILED, 'any other refusal is DSH\'s fork failure')
+  assert.equal(tree.forkRefusal(null), tree.FORK_FAILED)
+})
+
 test('a saved New session placeholder is reopened by its own id, never replaced by a fresh one', () => {
   /** DSH's restoreBlank reloads the saved blank's projections and reconnects the same id (lib/client.js:1451-1458, :1619). */
   const workspaces = [workspace('w', '/w', { sessionIds: ['s-blank', 's-talked'] })]
@@ -598,4 +643,29 @@ test('the most recently active workspace is DSH\'s recentWorkspace', () => {
     'a tie keeps registry order',
   )
   assert.equal(tree.recentWorkspace([], sessions), undefined)
+})
+
+test('the page asks those rules where it acts: a load opens no session on its own, and the blank row and Fork follow DSH (#17, #79)', () => {
+  /**
+   * The rules above are pure; this pins the page to them, because the defects were in the wiring: `refreshSessions` opened
+   * the newest session whenever nothing was open (#17), and `nodeRow`, `menuItemsFor` and `forkSession` drew every action on
+   * the blank and printed the server's refusal (#79). The browser check is 80's check-workspace-tree.mjs, "a first visit…".
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  assert.doesNotMatch(body('async function refreshSessions() {'), /showSession\(|restoreChoice\(/, 'refreshing the list opens nothing')
+  const restore = body('async function restoreSelection() {')
+  assert.doesNotMatch(restore, /'newest'/, 'a load has no newest-session branch left')
+  assert.match(restore, /if \(choice\.kind === 'saved'\) \{\s*await showSession\(choice\.id\)/, 'it reopens only what was saved')
+  assert.match(restore, /startSessionAt\(\{ path: choice\.path, reveal: false, boot: true \}\)/, 'and otherwise starts a fresh session, keeping the folds')
+  assert.match(body('function sessionNode(meta) {'), /WorkspaceTree\.rowOffersActions\(meta\) \? \{\} : \{ blank: true \}/, 'a session node knows it is the blank')
+  assert.match(body('function menuItemsFor(node) {'), /if \(node\.kind === 'session' && node\.session && node\.blank !== true\) \{/, 'the blank gets no menu')
+  assert.equal((body('function nodeRow(node, depth = 0) {').match(/node\.kind === 'session' && node\.session && node\.blank !== true/g) ?? []).length, 2, 'nor a double-click rename or the hover buttons')
+  const fork = body('async function forkSession(node) {')
+  assert.match(fork, /const blocked = WorkspaceTree\.forkBlocked\(node\.session\)/, 'Fork is refused before the request when there is no turn')
+  assert.match(fork, /setNote\(WorkspaceTree\.forkRefusal\(body\)\)/, 'and a refusal is said in DSH\'s words')
+  assert.doesNotMatch(fork, /body\.error/, 'never the server\'s, which names the raw id')
 })

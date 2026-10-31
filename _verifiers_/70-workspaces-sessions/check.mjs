@@ -2842,7 +2842,7 @@ test('the page wears the project icon, and its name sits above the workspaces', 
 })
 
 test('a session is renamed from its own menu, and the row and its definition follow', async (context) => {
-  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-rename')
@@ -2853,13 +2853,20 @@ test('a session is renamed from its own menu, and the row and its definition fol
     const created = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', 'some-tool'), '--json']), { env: h.env, cwd: h.work })
     assert.equal(created.code, 0, `the session was created\n${created.stdout}${created.stderr}`)
     const made = parseJson(created.stdout)
+    /**
+     * A first turn, so the session is not a blank: DSH's blank row offers no menu at all (`!row.blank &&`,
+     * dsh-client-ui-workspace lib/client.js:2317-2323, #79), and this is the menu's check. The turn names it automatically.
+     */
+    const turn = await runCli(adminArgs(h, ['--turn', 'a session to rename from its menu']), { env: h.env, cwd: join(h.work, '_tools_', 'some-tool') })
+    assert.equal(turn.code, 0, turn.stderr)
+    const auto = (await sessionsOf(h)).find((meta) => meta.id === made.session)?.title
 
     live = await startServer(
       ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    /** The page opens no session on its own (#17); this one is opened, so its row is the session row drawn. */
     await browser.gotoSession(live.url, made.session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
@@ -2907,12 +2914,12 @@ test('a session is renamed from its own menu, and the row and its definition fol
       `the menu reads what DSH's reads\nsaw: ${reading.items.join(', ')}`,
     )
     /**
-     * Nothing has named it yet, and it is the open blank (the page opens the newest session), so the row reads DSH's
-     * `New Session` (dsh-client-ui-workspace lib/client.js:1801-1804, :4876), not its folder's clock name (#24).
+     * Its first prompt named it, so the row reads that title (DSH's `displayTitle`, dsh-client-ui-workspace
+     * lib/client.js:1801-1804), not its folder's clock name (#24).
      */
-    assert.equal(reading.label, 'New Session', `the row starts as New Session, because nothing has named it yet\nsaw: ${JSON.stringify(reading)}`)
-    /** DSH: an unnamed session's dialog starts with an empty draft, and Rename waits for a name. */
-    assert.deepEqual(reading.draft, { value: '', confirm: 'disabled' }, `an unnamed session's dialog starts empty and asks for a name\nsaw: ${JSON.stringify(reading.draft)}`)
+    assert.equal(reading.label, auto, `the row reads the title its first prompt gave it\nsaw: ${JSON.stringify(reading)}`)
+    /** DSH: the dialog starts with the stored title, and Rename waits only for a non-blank draft, an unchanged one included. */
+    assert.deepEqual(reading.draft, { value: auto, confirm: 'enabled' }, `the dialog starts from the stored title\nsaw: ${JSON.stringify(reading.draft)}`)
     assert.equal(reading.closed, true, 'Rename closes the dialog once the server accepted the name')
     assert.equal(reading.renamed, 'a session with a name', 'after the rename the row shows the name it was given')
     const folderName = basename(dirname(String(made.definition)))
