@@ -3,9 +3,11 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 
+import { symbols } from '@deepseek-ai/cordis'
+
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
 import type { SandboxService } from '../sandbox/service.ts'
-import type { ToolDefinition, ToolResult } from './service.ts'
+import type { ToolDefinition, ToolResult, ToolRunContext } from './service.ts'
 
 /**
  * The tools this harness ships.
@@ -48,6 +50,88 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
 
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
+
+/** The environment every `bash` command runs with, foreground or background. */
+export function shellEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, NO_COLOR: '1' }
+}
+
+/** A command line confined for one call: the argv to spawn and the confinement it runs under (`null`: unconfined). */
+export interface ShellLaunch {
+  readonly argv: readonly string[]
+  readonly confined: ConfinedArgv | null
+}
+
+/**
+ * Confine the exact argv, or refuse to run it.
+ *
+ * `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox
+ * service for a wrapped argv; if this host cannot confine, the call fails closed with the reason rather than
+ * running unconfined — that is the difference between a sandbox and a suggestion.
+ *
+ * Shared by the foreground run below and the jobs row's background run (`src/jobs/bash.ts`), so a background
+ * command is confined by exactly the path a foreground one is.
+ */
+export function launchShell(sandbox: SandboxService, command: string, context: ToolRunContext): ShellLaunch | { readonly refusal: ToolResult } {
+  const mode = context.mode
+  let confined: ConfinedArgv | null = null
+  try {
+    if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode, context.cwd)
+  } catch (error) {
+    if (error instanceof SandboxUnavailableError) {
+      context.log(`refused a '${mode}' shell: ${error.message}`)
+      return {
+        refusal: {
+          output: '',
+          error: { code: 'SANDBOX_UNAVAILABLE', message: error.message },
+          data: { sandbox: { mode, denied: false, unavailable: true } },
+        },
+      }
+    }
+    throw error
+  }
+  return { argv: confined?.argv ?? ['/bin/sh', '-c', command], confined }
+}
+
+/**
+ * The background half of `bash`: what the jobs row (`src/plugins/jobs.ts`) attaches.
+ *
+ * While one is attached to the sandbox a `bash` tool was built over, the tool's schema carries `run_in_background`
+ * and a call that sets it is handed to `start`; with none attached, the schema is exactly the foreground one. The
+ * seam is keyed by the sandbox service because that is the one object both rows already share, which keeps the tools
+ * row unchanged and the dependency optional.
+ */
+export interface BashBackground {
+  /** The schema property bash advertises while attached (DSH's `run_in_background`). */
+  readonly property: { readonly type: 'boolean'; readonly description: string }
+  /** Start the command as a background job and answer the tool result. */
+  readonly start: (args: Record<string, unknown>, context: ToolRunContext) => Promise<ToolResult>
+}
+
+const backgrounds = new WeakMap<object, BashBackground>()
+
+/**
+ * The service behind a context's handle. Cordis hands each plugin its own proxy of a service, so the tools row's
+ * `ctx.sandbox` and the jobs row's are different objects over one service; the seam is keyed by that service.
+ */
+function serviceOf(sandbox: SandboxService): object {
+  const original = (sandbox as unknown as Record<symbol, unknown>)[symbols.original]
+  return typeof original === 'object' && original !== null ? original : sandbox
+}
+
+/** The background runner attached for the `bash` tools built over `sandbox`, if any. */
+function backgroundFor(sandbox: SandboxService): BashBackground | undefined {
+  return backgrounds.get(serviceOf(sandbox))
+}
+
+/** Attach a background runner for the `bash` tools built over `sandbox`; answers the detach. */
+export function attachBashBackground(sandbox: SandboxService, background: BashBackground): () => void {
+  const key = serviceOf(sandbox)
+  backgrounds.set(key, background)
+  return () => {
+    if (backgrounds.get(key) === background) backgrounds.delete(key)
+  }
+}
 
 /** Build the standard tools around one sandbox. */
 export function builtinTools(
@@ -136,55 +220,57 @@ export function builtinTools(
   }
 
   const bash: ToolDefinition = {
-    spec: {
-      name: 'bash',
-      description:
-        'Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'Command line, run through sh -c.' },
-          timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
-          ...escalation,
+    /**
+     * Read per call rather than fixed: `run_in_background` is in the schema only while the jobs row has attached
+     * a background runner to this sandbox (DSH shows the parameter only when a job registry is loaded). With none
+     * attached, this is the foreground schema exactly.
+     */
+    get spec() {
+      const background = backgroundFor(sandbox)
+      return {
+        name: 'bash',
+        description:
+          'Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Command line, run through sh -c.' },
+            timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
+            ...(background !== undefined ? { run_in_background: background.property } : {}),
+            ...escalation,
+          },
+          required: ['command'],
+          additionalProperties: false,
         },
-        required: ['command'],
-        additionalProperties: false,
-      },
+      }
     },
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
       const mode = context.mode
 
-      /**
-       * Confine the exact argv, or refuse to run it.
-       *
-       * `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox
-       * service for a wrapped argv; if this host cannot confine, the call fails closed with the reason rather than
-       * running unconfined — that is the difference between a sandbox and a suggestion.
-       */
-      let confined: ConfinedArgv | null = null
-      try {
-        if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode, context.cwd)
-      } catch (error) {
-        if (error instanceof SandboxUnavailableError) {
-          context.log(`refused a '${mode}' shell: ${error.message}`)
+      /** A background call is the jobs row's (DSH's refusal text when no job registry is loaded, adapted). */
+      if (args.run_in_background === true) {
+        const background = backgroundFor(sandbox)
+        if (background === undefined) {
           return {
             output: '',
-            error: { code: 'SANDBOX_UNAVAILABLE', message: error.message },
-            data: { sandbox: { mode, denied: false, unavailable: true } },
+            error: { code: 'JOB_UNAVAILABLE', message: 'background jobs unavailable: load the jobs row (src/plugins/jobs.ts)' },
           }
         }
-        throw error
+        return await background.start(args, context)
       }
-      const argv = confined?.argv ?? ['/bin/sh', '-c', command]
+
+      const launch = launchShell(sandbox, command, context)
+      if ('refusal' in launch) return launch.refusal
+      const { argv, confined } = launch
       // The working directory is the call's folder — the session's workspace, resolved by the loop — not the
       // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
       const cwd = context.cwd
       const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
-        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
+        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: shellEnv() })
         let stdout = ''
         let stderr = ''
         let timedOut = false
