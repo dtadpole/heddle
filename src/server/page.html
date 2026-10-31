@@ -5396,6 +5396,8 @@ async function showSession(id) {
    */
   log.replaceChildren()
   try {
+    /** The seat's choice count when this view was asked for: a choice made after it outranks the view. */
+    const selectionAt = selectionSeq
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
     if (!response.ok) {
       /**
@@ -5420,15 +5422,8 @@ async function showSession(id) {
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
      * session: the choice travels with the request and the server records it on the session it made.
      */
-    applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
-    /** A blank session has no recorded selection yet: its first turn carries the seat's choice (developer-ten, B1). */
-    if (typeof body.endpoint === 'string' && body.endpoint.length > 0) {
-      recordedSelections.add(id)
-      serverSeats.set(id, { endpoint: body.endpoint, model: body.model ?? null, effort: body.reasoningEffort ?? null })
-    } else {
-      recordedSelections.delete(id)
-      serverSeats.delete(id)
-    }
+    /** The view's selection, published only while this session is still shown and has no newer choice (#46). */
+    adoptViewSelection(id, body, selectionAt)
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
     updateStatusBar()
@@ -5577,6 +5572,7 @@ events.addEventListener('session', (message) => {
   if (event.type === 'model/selection' && typeof payload.session === 'string') {
     recordedSelections.add(payload.session)
     serverSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    heldSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
     if (payload.session === current && current !== null) applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
   }
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
@@ -6785,9 +6781,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   updateStatusBar()
   const startedAt = performance.now()
   const target = key === QUEUE_KEY_NONE ? null : key
+  /** The folder and the seat as they were when the person sent, not as they are after the waits below. */
+  const folder = activeFolder
+  const seatAtSend = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
   // Every record in flight, including one chosen while this turn waited, reaches the server before the turn does.
   while (pendingSaves.size > 0) await Promise.all([...pendingSaves])
   const carrySeat = target === null || !recordedSelections.has(target)
+  /** The target's own seat, as its records settled (a refusal restores it), else the seat shown at the send. */
+  const seat = (target !== null ? heldSeats.get(target) : undefined) ?? seatAtSend
   const response = await sendTurn({
     /**
      * The folder is named when a tree node is selected, and the server continues **that folder's**
@@ -6804,8 +6805,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
-    folder: activeFolder,
-    ...(carrySeat ? selectionForTurn() : {}),
+    folder,
+    ...(carrySeat ? selectionForSeat(seat) : {}),
   })
   /** The server records the selection a turn carried, so the session now has one. */
   if (carrySeat && target !== null && response.ok) recordedSelections.add(target)
@@ -8734,6 +8735,49 @@ let selectionSeq = 0
 const latestSelection = new Map()
 /** What the server is known to hold per session (its view, a model/selection event, an accepted record). */
 const serverSeats = new Map()
+/**
+ * The seat this page holds for each session: what its seat shows when the session is shown, kept per session so a turn
+ * sent into one session never reads the seat of another shown since (developer-twelve's review of 565d4847).
+ */
+const heldSeats = new Map()
+
+/** A turn's selection fields for a given seat, through the same rules as the shown seat's (synchronous). */
+function selectionForSeat(seat) {
+  const shown = [chosenEndpoint, chosenModel, chosenEffort]
+  chosenEndpoint = seat.endpoint
+  chosenModel = seat.model
+  chosenEffort = seat.effort
+  try {
+    return selectionForTurn()
+  } finally {
+    ;[chosenEndpoint, chosenModel, chosenEffort] = shown
+  }
+}
+
+/**
+ * A session's view arrived: record what the server holds for it, and publish its selection to the seat only while that
+ * session is still the one shown and no choice was made for it after the view was asked for (`selectionAt`). A late
+ * view of a session switched away from, or one overtaken by a newer choice, changes no seat.
+ */
+function adoptViewSelection(id, body, selectionAt) {
+  const endpoint = typeof body?.endpoint === 'string' && body.endpoint.length > 0 ? body.endpoint : null
+  const newerChoice = (latestSelection.get(id) ?? 0) > (selectionAt ?? 0)
+  if (endpoint !== null) {
+    recordedSelections.add(id)
+    if (!newerChoice) {
+      const seat = { endpoint, model: body.model ?? null, effort: body.reasoningEffort ?? null }
+      serverSeats.set(id, seat)
+      heldSeats.set(id, seat)
+    }
+  } else if (!newerChoice) {
+    recordedSelections.delete(id)
+    serverSeats.delete(id)
+  }
+  if (current !== id || newerChoice) return
+  applySessionModel(body?.endpoint ?? null, body?.model ?? null, body?.reasoningEffort ?? null)
+  // A blank session holds the seat it was opened with, which its first turn carries.
+  if (endpoint === null) heldSeats.set(id, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+}
 
 /**
  * Record one selection on the session.
@@ -8757,8 +8801,10 @@ async function recordSelection(selection) {
    * the seat before this choice.
    */
   const restore = () => {
-    if (seq !== latestSelection.get(recording) || current !== recording) return
+    if (seq !== latestSelection.get(recording)) return
     const known = serverSeats.get(recording) ?? previous
+    heldSeats.set(recording, { endpoint: known.endpoint, model: known.model, effort: known.effort })
+    if (current !== recording) return
     chosenEndpoint = known.endpoint
     chosenModel = known.model
     chosenEffort = known.effort
@@ -8770,6 +8816,7 @@ async function recordSelection(selection) {
   renderModelSeat()
   if (recording === null) return true
   latestSelection.set(recording, seq)
+  heldSeats.set(recording, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
   /**
    * Records are sent one at a time, in the order they were chosen, so the server ends on the last one (a model, then
    * an effort, picked in quick succession). Each is tracked by its own promise; a turn waits for every record in flight.

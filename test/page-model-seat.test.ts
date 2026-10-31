@@ -16,8 +16,21 @@ import { runInNewContext } from 'node:vm'
  * - a blank session's first turn dropped the seat, and a turn sent while a record was in flight overtook it.
  */
 const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src/server/page.html'), 'utf8')
+/** Functions an older page lacks, as that page behaved (its showSession published every view; its runTurn read the shown seat). */
+const OPTIONAL = new Map([
+  [
+    'adoptViewSelection',
+    `function adoptViewSelection(id, body) {
+      applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+      if (typeof body.endpoint === 'string' && body.endpoint.length > 0) recordedSelections.add(id)
+      else recordedSelections.delete(id)
+    }`,
+  ],
+  ['selectionForSeat', 'function selectionForSeat() { return selectionForTurn() }'],
+])
 function source(name: string): string {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
+  if (start < 0 && OPTIONAL.has(name)) return OPTIONAL.get(name) as string
   assert.ok(start >= 0, `the page defines ${name}`)
   const end = page.indexOf('\n}', start)
   return page.slice(start, end + 2)
@@ -34,6 +47,13 @@ interface Page {
   turn(text: string, key: string): Promise<void>
   /** Show another session, with the seat its view gives it. */
   show(id: string, seat: Seat): void
+  /** The shown session changes (before its view arrives). */
+  setCurrent(id: string): void
+  setFolder(folder: string): void
+  /** A view request is issued now: the choice count it carries. */
+  viewAsk(): number
+  /** A view arrives for a session, asked for at that count. */
+  view(id: string, body: Record<string, unknown>, askedAt: number): void
   seat(): Seat
   recorded(id: string): boolean
   recordSession(id: string): void
@@ -58,9 +78,10 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
     let selectionSeq = 0;
     const latestSelection = new Map();
     const serverSeats = new Map();
+    const heldSeats = new Map();
     let liveTurns = 0;
     const QUEUE_KEY_NONE = '';
-    const activeFolder = null;
+    let activeFolder = null;
     const modelTrigger = { setAttribute() {} };
     const modelSpinner = { hidden: true };
     const modelMenu = { hidden: true };
@@ -82,6 +103,9 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
         });
       });
     };
+    ${source('applySessionModel')}
+    ${source('selectionForSeat')}
+    ${source('adoptViewSelection')}
     ${source('recordSelection')}
     ${source('runTurn')}
     ({
@@ -91,8 +115,13 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
         current = id;
         chosenEndpoint = seat.endpoint; chosenModel = seat.model; chosenEffort = seat.effort;
         serverSeats.set(id, seat);
+        heldSeats.set(id, seat);
         recordedSelections.add(id);
       },
+      setCurrent(id) { current = id },
+      setFolder(folder) { activeFolder = folder },
+      viewAsk: () => selectionSeq,
+      view: (id, body, askedAt) => adoptViewSelection(id, body, askedAt),
       seat: () => ({ endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }),
       recorded: (id) => recordedSelections.has(id),
       recordSession: (id) => recordedSelections.add(id),
@@ -216,4 +245,44 @@ test('#46: a turn into a session with no recorded selection carries the seat; on
   assert.equal(page.sends[1]?.endpoint, undefined, 'a recorded session runs on its own selection')
   await page.turn('a new conversation', '')
   assert.equal(page.sends[2]?.endpoint, 'double-one', 'a turn that creates its session carries the seat')
+})
+
+test('#46: a late view of a session switched away from, or one a newer choice overtook, does not move the seat', { timeout: 5000 }, async () => {
+  const { page, answer } = harness()
+  page.setCurrent('A')
+  const askedA = page.viewAsk()
+  page.setCurrent('B')
+  page.view('B', { endpoint: 'double-three', model: 'model-three', reasoningEffort: 'low' }, page.viewAsk())
+  page.view('A', { endpoint: 'double-two', model: 'model-two' }, askedA)
+  assert.deepEqual(plain(page.seat()), { endpoint: 'double-three', model: 'model-three', effort: 'low' }, 'B’s seat stays B’s')
+  assert.equal(page.recorded('A'), true, 'A’s record is still noted for A’s next turn')
+
+  const asked = page.viewAsk()
+  const recording = page.record({ endpoint: 'double-two', model: 'model-two' })
+  page.view('B', { endpoint: 'double-three', model: 'model-three', reasoningEffort: 'low' }, asked)
+  assert.deepEqual(plain(page.seat()), { endpoint: 'double-two', model: 'model-two', effort: null }, 'a view asked before the choice does not undo it')
+  await tick()
+  answer('ok')
+  await recording
+})
+
+test('#46: a blank session’s turn, after its record was refused and another session was shown, carries its own seat and folder', { timeout: 5000 }, async () => {
+  const { page, answer } = harness()
+  page.setFolder('/work/A')
+  page.setCurrent('A')
+  page.view('A', {}, page.viewAsk())
+  const recording = page.record({ endpoint: 'double-two', model: 'model-z' })
+  const turn = page.turn('first in blank A', 'A')
+  await tick()
+  page.setFolder('/work/B')
+  page.setCurrent('B')
+  page.view('B', { endpoint: 'double-three', model: 'model-three' }, page.viewAsk())
+  answer('refuse')
+  await recording
+  await turn
+  assert.equal(page.sends.length, 1)
+  assert.equal(page.sends[0]?.endpoint, 'double-one', 'A’s turn carries A’s seat as its refusal restored it, not B’s')
+  assert.equal(page.sends[0]?.model, 'model-one')
+  assert.equal(page.sends[0]?.folder, '/work/A', 'and the folder it was sent from')
+  assert.deepEqual(plain(page.seat()), { endpoint: 'double-three', model: 'model-three', effort: null }, 'B’s seat is untouched')
 })
