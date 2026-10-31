@@ -79,6 +79,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function chooseWorkspace() {}
     function paintEmptyState() {}
     function rememberCurrent() {}
+    function rememberSessionWorkspace() {}
     function paintComposerAccess() {}
     function paintRunningMarks() {}
     function jobsSessionChanged() {}
@@ -235,14 +236,17 @@ function booting(saved: string | null): Restoring & Pick<Page, 'release' | 'wait
   const restoring = runInNewContext(
     `
     let current = null;
+    let lastWorkspace = null;
     const opened = [], started = [];
     const WorkspaceTree = {
       SELECTION_KEY: 'heddle.sessions.current',
+      LAST_WORKSPACE_KEY: 'heddle.workspace.last',
       savedSelection: (raw) => raw,
+      savedWorkspace: () => null,
       restoreChoice: (saved, workspaces, sessions) =>
-        saved !== null && sessions.some((meta) => meta.id === saved) ? { kind: 'saved', id: saved } : { kind: 'start', path: '/work' },
+        saved !== null && sessions.some((meta) => meta.id === saved) ? { kind: 'saved', id: saved } : { kind: 'aim', path: '/work' },
     };
-    const localStorage = { getItem: () => saved };
+    const localStorage = { getItem: (key) => (key === 'heddle.sessions.current' ? saved : null) };
     async function showSession(id) { current = id; opened.push(id); return true }
     async function startSessionAt(node) { started.push(node.path); current = 'session-fresh' }
     async function refreshSessions() {}

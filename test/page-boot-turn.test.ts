@@ -31,6 +31,8 @@ interface Run {
   current(): string | null
   opened(): string
   adopted(): string
+  /** The workspace the page remembered as this browser's last (#142), or null. */
+  remembered(): string | null
 }
 
 function harness(created: string): Run {
@@ -47,6 +49,9 @@ function harness(created: string): Run {
     let stopRequested = false
     const opened = []
     const adopted = []
+    let remembered = null
+    /** The page's memory of this browser's last workspace (#142): here, what it was asked to keep. */
+    const rememberWorkspace = (path) => { remembered = path }
     let ready
     const firstTreeReady = new Promise((resolve) => { ready = resolve })
     const newConversationTarget = () => ({ path: '/work/default-workspace', label: 'Default workspace' })
@@ -77,6 +82,7 @@ function harness(created: string): Run {
       current: () => current,
       opened: () => opened.join(','),
       adopted: () => adopted.join(','),
+      remembered: () => remembered,
     })
     `,
     { CREATED: created, JSON, Promise, TextEncoder, TextDecoder, performance, Error, Array, Object, String, Number, Set, Map },
@@ -103,4 +109,13 @@ test('a turn sent with nothing open simply adopts the session it created, as bef
   assert.equal(run.opened(), '', 'no open is needed: nothing else is on screen')
   assert.equal(run.current(), N, 'the created session is current')
   assert.equal(run.adopted(), N, 'and the composer adopts it')
+  assert.equal(run.remembered(), '/work/default-workspace', 'and the workspace it started in is remembered as this browser\'s last (#142)')
+})
+
+test('a turn that created its session in a workspace remembers that workspace even when the boot opened another one meanwhile (#142)', async () => {
+  const run = harness(N)
+  const sent = run.send()
+  run.boot(X)
+  await sent
+  assert.equal(run.remembered(), '/work/default-workspace', 'the workspace the first message started its session in')
 })

@@ -165,8 +165,8 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
    */
   assert.match(
     page,
-    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{\s*chosen: chosenWorkspace,\s*current,\s*selected: selectedPath,\s*active: activeFolder,\s*workspaces: knownWorkspaces,\s*sessions: \[\.\.\.sessionMetas\.values\(\)\],\s*\}\)/,
-    'the page asks it with the rows the tree drew, the reader\'s context and the whole index',
+    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{\s*chosen: chosenWorkspace,\s*current,\s*selected: selectedPath,\s*active: activeFolder,\s*remembered: lastWorkspace,\s*workspaces: knownWorkspaces,\s*sessions: \[\.\.\.sessionMetas\.values\(\)\],\s*\}\)/,
+    'the page asks it with the rows the tree drew, the reader\'s context, this browser\'s last workspace (#142) and the whole index',
   )
   assert.match(
     page,

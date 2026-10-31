@@ -7083,9 +7083,9 @@ async function showSession(id) {
        * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
        *
        * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
-       * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
-       * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
-       * selection with it.
+       * unlisted saved session is forgotten instead (`WorkspaceTree.restoreChoice`), as DSH's `restoreSelection` does,
+       * and the load then creates nothing (#142). The tree is read again here, so a row whose session is no longer
+       * listed goes, and the selection with it.
        */
       const failure = await response.json().catch(() => ({}))
       /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
@@ -7117,6 +7117,8 @@ async function showSession(id) {
     const body = await response.json()
     /** The same check after the body is read: only the latest open appends its turns. */
     if (generation !== showGeneration) return false
+    /** A session opened is where this browser works now: its workspace is the next visit's aim (#142). */
+    rememberSessionWorkspace(id)
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -7381,9 +7383,9 @@ async function refreshSessions() {
    * Nothing is opened here. This used to open the newest session in the store whenever nothing was open, and on a
    * shared server the newest session is often another person's: a load showed their transcript, and the next message
    * went into their conversation (#17). DSH opens a session only when a person picks one or when its startup restores
-   * the saved selection, else starts a fresh one (`restoreSelection`, `dsh-client-ui-workspace` `lib/client.js:1605-1628`),
-   * and so does this page: a load asks `restoreSelection`, which reopens the saved session or starts a fresh one in the
-   * most recently active workspace, and nothing else opens a session nobody picked.
+   * the saved selection, else starts a fresh one (`restoreSelection`, `dsh-client-ui-workspace` `lib/client.js:1605-1628`).
+   * This page opens one only when a person picks one or when a load restores the saved selection (`restoreSelection`);
+   * with nothing saved a load creates nothing either (#142), and nothing else opens a session nobody picked.
    */
 }
 
@@ -7401,16 +7403,20 @@ function rememberCurrent() {
  * (`dsh-client-ui-workspace` `lib/client.js:1574-1628`), decided by `WorkspaceTree.restoreChoice`.
  *
  * The saved session reopens, a saved New session placeholder included. With nothing to reopen — a first visit, a cleared
- * entry, a saved session that is gone or archived — a fresh session starts in the most recently active workspace, as
- * DSH's does (`:1620`, `:1626`), without unfolding a workspace the person folded (a remembered collapse survives the
- * reload, C33). It never opens on its own a session nobody saved: that was the newest session in the store, on a shared
- * server another person's (#17). A list that cannot be read decides nothing: it falls back to `refreshSessions`, so a
- * failed request neither starts nor opens a session.
+ * entry, a saved session that is gone or archived — nothing is opened and **nothing is created** (#142): the composer is
+ * aimed at the workspace this browser last worked in, else the only registered one, else nowhere (DSH's inert composer),
+ * and the first message creates the session there (`runTurn`, `new: true`, #134). DSH creates a blank Session at once in
+ * its `recentWorkspace` (`:1620`, `:1626`, `connectBlank` `:1403-1406`), which is the person's own because DSH is
+ * single-user; on heddle's shared server stack 2's port of that left a blank session in whichever workspace was active
+ * last, another person's, on every load, and aimed the composer at their folder. It never opens on its own a session
+ * nobody saved either: that was the newest session in the store, on a shared server another person's (#17). A list that
+ * cannot be read decides nothing: it falls back to `refreshSessions`, so a failed request opens nothing.
  */
 async function restoreSelection() {
   let saved = null
   try {
     saved = WorkspaceTree.savedSelection(localStorage.getItem(WorkspaceTree.SELECTION_KEY))
+    lastWorkspace = WorkspaceTree.savedWorkspace(localStorage.getItem(WorkspaceTree.LAST_WORKSPACE_KEY))
   } catch (error) {
     saved = null
   }
@@ -7438,16 +7444,16 @@ async function restoreSelection() {
     return
   }
   const workspaces = Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : []
-  const choice = WorkspaceTree.restoreChoice(saved, workspaces, sessions)
+  const choice = WorkspaceTree.restoreChoice(saved, workspaces, sessions, lastWorkspace)
   if (choice.forget === true) rememberCurrent()
   if (choice.kind === 'saved') {
     await showSession(choice.id)
     return
   }
-  if (choice.kind === 'start') {
-    await startSessionAt({ path: choice.path, reveal: false, boot: true })
-    if (current !== null) return
-  }
+  /**
+   * `aim` or `none`: nothing to open, and nothing to create. The aim is `newConversationTarget`'s to read once the tree is
+   * drawn (the hero, the note, the composer's inert state and the first message all ask it), from the same memory.
+   */
   await refreshSessions()
 }
 
@@ -9226,6 +9232,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          */
         if (target === null && adopted === null) {
           adopted = payload.session
+          /** The workspace the first message started its session in is where this browser works now (#142). */
+          if (fresh) rememberWorkspace(folder)
           /**
            * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
            * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
@@ -11639,6 +11647,38 @@ function chooseWorkspace(path) {
 }
 
 /**
+ * The workspace this browser last worked in (#142): read back by `restoreSelection` from `WorkspaceTree.LAST_WORKSPACE_KEY`
+ * and written by `rememberWorkspace`. With no session open and nothing chosen in this page, the composer is aimed there
+ * (`newConversationTarget`), and so is New session (`newSessionWorkspace`); a first visit starts nothing.
+ */
+let lastWorkspace = null
+
+/**
+ * Keep `path` as the workspace this browser last worked in, beside the open session's entry. Called when a session is
+ * opened (`showSession`, for the registered workspace it lives in) and when a first message starts one in a workspace
+ * (`runTurn`); a session started by New session is opened, so it is kept the first way.
+ */
+function rememberWorkspace(path) {
+  if (typeof path !== 'string' || path.length === 0) return
+  lastWorkspace = path
+  try {
+    localStorage.setItem(WorkspaceTree.LAST_WORKSPACE_KEY, WorkspaceTree.workspaceRecord(path))
+  } catch (error) {
+    /* A browser with no storage still works; only the next visit's aim is lost. */
+  }
+}
+
+/**
+ * Remember the registered workspace session `id` lives in, found in the whole index as New session finds it
+ * (`WorkspaceTree.sessionWorkspace`, #119): by the workspace that accounts for it, else by its `cwd`. An Ungrouped session
+ * has none, and the memory stays where it was.
+ */
+function rememberSessionWorkspace(id) {
+  const home = WorkspaceTree.sessionWorkspace(knownWorkspaces, [...sessionMetas.values()], id)
+  if (home !== undefined) rememberWorkspace(home.path)
+}
+
+/**
  * The workspace rows the tree last drew, in its order.
  *
  * The tree's own render is the only place that knows them, and the primary action needs one when nothing is selected —
@@ -13115,33 +13155,28 @@ async function startSessionAt(node) {
   setNote('')
   activeFolder = node.path
   /**
-   * A press opens the workspace so the new row is seen. A reload's fallback (`restoreSelection` passes a node with
-   * `reveal: false`) leaves the folding as the person left it: DSH's restore opens its session with `"preserve"`
-   * (`lib/client.js:1627`), not the `"reveal"` a press uses (`:1489`, `:1673`), and a folded workspace stays folded with
-   * its folder tinted as the one holding the open session (C33).
+   * A press opens the workspace so the new row is seen, as DSH's `"reveal"` does (`lib/client.js:1489`, `:1673`). Every
+   * caller is a person's act now: a page load starts nothing (#142), so the reload's `reveal: false` and `boot: true`
+   * (stack 2's first-visit start, which kept a folded workspace folded, C33) are gone with it. That boot start also raced
+   * a New session pressed in the first second or so: its `chooseSelected` could land after the press's, so the mark sat
+   * on the boot's blank, which is no row once another session is open, and no row was selected (#142's side effect).
    */
-  if (node.reveal !== false) {
-    expanded.add(node.path)
-    rememberExpanded()
-  }
+  expanded.add(node.path)
+  rememberExpanded()
   if (typeof body.definition === 'string') learnDefinition(body.session, body.definition.replace(/\/session\.json$/, ''))
   /** The new session's row is the selected one; the tree keys a session row by its id. */
   chooseSelected('session:' + body.session)
   await showSession(body.session)
-  /**
-   * At boot (`restoreSelection` passes `boot: true`) the page draws the tree itself right after, so the start leaves the
-   * drawing to it: one first paint, which now follows every first visit (#17), rather than two racing redraws.
-   */
-  if (node.boot !== true) await renderTree()
+  await renderTree()
 }
 
 /**
  * Which workspace a new session should start in: `WorkspaceTree.newSessionWorkspace` over the rows the tree last drew and
  * the reader's context — the workspace chosen beside the open session (`chosenWorkspace`), the open session's, the
- * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws. The open session's
- * workspace is read from the whole index (`knownWorkspaces`, `sessionMetas`), not from the drawn groups, so an archived
- * session open under Hide archived still starts New session in its own workspace rather than in the last remembered
- * folder (#119).
+ * selected row's, the folder the prompt box was aimed at, then the workspace this browser last worked in
+ * (`lastWorkspace`), then the only registered one (#142). The open session's workspace is read from the whole index
+ * (`knownWorkspaces`, `sessionMetas`), not from the drawn groups, so an archived session open under Hide archived still
+ * starts New session in its own workspace rather than in the last remembered folder (#119).
  */
 function newSessionWorkspace() {
   return WorkspaceTree.newSessionWorkspace(treeTops, {
@@ -13149,6 +13184,7 @@ function newSessionWorkspace() {
     current,
     selected: selectedPath,
     active: activeFolder,
+    remembered: lastWorkspace,
     workspaces: knownWorkspaces,
     sessions: [...sessionMetas.values()],
   })
@@ -13157,10 +13193,18 @@ function newSessionWorkspace() {
 /**
  * Where the composer's next message starts its conversation while no session is open, and what the page calls it
  * (`WorkspaceTree.newConversationTarget`): the hero chip names it, the note under the tree names it, and the turn posts it
- * as its folder (#134). Null when there is nowhere to start one, and then nothing is sent (`composerAimless`).
+ * as its folder (#134). Null when there is nowhere to start one, and then nothing is sent (`composerAimless`). With nothing
+ * chosen in this page it is the workspace this browser last worked in, else the only registered one, read from the whole
+ * registry (`knownWorkspaces`), whatever the filter or the flat list draws (#142).
  */
 function newConversationTarget() {
-  return WorkspaceTree.newConversationTarget(treeTops, { chosen: chosenWorkspace, selected: selectedPath, active: activeFolder })
+  return WorkspaceTree.newConversationTarget(treeTops, {
+    chosen: chosenWorkspace,
+    selected: selectedPath,
+    active: activeFolder,
+    remembered: lastWorkspace,
+    workspaces: knownWorkspaces,
+  })
 }
 
 /**
@@ -13240,7 +13284,18 @@ function paintConversationTarget() {
 async function startNewSession() {
   const workspace = newSessionWorkspace()
   if (workspace === null) {
-    setNote('register a workspace first — the + beside Workspaces')
+    /**
+     * Several workspaces and nothing that picks one (#142): DSH's words for a start with no workspace, `Choose a workspace
+     * first.` (`draft.workspaceRequired`, `lib/client.js:4873`), and the hero's picker where the hero is shown, as Enter
+     * in the inert composer opens it. DSH's `startSession` clears the view there and starts nothing (`:1509-1518`).
+     */
+    const registered = knownWorkspaces.some((entry) => entry !== null && typeof entry === 'object' && entry.origin !== 'auto')
+    if (!registered) {
+      setNote('register a workspace first — the + beside Workspaces')
+      return
+    }
+    setNote(NO_WORKSPACE_REFUSAL)
+    if (!heroRow.hidden && heroMenu.hidden) void openHeroMenu()
     return
   }
   await startSessionAt(workspace)
@@ -14180,8 +14235,9 @@ function workspaceDisplayTitle(title) {
  *   `Show {n} more sessions` and each click adds 5. The number lives with the page, never in storage, as DSH's
  *   watermark does.
  * - **Reload**: the open session is kept in storage and a load reopens it (`restoreChoice`, DSH's `restoreSelection`);
- *   with nothing to reopen (a first visit, a cleared entry, a saved session that is gone) a fresh one starts in the most
- *   recently active workspace, and a load never opens on its own a session nobody saved (#17).
+ *   with nothing to reopen (a first visit, a cleared entry, a saved session that is gone) nothing is created: the
+ *   composer is aimed at the workspace this browser last worked in, else the only one, else nowhere (#142), and a load
+ *   never opens on its own a session nobody saved (#17).
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -14545,66 +14601,81 @@ const WorkspaceTree = (() => {
   }
 
   /**
-   * The workspace a fresh session starts in when nothing names one: DSH's `recentWorkspace` (`lib/client.js:1694-1710`),
-   * the workspace whose sessions were written last, else, with no session, the one created last; a tie keeps registry
-   * order. Only a registered workspace is a place a session starts, and an adopted root's sessions count for the registered
-   * workspace above it, where `deriveGroups` draws them. Undefined when no workspace is registered.
+   * The workspace this browser last worked in, kept beside the open session (`SELECTION_KEY`) in one `localStorage` entry
+   * holding `{ path }`, written whenever a session is opened or one is started in a workspace (#142). A page with no
+   * session open aims its composer there (`aimedWorkspace`).
+   *
+   * DSH keeps no such entry. Its startup and its New session take `recentWorkspace`, the workspace whose sessions were
+   * written last (`dsh-client-ui-workspace` `lib/client.js:1694-1710`, asked at `:1507` and `:1620`), and DSH is
+   * single-user, so that is always the person's own. heddle's server is shared: the same ranking named whoever was active
+   * last, and a first visit started a blank session in that person's workspace and aimed the composer at their folder
+   * (#142). The memory is this browser's own, so it is per origin, shared by the tabs of one server, as the open
+   * session's entry is.
    */
-  function recentWorkspace(workspaces, sessions) {
-    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
-    const metas = new Map((Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object').map((meta) => [meta.id, meta]))
-    const byId = new Map(list.map((entry) => [entry.id, entry]))
-    const latest = new Map()
-    for (const entry of list) {
-      const home = registered(entry) ? entry : registeredAboveIn(entry, byId)
-      if (home === undefined) continue
-      for (const id of Array.isArray(entry.sessionIds) ? entry.sessionIds : []) {
-        const meta = metas.get(id)
-        const at = meta === undefined ? Number.NaN : Date.parse(stamp(meta))
-        if (Number.isFinite(at)) latest.set(home.id, Math.max(latest.get(home.id) ?? Number.NEGATIVE_INFINITY, at))
-      }
+  const LAST_WORKSPACE_KEY = 'heddle.workspace.last'
+
+  /** The entry this page writes for the workspace at `path`, or `{}` for none. */
+  function workspaceRecord(path) {
+    return JSON.stringify(typeof path === 'string' && path.length > 0 ? { path } : {})
+  }
+
+  /** The workspace path a stored entry names, or null for an entry that is missing, empty, or not one this page wrote. */
+  function savedWorkspace(raw) {
+    if (typeof raw !== 'string') return null
+    try {
+      const value = JSON.parse(raw)
+      return value !== null && typeof value === 'object' && typeof value.path === 'string' && value.path.length > 0 ? value.path : null
+    } catch (error) {
+      return null
     }
-    let selected
-    let selectedTime = Number.NEGATIVE_INFINITY
-    for (const entry of list) {
-      if (!registered(entry)) continue
-      let time = latest.get(entry.id) ?? Number.NEGATIVE_INFINITY
-      if (time === Number.NEGATIVE_INFINITY) time = Date.parse(String(entry.createdAt ?? ''))
-      if (!Number.isFinite(time)) time = Number.NEGATIVE_INFINITY
-      if (selected === undefined || time > selectedTime) {
-        selected = entry
-        selectedTime = time
-      }
+  }
+
+  /**
+   * Where a page aims a new conversation when nothing the person did in it says where (#142). `workspaces` is
+   * `/api/workspaces`'s array, `remembered` the path `savedWorkspace` read. The answer is the registered workspace at the
+   * remembered path; else the only registered workspace, when there is exactly one (the single-user case, DSH's
+   * `recentWorkspace` with one workspace to rank, such as first use's Default workspace); else undefined, and the
+   * composer is DSH's inert one (`Choose a workspace to start`, `composerAimless`). It never ranks workspaces by their
+   * sessions' activity: on a shared server that is other people's. An adopted root is no place, as it is no group.
+   */
+  function aimedWorkspace(workspaces, remembered) {
+    const list = (Array.isArray(workspaces) ? workspaces : []).filter((entry) => entry !== null && typeof entry === 'object' && registered(entry) && typeof entry.path === 'string')
+    if (typeof remembered === 'string' && remembered.length > 0) {
+      const kept = list.find((entry) => entry.path === remembered)
+      if (kept !== undefined) return kept
     }
-    return selected
+    return list.length === 1 ? list[0] : undefined
   }
 
   /**
    * What a page load opens: DSH's `restoreSelection` (`lib/client.js:1605-1628`) under heddle's rules. `saved` is the id
    * `savedSelection` read (or null), `workspaces` and `sessions` the answers of `/api/workspaces` and `/api/sessions`
-   * (newest first). The answer is `{ kind, id?, path?, forget? }`, and it never names a session nobody saved:
+   * (newest first), `remembered` the workspace path `savedWorkspace` read. The answer is `{ kind, id?, path?, forget? }`,
+   * and it never names a session nobody saved, nor asks for one to be created:
    *
    * - `saved` — the saved session is listed and not archived, so it is reopened (`:1611-1616`). A saved New session
    *   placeholder is reopened too, by its own id and with its record read again, never replaced by a fresh one (DSH's
    *   `restoreBlank` reloads the blank's projections and reconnects the same id, `:1451-1458`, `:1619`). A subagent's
    *   child the person opened (search, `In one list`) is theirs to come back to, as DSH restores a saved subagent view
    *   (`:1607-1609`).
-   * - `start` with `path` — nothing this page may reopen is saved, so a fresh session starts in the most recently active
-   *   registered workspace (`:1620`, then `connectWorkspace`, `:1626`, which creates one, `:1406`). That is a first visit
-   *   or a cleared entry, a saved session that is gone, and an archived saved one, which DSH reopens only for its
-   *   `clearArchivedCurrent` to empty the main view and the entry at once (`:1578`, `:1638-1650`). `forget` empties a
-   *   stale entry. #17: this page used to open the newest session in the store when nothing was saved, and on a shared
-   *   server that is often another person's, so their transcript was shown and the next message went into it.
-   * - `none` — no registered workspace to start in: nothing opens, and with `forget` the stale entry is emptied all the
+   * - `aim` with `path` — nothing this page may reopen is saved: a first visit or a cleared entry, a saved session that
+   *   is gone, and an archived saved one, which DSH reopens only for its `clearArchivedCurrent` to empty the main view and
+   *   the entry at once (`:1578`, `:1638-1650`). The composer is aimed at `aimedWorkspace`'s answer, and nothing is
+   *   created: the first message creates the session there (`new: true`, #134). DSH creates a blank Session at once, in
+   *   `recentWorkspace` (`:1620`, then `connectWorkspace`, `:1626`, `connectBlank`, `:1403-1406`); on heddle's shared
+   *   server that left a blank session in another person's workspace on every load (#142). `forget` empties a stale entry.
+   *   #17: this page used to open the newest session in the store when nothing was saved, and on a shared server that is
+   *   often another person's, so their transcript was shown and the next message went into it.
+   * - `none` — nowhere to aim: nothing opens, the composer is inert, and with `forget` the stale entry is emptied all the
    *   same. The first-use default workspace is the page's `initializeDefaultWorkspace`, after the tree is drawn.
    */
-  function restoreChoice(saved, workspaces, sessions) {
+  function restoreChoice(saved, workspaces, sessions, remembered = null) {
     const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
     const named = typeof saved === 'string' && saved.length > 0
     const meta = named ? metas.find((entry) => entry.id === saved) : undefined
     if (meta !== undefined && meta.archived !== true) return { kind: 'saved', id: saved }
-    const target = recentWorkspace(workspaces, metas)
-    const fresh = target !== undefined && typeof target.path === 'string' ? { kind: 'start', path: target.path } : { kind: 'none' }
+    const target = aimedWorkspace(workspaces, remembered)
+    const fresh = target !== undefined ? { kind: 'aim', path: target.path } : { kind: 'none' }
     return named ? { ...fresh, forget: true } : fresh
   }
 
@@ -14640,17 +14711,18 @@ const WorkspaceTree = (() => {
    * `{ path, label, group }`, in drawing order).
    *
    * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
-   * context exists (`state` is `{ chosen, current, selected, active, workspaces, sessions }`): the workspace row the person
-   * opened or added since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace
-   * (DSH's `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace,
-   * then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where
-   * am I", and the first one that applies wins. Null when the tree draws no workspace and no session is open in one.
-   * `workspaces` and `sessions` are the whole index (`/api/workspaces`, `/api/sessions`), whatever the archive filter
-   * drew; the open session's workspace is read there.
+   * context exists (`state` is `{ chosen, current, selected, active, remembered, workspaces, sessions }`): the workspace
+   * row the person opened or added since the open session was chosen (`chosen`, `{ path, during }`), then the open
+   * session's workspace (DSH's `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the
+   * selected row's workspace, then the folder the prompt box was last aimed at, then the workspace this browser last
+   * worked in (`remembered`, #142), then the only registered workspace. All are answers to "where am I", and the first one
+   * that applies wins. Null when none applies: no workspace, or several and nothing that picks one (#142). `workspaces`
+   * and `sessions` are the whole index (`/api/workspaces`, `/api/sessions`), whatever the archive filter drew; the open
+   * session's workspace and the remembered one are read there.
    */
   function newSessionWorkspace(tops, state = {}) {
     const list = Array.isArray(tops) ? tops.filter((node) => node !== null && typeof node === 'object' && typeof node.path === 'string') : []
-    const { chosen = null, current = null, selected = null, active = null, workspaces = [], sessions = [] } = state ?? {}
+    const { chosen = null, current = null, selected = null, active = null, remembered = null, workspaces = [], sessions = [] } = state ?? {}
     /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
     const owner = (path) =>
       list.filter((node) => path === node.path || path.startsWith(node.path + '/')).sort((left, right) => right.path.length - left.path.length)[0] ?? null
@@ -14683,7 +14755,19 @@ const WorkspaceTree = (() => {
       const byFolder = owner(active)
       if (byFolder !== null) return byFolder
     }
-    return list[0] ?? null
+    /**
+     * Nothing the person did in this page says where (#142): the workspace this browser last worked in, else the only
+     * registered workspace, else nowhere (`aimedWorkspace`), drawn or not. This step was the first workspace the tree
+     * draws, which on a shared server is whoever registered first, so a press with nothing to go on started a session,
+     * and the composer was aimed, in a workspace this browser never used. DSH's `startSession` asks its startup's
+     * `recentWorkspace` here and, with none, clears the main view and starts nothing (`lib/client.js:1507-1518`). The
+     * registry is the whole index, else, for a caller without it, the workspaces the tree draws.
+     */
+    const registry = Array.isArray(workspaces) && workspaces.length > 0 ? workspaces : list.map((node) => node.group?.workspace ?? { path: node.path })
+    const aimed = aimedWorkspace(registry, remembered)
+    if (aimed === undefined) return null
+    const label = typeof aimed.title === 'string' && aimed.title.length > 0 ? workspaceDisplayTitle(aimed.title) : basename(aimed.path)
+    return list.find((node) => node.path === aimed.path) ?? { kind: 'workspace', path: aimed.path, label }
   }
 
   /**
@@ -14696,15 +14780,17 @@ const WorkspaceTree = (() => {
    * workspace to start" (`:17819-17828`, `placeholder.workspace` at `:16409`). heddle starts the session with the first
    * prompt instead (first use opens none, D-056), so the page has to know that workspace before the session exists:
    * it is `newSessionWorkspace`'s answer with no session open — the workspace chosen, the selected row's, the one the
-   * prompt box was aimed at, else the first workspace the tree draws — and only with no workspace drawn at all, a folder
-   * the prompt box was aimed at outside every workspace. #134: after a reload this was nothing, the hero read "Choose
-   * workspace", and the first message went out with no folder, so the server ran it in its own start folder, outside
-   * every workspace and out of the tree. `label` is the tree's (a workspace's display title, *Default workspace* for the
-   * first-use one); a bare folder is named by its last segment.
+   * prompt box was aimed at, else the workspace this browser last worked in (`remembered`), else the only registered
+   * one (#142) — and only with no workspace at all, a folder the prompt box was aimed at outside every workspace. #134:
+   * after a reload this was nothing, the hero read "Choose workspace", and the first message went out with no folder, so
+   * the server ran it in its own start folder, outside every workspace and out of the tree. #142: the last step was the
+   * first workspace the tree draws, and with the first visit's start (stack 2) the most recently active one on the
+   * server; on a shared server both may be another person's. `label` is the tree's (a workspace's display title,
+   * *Default workspace* for the first-use one); a bare folder is named by its last segment.
    */
   function newConversationTarget(tops, state = {}) {
-    const { chosen = null, selected = null, active = null } = state ?? {}
-    const workspace = newSessionWorkspace(tops, { chosen, current: null, selected, active })
+    const { chosen = null, selected = null, active = null, remembered = null, workspaces = [] } = state ?? {}
+    const workspace = newSessionWorkspace(tops, { chosen, current: null, selected, active, remembered, workspaces })
     if (workspace !== null) return { path: workspace.path, label: typeof workspace.label === 'string' && workspace.label !== '' ? workspace.label : basename(workspace.path) }
     if (typeof active === 'string' && active !== '') return { path: active, label: basename(active) }
     return null
@@ -15028,7 +15114,10 @@ const WorkspaceTree = (() => {
     rowKeyOpens,
     selectionRecord,
     savedSelection,
-    recentWorkspace,
+    LAST_WORKSPACE_KEY,
+    workspaceRecord,
+    savedWorkspace,
+    aimedWorkspace,
     restoreChoice,
     sessionWorkspace,
     newSessionWorkspace,
