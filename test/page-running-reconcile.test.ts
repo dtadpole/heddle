@@ -53,6 +53,12 @@ function harness(): Page {
     async function renderSettledAnswers() {}
     async function pumpQueue(key) { pumped.push(key) }
     async function showSession() {}
+    // What stack-2's refreshSessions also reads: subagents' listed records and composer lock, page-polish's header
+    // notes, and row-status's unread completions. None of them decides which turn a read may end.
+    const listedMetas = new Map();
+    function paintComposerAccess() {}
+    function noteSessions() {}
+    function noteCompletion() {}
     const fetch = () => new Promise((resolve) => queue((sessions) => resolve({ ok: true, json: async () => sessions })));
     ${source('markRunning')}
     ${source('refreshSessions')}

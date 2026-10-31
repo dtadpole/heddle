@@ -39,6 +39,7 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
+import { activitySessions, sessionActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
@@ -141,6 +142,8 @@ export interface WebServerOptions {
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
    */
   readonly settings?: SettingsService
+  /** Exact Browser opt-in captured at server startup (D-068). */
+  readonly browser?: boolean
 }
 
 export interface WebServer {
@@ -304,6 +307,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       subscribers,
       log,
       heartbeatMs,
+      browser: options.browser === true,
       running,
       controllers,
       runningSince,
@@ -427,6 +431,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
+  readonly browser: boolean
   /** The settings surface, when the server was started with one. */
   readonly settings?: SettingsService
   readonly token: string
@@ -607,7 +612,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
+      const html = page(pageLanguage(ctx, request.headers['accept-language']))
+      respond(response, 200, 'text/html; charset=utf-8', html, { 'content-security-policy': pagePolicy(html, state.browser) })
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -1624,9 +1630,31 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id)
+    /**
+     * An optional `atSeq` body field is DSH's inclusive cut (dsh-api-session-controller/lib/index.js:849-872): the chat's
+     * Branch action sends the seq that ended its turn. DSH refuses a value that is not a non-negative safe integer as a
+     * bad request, and a seq the source does not have as fork-unavailable, with the same two sentences used here.
+     */
+    const body = await readJson(request, response)
+    if (body === null) return
+    const atSeq = body.atSeq
+    if (atSeq !== undefined && !(typeof atSeq === 'number' && Number.isSafeInteger(atSeq) && atSeq >= 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
+      return
+    }
+    const forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    if ('error' in forked && forked.error === 'no-such-event') {
+      const last = forked.lastSeq === undefined ? 'none' : String(forked.lastSeq)
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: `event ${forked.atSeq} does not exist in session "${id}" (last seq: ${last})`, code: 'unavailable' })}\n`,
+      )
       return
     }
     if ('error' in forked) {
@@ -1672,9 +1700,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Archiving a session with a turn in flight is refused unless the caller says to stop it, which is DSH's
+     * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
      * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     *
+     * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
+     * `details.activity`): the turn in progress and the running subagent descendants, which the page's stop-and-archive
+     * dialog lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn,
+     * a teammate's, a notice's), because a session the page did not start can still be working.
      */
     /**
      * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
@@ -1684,9 +1717,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     const jobs = ctx.get('jobs') as JobRegistry | undefined
     const stopJobs = archived === true && body.stop === true
     if (archived === true) {
-      const running = state.running.get(id) ?? 0
+      const turns = ctx.get('turns') as TurnRegistry | undefined
+      const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
+      /** The session's own turn and its running subagents (stack-2's archive), then its live jobs (main's jobs view). */
+      const activity = sessionActivity(id, ctx.session.list(), isRunning)
       const liveJobs = sessionJobActivity(jobs, id)
-      if (running > 0 || liveJobs.length > 0) {
+      if (activity.length > 0 || liveJobs.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
@@ -1694,17 +1730,22 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
             'application/json',
             `${JSON.stringify({
               error:
-                running > 0
+                activity.length > 0
                   ? `session ${id} is running; pass stop: true to stop it and archive`
                   : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
               code: 'active',
-              running,
+              running: state.running.get(id) ?? 0,
+              /** DSH's list, every family: `dsh-jobs` prepends its `{ kind: 'job', items }` ahead of the rest (lib/index.js:19-31). */
+              activity: [...(liveJobs.length > 0 ? [{ kind: 'job', items: liveJobs }] : []), ...activity],
               ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
             })}\n`,
           )
           return
         }
-        if (running > 0) abortSession(state.controllers, id)
+        for (const sessionId of activitySessions(id, activity)) {
+          abortSession(state.controllers, sessionId)
+          turns?.abort(sessionId, 'session archived')
+        }
       }
     }
     let meta
@@ -3575,6 +3616,18 @@ export function transcriptTurns(
         }
       }
       /**
+       * A completed turn can be branched from its closing answer — DSH's turn footer offers "Branch into a new
+       * conversation" there and forks with `atSeq` set to the turn's end (dsh-client-ui-chat/lib/client.js:6963-7001,
+       * 11094-11115, 13266-13285). DSH refuses the branch when the turn's last row is not an answer with text (a call
+       * after the answer, or no text at all), so only that case carries the seq.
+       */
+      if (event.type === 'turn/completed' && typeof event.seq === 'number') {
+        const last = turns[turns.length - 1]
+        if (last !== undefined && last.kind === 'assistant' && last.text.trim().length > 0) {
+          turns[turns.length - 1] = { ...last, forkSeq: event.seq }
+        }
+      }
+      /**
        * A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the same notice row
        * a stopped turn uses, so a reload says what the live page said.
        */
@@ -3691,6 +3744,11 @@ export interface ChatTurn {
   readonly result?: string
   /** DSH's phases, simplified: a call is running until its result says otherwise; a command is done or failed. */
   readonly state?: 'running' | 'ok' | 'error' | 'done'
+  /**
+   * On the answer that closes a completed turn: the seq of that turn's `turn/completed`, which the page's Branch action
+   * sends as the fork's `atSeq` — DSH's turn footer forks at the turn's end seq.
+   */
+  readonly forkSeq?: number
   /** A slash command's run id, which pairs its `command/run` and `command/done` (src/commands/). */
   readonly commandId?: string
   /** What followed the command's name, when the log kept it. */
@@ -3769,6 +3827,40 @@ export function tokenFormPage(options: { readonly stale?: boolean } = {}): strin
 export function markedPage(html: string): string {
   const marker = createHash('sha256').update(html).digest('hex').slice(0, 12)
   return html.replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+}
+
+/**
+ * The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`.
+ */
+export function inlineScripts(html: string): string[] {
+  return [...html.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1] ?? '')
+}
+
+/**
+ * The page's Content-Security-Policy, sent with `page.html` only.
+ *
+ * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
+ * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
+ * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
+ * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
+ * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
+ * writes the same.
+ */
+export function pagePolicy(html: string, browserEnabled = false): string {
+  const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
+  return [
+    "default-src 'self'",
+    ["script-src 'self'", ...hashes].join(' '),
+    "style-src 'self' 'unsafe-inline' https:",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data: https:",
+    "media-src 'self' https:",
+    browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join('; ')
 }
 
 /**
