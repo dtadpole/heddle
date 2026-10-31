@@ -543,6 +543,50 @@ pub trait TurnInterrupter: Send + Sync {
     fn interrupt(&self, session: &str) -> bool;
 }
 
+/// Work a session holds besides the turns and subagents the server counts itself, which an archive is refused by
+/// unless the caller agrees to stop it: DSH's other `workspace/session-activity` providers and their
+/// `workspace/session-stop` listeners (`dsh-workspace` `archiveSession`, `lib/index.js:527-541`). The binary
+/// supplies it from the schedule row (`dsh-schedule/lib/index.js:2043-2064`).
+pub trait SessionActivity: Send + Sync {
+    /// The live work that blocks archiving `session`, each item under its kind. The server lists the items of
+    /// the `job` and `schedule` kinds in DSH's listener order (`heddle_session::session_activity`); it counts
+    /// turns and subagents itself.
+    fn active(&self, session: &str) -> Vec<ActivityItem>;
+    /// Stop it, once the archive is written; the server awaits it before answering, as DSH's registry awaits
+    /// every stop listener (`dsh-workspace/lib/index.js:540`, `:621-628`) — a reminder's removal waits its turn
+    /// in the schedule service's queue (`stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
+    fn stop(&self, session: &str) -> BoxFuture<'static, ()>;
+}
+
+/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Turn,
+    Job,
+    Subagent,
+    Schedule,
+}
+
+impl ActivityKind {
+    /// The kind as DSH spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Job => "job",
+            Self::Subagent => "subagent",
+            Self::Schedule => "schedule",
+        }
+    }
+}
+
+/// One piece of live work an archive is refused by (DSH's activity item: `{ id, label }` under a `kind`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    pub kind: ActivityKind,
+    pub id: String,
+    pub label: String,
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -600,6 +644,8 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// Work besides turns and subagents that an archive stops or is refused by; `None`: no such row is loaded.
+    pub activity: Option<Arc<dyn SessionActivity>>,
     /// The interface language the optional `locale` row stores (issue #80): the page is served with its
     /// `<html lang>`; `None` follows each browser's `Accept-Language`.
     pub locale: Option<heddle_config::LocalePreference>,
@@ -636,6 +682,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
             locale: None,
             presets: None,
             interrupter: None,
@@ -683,6 +730,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
             locale: None,
             presets: None,
             interrupter: None,
@@ -879,6 +927,11 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    pub fn activity(mut self, service: Arc<dyn SessionActivity>) -> Self {
+        self.harness.activity = Some(service);
         self
     }
 

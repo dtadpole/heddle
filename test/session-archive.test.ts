@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
+import * as activity from '../src/session/activity.ts'
 import { activitySessions, sessionActivity } from '../src/session/activity.ts'
+import { ScheduleService } from '../src/schedule/service.ts'
 
 /**
  * Archive and unarchive with running work, judged at the two places the rules live (R-developer-eight-13, -14).
@@ -12,7 +15,13 @@ import { activitySessions, sessionActivity } from '../src/session/activity.ts'
  * (`dsh-agent`), running subagent descendants (`dsh-subagent`, found by lineage) — and its sidebar opens a stop-and-archive
  * dialog listing it, then shows a notice with `undo`. `src/session/activity.ts` is the server half (the `409` body); the
  * page's `session-archive` block is the other half (the wording, the refusal it recognises, the notice's actions).
+ *
+ * The schedule row's reminders are a family too (`dsh-schedule`), read and stopped through the row's public `list` and
+ * `stopSessionTasks`, and the four families come in DSH's listener order: turn, job, subagent, schedule.
  */
+
+const scratch = mkdtempSync(join(tmpdir(), 'heddle-session-archive-'))
+after(() => rmSync(scratch, { recursive: true, force: true }))
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
 const begin = page.indexOf('/* session-archive:begin */')
@@ -94,4 +103,84 @@ test('an archive notice offers undo, and the filter only while archived rows are
   assert.equal(refused.text, 'Archived sessions cannot be opened. Unarchive it to view.')
   assert.deepEqual(refused.actions, [])
   assert.equal(block.TEXT.unarchiveSession, 'Unarchive session')
+})
+
+test("the four families come in DSH's listener order: turn, job, subagent, schedule", () => {
+  /**
+   * A Cordis waterfall whose listeners each answer `[own, ...rest]` lists the first registered family first, and DSH
+   * registers turn (the Agent registry), job (the job registry seam), subagent (inside `inject(['agents'])`), then
+   * schedule (the service with the most injections) — see `src/session/activity.ts`.
+   */
+  const metas = [{ id: 'a' }, { id: 'child', parentSession: 'a', origin: 'subagent', title: 'look things up' }]
+  const rows = { jobs: [{ id: 'bash-0123456789abcdef', label: 'sleep 30' }], schedules: [{ id: 'schedule-1', label: 'Stand-up' }] }
+  assert.deepEqual(sessionActivity('a', metas, () => true, rows), [
+    { kind: 'turn' },
+    { kind: 'job', items: [{ id: 'bash-0123456789abcdef', label: 'sleep 30' }] },
+    { kind: 'subagent', items: [{ id: 'child', label: 'look things up' }] },
+    { kind: 'schedule', items: [{ id: 'schedule-1', label: 'Stand-up' }] },
+  ])
+  assert.deepEqual(
+    sessionActivity('a', metas, () => false, { schedules: rows.schedules }),
+    [{ kind: 'schedule', items: [{ id: 'schedule-1', label: 'Stand-up' }] }],
+    'an idle session with an active reminder is still active',
+  )
+  assert.deepEqual(sessionActivity('a', metas, () => false, { jobs: [], schedules: [] }), [], 'an empty family is not reported')
+})
+
+test("a stop reaches sessions only: a job's or a reminder's id is not a session to abort", () => {
+  const named = [
+    { kind: 'turn' as const },
+    { kind: 'job' as const, items: [{ id: 'bash-0123456789abcdef', label: 'sleep 30' }] },
+    { kind: 'subagent' as const, items: [{ id: 'child' }] },
+    { kind: 'schedule' as const, items: [{ id: 'schedule-1', label: 'Stand-up' }] },
+  ]
+  assert.deepEqual(activitySessions('a', named), ['a', 'child'])
+})
+
+test("the schedule family is the session's active reminders, labelled by title, and the stop removes them through the row", async () => {
+  const service = new ScheduleService({ file: join(scratch, 'schedule.json') })
+  const standUp = await service.create('session-a', { prompt: 'say what you did', title: 'Stand-up', after_seconds: 3600 })
+  const review = await service.create('session-a', { prompt: 'look back', title: 'Review', every_seconds: 3600 })
+  const other = await service.create('session-b', { prompt: 'not mine', title: 'Elsewhere', after_seconds: 3600 })
+  assert.deepEqual(
+    await activity.scheduleActivity(service, 'session-a'),
+    [
+      { id: standUp.id, label: 'Stand-up' },
+      { id: review.id, label: 'Review' },
+    ],
+    "DSH's { id: record.id, label: record.title }, in storage order, and another session's reminder is not listed",
+  )
+  const warnings: string[] = []
+  await activity.stopSessionSchedules(service, 'session-a', (message) => warnings.push(message))
+  assert.deepEqual(await activity.scheduleActivity(service, 'session-a'), [], "the stop removes every active reminder of the session (DSH's stopSessionTasks)")
+  assert.deepEqual(
+    (await service.list({ sessionId: 'session-b' })).map((record) => record.id),
+    [other.id],
+    "and leaves another session's alone",
+  )
+  assert.deepEqual(await activity.scheduleActivity(undefined, 'session-a'), [], 'without the schedule row there is no family')
+  await activity.stopSessionSchedules(undefined, 'session-a', (message) => warnings.push(message))
+  assert.equal(warnings.length, 0, 'nothing failed')
+  await service.dispose()
+})
+
+test('a reminder stop that fails is reported, never thrown, as the registry logs a failing provider', async () => {
+  const warnings: string[] = []
+  const failing = { list: async () => [], stopSessionTasks: async () => Promise.reject(new Error('disk full')) }
+  await activity.stopSessionSchedules(failing, 'session-a', (message) => warnings.push(message))
+  assert.deepEqual(warnings, ["workspace: stopping session 'session-a' for archive failed: Error: disk full"])
+})
+
+test('the refusal says what blocks the archive', () => {
+  const id = 'session-a'
+  assert.equal(activity.refusalSentence(id, [{ kind: 'turn' }]), 'session session-a is running; pass stop: true to stop it and archive')
+  assert.equal(activity.refusalSentence(id, [{ kind: 'subagent', items: [{ id: 'child' }] }]), 'session session-a is running; pass stop: true to stop it and archive')
+  assert.equal(
+    activity.refusalSentence(id, [{ kind: 'job', items: [{ id: 'bash-1', label: 'sleep 30' }] }, { kind: 'schedule', items: [{ id: 's', label: 'x' }] }]),
+    'session session-a has running background jobs; pass stop: true to stop them and archive',
+  )
+  assert.equal(
+    activity.refusalSentence(id, [{ kind: 'schedule', items: [{ id: 's', label: 'x' }] }]),
+    'session session-a has active scheduled reminders; pass stop: true to stop them and archive',
+  )
 })

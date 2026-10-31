@@ -133,6 +133,15 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
         harness.interrupter = Some(Arc::new(LiveTurns { turns }));
     }
+    // The schedule row: a session's active reminders block its archive and are removed by `stop: true`.
+    if let Some(schedule) = boot
+        .services
+        .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+    {
+        harness.activity = Some(Arc::new(ScheduleActivity {
+            service: Arc::clone(&schedule.service),
+        }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -1210,6 +1219,44 @@ struct LiveTurns {
 impl heddle_server::services::TurnInterrupter for LiveTurns {
     fn interrupt(&self, session: &str) -> bool {
         self.turns.abort(session, Some("stopped by the user"))
+    }
+}
+
+/// The schedule row as the server's archive admission — DSH's `workspace/session-activity` and
+/// `workspace/session-stop` listeners of `dsh-schedule` (`lib/index.js:2043-2064`), through the service's
+/// public `list` and `stop_session_tasks` (`scheduleActivity` / `stopSessionSchedules` in the TypeScript
+/// build's `src/session/activity.ts`).
+struct ScheduleActivity {
+    service: Arc<heddle_schedule::ScheduleService>,
+}
+
+impl heddle_server::services::SessionActivity for ScheduleActivity {
+    /// The session's active reminders, each labelled by its title (DSH's `{ id: record.id, label:
+    /// record.title }`).
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        self.service
+            .list(session)
+            .into_iter()
+            .map(|record| heddle_server::services::ActivityItem {
+                kind: heddle_server::services::ActivityKind::Schedule,
+                id: record.id,
+                label: record.title,
+            })
+            .collect()
+    }
+
+    /// Remove every active reminder of the session inside the service's queue (DSH's `stopSessionTasks`); a
+    /// failure is reported, never a reason to keep the session visible (`dsh-workspace/lib/index.js:621-628`).
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
+        let service = Arc::clone(&self.service);
+        let session = session.to_owned();
+        Box::pin(async move {
+            if let Err(error) = service.stop_session_tasks(&session).await {
+                service.warn(&format!(
+                    "workspace: stopping session '{session}' for archive failed: {error}"
+                ));
+            }
+        })
     }
 }
 
