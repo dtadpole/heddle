@@ -715,11 +715,13 @@ mod tests {
             ] {
                 let html = render_at("/w/notes.md", &source);
                 assert!(html.contains(&format!("href=\"{expected}\"")), "{html}");
-                assert!(
-                    html.contains(&format!("data-heddle-path=\"/w/{path}\"")),
-                    "{html}"
-                );
             }
+            // Markdown carries metadata; raw HTML uses the served href via the page's decodeRawPath.
+            let html = render_at("/w/notes.md", &format!("[note]({destination})"));
+            assert!(
+                html.contains(&format!("data-heddle-path=\"/w/{path}\"")),
+                "{html}"
+            );
         }
         for destination in [
             "100%.png",
