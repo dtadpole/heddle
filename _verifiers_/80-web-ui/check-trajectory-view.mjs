@@ -232,7 +232,7 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.equal(idle.band, '0', 'the band is invisible until you are near it')
     assert.equal(idle.grip, '0', 'and so is the grip')
     assert.ok(split.afterDrag > split.before + 3, `dragging the bar resizes the sidebar (${split.before}rem to ${split.afterDrag}rem)`)
-    assert.equal(split.afterReset, 22, 'a double-click restores the default width')
+    assert.equal(split.afterReset, 17.5, 'a double-click restores the default width, DSH\'s 280 pixels')
     assert.ok(split.afterKey < split.afterReset, 'and an arrow key nudges it from there')
 
 
