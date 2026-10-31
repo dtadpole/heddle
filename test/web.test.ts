@@ -167,6 +167,30 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   assert.equal(answers[1]?.files, undefined, 'the next exchange does not inherit the previous one\'s files')
 })
 
+test('a write the sandbox refused, or whose escalation was rejected, is not an edited file', () => {
+  /**
+   * Live-testing draft developer-five-6: the fold noted a file when its `write_file` was asked for, so a refused write
+   * was listed as edited. DSH lists deliverables, recorded only after the file was written; a refusal's result is
+   * `error (CODE): …`, and a call cut off before its result is not known to have written anything.
+   */
+  const call = (id: string, path: string) => ({ type: 'assistant/chunk', chunk: { type: 'tool-call', id, name: 'write_file', arguments: JSON.stringify({ path, content: 'x\n' }) } })
+  const result = (id: string, text: string) => ({ type: 'message', message: { role: 'tool', content: [{ type: 'text', text }], toolCallId: id } })
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'write four' }] } },
+    call('c1', '../outside.txt'),
+    result('c1', "error (SANDBOX): '../outside.txt' is outside the sandbox root"),
+    call('c2', 'b.txt'),
+    result('c2', "error (REJECTED): the request to run this tool with 'danger-full-access' permissions was rejected; the call stays under 'read-only'"),
+    call('c3', 'c.txt'),
+    result('c3', 'wrote 2 bytes to c.txt'),
+    call('c4', 'd.txt'),
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'one written' } },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answer?.files, [{ path: 'c.txt', added: 1 }], 'only the write whose result says it was written')
+  assert.deepEqual(turns.filter((turn) => turn.kind === 'tool').map((turn) => turn.state), ['error', 'error', 'ok', 'running'])
+})
+
 test('a file route answers with the sandbox and nosniff headers DSH puts on its own file route', () => {
   /**
    * DSH parity R-developer-twelve-16, measured 2026-10-29: a workspace SVG served inline by `/api/raw` and opened
