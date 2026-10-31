@@ -2789,6 +2789,121 @@ test('a workspace moved before another keeps its place across a restart, as DSH 
   }
 })
 
+test('a workspace reorder is pushed to every open page as a workspace frame, and a move that moves nothing is not (#136)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * GitHub issue #136: another client's reorder (POST /api/workspaces/insertBefore) never reached an open page, which
+   * kept the old order until a reload, while an added, renamed or removed workspace was already pushed as a workspace
+   * frame. DSH clients follow the host's workspace list, order included: insertBefore commits the new order to the
+   * registry state every client hears, and a move that changes nothing returns before it writes (dsh-workspace
+   * lib/index.js:479-499, the early returns at :484 and :492). Judged on the stream the page listens to: the frame
+   * names the complete order the route answered, and a move to where a workspace already is pushes nothing.
+   */
+  const h = harness('web-reorder-push')
+  const folders = ['one', 'two', 'three'].map((name) => fixtureDir(`web-reorder-push-${name}`))
+  const controller = new AbortController()
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const ids = []
+    for (const folder of folders) {
+      const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: folder }) })
+      assert.equal(added.status, 200, `a folder is added (${JSON.stringify(added.body)})`)
+      ids.push(added.body.record.id)
+    }
+    const [one, two, three] = ids
+
+    /** The page's stream, read frame by frame. */
+    const frames = []
+    const stream = await fetch(origin + '/api/events', { headers: { cookie, accept: 'text/event-stream' }, signal: controller.signal })
+    assert.equal(stream.status, 200, 'the stream opens')
+    void (async () => {
+      const reader = stream.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      try {
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) return
+          buffer += decoder.decode(value, { stream: true })
+          let index
+          while ((index = buffer.indexOf('\n\n')) >= 0) {
+            const block = buffer.slice(0, index)
+            buffer = buffer.slice(index + 2)
+            let event = 'message'
+            const data = []
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) event = line.slice(6).trim()
+              else if (line.startsWith('data:')) data.push(line.slice(5).trimStart())
+            }
+            if (data.length === 0) continue
+            let parsed
+            try {
+              parsed = JSON.parse(data.join('\n'))
+            } catch {
+              parsed = data.join('\n')
+            }
+            frames.push({ event, data: parsed })
+          }
+        }
+      } catch {
+        // aborted at the end of the check
+      }
+    })()
+    const heard = async (predicate, label, ms = 10_000) => {
+      const until = Date.now() + ms
+      while (Date.now() < until) {
+        const found = frames.find(predicate)
+        if (found !== undefined) return found
+        await new Promise((done) => setTimeout(done, 50))
+      }
+      assert.fail(`${label}: no such frame within ${ms} ms; heard ${JSON.stringify(frames.map((frame) => [frame.event, frame.data?.type]))}`)
+    }
+    await heard((frame) => frame.event === 'ready', 'the stream says it is ready')
+    const reordered = (frame) => frame.event === 'workspace' && frame.data?.type === 'workspace/reordered'
+
+    const first = await call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: one, beforeWorkspaceId: three }) })
+    assert.equal(first.status, 200, `another client moves a workspace (${JSON.stringify(first.body)})`)
+    assert.deepEqual(first.body.workspaceIds, [one, three, two], 'and the host answers the complete order')
+    const pushed = await heard(reordered, 'the move is pushed to the open page')
+    assert.deepEqual(pushed.data.workspaceIds, first.body.workspaceIds, 'as a workspace frame naming the order the host now keeps')
+
+    const still = await call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: two, beforeWorkspaceId: two }) })
+    assert.equal(still.status, 200, 'a move onto itself is answered')
+    const last = await call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: one }) })
+    assert.equal(last.status, 200, `a second move is answered (${JSON.stringify(last.body)})`)
+    await heard((frame) => reordered(frame) && JSON.stringify(frame.data.workspaceIds) === JSON.stringify(last.body.workspaceIds), 'the second move is pushed too')
+    assert.deepEqual(
+      frames.filter(reordered).map((frame) => frame.data.workspaceIds),
+      [first.body.workspaceIds, last.body.workspaceIds],
+      'the move that moved nothing pushed nothing between them',
+    )
+  } finally {
+    controller.abort()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    for (const folder of folders) removeDir(folder)
+  }
+})
+
 test('a workspace whose folder was deleted or moved is renamed and deleted by the routes the page uses, and the tree says the folder is gone (#141)', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**

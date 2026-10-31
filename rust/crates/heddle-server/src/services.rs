@@ -342,6 +342,14 @@ pub trait WorkspaceService: Send + Sync {
         Err(workspace_not_found(id))
     }
 
+    /// [`WorkspaceService::insert_before`], saying whether anything moved (`reorder` in `src/workspace/service.ts`),
+    /// so the route pushes a move to every open page and nothing for a move that changes nothing (#136; DSH's
+    /// registry writes nothing then, dsh-workspace lib/index.js:484, :492). The default counts every answered move
+    /// as one, for doubles that do not model the order.
+    fn reorder(&self, id: &str, before: Option<&str>) -> Result<(Vec<String>, bool), ServiceError> {
+        self.insert_before(id, before).map(|order| (order, true))
+    }
+
     /// First use — DSH's `workspace/initializeDefault`, `POST /api/workspaces/default`: the default workspace's
     /// record when this install is a first use (created or reused), `Ok(None)` when it is not, `Err` when its
     /// folder cannot be made (`500`). The default answers `None`, for doubles that do not model first use.

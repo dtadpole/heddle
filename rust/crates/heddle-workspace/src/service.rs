@@ -471,6 +471,18 @@ impl WorkspaceService {
         id_or_path: &str,
         before: Option<&str>,
     ) -> Result<Vec<String>, WorkspaceError> {
+        self.reorder(id_or_path, before).map(|(order, _)| order)
+    }
+
+    /// [`WorkspaceService::insert_before`], saying whether anything moved — what the route needs to announce a move
+    /// to every open page and to stay quiet about one that changes nothing (#136; `reorder` in
+    /// `src/workspace/service.ts`). DSH's `insertBefore` returns before it writes when the workspace is its own
+    /// anchor or the order would not change (dsh-workspace lib/index.js:484, :492).
+    pub fn reorder(
+        &self,
+        id_or_path: &str,
+        before: Option<&str>,
+    ) -> Result<(Vec<String>, bool), WorkspaceError> {
         let _guard = self
             .lock
             .lock()
@@ -485,7 +497,7 @@ impl WorkspaceService {
         let id = listed(id_or_path)?;
         let before = before.map(listed).transpose()?;
         if before.as_deref() == Some(id.as_str()) {
-            return Ok(shape.workspace_ids);
+            return Ok((shape.workspace_ids, false));
         }
         let mut order: Vec<String> = shape
             .workspace_ids
@@ -502,11 +514,11 @@ impl WorkspaceService {
         };
         order.insert(at, id);
         if order == shape.workspace_ids {
-            return Ok(order);
+            return Ok((order, false));
         }
         shape.workspace_ids = order.clone();
         self.write(&shape)?;
-        Ok(order)
+        Ok((order, true))
     }
 
     /// The root that owns a folder: the **nearest** registered root at or above it.
@@ -1291,6 +1303,41 @@ mod tests {
             Some((text(real.join("w")), Some(record.id.clone()))),
             "the root's own folder, gone, is still the root's"
         );
+    }
+
+    /// A reorder says whether it moved anything, so the route announces only a real move (#136; DSH's early
+    /// returns, dsh-workspace lib/index.js:484, :492).
+    #[test]
+    fn a_reorder_says_whether_it_moved_anything_and_writes_nothing_when_it_did_not() {
+        let (_dir, service) = service();
+        let one = service.add("/work/one", Some("one")).unwrap().record.id;
+        let two = service.add("/work/two", Some("two")).unwrap().record.id;
+        let three = service.add("/work/three", Some("three")).unwrap().record.id;
+        assert_eq!(
+            service.reorder(&one, Some(&three)).unwrap(),
+            (vec![one.clone(), three.clone(), two.clone()], true)
+        );
+        let written = std::fs::read_to_string(service.file()).unwrap();
+        for (id, before) in [
+            (&two, Some(two.as_str())),
+            (&two, None),
+            (&three, Some(two.as_str())),
+        ] {
+            assert_eq!(
+                service.reorder(id, before).unwrap(),
+                (vec![one.clone(), three.clone(), two.clone()], false),
+                "{id} before {before:?} moves nothing"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(service.file()).unwrap(), written);
+        assert_eq!(
+            service.reorder("/work/three", None).unwrap(),
+            (vec![one.clone(), two.clone(), three.clone()], true)
+        );
+        assert!(matches!(
+            service.reorder("w-nowhere", None),
+            Err(WorkspaceError::OrderInvalid(_))
+        ));
     }
 
     /// A store whose `$HEDDLE_HOME` is a temp folder, so first use makes its folder there.

@@ -1829,8 +1829,19 @@ async fn insert_workspace_before(State(state): State<AppState>, body: JsonBody) 
             );
         }
     };
-    match workspaces.insert_before(id, before) {
-        Ok(order) => respond::json(StatusCode::OK, &json!({"workspaceIds": order})),
+    match workspaces.reorder(id, before) {
+        Ok((order, moved)) => {
+            // Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an
+            // added, renamed or removed workspace is; a move that changes nothing is not announced, as DSH's
+            // registry writes nothing then (dsh-workspace lib/index.js:484, :492). web.ts pushes the same frame.
+            if moved {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/reordered", "workspaceIds": order}),
+                );
+            }
+            respond::json(StatusCode::OK, &json!({"workspaceIds": order}))
+        }
         Err(error) if error.code.as_deref() == Some("workspace/not-found") => {
             service_refusal(error, StatusCode::NOT_FOUND)
         }
@@ -3793,6 +3804,121 @@ mod tests {
         assert_eq!(
             registry.asked.lock().unwrap()[0],
             ("w-3".to_owned(), Some("w-1".to_owned()))
+        );
+    }
+
+    /// A registry double that keeps an order and says whether a move moved it, as `heddle_workspace`'s
+    /// `reorder` does.
+    struct KeptOrder {
+        order: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::WorkspaceService for KeptOrder {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn reorder(
+            &self,
+            id: &str,
+            before: Option<&str>,
+        ) -> Result<(Vec<String>, bool), ServiceError> {
+            let mut order = self.order.lock().unwrap();
+            if before == Some(id) {
+                return Ok((order.clone(), false));
+            }
+            let mut moved: Vec<String> = order.iter().filter(|each| *each != id).cloned().collect();
+            let at = before
+                .and_then(|anchor| moved.iter().position(|each| each == anchor))
+                .unwrap_or(moved.len());
+            moved.insert(at, id.to_owned());
+            let changed = moved != *order;
+            *order = moved.clone();
+            Ok((moved, changed))
+        }
+    }
+
+    /// A move is pushed to every open page as a `workspace` frame naming the order (#136), as an added, renamed
+    /// or removed workspace is; a move that changes nothing pushes nothing, as DSH's registry writes nothing then
+    /// (dsh-workspace lib/index.js:484, :492).
+    #[tokio::test]
+    async fn a_workspace_move_is_pushed_and_a_move_that_moves_nothing_is_not() {
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(KeptOrder {
+            order: std::sync::Mutex::new(vec!["w-1".into(), "w-2".into(), "w-3".into()]),
+        }));
+        let (router, state) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-order-push")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let post = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            async move {
+                let (status, _) =
+                    post_json(&router, "/api/workspaces/insertBefore", &cookie, body).await;
+                status
+            }
+        };
+
+        assert_eq!(
+            post(r#"{"workspaceId":"w-3","beforeWorkspaceId":"w-1"}"#).await,
+            StatusCode::OK
+        );
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "workspace");
+        assert_eq!(
+            data,
+            json!({"type": "workspace/reordered", "workspaceIds": ["w-3", "w-1", "w-2"]})
+        );
+        assert!(id.is_some(), "numbered, so a reconnecting page is given it");
+
+        // Itself as the anchor, then the last one last: answered, and nothing pushed for either.
+        for body in [
+            r#"{"workspaceId":"w-2","beforeWorkspaceId":"w-2"}"#,
+            r#"{"workspaceId":"w-2"}"#,
+        ] {
+            assert_eq!(post(body).await, StatusCode::OK, "{body}");
+        }
+        assert_eq!(post(r#"{"workspaceId":"w-3"}"#).await, StatusCode::OK);
+        let (_, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            data["workspaceIds"],
+            json!(["w-1", "w-2", "w-3"]),
+            "the next frame is the next real move: the two that moved nothing pushed nothing"
         );
     }
 

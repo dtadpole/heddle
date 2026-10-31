@@ -179,3 +179,64 @@ test('a workspace dragged onto a sibling lands before or after it, the host keep
     for (const dir of [home, loose, ...Object.values(folders)]) removeDir(dir)
   }
 })
+
+test("another client's workspace reorder redraws an open page in the host's order, without a reload (#136)", async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * GitHub issue #136: a reorder made elsewhere (a second tab, or POST /api/workspaces/insertBefore) never reached an open
+   * page, which kept the old order at +3 s and +12 s and showed the host's only after a reload, while a rename or a new
+   * workspace made elsewhere was redrawn within seconds. DSH clients follow the host's workspace list, order included
+   * (dsh-workspace lib/index.js:479-499 commits the order to the registry state every client hears). The host now
+   * pushes a workspace frame for a move, as it does for the other workspace edits, and the page redraws from the host.
+   */
+  const home = isolatedHome('workspace-drag-pushed')
+  const folders = ['one', 'two', 'three'].map((name) => fixtureDir(`workspace-drag-pushed-${name}`))
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const handshake = await fetch(server.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const ids = []
+    for (const path of folders) {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      ids.push(added.body.record.id)
+    }
+    const [one, two, three] = folders.map((path) => path.split('/').filter(Boolean).pop())
+    const [oneId, , threeId] = ids
+    browser = await openBrowser()
+    const top = `JSON.stringify([...document.querySelectorAll('#tree > li[data-kind="workspace"]')].map((li) => li.querySelector(':scope > .row .label').textContent))`
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`document.querySelectorAll('#tree > li[data-kind="workspace"]').length === 3`, 15_000)
+    assert.deepEqual(JSON.parse(await browser.evaluate(top)), [three, two, one], 'newest workspace first')
+    await browser.evaluate('window.__samePage = true')
+
+    /** Another client moves the oldest workspace before the newest. */
+    const moved = await api(server.url, cookie, '/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: oneId, beforeWorkspaceId: threeId }) })
+    assert.equal(moved.status, 200, `the host takes the move (${JSON.stringify(moved.body)})`)
+    assert.ok(
+      await browser.waitFor(`${top} === ${JSON.stringify(JSON.stringify([one, three, two]))}`, 5_000),
+      `the open page redraws in the host's new order within seconds\nsaw: ${await browser.evaluate(top)}`,
+    )
+    assert.equal(await browser.evaluate('window.__samePage === true'), true, 'without a reload')
+
+    /** And again: the newest goes last. */
+    const last = await api(server.url, cookie, '/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: threeId }) })
+    assert.equal(last.status, 200, `the host takes the second move (${JSON.stringify(last.body)})`)
+    assert.ok(
+      await browser.waitFor(`${top} === ${JSON.stringify(JSON.stringify([one, two, three]))}`, 5_000),
+      `the page follows the second move too\nsaw: ${await browser.evaluate(top)}`,
+    )
+    assert.equal(await browser.evaluate('window.__samePage === true'), true, 'still the same page')
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, ...folders]) removeDir(dir)
+  }
+})

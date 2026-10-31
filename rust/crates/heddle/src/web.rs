@@ -1050,8 +1050,13 @@ impl heddle_server::services::WorkspaceService for Workspaces {
     }
 
     fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.reorder(id, before).map(|(order, _)| order)
+    }
+
+    fn reorder(&self, id: &str, before: Option<&str>) -> Result<(Vec<String>, bool), ServiceError> {
+        // Whether the move moved anything comes from the registry, which writes only then (#136).
         self.service
-            .insert_before(id, before)
+            .reorder(id, before)
             .map_err(|error| match error {
                 heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
                     heddle_server::services::workspace_not_found(&missing)

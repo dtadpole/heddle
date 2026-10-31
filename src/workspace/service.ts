@@ -405,6 +405,16 @@ export class WorkspaceService extends Service {
    * workspace's siblings, as DSH's does. Answers the complete order, as DSH's does.
    */
   insertBefore(idOrPath: string, beforeIdOrPath?: string): readonly string[] {
+    return this.reorder(idOrPath, beforeIdOrPath).workspaceIds
+  }
+
+  /**
+   * {@link insertBefore}, saying whether anything moved — what the route needs to announce a move to every open page
+   * and to stay quiet about one that changes nothing (#136). DSH's `insertBefore` returns before it writes when the
+   * workspace is its own anchor or the order would not change (dsh-workspace lib/index.js:484, :492), so no change
+   * reaches its clients then; a committed order is registry state every client follows.
+   */
+  reorder(idOrPath: string, beforeIdOrPath?: string): { readonly workspaceIds: readonly string[]; readonly moved: boolean } {
     const shape = this.read()
     const listed = (key: string): string => {
       const record = this.find(key)
@@ -413,15 +423,15 @@ export class WorkspaceService extends Service {
     }
     const id = listed(idOrPath)
     const before = beforeIdOrPath === undefined ? undefined : listed(beforeIdOrPath)
-    if (before === id) return shape.workspaceIds
+    if (before === id) return { workspaceIds: shape.workspaceIds, moved: false }
     const without = shape.workspaceIds.filter((each) => each !== id)
     const at = before === undefined ? without.length : without.indexOf(before)
     const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
     if (workspaceIds.length === shape.workspaceIds.length && workspaceIds.every((each, index) => each === shape.workspaceIds[index])) {
-      return shape.workspaceIds
+      return { workspaceIds: shape.workspaceIds, moved: false }
     }
     this.write({ ...shape, workspaceIds })
-    return workspaceIds
+    return { workspaceIds, moved: true }
   }
 
   /**
