@@ -10318,7 +10318,14 @@ async function openPath(path) {
  * which is the honest outcome: a jump to the top would be a lie about where the fragment is.
  */
 function scrollToHeading(fragment) {
-  const wanted = slug(fragment)
+  let decoded
+  try {
+    decoded = decodeURIComponent(fragment)
+  } catch {
+    return // Malformed authored escapes name no heading; do not silently jump elsewhere.
+  }
+  const wanted = slug(decoded)
+  if (wanted.length === 0) return
   const heading = [...fileBody.querySelectorAll('h1, h2, h3, h4, h5, h6')].find((element) => slug(element.textContent ?? '') === wanted)
   if (heading === undefined) return
   heading.scrollIntoView({ block: 'start' })
@@ -10329,7 +10336,8 @@ function slug(text) {
   return text
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9\s-]/g, '')
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{N}\p{M}\s-]/gu, '')
     .replace(/\s+/g, '-')
 }
 
