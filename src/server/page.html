@@ -3275,6 +3275,15 @@ function followLedgerTail() {
  * above, or `heddle workspace add`) promotes it into the tree, sessions and all.
  */
 let current = null
+/**
+ * The session the reader opened whose history could not be loaded, or null (#56; ported from developer-six's 4cd4cafb).
+ *
+ * DSH's Chat shows "Failed to load history: {message} ({code})" for such a session (`dsh-client-ui-chat` `lib/client.js:2893-2898`,
+ * the words at `:5991`), and its composer is disabled and reads "Session unavailable" (`dsh-client-ui-conversation`
+ * `lib/client.js:18819-18824`, `:18972`, the words at `:16406`). While this is set `current` is null, the composer says so
+ * and takes no message; opening any session clears it.
+ */
+let unavailableSession = null
 /** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
 let goalView = null
 /** The generation of the goal read: an older response must not paint over a newer goal. */
@@ -5627,6 +5636,23 @@ function renderTodo() {
   )
 }
 
+/**
+ * DSH's Chat line for a session whose history cannot be loaded: "Failed to load history: {message} ({code})"
+ * (`dsh-client-ui-chat` `lib/client.js:5991`). The message is the server's own reason (`{"error": "no session …"}`), else
+ * the status text; the code is the HTTP status. Ported from developer-six's 4cd4cafb.
+ */
+function historyFailureText(status, statusText, failure) {
+  const reason =
+    failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
+      ? failure.error
+      : statusText || 'no reason given'
+  return `Failed to load history: ${reason} (${status})`
+}
+
+/**
+ * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
+ * be loaded and the column shows DSH's failure line instead (#56).
+ */
 async function showSession(id) {
   sessionStats = null
   liveRounds = 0
@@ -5641,6 +5667,11 @@ async function showSession(id) {
    * is current (`dsh-client-ui-workspace` `lib/client.js:964-966`); the tree is redrawn once, shortly, only in that case.
    */
   if (current !== null && current !== id && placeholderDrawn(current)) scheduleTreeRefresh()
+  /** Opening a session ends an unavailable one's state; the read below sets it again if this one cannot be loaded either. */
+  if (unavailableSession !== null) {
+    unavailableSession = null
+    renderComposerState()
+  }
   /** Opening another session gives New session's target back to it (`chosenWorkspace`, #25), even a session opened before. */
   if (current !== id) chooseWorkspace(null)
   current = id
@@ -5674,17 +5705,41 @@ async function showSession(id) {
        * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
        * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+       *
+       * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
+       * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
+       * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
+       * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
+       * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
+       *
+       * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
+       * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
+       * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
+       * selection with it.
        */
+      const failure = await response.json().catch(() => ({}))
+      /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
+      if (current !== id) return false
+      unavailableSession = id
       current = null
       paintSessionHeading()
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
+      const note = document.createElement('div')
+      note.className = 'turn denied load-error'
+      note.setAttribute('role', 'alert')
+      note.textContent = historyFailureText(response.status, response.statusText, failure)
+      log.append(note)
       paintEmptyState()
       applySessionAccess(null)
       /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
       rememberCurrent()
       paintComposerAccess()
-      return
+      renderComposerState()
+      selectedPath = null
+      await renderTree()
+      markSelection()
+      return false
     }
     const body = await response.json()
     /**
@@ -5735,6 +5790,7 @@ async function showSession(id) {
   }
   await refreshGoal()
   await refreshTodo()
+  return true
 }
 
 /** Each session's record as `/api/sessions` last listed it — what tells the composer that the open one is a one-shot child. */
@@ -5751,11 +5807,17 @@ const listedMetas = new Map()
  */
 function paintComposerAccess() {
   const readOnly = current !== null && SessionRules.composerReadOnly(listedMetas.get(current))
+  /**
+   * A session that could not be loaded keeps the composer on screen but disabled, as DSH's does: its editor is not
+   * editable and its primary action is disabled while the session is not live (`dsh-client-ui-conversation`
+   * `lib/client.js:18819-18824`, `:18948`), and the placeholder says why (`renderComposerState`) (#56).
+   */
+  const unavailable = unavailableSession !== null
   composer.hidden = readOnly
-  field.disabled = readOnly
-  field.readOnly = readOnly
+  field.disabled = readOnly || unavailable
+  field.readOnly = readOnly || unavailable
   document.getElementById('subagent-readonly').hidden = !readOnly
-  document.body.dataset.composer = readOnly ? 'read-only' : 'writable'
+  document.body.dataset.composer = readOnly ? 'read-only' : unavailable ? 'unavailable' : 'writable'
 }
 
 /**
@@ -5785,7 +5847,8 @@ function paintSessionHeading(meta = current === null ? null : sessionMetas.get(c
   if (current === null || meta === null) {
     if (cell !== null) {
       cell.hidden = false
-      cell.textContent = 'No session'
+      /** A session the reader opened that could not be loaded is named for what it is, not as nothing open (#56). */
+      cell.textContent = current === null && unavailableSession !== null ? 'Session unavailable' : 'No session'
     }
     document.title = WorkspaceTree.documentTitle(null)
     return
@@ -6614,6 +6677,8 @@ function queuePreview(text) {
 function submitDraft(gesture) {
   /** A one-shot subagent's record takes no follow-up (`paintComposerAccess`); nothing is sent into it. */
   if (document.body.dataset.composer === 'read-only') return
+  /** Nor into a session that could not be loaded (#56): DSH's composer for it does not submit, and Enter reaches here past the button. */
+  if (unavailableSession !== null) return
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
@@ -7239,7 +7304,7 @@ function growComposer() {
 }
 function updateSendDisabled() {
   /** While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. */
-  sendButton.disabled = !anyRunning() && field.value.trim().length === 0
+  sendButton.disabled = unavailableSession !== null || (!anyRunning() && field.value.trim().length === 0)
 }
 field.addEventListener('input', () => {
   growComposer()
@@ -7288,9 +7353,12 @@ function renderComposerState() {
    * chord would do — "Cmd/Ctrl+Enter steers all queued messages". That is `canSteerQueue` in its own words.
    */
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
-  field.placeholder = canSteerQueue
-    ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : 'Message or run a task, / commands, @ files or sessions'
+  /** DSH's `placeholder.unavailable` comes before the others: a disabled composer says why (`lib/client.js:18972`, #56). */
+  field.placeholder = unavailableSession !== null
+    ? 'Session unavailable'
+    : canSteerQueue
+      ? 'Cmd/Ctrl+Enter steers all queued messages'
+      : 'Message or run a task, / commands, @ files or sessions'
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
@@ -13752,7 +13820,8 @@ async function renderFlatList() {
        * the selection through `chooseSelected`; the flat list is a view of the same selection and must say so too.
        */
       row.onclick = async () => {
-        await showSession(meta.id)
+        /** A session that could not be loaded is not the open one, so no row is marked for it (#56). */
+        if (!(await showSession(meta.id))) return
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }

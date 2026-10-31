@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, renameSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The left column is a **workspace tree** after DSH's workspace browser (owner goal G2, 2026-10-28).
@@ -16,8 +16,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  * sessions` control (the open New session on top of the five, not in one of their places); the
  * selected session's workspace tints its folder; a workspace's `+` starts a session there; the `Workspace` grouping
  * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
- * child; and a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
- * offers no actions.
+ * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
+ * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
+ * with the composer disabled, not to a blank page that takes a message (#56).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -885,5 +886,157 @@ test('a first visit opens a fresh New session, never the newest session someone 
     browser.close()
     server.kill()
     for (const dir of [home, mine, theirs]) removeDir(dir)
+  }
+})
+
+test('a session row whose session can no longer be read opens to DSH\'s failure line, the composer disabled, and nothing is sent (#56)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's Chat shows "Failed to load history: {message} ({code})" for a session it cannot open (dsh-client-ui-chat
+   * lib/client.js:2893-2898, :5991), and its composer is disabled and reads "Session unavailable" (dsh-client-ui-conversation
+   * lib/client.js:18819-18824, :18948, :18972, :16406). #56: both builds opened such a row to "No session" and an empty
+   * conversation with the composer enabled, and a message sent from there was answered 500. Ported from developer-six's
+   * 4cd4cafb (R-developer-six-4).
+   *
+   * The page opens the kept session by name (gotoSession), so no first-visit blank is involved. The doomed session's log
+   * and metadata are then moved out of this server's store behind its back while the page still draws its row, and the row
+   * is opened. A reload afterwards is a boot restore, not an open: the saved selection was emptied, so a fresh New session
+   * starts (#17), and no failure line is shown.
+   */
+  const home = isolatedHome('tree-unavailable')
+  const work = fixtureDir('tree-unavailable-work')
+  const root = join(home, 'sessions')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', root], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const made = async (title) => {
+      const answer = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: work, title }) })
+      assert.equal(answer.status, 200, `created ${title} (${JSON.stringify(answer.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+      return answer.body.session
+    }
+    const kept = await made('kept notes')
+    const doomed = await made('doomed notes')
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const rowOf = (id) => `document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        title: document.getElementById('session-title')?.textContent ?? null,
+        titleHidden: document.getElementById('session-title')?.hidden ?? null,
+        lines: [...document.querySelectorAll('#log > *')].map((node) => node.textContent),
+        emptyState: (() => { const empty = document.getElementById('empty-state'); return empty !== null && !empty.hidden })(),
+        placeholder: document.querySelector('#prompt textarea')?.placeholder ?? null,
+        disabled: document.querySelector('#prompt textarea')?.disabled ?? null,
+        send: document.getElementById('send')?.disabled ?? null,
+        doomedRow: ${rowOf(doomed)} !== null,
+        selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
+        saved: ${saved},
+        writes: window.__writes ?? null,
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+
+    await browser.gotoSession(server.url, kept)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`document.getElementById('session-title')?.textContent === 'kept notes'`, 'the page opens the kept session it was given by name')
+    await browser.evaluate(
+      `(async () => {
+        for (let attempt = 0; attempt < 40 && ${rowOf(doomed)} === null; attempt += 1) {
+          const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(added.body.record.path)})
+          if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+          await new Promise((done) => setTimeout(done, 250))
+        }
+        return true
+      })()`,
+      15_000,
+    )
+    await until(`${rowOf(doomed)} !== null`, 'the doomed session\'s row is drawn')
+
+    /** The session leaves this server's store behind its back: its log and its metadata are moved away. */
+    const files = listFiles(root).filter((file) => basename(file).startsWith(doomed))
+    assert.ok(files.some((file) => file.endsWith(`${doomed}.json`)), `the store holds the doomed session's metadata\nsaw: ${JSON.stringify(files)}`)
+    const gone = join(home, 'gone')
+    mkdirSync(gone, { recursive: true })
+    for (const file of files) renameSync(join(root, file), join(gone, basename(file)))
+    assert.equal((await api(server.url, cookie, `/api/sessions/${doomed}`)).status, 404, 'the server can no longer read it')
+    const before = (await listed()).map((meta) => meta.id)
+
+    /** Every write the page makes from here on is recorded, so a send that slipped through is seen. */
+    await browser.evaluate(`(() => {
+      window.__writes = []
+      const original = window.fetch
+      window.fetch = (input, init) => {
+        const method = String(init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+        if (method !== 'GET') window.__writes.push(method + ' ' + String(input instanceof Request ? input.url : input))
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${rowOf(doomed)}.querySelector(':scope > .row').click()`)
+    const failed = await browser.waitFor(`document.getElementById('log').textContent.includes('Failed to load history')`, 15_000).catch(() => false)
+    /** The tree is read again after the line is written; give that redraw its moment before the page is read. */
+    if (failed) await browser.waitFor(`${rowOf(doomed)} === null`, 5_000).catch(() => false)
+    await new Promise((done) => setTimeout(done, 300))
+    const seen = JSON.parse(await state())
+    assert.ok(failed, `opening the row says the history could not be loaded, as DSH's Chat does\nsaw: ${JSON.stringify(seen)}`)
+    assert.deepEqual(seen.lines, [`Failed to load history: no session ${doomed} (404)`], `one line, with the server's reason and the status\nsaw: ${JSON.stringify(seen)}`)
+    assert.equal(seen.emptyState, false, 'the failure line wins over the blank start page')
+    assert.equal(seen.title, 'Session unavailable', `the header does not say "No session"\nsaw: ${JSON.stringify(seen)}`)
+    assert.equal(seen.placeholder, 'Session unavailable', `the composer reads DSH's placeholder.unavailable\nsaw: ${JSON.stringify(seen)}`)
+    assert.equal(seen.disabled, true, 'and its editor is disabled')
+    assert.equal(seen.send, true, 'and Send is disabled')
+    assert.equal(seen.doomedRow, false, `the tree is read again and the row that has no session goes\nsaw: ${JSON.stringify(seen)}`)
+    assert.deepEqual(seen.selected.filter((id) => id === doomed), [], 'and is not left selected')
+    assert.equal(seen.saved, null, 'nor kept as the session a reload reopens')
+
+    /** A send from there is impossible: a typed draft, Enter, a form submit and a click on Send reach no route. */
+    await browser.evaluate(`(() => {
+      const form = document.getElementById('prompt')
+      const field = form.querySelector('textarea')
+      field.value = 'a message into a session that is gone'
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      form.requestSubmit()
+      document.getElementById('send').click()
+      return true
+    })()`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const tried = JSON.parse(await state())
+    assert.deepEqual(tried.writes, [], `nothing was sent\nsaw: ${JSON.stringify(tried)}`)
+    assert.equal(tried.send, true, 'Send stays disabled with a draft in the field')
+    assert.deepEqual(tried.lines, seen.lines, 'and the conversation still shows only the failure line')
+    assert.deepEqual((await listed()).map((meta) => meta.id), before, 'and no session was started or written')
+
+    /** A reload is a boot restore, not an open: nothing is saved, so a fresh New session starts and nothing says it failed. */
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page reloads')
+    await until(
+      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify([...before, doomed])}.includes(id) && document.getElementById('session-title')?.hidden === true })()`,
+      'a reload starts a fresh New session, as a first visit does',
+    )
+    const fresh = JSON.parse(await state())
+    assert.equal(fresh.lines.some((line) => line.includes('Failed to load history')), false, `no failure line on the fresh session\nsaw: ${JSON.stringify(fresh)}`)
+    assert.equal(fresh.disabled, false, 'its composer takes a message')
+    assert.notEqual(fresh.placeholder, 'Session unavailable')
+    assert.equal(fresh.doomedRow, false, 'and the gone session is not drawn')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, work]) removeDir(dir)
   }
 })

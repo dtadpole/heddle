@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T08:15:00Z
+modified: 2026-10-31T08:40:00Z
 level: L3
-version: 1.2.0
+version: 1.3.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -72,7 +72,11 @@ grounded_in:
   new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh
   New session in the most recently active workspace, never the newest session another person is in, on a blank row
   that offers no menu, no Archive or Pin and no double-click rename, whose fork chord says DSH's *This session has no
-  completed turn* (#79). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  completed turn* (#79); and a session row whose session can no longer be read (its log and metadata moved out of the
+  store under an open page) opening to DSH's one line *Failed to load history: {message} (404)*, the header and the
+  disabled composer reading *Session unavailable*, no request sent by a draft, Enter, submit or Send, the stale row let
+  go, and a reload starting a fresh New session rather than showing the failure again (#56, ported from
+  developer-six's 4cd4cafb). The page opens no session on its own, so a check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
