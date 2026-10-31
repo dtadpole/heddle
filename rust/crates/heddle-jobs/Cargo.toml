@@ -1,0 +1,41 @@
+[package]
+name = "heddle-jobs"
+description = "Heddle in Rust: background jobs - the registry and its output ring, the three job tools, background bash, completion notices and the page's job routes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The page's job routes (`http::router`), mounted by the binary beside the other page routers.
+axum.workspace = true
+futures.workspace = true
+# A completion notice can start a turn: `compose` begins it with `begin_turn` on the run's shared runtime.
+heddle-agent.workspace = true
+# The session store: an owner must exist, the lifecycle events go to its log, the running tool call is read from
+# it, and a notice for a running turn is queued in its inbox.
+heddle-session.workspace = true
+# The three tools join the run's registry, and background `bash` attaches to the tools row's `bash` through its
+# seam (`heddle_tools::background`), confined by the same `launch_shell`.
+heddle-tools.workspace = true
+# A killed job's process group is signalled (SIGTERM, then SIGKILL) without unsafe code. Already in the lockfile.
+rustix = { version = "1", features = ["process"] }
+serde.workspace = true
+# `preserve_order`: a view, a session-log event and a route body are written with the TypeScript build's key
+# order, as heddle-schedule does.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio.workspace = true
+tracing.workspace = true
+# A job id is `<kind>-` and 16 hex digits cut from a v4 uuid, as the TypeScript build cuts `randomUUID()`.
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# The compose tests boot a real session store and a real turn on a scripted endpoint.
+heddle-config.workspace = true
+heddle-llm.workspace = true
+heddle-sandbox.workspace = true
+# The route tests drive the router in-process.
+tower = { version = "0.5", features = ["util"] }
