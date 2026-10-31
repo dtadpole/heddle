@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-31T08:45:00Z
 level: L3
-version: 1.1.0
+version: 1.1.1
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -21,7 +21,12 @@ grounded_in:
 - [`check-stream.mjs`](check-stream.mjs) — the live event stream against DSH's `$events` stream: it opens with
   `{ type: 'ready', clientId, host: { home } }` after its listeners are attached, so a baseline read on `ready`
   misses no increment; an idle stream gets a heartbeat every interval and a peer that stops reading is cut after
-  two (DSH parity phase B, developer-ten).
+  two; a reconnect is given every frame it missed after its cursor (`Last-Event-ID` or `?cursor=`) and a cursor
+  from another start gets `reset`; the page shows it is reconnecting while the server is down and, once back,
+  draws a session made meanwhile without a reload; renames, workspace edits and settled approvals are pushed to
+  every stream, numbered, and a page redraws a rename and a new workspace made elsewhere without a reload; an
+  approval answered on one page closes on every page; a failed turn reaches every client and the log, and the
+  transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
@@ -56,6 +61,10 @@ grounded_in:
   screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
   breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
   (live-testing draft developer-ten-9).
+- [`check-phone-composer.mjs`](check-phone-composer.mjs) — at phone width (390 x 844) the composer's control row and
+  the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
+  shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
+  composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
 
 ## What it deliberately does not judge
 

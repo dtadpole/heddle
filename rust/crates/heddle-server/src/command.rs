@@ -172,14 +172,29 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// A folder a test made under the system temp dir, removed when it is dropped.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// The temp folders of the test on this thread, dropped (and removed) when the test's thread ends, after a
+        /// panic too; see server.rs's `temp_secret`.
+        static TEMP_FOLDERS: std::cell::RefCell<Vec<TempFolder>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
     fn secret(label: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!(
-                "heddle-command-{label}-{}-{}",
-                std::process::id(),
-                crate::token::now_ms()
-            ))
-            .join("web-secret")
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-command-{label}-{}-{}",
+            std::process::id(),
+            crate::token::now_ms()
+        ));
+        TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
+        folder.join("web-secret")
     }
 
     fn context<'a>(harness: &'a Harness, label: &str) -> Context<'a> {

@@ -111,7 +111,8 @@ pub struct StartSession {
     pub resume: Option<String>,
     /// Start a fresh session here (the server's working directory).
     pub cwd: Option<PathBuf>,
-    /// The first 60 characters of the prompt.
+    /// A name for a session this request creates. The turn route gives none (#68): a new session is born untitled,
+    /// and its first message writes the fallback name the session layer's title coordinator replaces.
     pub title: Option<String>,
     /// What a session created by this request is born with.
     pub selection: SessionSelection,
@@ -174,6 +175,12 @@ pub struct ModeWrite {
 pub trait SessionService: Send + Sync {
     /// Every session's meta, in the store's order.
     fn list(&self) -> Vec<SessionMeta>;
+
+    /// Append one record to a session's log — the turn route's `turn/failed`, which web.ts writes through
+    /// `ctx.session.store.append`. An implementation that keeps no log writes nothing and answers `Ok`.
+    fn record(&self, _id: &str, _kind: &str, _fields: Value) -> Result<(), ServiceError> {
+        Ok(())
+    }
 
     /// One session's meta.
     fn meta(&self, id: &str) -> Option<SessionMeta> {
@@ -571,6 +578,9 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// The interface language the optional `locale` row stores (issue #80): the page is served with its
+    /// `<html lang>`; `None` follows each browser's `Accept-Language`.
+    pub locale: Option<heddle_config::LocalePreference>,
     /// The agent presets (inventory A96), from the optional `presets` row: `GET /api/presets` answers them, and a
     /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
     /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
@@ -604,6 +614,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            locale: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -650,6 +661,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            locale: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -845,6 +857,12 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    /// The interface language the profile's `locale` row stores (issue #80).
+    pub fn locale(mut self, preference: heddle_config::LocalePreference) -> Self {
+        self.harness.locale = Some(preference);
         self
     }
 

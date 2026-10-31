@@ -238,10 +238,18 @@ struct Entry {
     name: String,
     directory: bool,
     bytes: u64,
+    /// A symlink: its row stays at the link's own path, not its target's.
+    link: bool,
 }
 
 /// One directory's entries worth showing: folders first, then files, each name-sorted; dot-entries and
 /// the two noise directories are not returned at all.
+///
+/// A **symlink is what it resolves to**, as DSH lists one (`dsh-fs-local` `listDirectory` probes each
+/// child's resolved target; `dsh-api-workspace-files` reports a size only for a regular file): a linked
+/// folder is a folder, a linked file carries its target's size, and a link that resolves to nothing is a
+/// 0-byte leaf. A directory entry's own file type does not follow the link, which is why a link to a
+/// folder used to list as a file with the folder entry's size.
 fn entries(dir: &str) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -254,12 +262,35 @@ fn entries(dir: &str) -> Vec<Entry> {
         })
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let directory = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
             let path = Path::new(dir).join(&name).to_string_lossy().into_owned();
+            let link = entry
+                .file_type()
+                .map(|kind| kind.is_symlink())
+                .unwrap_or(false);
+            if link {
+                // `metadata` follows the link; an error is a link that resolves to nothing.
+                let target = std::fs::metadata(&path).ok();
+                let directory = target
+                    .as_ref()
+                    .map(|target| target.is_dir())
+                    .unwrap_or(false);
+                let bytes = target
+                    .filter(|target| target.is_file())
+                    .map(|target| target.len())
+                    .unwrap_or(0);
+                return Entry {
+                    name,
+                    directory,
+                    bytes,
+                    link,
+                };
+            }
+            let directory = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
             Entry {
                 name,
                 directory,
                 bytes: if directory { 0 } else { size_of(&path) },
+                link,
             }
         })
         .collect();
@@ -439,7 +470,19 @@ fn children_of(dir: &str, kind: NodeKind, context: &Context) -> Vec<TreeNode> {
     let parent_is_sessions = basename(dir) == SESSIONS_FOLDER;
 
     for entry in entries(dir) {
-        let path = canonical(&Path::new(dir).join(&entry.name).to_string_lossy());
+        // A link's row stays at the **link's own path**, DSH's rule (a child's path is the listed
+        // directory's joined with its name): canonicalising it put the row at its target's path, which the
+        // target's own row already holds. Asking for the link's path lists its target; refusing a link that
+        // leads outside every root is the caller's containment check.
+        let joined = Path::new(dir)
+            .join(&entry.name)
+            .to_string_lossy()
+            .into_owned();
+        let path = if entry.link {
+            joined
+        } else {
+            canonical(&joined)
+        };
 
         if entry.directory && entry.name == SESSIONS_FOLDER {
             // The sessions folder is **not a node**: its sessions are this branch's own, shown first.
@@ -1212,6 +1255,107 @@ mod tests {
             classify("a-b-c-d-e", NodeKind::Type, &generated),
             NodeKind::Folder,
             "five words is not an instance"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_folder_lists_as_a_folder_at_its_own_path_and_expands_to_its_target() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("nest/inner")).unwrap();
+        std::fs::create_dir_all(outside.path().join("far")).unwrap();
+        write(root, "nest/a.txt", "hello\n");
+        write(root, "plain.txt", "x\n");
+        symlink("nest", root.join("nest-link")).unwrap();
+        symlink("plain.txt", root.join("file-link")).unwrap();
+        symlink("missing", root.join("dangling")).unwrap();
+        symlink(outside.path().join("far"), root.join("out-link")).unwrap();
+        let canonical_root = canonical(root.to_str().unwrap());
+        let at = |name: &str| format!("{canonical_root}/{name}");
+        let input = TreeInput {
+            roots: vec![TreeRoot {
+                path: root.to_string_lossy().into_owned(),
+                title: "root".to_string(),
+                origin: Some(WorkspaceOrigin::Added),
+            }],
+            ..Default::default()
+        };
+        let level = tree(Some(root.to_str().unwrap()), &input);
+
+        let link = child(&level, "nest-link").expect("the link is listed");
+        assert_eq!(
+            link.kind,
+            NodeKind::Folder,
+            "a link to a folder is a folder row"
+        );
+        assert_eq!(link.children, None, "which can be expanded");
+        assert_eq!(link.bytes, None, "and carries no size");
+        assert_eq!(link.path, at("nest-link"), "at its own path");
+        assert_eq!(child(&level, "nest").unwrap().path, at("nest"));
+        let paths: HashSet<&str> = level
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|node| node.path.as_str())
+            .collect();
+        assert_eq!(
+            paths.len(),
+            level.children.as_ref().unwrap().len(),
+            "no two rows share one path"
+        );
+
+        let out = child(&level, "out-link").unwrap();
+        assert_eq!(
+            out.kind,
+            NodeKind::Folder,
+            "a link leading outside still lists as a folder"
+        );
+        assert_eq!(out.path, at("out-link"));
+
+        let file_link = child(&level, "file-link").unwrap();
+        assert_eq!(file_link.kind, NodeKind::File);
+        assert_eq!(file_link.bytes, Some(2), "with its target's size");
+        assert_eq!(file_link.path, at("file-link"));
+
+        let dangling = child(&level, "dangling").unwrap();
+        assert_eq!(dangling.kind, NodeKind::File, "a link to nothing is a leaf");
+        assert_eq!(dangling.bytes, Some(0));
+
+        let labels: Vec<&str> = level
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "nest",
+                "nest-link",
+                "out-link",
+                "dangling",
+                "file-link",
+                "plain.txt"
+            ],
+            "a linked folder sorts with the folders"
+        );
+
+        let expanded = tree(Some(&at("nest-link")), &input);
+        let inside: Vec<String> = expanded
+            .children
+            .unwrap()
+            .iter()
+            .map(|node| format!("{:?}:{}", node.kind, node.label))
+            .collect();
+        assert_eq!(
+            inside,
+            vec!["Folder:inner", "File:a.txt"],
+            "expanding the link lists its target"
         );
     }
 }

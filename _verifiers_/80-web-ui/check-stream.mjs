@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
  * 80-web-ui — the live event stream, judged against DSH's `$events` stream (DSH parity phase B, developer-ten).
@@ -22,16 +23,26 @@ after(() => Promise.all([...servers].map((server) => server.close())))
 
 /** Spawn `heddle web` on a free port with a scripted endpoint; resolves once it prints its URL. */
 function startServer(label, steps = [{ text: 'scripted answer' }], extraEnv = {}) {
+  const home = isolatedHome(`stream-${label}`)
+  const work = fixtureDir(`stream-${label}-work`)
+  const { config, script } = scriptedConfig({ home, steps })
+  return spawnHeddle({ home, work, config, script, port: 0, extraEnv })
+}
+
+/** Start the same server again — same home, secret, store and port — after it was stopped. */
+function restartServer(server) {
+  return spawnHeddle({ home: server.home, work: server.work, config: server.config, script: server.script, port: server.port, extraEnv: server.extraEnv })
+}
+
+function spawnHeddle({ home, work, config, script, port, extraEnv }) {
   return new Promise((resolvePromise, reject) => {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const home = isolatedHome(`stream-${label}`)
-      const work = fixtureDir(`stream-${label}-work`)
-      const { config, script } = scriptedConfig({ home, steps })
+      const env = { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config, ...extraEnv }
       const child = spawn(
-        ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
-        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] },
+        ...heddleCommand(['web', '--host', '127.0.0.1', '--port', String(port), '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
+        { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
       let settled = false
@@ -45,8 +56,19 @@ function startServer(label, steps = [{ text: 'scripted answer' }], extraEnv = {}
             port: Number(match[2]),
             home,
             work,
+            config,
             script,
+            extraEnv,
+            env,
             output: () => output,
+            /** Stop the process and keep its home, so it can be started again. */
+            stop: () =>
+              new Promise((done) => {
+                servers.delete(server)
+                if (child.exitCode !== null) return done()
+                child.once('exit', () => done())
+                child.kill('SIGKILL')
+              }),
             close: async () => {
               servers.delete(server)
               child.kill('SIGKILL')
@@ -104,7 +126,7 @@ async function api(server, cookie, method, path, body) {
  * Open `GET /api/events` with the cookie and parse frames as they arrive.
  * `frames` holds `{ event, data, id, comment }`; `next(predicate, ms)` resolves with the first frame that matches.
  */
-async function openStream(server, cookie, headers = {}) {
+async function openStream(server, cookie, headers = {}, path = '/api/events') {
   const http = await import('node:http')
   const stream = { frames: [], chunks: [], closed: false, status: null }
   const waiters = []
@@ -118,7 +140,7 @@ async function openStream(server, cookie, headers = {}) {
       }
     }
   }
-  const request = http.get({ host: '127.0.0.1', port: server.port, path: '/api/events', headers: { cookie, accept: 'text/event-stream', ...headers } }, (response) => {
+  const request = http.get({ host: '127.0.0.1', port: server.port, path, headers: { cookie, accept: 'text/event-stream', ...headers } }, (response) => {
     stream.status = response.statusCode
     response.setEncoding('utf8')
     response.on('data', (chunk) => {
@@ -328,6 +350,285 @@ test('an idle stream carries a heartbeat every interval, and a peer that stops r
     await stream.next((frame) => frame.event === 'heartbeat' && frame.at > Date.now() - 200, 2000)
     stalled.socket.destroy()
     stream.close()
+  } finally {
+    await server.close()
+  }
+})
+
+/** The sequence number of a frame id `<epoch>-<seq>`. */
+const seqOf = (id) => Number(String(id).slice(String(id).lastIndexOf('-') + 1))
+
+test('a reconnecting client is given every frame it missed after its cursor, and a cursor from another start gets reset', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const server = await startServer('follow', [
+    { text: 'one ', toolCall: { name: 'bash', arguments: { command: 'true' } } },
+    { text: 'two' },
+  ])
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'follow' })
+    const session = created.json.session
+
+    /** Every frame on the followed stream carries an id, `<epoch>-<seq>`, counting up by one. */
+    const first = await openStream(server, cookie)
+    const ready = await first.next((frame) => frame.event === 'ready')
+    assert.equal(typeof ready.data.cursor, 'string', 'ready names the newest id')
+    assert.equal(ready.data.resumed, false, 'a first connection resumes nothing')
+    assert.ok(Number.isInteger(ready.data.heartbeatMs) && ready.data.heartbeatMs > 0, 'and says the heartbeat interval')
+    await runTurn(server, cookie, { session, prompt: 'first' })
+    await first.next((frame) => frame.event === 'session' && frame.data?.event?.type === 'turn/completed')
+    const numbered = first.frames.filter((frame) => frame.event === 'session')
+    assert.ok(numbered.every((frame) => /^[0-9a-f]+-\d+$/.test(frame.id ?? '')), 'every session frame has an id')
+    // The count runs over every numbered frame, not the session frames alone: a turn's bash call also publishes `jobs`
+    // frames (main's jobs, 04f454c4), and those are numbered in the same sequence, so they sit between session ids.
+    const seqs = first.frames.filter((frame) => typeof frame.id === 'string' && frame.id.length > 0).map((frame) => seqOf(frame.id))
+    assert.deepEqual(seqs, seqs.map((_, index) => seqs[0] + index), 'ids count up by one with no gap')
+    const lastSeen = numbered.at(-1).id
+    first.close()
+
+    /** A turn runs while no stream is open; the reconnect is given all of it, after ready, and nothing twice. */
+    const before = await logEntries(server, cookie, session)
+    await runTurn(server, cookie, { session, prompt: 'while away' })
+    const missed = (await logEntries(server, cookie, session)) - before
+    for (const [how, reconnect] of [
+      ['Last-Event-ID', () => openStream(server, cookie, { 'last-event-id': lastSeen })],
+      ['?cursor=', () => openStream(server, cookie, {}, `/api/events?cursor=${encodeURIComponent(lastSeen)}`)],
+    ]) {
+      const again = await reconnect()
+      const resumed = await again.next((frame) => frame.event === 'ready')
+      assert.equal(resumed.data.resumed, true, `${how}: the cursor was honoured`)
+      await again.next((frame) => frame.event === 'session' && frame.data?.event?.type === 'turn/completed')
+      const replayed = again.frames.filter((frame) => frame.event === 'session')
+      assert.equal(replayed.length, missed, `${how}: every entry written while away was replayed (${replayed.length} of ${missed})`)
+      assert.equal(seqOf(replayed[0].id), seqOf(lastSeen) + 1, `${how}: starting right after the cursor`)
+      assert.ok(again.frames.indexOf(resumed) < again.frames.indexOf(replayed[0]), `${how}: after ready`)
+      again.close()
+    }
+
+    /** A cursor this server never gave (another start) cannot be resumed: ready says so and reset follows. */
+    const stranger = await openStream(server, cookie, { 'last-event-id': '0000000000000000-12' })
+    const notResumed = await stranger.next((frame) => frame.event === 'ready')
+    assert.equal(notResumed.data.resumed, false, 'a cursor from another start is not honoured')
+    const reset = await stranger.next((frame) => frame.event !== null && frame.event !== 'ready' && frame.event !== 'heartbeat')
+    assert.equal(reset.event, 'reset', 'and the client is told to re-read its baselines')
+    stranger.close()
+  } finally {
+    await server.close()
+  }
+})
+
+test('the page shows it is reconnecting while the server is down, and a session made meanwhile appears without a reload', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  let server = await startServer('page-reconnect', [{ text: 'scripted answer' }], { HEDDLE_WEB_HEARTBEAT_MS: '500' })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'before the outage' })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 10_000), 'the page says its stream is open')
+    assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), true, 'and shows no connection notice')
+
+    /** DSH shows a connecting state while it retries; so must the page, within a few seconds of losing the server. */
+    await server.stop()
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "connecting"', 8000), 'the page knows the stream is down')
+    assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), false, 'and shows it')
+
+    /** A session made while the page cannot hear about it: the CLI writes the same store. */
+    // From the checkout, as the server runs: the TypeScript CLI composes its layers from its working folder.
+    const made = await runCli(['session', 'new', server.work, '--session-root', join(server.home, 'sessions')], { env: server.env })
+    assert.equal(made.code, 0, `the CLI made a session while the server was down: ${made.stderr}`)
+
+    server = await restartServer(server)
+    const sessions = await api(server, cookie, 'GET', '/api/sessions')
+    const fresh = sessions.json.find((entry) => entry.title !== 'before the outage')
+    assert.ok(fresh !== undefined, 'the restarted server lists the session made while it was down')
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 20_000), 'the page reconnects on its own')
+    assert.equal(await browser.evaluate('document.getElementById("connection-state").hidden'), true, 'and the notice goes')
+    assert.ok(
+      await browser.waitFor(`document.querySelector('#tree li[data-session-id="${fresh.id}"]') !== null`, 10_000),
+      'the session made while it was away appears in the tree without a reload',
+    )
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/** A turn whose first call is denied under workspace-write and whose retry asks to widen: an approval question. */
+const escalationSteps = (outsidePath) => [
+  { toolCall: { name: 'bash', arguments: { command: `echo outside > ${JSON.stringify(outsidePath)}` } } },
+  {
+    toolCall: {
+      name: 'bash',
+      arguments: {
+        command: `echo outside > ${JSON.stringify(outsidePath)}`,
+        sandbox_permissions: 'danger-full-access',
+        justification: 'the write target is outside the workspace and the task requires it',
+      },
+    },
+  },
+  { text: 'done' },
+]
+
+test('renames, workspace edits and settled approvals are pushed to every stream, numbered like every frame', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const outsideDir = fixtureDir('stream-push-outside')
+  const extra = fixtureDir('stream-push-extra')
+  const server = await startServer('push', escalationSteps(join(outsideDir, 'outside.txt')))
+  try {
+    const cookie = await cookieFor(server)
+    const pages = [await openStream(server, cookie), await openStream(server, cookie)]
+    for (const page of pages) await page.next((frame) => frame.event === 'ready')
+    /** Every page hears the change, as a frame with an id (so a page that was away is given it on reconnect). */
+    const heard = async (event, match, label) => {
+      const frames = await Promise.all(pages.map((page) => page.next((frame) => frame.event === event && match(frame.data), 10_000)))
+      for (const frame of frames) assert.match(frame.id ?? '', /^[0-9a-f]+-\d+$/, `${label}: numbered`)
+      return frames[0]
+    }
+
+    /** DSH pushes workspace increments: an added, renamed and removed root reach every page. */
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const added = await api(server, cookie, 'POST', '/api/workspaces', { path: extra })
+    assert.equal(added.status, 200, added.text)
+    const addedFrame = await heard('workspace', (data) => data?.type === 'workspace/added' && String(data.workspace?.path ?? '').includes('stream-push-extra'), 'an added workspace')
+    const workspaceId = addedFrame.data.workspace.id
+    const renamed = await api(server, cookie, 'PATCH', `/api/workspaces/${encodeURIComponent(workspaceId)}`, { title: 'pushed-root' })
+    assert.equal(renamed.status, 200, renamed.text)
+    await heard('workspace', (data) => data?.type === 'workspace/renamed' && data.workspace?.id === workspaceId, 'a renamed workspace')
+
+    /** DSH pushes api-session changes: a renamed session reaches every page with its new title. */
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'before' })
+    const session = created.json.session
+    const titled = await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title: 'pushed title' })
+    assert.equal(titled.status, 200, titled.text)
+    await heard('sessions', (data) => data?.type === 'session/renamed' && data.session === session && data.title === 'pushed title', 'a renamed session')
+
+    const removed = await api(server, cookie, 'DELETE', `/api/workspaces/${encodeURIComponent(workspaceId)}`)
+    assert.equal(removed.status, 200, removed.text)
+    await heard('workspace', (data) => data?.type === 'workspace/removed' && data.id === workspaceId, 'a removed workspace')
+
+    /** An approval answered anywhere is announced as settled to every page, with its outcome. */
+    const turn = runTurn(server, cookie, { session, prompt: 'write outside' })
+    const asked = await pages[0].next((frame) => frame.event === 'approval', 20_000)
+    const answered = await api(server, cookie, 'POST', `/api/approvals/${encodeURIComponent(asked.data.id)}`, { outcome: 'rejected' })
+    assert.equal(answered.status, 200, answered.text)
+    await heard('approval-settled', (data) => data?.type === 'approval/settled' && data.id === asked.data.id && data.outcome === 'rejected', 'a settled approval')
+    assert.equal((await turn).status, 200, 'the turn ended once its question was answered')
+    for (const page of pages) page.close()
+  } finally {
+    removeDir(outsideDir)
+    removeDir(extra)
+    await server.close()
+  }
+})
+
+test('a page redraws a rename and a new workspace made elsewhere, without a reload', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const extra = fixtureDir('stream-page-push-extra')
+  const server = await startServer('page-push')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'old title' })
+    const session = created.json.session
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor(`document.querySelector('#tree li[data-session-id="${session}"]') !== null`, 10_000), 'the session is in the tree')
+    await browser.evaluate('window.__heddleNoReload = true')
+
+    /** Another page renames the session: this one redraws the row, with no reload in between. */
+    await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title: 'renamed elsewhere' })
+    assert.ok(
+      await browser.waitFor(`(document.querySelector('#tree li[data-session-id="${session}"]')?.textContent ?? '').includes('renamed elsewhere')`, 8000),
+      'the renamed session shows its new title',
+    )
+
+    /** Another page adds a workspace: it appears in this tree too. */
+    await api(server, cookie, 'POST', '/api/workspaces', { path: extra })
+    assert.ok(
+      await browser.waitFor(`document.getElementById('tree').textContent.includes('stream-page-push-extra')`, 8000),
+      'the added workspace appears in the tree',
+    )
+    assert.equal(await browser.evaluate('window.__heddleNoReload === true'), true, 'and the page was never reloaded')
+  } finally {
+    browser.close()
+    removeDir(extra)
+    await server.close()
+  }
+})
+
+test('an approval answered on one page closes on every page', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const outsideDir = fixtureDir('stream-approve-outside')
+  const server = await startServer('approve', escalationSteps(join(outsideDir, 'outside.txt')))
+  const pages = [await openBrowser({ width: 1280, height: 900 }), await openBrowser({ width: 1280, height: 900 })]
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'two pages' })
+    const session = created.json.session
+    for (const page of pages) {
+      await page.goto(server.url)
+      await page.waitFor('document.body.dataset.ready === "true"', 25_000)
+      await page.waitFor(`document.querySelector('#tree li[data-session-id="${session}"]') !== null`, 10_000)
+      await page.evaluate(`(document.querySelector('li[data-session-id="${session}"] .row') || document.querySelector('li[data-session-id="${session}"]')).click()`)
+      assert.ok(await page.waitFor(`document.getElementById('session-title').textContent.includes('two pages')`, 10_000), 'each page has the session open')
+    }
+
+    /** One question, shown on both pages. */
+    const turn = runTurn(server, cookie, { session, prompt: 'write outside' })
+    for (const page of pages) {
+      assert.ok(await page.waitFor('document.getElementById("approval-card").hidden === false', 20_000), 'both pages show the question')
+    }
+
+    /** DSH ends the waterfall for every client once one answers: the other page's card goes without being pressed. */
+    await pages[0].evaluate('document.getElementById("approval-reject").click()')
+    assert.ok(await pages[0].waitFor('document.getElementById("approval-card").hidden === true', 10_000), 'the answering page closes its card')
+    assert.ok(await pages[1].waitFor('document.getElementById("approval-card").hidden === true', 5000), 'and the other page closes the same card on its own')
+    assert.equal(await pages[1].evaluate('document.getElementById("approval-note").hidden'), true, 'with no refusal note: nobody pressed a stale card')
+    assert.equal((await turn).status, 200, 'the turn ended once its question was answered')
+  } finally {
+    for (const page of pages) page.close()
+    removeDir(outsideDir)
+    await server.close()
+  }
+})
+
+test('a failed turn reaches every client and the log, not only the client that started it', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  // R-developer-six-2 (S83): the endpoint's step fails as a 502 does.
+  const server = await startServer('failed', [{ error: { status: 502, message: 'upstream answered 502' } }])
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work, title: 'fails' })
+    const session = created.json.session
+    const watcher = await openStream(server, cookie)
+    await watcher.next((frame) => frame.event === 'ready')
+
+    /** The client that started the turn is told, as before. */
+    const turn = await runTurn(server, cookie, { session, prompt: 'fail, please' })
+    assert.equal(turn.status, 200)
+    assert.match(turn.text, /event: error\n/, 'the starting client gets the error on its own response')
+
+    /** DSH's api-session/error: every other client hears it too, and for them the turn has ended. */
+    const failed = await watcher.next((frame) => frame.event === 'session' && frame.data?.session === session && frame.data?.event?.type === 'turn/failed', 10_000)
+    assert.match(String(failed.data.event.message), /502/, 'another client gets the failure with its message')
+
+    /** It is in the log, so a reload can tell the turn failed, and the transcript says so. */
+    const log = await (await fetch(`http://127.0.0.1:${server.port}/api/sessions/${encodeURIComponent(session)}/log`, { headers: { cookie } })).text()
+    assert.ok(log.split('\n').some((line) => line.includes('"type":"turn/failed"')), 'the log records the failed turn')
+    const read = await api(server, cookie, 'GET', `/api/sessions/${encodeURIComponent(session)}`)
+    const ended = (read.json?.turns ?? []).flatMap((entry) => entry.ended ?? [])
+    assert.ok(ended.some((reason) => /the turn failed: .*502/.test(reason)), `the transcript carries it as the stop reason (${JSON.stringify(ended)})`)
+    watcher.close()
   } finally {
     await server.close()
   }

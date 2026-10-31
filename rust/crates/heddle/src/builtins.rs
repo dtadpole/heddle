@@ -57,12 +57,16 @@ pub enum Builtin {
     TodoTool,
     /// `src/plugins/turns.ts`.
     Turns,
+    /// `src/plugins/locale.ts`: the interface language a person chose (issue #80).
+    Locale,
     /// `src/plugins/presets.ts`: the agent presets (inventory A96).
     Presets,
     /// `src/plugins/team.ts`.
     Team,
     /// `src/plugins/schedule.ts`.
     Schedule,
+    /// `src/plugins/jobs.ts`.
+    Jobs,
     /// `src/plugins/tools.ts`.
     Tools,
 }
@@ -233,6 +237,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         "heddle-agent",
     ),
     spec(
+        Builtin::Locale,
+        "plugins/locale",
+        "locale",
+        "locale",
+        Some("locale"),
+        &[],
+        "heddle-config",
+    ),
+    spec(
         Builtin::Presets,
         "plugins/presets",
         "presets",
@@ -258,6 +271,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         Some("schedule"),
         &["session", "model", "tools", "sandbox", "context"],
         "heddle-schedule",
+    ),
+    spec(
+        Builtin::Jobs,
+        "plugins/jobs",
+        "jobs",
+        "jobs",
+        Some("jobs"),
+        &["session", "model", "tools", "sandbox", "context"],
+        "heddle-jobs",
     ),
     spec(
         Builtin::Tools,
@@ -442,6 +464,9 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
             }
+            ComponentRef::Builtin(Builtin::Locale) => {
+                Some(Box::new(crate::adapters::LocaleComponent))
+            }
             ComponentRef::Builtin(Builtin::Presets) => {
                 Some(Box::new(crate::adapters::PresetsComponent))
             }
@@ -455,6 +480,7 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Schedule) => Some(Box::new(
                 crate::adapters::ScheduleComponent::new(self.env.clone()),
             )),
+            ComponentRef::Builtin(Builtin::Jobs) => Some(Box::new(crate::adapters::JobsComponent)),
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),

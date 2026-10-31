@@ -10,7 +10,7 @@
 //! | [`backend`] | [`SandboxBackend`], [`ConfinedArgv`], [`select_backend`], [`classify_outcome`], [`SandboxUnavailableError`] | `sandbox/backend.ts` |
 //! | [`seatbelt`] | the macOS rung | `sandbox/seatbelt.ts` |
 //! | [`linux`] | the bubblewrap and Landlock rungs | `sandbox/linux.ts` |
-//! | [`process`] | [`kill_process_group`]: a Stop or a timeout reaches everything a command started | `sandbox/process-group.ts` |
+//! | [`process`] | [`kill_process_group`], `signal_process_group`: a Stop, a timeout or a job kill reaches everything a command started | `sandbox/process-group.ts` |
 //! | [`escalation`] | [`approve_escalation`], [`validate_escalation_args`], [`EscalationRefusal`] | `sandbox/escalation.ts` |
 //! | [`transition`] | [`permission_transition`] | `sandbox/service.ts` |
 //! | [`service`] | [`SandboxService`], [`SandboxConfig`], [`SandboxDenial`] | `sandbox/service.ts` |
@@ -61,6 +61,8 @@ pub use mode::{
 };
 pub use paths::{canonical, contains};
 pub use process::kill_process_group;
+#[cfg(unix)]
+pub use process::signal_process_group;
 pub use service::{BackendChoice, SandboxConfig, SandboxDenial, SandboxHost, SandboxService};
 pub use transition::{
     FULL_ACCESS_CONFIRMATION, ModeChange, TransitionRefusal, permission_transition,
