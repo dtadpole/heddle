@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
@@ -62,13 +62,32 @@ export const BASH_SPILL_MAX_BYTES = 64 * 1024 * 1024
  * be written). Stated differences: heddle cuts the combined stdout and stderr, by characters (`bashOutputLimit`),
  * where DSH cuts each stream at 64,000 bytes.
  */
-export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH_SPILL_MAX_BYTES): string {
+export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH_SPILL_MAX_BYTES, io: SpillIo = NODE_SPILL_IO): string {
   if (combined.length <= limit) return combined
   let tail = combined.slice(combined.length - limit)
   // Never start on the second half of a surrogate pair.
   const first = tail.charCodeAt(0)
   if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1)
-  return `${tail}\n[output truncated; full output: ${spillOutput(combined, spillMaxBytes) ?? '(unavailable)'}]`
+  return `${tail}\n[output truncated; full output: ${spillOutput(combined, spillMaxBytes, io) ?? '(unavailable)'}]`
+}
+
+/** The file operations a spill makes. A test replaces them to model a failed write or a failed cleanup. */
+export interface SpillIo {
+  /** Create the file exclusively (`wx`, mode 0600) and answer its descriptor; throws when it cannot. */
+  readonly open: (path: string) => number
+  readonly write: (fd: number, bytes: Buffer) => void
+  readonly close: (fd: number) => void
+  readonly unlink: (path: string) => void
+}
+
+const NODE_SPILL_IO: SpillIo = {
+  open: (path) => openSync(path, 'wx', 0o600),
+  write: (fd, bytes) => {
+    let offset = 0
+    while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset)
+  },
+  close: (fd) => closeSync(fd),
+  unlink: (path) => rmSync(path, { force: true }),
 }
 
 /**
@@ -78,16 +97,46 @@ export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH
  * it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the marker never
  * points at a partial file (developer-five's review of #83). A completed file stays in the temporary directory, as DSH's do.
  */
-function spillOutput(full: string, spillMaxBytes: number): string | undefined {
-  const bytes = Buffer.from(full, 'utf8')
-  if (bytes.length > spillMaxBytes) return undefined
-  const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
+function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string | undefined {
+  /**
+   * The spill is optional, so nothing in it may fail the command: every step, the name included, is contained,
+   * and any failure answers "no file". Ownership is tracked rather than guessed. A file is removed only after this
+   * call's exclusive open succeeded, so an open that fails (an existing name, a missing or unwritable directory)
+   * removes nothing. A cleanup that fails is ignored, as the Rust twin ignores `remove_file`'s error
+   * (developer-five's review of #83).
+   */
   try {
-    writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' })
-    return path
-  } catch (error) {
-    // 'wx' refuses a name that already exists; that file is not ours to remove.
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') rmSync(path, { force: true })
+    const bytes = Buffer.from(full, 'utf8')
+    if (bytes.length > spillMaxBytes) return undefined
+    const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
+    let fd: number
+    try {
+      fd = io.open(path)
+    } catch {
+      return undefined
+    }
+    let closed = false
+    try {
+      io.write(fd, bytes)
+      closed = true
+      io.close(fd)
+      return path
+    } catch {
+      if (!closed) {
+        try {
+          io.close(fd)
+        } catch {
+          // Best effort: the descriptor is gone either way.
+        }
+      }
+      try {
+        io.unlink(path)
+      } catch {
+        // Best effort: a cleanup failure must not replace the command's result.
+      }
+      return undefined
+    }
+  } catch {
     return undefined
   }
 }
