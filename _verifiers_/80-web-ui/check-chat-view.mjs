@@ -2593,3 +2593,71 @@ test('markdown null or primitive JSON is answered with validation, never left ha
     assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2500) })).status, 200)
   } finally { await server.close() }
 })
+
+test('only a turn that edited files shows the Edited files card, under its own answer, live and after a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-five-8: after one write, every later answer showed that write's card, and a new copy
+   * was added under each new answer, because the live path pinned every edited turn's card to the last answers counted
+   * from the end. DSH's ChangedFiles card belongs to the turn that changed the files. The first turn writes a file;
+   * the script is then rewritten (both builds read it per round) so the next two turns only answer.
+   */
+  const server = await startServer('edits-live', (work) => [
+    { toolCall: { name: 'write_file', arguments: { path: join(work, 'a.txt'), content: 'one\n' } }, reasoning: 'writing a.txt' },
+    { text: 'wrote a.txt' },
+  ])
+  const browser = await openBrowser()
+  const cards = `JSON.stringify([...document.querySelectorAll('#log .turn.assistant')].map((row) => ({
+    text: [...row.childNodes].filter((node) => !(node instanceof Element && node.matches('[data-changed-files], .actions, .turn-usage, .turn-notice'))).map((node) => node.textContent).join('').trim(),
+    cards: row.querySelectorAll('[data-changed-files]').length,
+  })))`
+  const settled = (text, count) => `[...document.querySelectorAll('#log .turn.assistant')].filter((row) => row.dataset.rendered === 'true' && row.textContent.includes(${JSON.stringify(text)})).length === ${count}`
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    /**
+     * The page creates the session from its first message. (A session made by /api/folders/session and opened from the
+     * tree draws each live turn twice on TS, a separate defect, live-testing draft developer-eleven-1; this check judges
+     * the card.)
+     */
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await sendMessage(browser, 'write a.txt')
+    assert.ok(await browser.waitFor(settled('wrote a.txt', 1), 25_000), 'the writing turn finishes')
+    assert.ok(await browser.waitFor(`document.querySelectorAll('#log [data-changed-files]').length === 1`, 10_000), 'and shows its card')
+    writeFileSync(join(server.home, 'script.json'), JSON.stringify({ steps: [{ text: 'only an answer' }] }))
+    await sendMessage(browser, 'read it back')
+    assert.ok(await browser.waitFor(settled('only an answer', 1), 25_000), 'the second turn finishes')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await sendMessage(browser, 'and once more')
+    assert.ok(await browser.waitFor(settled('only an answer', 2), 25_000), 'the third turn finishes')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+
+    const judge = (rows, when) => {
+      assert.equal(rows.reduce((sum, row) => sum + row.cards, 0), 1, `one card in all, ${when} (${JSON.stringify(rows)})`)
+      const carded = rows.find((row) => row.cards === 1)
+      assert.equal(carded?.text, 'wrote a.txt', `under the answer of the turn that wrote, ${when}`)
+      for (const row of rows.filter((entry) => entry.text.includes('only an answer'))) {
+        assert.equal(row.cards, 0, `a turn that edited nothing shows none, ${when}`)
+      }
+      assert.ok(rows.every((row) => !row.text.includes('Edited')), `no card's words are drawn into an answer, ${when}`)
+    }
+    judge(JSON.parse(await browser.evaluate(cards)), 'live')
+
+    const listed = await api(server.url, cookie, '/api/sessions')
+    const session = (Array.isArray(listed.body) ? listed.body : listed.body.sessions ?? [])[0]?.id
+    assert.ok(typeof session === 'string', 'the page created the session')
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    if (!(await browser.waitFor(settled('only an answer', 2), 5_000).catch(() => false))) {
+      await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    }
+    assert.ok(await browser.waitFor(settled('only an answer', 2), 10_000), 'the reloaded session draws its answers')
+    judge(JSON.parse(await browser.evaluate(cards)), 'after a reload')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
