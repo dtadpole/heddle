@@ -9085,6 +9085,15 @@ function setNote(text) {
   treeNote.hidden = text === undefined || text === null || text === ''
 }
 
+/**
+ * Say why an archived session did not open, and open nothing (DSH's `notifyArchivedNotOpenable`). The app-wide archive
+ * notice says it where the page has one (`showArchiveNotice`, hd/developer-eight-archive); otherwise the tree's note does.
+ */
+function notifyArchivedNotOpenable() {
+  if (typeof showArchiveNotice === 'function') showArchiveNotice('archivedNotOpenable')
+  else setNote(WorkspaceTree.ARCHIVED_NOT_OPENABLE)
+}
+
 const FOLDER_PATH = 'M2 4.6A1.6 1.6 0 0 1 3.6 3h2.6l1.6 2h4.6A1.6 1.6 0 0 1 14 6.6v4.8A1.6 1.6 0 0 1 12.4 13H3.6A1.6 1.6 0 0 1 2 11.4z'
 /** The one mark that distinguishes a type folder from a plain one: the braces around its name. */
 const TYPE_MARK = 'M6.3 7.4 5 9.5l1.3 2.1M9.7 7.4 11 9.5l-1.3 2.1'
@@ -10479,7 +10488,19 @@ const WorkspaceTree = (() => {
     return shown > INITIAL ? 'less' : null
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+  /** DSH's `toast.archivedNotOpenable` (`dsh-client-ui-workspace` lib/client.js:4934), word for word. */
+  const ARCHIVED_NOT_OPENABLE = 'Archived sessions cannot be opened. Unarchive it to view.'
+
+  /**
+   * Whether clicking a row opens what it names. An **archived session** does not: DSH's browser guards opening
+   * (`guardedOpen`, lib/client.js:3532-3538), says why, and opens nothing; Rename, Fork and Unarchive stay in its menu.
+   * Measured before (live-testing draft developer-six-7): the click opened the session with a working composer.
+   */
+  function opensOnClick(node) {
+    return !(node?.kind === 'session' && node.archived === true)
+  }
+
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow, ARCHIVED_NOT_OPENABLE, opensOnClick }
 })()
 /* workspace-tree:end */
 
@@ -10762,6 +10783,8 @@ function nodeRow(node, depth = 0) {
    */
   /** The archived state on the item itself, so a check (and a future style) can tell an archived row without reading text. */
   if (node.archived === true) li.dataset.archived = 'true'
+  /** An archived session row explains to a screen reader that it cannot be opened until restored (DSH, lib/client.js:2279). */
+  if (!WorkspaceTree.opensOnClick(node)) li.setAttribute('aria-description', WorkspaceTree.ARCHIVED_NOT_OPENABLE)
   const rowTools = document.createElement('span')
   rowTools.className = 'row-tools'
   /**
@@ -10860,6 +10883,10 @@ function nodeRow(node, depth = 0) {
       return
     }
     if (node.kind === 'session') {
+      if (!WorkspaceTree.opensOnClick(node)) {
+        notifyArchivedNotOpenable()
+        return
+      }
       await selectSession(node)
       return
     }

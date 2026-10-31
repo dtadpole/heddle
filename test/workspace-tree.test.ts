@@ -36,6 +36,8 @@ interface Tree {
   nextWatermark: (total: number, shown: number) => number
   overflow: (total: number, shown: number) => 'more' | 'less' | null
   sessionOrder: (left: unknown, right: unknown) => number
+  ARCHIVED_NOT_OPENABLE: string
+  opensOnClick: (node: unknown) => boolean
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -158,4 +160,18 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+test('an archived session row does not open, and says why in DSH\'s words', () => {
+  /**
+   * DSH's workspace browser guards opening (dsh-client-ui-workspace lib/client.js:3532-3538, guardedOpen): an archived
+   * session's row raises "Archived sessions cannot be opened. Unarchive it to view." (toast.archivedNotOpenable,
+   * :4934) and opens nothing, and the row carries that sentence as its aria-description (:2279). Measured before (live-
+   * testing draft developer-six-7): clicking an archived row opened it with a working composer.
+   */
+  assert.equal(tree.ARCHIVED_NOT_OPENABLE, 'Archived sessions cannot be opened. Unarchive it to view.')
+  const live = { kind: 'session', path: 'session:s-1', session: { id: 's-1' } }
+  assert.equal(tree.opensOnClick(live), true, 'a live session opens')
+  assert.equal(tree.opensOnClick({ ...live, archived: true }), false, 'an archived one does not')
+  assert.equal(tree.opensOnClick({ kind: 'folder', path: '/w/a', archived: true }), true, 'only a session row is guarded')
 })
