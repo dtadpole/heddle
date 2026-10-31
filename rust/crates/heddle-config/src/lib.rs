@@ -47,7 +47,9 @@
 //! ([`command::run`]). The port plan and what remains (step 9, the verifier) are in the crate's
 //! `INDEX.md`.
 
+mod builtin_forms;
 pub mod command;
+mod component_schemas;
 mod compose;
 mod endpoints;
 mod env;
@@ -69,6 +71,12 @@ mod template;
 mod validate;
 mod value;
 
+pub use builtin_forms::{
+    HEDDLE_HOME_PLACEHOLDER, builtin_form, builtin_form_modules, form_problem,
+};
+pub use component_schemas::{
+    context_schema, goal_schema, jobs_schema, schedule_schema, subagent_tool_schema, team_schema,
+};
 pub use compose::{ComponentName, ComposedRow, EntryRow, Provenance, compose, origin_of};
 pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 
 import { classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
-import { killProcessGroup } from '../sandbox/process-group.ts'
+import { killProcessGroup, trackGroup, untrackGroup } from '../sandbox/process-group.ts'
 import type { SandboxMode, SandboxService } from '../sandbox/service.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import { launchShell, shellEnv, type BashBackground, type ForegroundRun } from '../tools/builtin.ts'
@@ -124,6 +124,12 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
     }
     pid = child.pid
     spawned = child
+    /**
+     * The process-exit backstop the bash tool's own launcher uses (`trackGroup`, issue #6): if this process exits
+     * without its graceful teardown, the job's whole group ends with it instead of outliving the harness. A promoted
+     * foreground call runs here too, so without it the backstop would miss every promoted command.
+     */
+    trackGroup(pid)
     if (pid !== undefined) spec.onSpawn?.(pid)
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
     const take = (channel: 'stdout' | 'stderr', text: string): void => {
@@ -145,12 +151,14 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
     }
     child.on('error', (error) => {
       closed = true
+      untrackGroup(pid)
       seal()
       if (killTimer !== undefined) clearTimeout(killTimer)
       finish({ status: cancelled && pid === undefined ? 'killed' : 'failed', detail: error.message })
     })
     child.on('close', (code, signal) => {
       closed = true
+      untrackGroup(pid)
       take('stdout', decoders.stdout.end())
       take('stderr', decoders.stderr.end())
       seal()

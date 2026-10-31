@@ -130,15 +130,15 @@ test('the composer and the empty conversation follow the interface language, idl
     await browser.goto(server.url)
     assert.ok(await browser.waitFor(`document.body.dataset.ready === 'true'`, 20_000), 'the page is up')
     const english = await browser.evaluate(WORDS)
-    assert.equal(english.placeholder, 'Message or run a task, / commands, @ files or sessions')
+    assert.equal(english.placeholder, 'Message or run a task, / commands')
     assert.equal(english.send, 'Send message')
 
     await chooseLanguage(browser, 'zh')
     assert.deepEqual(await browser.evaluate(WORDS), {
-      placeholder: '发消息或创建任务, / 调用指令, @ 文件或对话',
+      placeholder: '发消息或创建任务, / 调用指令',
       attach: '添加文件或调用指令',
       attachTitle: '添加文件或插入工作区路径',
-      pending: '待发送附件',
+      pending: '待发送文件',
       send: '发送消息',
       sendTitle: '发送消息 — Enter · Shift+Enter 换行',
       stop: '停止生成',
@@ -158,7 +158,7 @@ test('the composer and the empty conversation follow the interface language, idl
 
     await chooseLanguage(browser, 'en')
     const back = await browser.evaluate(`({ send: document.getElementById('send').getAttribute('aria-label'), placeholder: document.querySelector('#prompt textarea').getAttribute('placeholder') })`)
-    assert.deepEqual(back, { send: 'Queue message', placeholder: 'Message or run a task, / commands, @ files or sessions' }, 'and English comes back at once')
+    assert.deepEqual(back, { send: 'Queue message', placeholder: 'Message or run a task, / commands' }, 'and English comes back at once')
     assert.ok(await browser.waitFor(`document.getElementById('stop').hidden`, 15_000), 'the turn finishes')
   } finally {
     browser.close()
