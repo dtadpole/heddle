@@ -13,7 +13,8 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
  * its row menu's `Unarchive session`, and from **search**, where an archived result carries an `Unarchive session`
  * button and choosing the result explains that it cannot be opened ("Archived sessions cannot be opened. Unarchive it
  * to view.") without clearing the query or navigating. Archiving a session with running work asks first: the Host
- * refuses the plain archive and names the work, and the stop-and-archive dialog lists it ("The turn in progress"),
+ * refuses the plain archive and names the work, and the stop-and-archive dialog lists it ("The turn in progress", and
+ * its running bash call as "1 background job: sleep 40"),
  * Cancel leaves it running, and Stop and archive stops it, archives it and shows a notice with `undo`.
  *
  * The row menu is judged where it was found wanting: on 29 Oct its right part lay under the conversation panel
@@ -285,7 +286,13 @@ test('an archived session is restored from Archived only and from search, and a 
       `“${title}” still has work in progress. Archiving stops it first; you can restore the session later from the “All conversations (show archived)” filter in the sidebar, and the stopped work will not resume on its own.`,
       'naming the session and the way back',
     )
-    assert.deepEqual(dialog.work, ['The turn in progress'], 'and listing the work the server named')
+    /**
+     * The work the server named, family by family: the turn, and its running bash call, which is a job as well (dsh-tool-bash
+     * registers every call's process with `ctx.jobs` as it starts, lib/index.js:210-216). Judged as a set: DSH's order is
+     * turn, job, subagent, schedule, and the server's order, with the schedule family, is fixed in
+     * hd/developer-eight-archive-activity (R-developer-eight-13).
+     */
+    assert.deepEqual([...dialog.work].sort(), ['1 background job: sleep 40', 'The turn in progress'], `and listing the work the server named\nsaw: ${JSON.stringify(dialog.work)}`)
     assert.equal(dialog.action, 'Stop and archive')
     await browser.evaluate(`[...document.querySelectorAll('#session-archive [data-ws-close]')].find((button) => button.textContent.trim() === 'Cancel').click()`)
     assert.equal(await browser.evaluate(`document.getElementById('session-archive').open`), false, 'Cancel closes it')
