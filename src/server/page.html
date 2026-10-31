@@ -11879,9 +11879,15 @@ function rememberExpanded() {
   }
 }
 
+/**
+ * Set the note under the tree. The note is a live region (N9), and every tree draw sets it, mostly to the text it already
+ * holds; a screen reader may announce a live region again whenever it is written, so the same text is not written again
+ * (developer-ten's review of follow-up 2).
+ */
 function setNote(text) {
-  treeNote.textContent = text ?? ''
-  treeNote.hidden = text === undefined || text === null || text === ''
+  const next = text ?? ''
+  if (treeNote.textContent !== next) treeNote.textContent = next
+  treeNote.hidden = next === ''
 }
 
 /**
@@ -14540,14 +14546,16 @@ const WorkspaceTree = (() => {
   }
 
   /**
-   * A tree row's `title`, or `undefined` for none (#109). The row is focusable, so its `title` is also what a keyboard or
-   * screen-reader user hears for it. DSH's rows carry no `title` and no `aria-label` at all: its session row
-   * (`SessionNodeItem`, `dsh-client-ui-workspace` `lib/client.js:2273-2280`) has only `aria-selected` and, archived,
-   * `aria-description`; its workspace row (`ProjectRowItem`, `:1965-1971`) only `aria-expanded`. The full title and the
-   * folder are on the pointer's hover card (`copyText`, `:2364` and `:2055`). So a session row's `title` is the display
-   * title its label shows (and may clip), the name its card shows; every other row has none. Never the session's
-   * definition folder (`<folder>/_sessions_/session-…`), nor its working folder: the first is an internal path, and either can
-   * carry the home directory. The page keeps the definition in `data-definition`, which nothing shows or reads aloud.
+   * A tree row's `title`, or `undefined` for none (#109). It is set on the row's `.row`, the pointer's target; since
+   * F4 the focusable element is the tree item around it (`li`, the row's one Tab stop, #92), which a keyboard or
+   * screen reader names from its contents, not from this `title`. DSH's rows carry no `title` and no `aria-label` at
+   * all: its session row (`SessionNodeItem`, `dsh-client-ui-workspace` `lib/client.js:2273-2280`) has only
+   * `aria-selected` and, archived, `aria-description`; its workspace row (`ProjectRowItem`, `:1965-1971`) only
+   * `aria-expanded`. The full title and the folder are on the pointer's hover card (`copyText`, `:2364` and
+   * `:2055`). So a session row's `title` is the display title its label shows (and may clip), the name its card
+   * shows; every other row has none. Never the session's definition folder (`<folder>/_sessions_/session-…`), nor
+   * its working folder: the first is an internal path, and either can carry the home directory. The page keeps the
+   * definition in `data-definition`, which nothing shows or reads aloud.
    */
   function rowTooltip(node) {
     return node !== null && typeof node === 'object' && node.kind === 'session' ? rowLabel(node) : undefined
