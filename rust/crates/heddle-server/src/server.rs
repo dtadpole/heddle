@@ -47,7 +47,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
-use axum::http::{Method, StatusCode, header::HOST};
+use axum::http::{HeaderMap, Method, StatusCode, header, header::HOST};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
@@ -755,7 +755,8 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
     if path == "/" && method == Method::GET {
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
-            return respond::html(StatusCode::OK, page::page());
+            let lang = page_language(&state, request.headers());
+            return respond::html(StatusCode::OK, page::with_language(page::page(), lang));
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
@@ -864,8 +865,25 @@ async fn healthz(State(state): State<AppState>) -> Response {
     healthz_body(state.port())
 }
 
-async fn page_route() -> Response {
-    respond::html(StatusCode::OK, page::page())
+async fn page_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    respond::html(
+        StatusCode::OK,
+        page::with_language(page::page(), page_language(&state, &headers)),
+    )
+}
+
+/// The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one
+/// the browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`.
+fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let locale = state
+        .harness()
+        .locale
+        .unwrap_or_default()
+        .for_request(accept);
+    heddle_config::document_language(locale)
 }
 
 async fn events_route(State(state): State<AppState>) -> Response {
