@@ -5667,6 +5667,101 @@ test('archiving a session with running work is refused with the work named, and 
   }
 })
 
+test('an active reminder keeps a session from a quiet archive: the refusal names it after the turn, and stop: true removes it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * R-developer-eight-13. DSH's schedule plugin is a `workspace/session-activity` provider too (`dsh-schedule`
+   * lib/index.js:2043-2064): a session with an active reminder answers `{kind: 'schedule', items: [{id, label: title}]}`,
+   * so even an idle session is refused a plain archive, and with `stopActivity` its `workspace/session-stop` listener
+   * removes every active reminder of the session (`stopSessionTasks`, :2273-2292). The families come in DSH's listener
+   * order, which puts the turn before the reminders. Judged over HTTP alone: the scripted model creates the reminder with
+   * `schedule_create`, the reminder routes read it back, and the flags route is asked to archive.
+   */
+  const h = harness('archive-reminder')
+  let live
+  const pending = []
+  try {
+    const script = join(h.home, 'script.json')
+    const setScript = (steps) => writeFileSync(script, `${JSON.stringify({ steps }, null, 2)}\n`)
+    const remind = (title) => ({ toolCall: { name: 'schedule_create', arguments: { prompt: `remember ${title}`, title, after_seconds: 3600 } } })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const post = (path, body) =>
+      fetch(new URL(path, live.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const get = async (path) => (await fetch(new URL(path, live.url), { headers: { cookie } })).json()
+    const metas = async () => get('/api/sessions')
+    const reminders = async (session) => (await get(`/api/schedule/list?session=${encodeURIComponent(session)}`)).reminders ?? []
+    const until = async (probe, ms = 15_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; ) {
+        const value = await probe()
+        if (value) return value
+        await new Promise((done) => setTimeout(done, 200))
+      }
+      return undefined
+    }
+
+    /** An idle session whose only work is a reminder an hour away. */
+    setScript([remind('Stand-up'), { text: 'reminder set' }])
+    const turnText = await (await post('/api/turn', { prompt: 'remind me about the stand-up', folder: h.work })).text()
+    const idle = /"session":"(session-[^"]+)"/.exec(turnText)?.[1]
+    assert.ok(idle, `the turn names its session\n${turnText.slice(0, 400)}`)
+    const [reminder] = await reminders(idle)
+    assert.equal(reminder?.title, 'Stand-up', `the scripted turn created the reminder\nsaw: ${JSON.stringify(await reminders(idle))}`)
+    assert.equal((await metas()).find((meta) => meta.id === idle)?.running, false, 'and its turn has ended')
+
+    const refused = await post(`/api/sessions/${idle}/flags`, { archived: true })
+    const refusal = await refused.json()
+    assert.equal(refused.status, 409, `an idle session with an active reminder is not archived quietly\n${JSON.stringify(refusal)}`)
+    assert.equal(refusal.code, 'active', 'and the refusal says why')
+    assert.deepEqual(refusal.activity, [{ kind: 'schedule', items: [{ id: reminder.id, label: 'Stand-up' }] }], `and names the reminder by its title, DSH's schedule family\n${JSON.stringify(refusal)}`)
+    assert.equal((await reminders(idle)).length, 1, 'the refusal removes nothing')
+    assert.notEqual((await metas()).find((meta) => meta.id === idle)?.archived, true, 'and archives nothing')
+
+    const stopped = await post(`/api/sessions/${idle}/flags`, { archived: true, stop: true })
+    assert.equal(stopped.status, 200, 'stop: true is the caller agreeing to stop it')
+    assert.equal((await stopped.json()).archived, true, 'and the session is archived')
+    assert.deepEqual(await reminders(idle), [], "and its reminder is gone, as DSH's stopSessionTasks removes it")
+
+    /**
+     * A running turn that has just set a reminder: the refusal lists the turn first, then the reminder. It runs in a
+     * folder of its own, because a folder holds one session and the first one is archived now.
+     */
+    const second = join(h.work, 'review')
+    mkdirSync(second, { recursive: true })
+    setScript([remind('Review'), { toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } }, { text: 'slept' }])
+    pending.push(post('/api/turn', { prompt: 'set a review reminder, then wait', folder: second }).then((response) => response.text()))
+    const busy = await until(async () => {
+      const meta = (await metas()).find((one) => one.id !== idle && one.running === true)
+      return meta !== undefined && (await reminders(meta.id)).length === 1 ? meta : undefined
+    })
+    const seen = async () =>
+      JSON.stringify(await Promise.all((await metas()).map(async (meta) => ({ id: meta.id, running: meta.running, archived: meta.archived, reminders: (await reminders(meta.id)).map((one) => one.title) }))))
+    assert.ok(busy, `a turn is running and has set its reminder\nsaw: ${await seen()}`)
+    const [review] = await reminders(busy.id)
+    const both = await (await post(`/api/sessions/${busy.id}/flags`, { archived: true })).json()
+    assert.deepEqual(
+      both.activity,
+      [{ kind: 'turn' }, { kind: 'schedule', items: [{ id: review.id, label: 'Review' }] }],
+      `the turn comes before the reminder, DSH's listener order\n${JSON.stringify(both)}`,
+    )
+    const stopBoth = await post(`/api/sessions/${busy.id}/flags`, { archived: true, stop: true })
+    assert.equal(stopBoth.status, 200, 'stop: true archives the running session')
+    assert.deepEqual(await reminders(busy.id), [], 'and removes its reminder')
+    const ended = await until(async () => (await metas()).find((meta) => meta.id === busy.id)?.running === false)
+    assert.ok(ended, 'and stops its turn')
+  } finally {
+    live?.kill()
+    await Promise.allSettled(pending)
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a clipped session title crawls on hover and returns on leave', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
