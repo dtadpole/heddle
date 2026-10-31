@@ -158,6 +158,9 @@ pub enum ForkOutcome {
         at_seq: u64,
         last_seq: Option<u64>,
     },
+    /// Refused with the store's own sentence — the source's folder is gone (#56). Answered `400 { error, code }`
+    /// (`session/folder-missing`), as #106's unwritable branch is.
+    Refused(ServiceError),
     Forked(CreatedSession),
 }
 

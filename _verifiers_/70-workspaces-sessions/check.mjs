@@ -2692,6 +2692,97 @@ test('a session title of only control or escape characters is refused on rename,
   }
 })
 
+/**
+ * A workspace whose folder was deleted outside heddle, served for the checks below (#56): the folder registered, one
+ * session with one answered turn in it, then the folder removed. `call` and `post` speak to the server with its cookie.
+ */
+async function goneFolderFixture(label) {
+  const h = harness(label)
+  const top = fixtureDir(`${label}-top`)
+  const folder = join(top, 'w')
+  mkdirSync(folder, { recursive: true })
+  const live = await startServer(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+    { ...h.env, HOME: h.home },
+  )
+  const origin = new URL(live.url).origin
+  const handshake = await fetch(live.url, { redirect: 'manual' })
+  const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+  const call = async (path, init = {}) => {
+    const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    const text = await response.text()
+    let body
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = text
+    }
+    return { status: response.status, body }
+  }
+  const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
+  try {
+    const added = await post('/api/workspaces', { path: folder })
+    assert.equal(added.status, 200, `the folder is registered (${JSON.stringify(added.body)})`)
+    const made = await post('/api/sessions', { branch: folder })
+    assert.equal(made.status, 200, `a session starts there while the folder exists (${JSON.stringify(made.body)})`)
+    const first = await post('/api/turn', { session: made.body.session, prompt: 'a conversation worth continuing' })
+    assert.ok(String(first.body).includes('event: done'), `its first turn completes\n${first.body}`)
+    const canonical = realpathSync(folder)
+    removeDir(folder)
+    assert.equal(existsSync(folder), false, 'the fixture really deleted the folder')
+    return { h, top, folder, canonical, session: made.body.session, live, call, post, reason: `This workspace's folder no longer exists: "${basename(canonical)}"` }
+  } catch (error) {
+    live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(top)
+    throw error
+  }
+}
+
+test('a fork or a turn in a session whose folder was deleted fails naming the folder, as DSH refuses them, and the folder stays gone', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * #56, the DSH-parity half, measured on both builds before the change: a fork answered 200 and put the deleted folder
+   * back with a `_sessions_` drawer in it, and a turn ran on as if nothing had happened — its relative `write_file`
+   * recreated the folder. DSH creates no directory for either: a turn's prompt assembly fails when the session's original
+   * directory is gone (`working-directory: directory does not exist`, dsh-working-directory lib/index.js:87-102 and
+   * :123-131), and a fork's workspace attach refuses a cwd that does not resolve (dsh-api-session-controller
+   * lib/index.js:902-909). Here the fork is a 400 naming the folder, and the turn's stream ends in an error naming it.
+   */
+  let fixture
+  try {
+    fixture = await goneFolderFixture('gone-folder-parity')
+    const { h, folder, call, post, session, reason } = fixture
+    const before = (await call('/api/sessions')).body.length
+
+    const forked = await post(`/api/sessions/${session}/fork`)
+    assert.equal(forked.status, 400, `the fork is refused (${JSON.stringify(forked.body)})`)
+    assert.equal(forked.body.error, reason, 'naming the folder by its name, as #106 names a folder')
+    assert.equal(forked.body.code, 'session/folder-missing', 'with the code the page reads')
+    assert.equal(existsSync(folder), false, 'and the folder is not recreated')
+    assert.equal((await call('/api/sessions')).body.length, before, 'and no child session is left')
+
+    /** The turn asks for a relative write, the one call that would put the folder back if the turn ran. */
+    scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'write_file', arguments: { path: 'notes.md', content: 'x\n' } } }, { text: 'wrote it' }] })
+    const turn = await post('/api/turn', { session, prompt: 'write a note' })
+    const stream = String(turn.body)
+    const failure = /event: error\ndata: (.*)/.exec(stream)
+    assert.ok(failure !== null, `the turn ends in an error\n${stream}`)
+    assert.equal(JSON.parse(failure[1]).message, reason, 'naming the folder')
+    assert.ok(!stream.includes('event: done'), 'and does not complete')
+    assert.equal(toolResultsInStream(stream).length, 0, 'no tool ran')
+    assert.equal(existsSync(folder), false, 'and the folder stays gone')
+  } finally {
+    fixture?.live.kill()
+    if (fixture !== undefined) {
+      removeDir(fixture.h.home)
+      removeDir(fixture.h.work)
+      removeDir(fixture.top)
+    }
+  }
+})
+
 test('a workspace moved before another keeps its place across a restart, as DSH workspace/insertBefore does', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
