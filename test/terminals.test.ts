@@ -72,7 +72,7 @@ test('a terminal runs a shell in a PTY of the asked size, and a resize reaches i
   try {
     const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 90, rows: 25, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
     assert.notEqual(info, 'limit')
-    if (info === 'limit') return
+    if (typeof info === 'string') return assert.fail(info)
     assert.equal(info.shell, '/bin/sh')
     const out = watch(terminals, 's1', info.id)
     terminals.input('s1', info.id, 'stty size; pwd; echo "SUM-$((6*7))"\n')
@@ -94,7 +94,7 @@ test('the shell exit status is reported, and an exited terminal takes no input',
   const terminals = registry()
   try {
     const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
-    if (info === 'limit') return assert.fail('limit')
+    if (typeof info === 'string') return assert.fail(info)
     const out = watch(terminals, 's1', info.id)
     terminals.input('s1', info.id, 'exit 3\n')
     const deadline = Date.now() + 8000
@@ -117,7 +117,7 @@ test('a session holds at most maxTerminals, and one session cannot reach another
     terminals.create({ ...spec, session: 'a' })
     assert.equal(terminals.create({ ...spec, session: 'a' }), 'limit')
     assert.notEqual(terminals.create({ ...spec, session: 'b' }), 'limit', 'the cap is per session')
-    if (first === 'limit') return
+    if (typeof first === 'string') return assert.fail(first)
     assert.equal(terminals.list('b').some((terminal) => terminal.id === first.id), false)
     assert.equal(terminals.input('b', first.id, 'echo nope\n'), 'missing')
     assert.equal(terminals.attach('b', first.id, () => {}), undefined)
@@ -135,7 +135,7 @@ test('closing a terminal ends its background jobs too', { skip }, async () => {
   const terminals = registry()
   try {
     const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
-    if (info === 'limit') return assert.fail('limit')
+    if (typeof info === 'string') return assert.fail(info)
     const out = watch(terminals, 's1', info.id)
     terminals.input('s1', info.id, 'sleep 300 & echo BG=$!\n')
     const pid = Number((await out.until(/BG=(\d+)/))[1])
@@ -158,7 +158,7 @@ test('closing a session’s terminals and closing all of them end every shell', 
     const pids: number[] = []
     for (const session of ['a', 'a', 'b']) {
       const info = terminals.create({ ...spec, session })
-      if (info === 'limit') return assert.fail('limit')
+      if (typeof info === 'string') return assert.fail(info)
       const out = watch(terminals, session, info.id)
       terminals.input(session, info.id, 'sleep 300 & echo BG=$!\n')
       pids.push(Number((await out.until(/BG=(\d+)/))[1]))
@@ -180,7 +180,7 @@ test('the replay keeps only the newest replayBytes, never starting inside a char
   const terminals = registry({ replayBytes: 1000 })
   try {
     const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
-    if (info === 'limit') return assert.fail('limit')
+    if (typeof info === 'string') return assert.fail(info)
     const out = watch(terminals, 's1', info.id)
     terminals.input('s1', info.id, 'i=0; while [ $i -lt 400 ]; do printf "你好"; i=$((i+1)); done; echo; echo REPLAY-$((40+2))\n')
     await out.until(/REPLAY-42\r?\n/)
@@ -204,7 +204,7 @@ test('a terminal nobody watches and nobody uses is reclaimed after unattendedMs'
   const terminals = registry({ unattendedMs: 300 })
   try {
     const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
-    if (info === 'limit') return assert.fail('limit')
+    if (typeof info === 'string') return assert.fail(info)
     const out = watch(terminals, 's1', info.id)
     terminals.input('s1', info.id, 'echo READY-$((40+2))\n')
     await out.until(/READY-42/)
@@ -226,7 +226,7 @@ test('under workspace-write the shell writes inside the workspace and is refused
   try {
     const confine = (argv: readonly string[]) => ['/usr/bin/sandbox-exec', ...seatbeltProfileArgs({ mode: 'workspace-write', workspaceRoot: s.workspace, extraWritableRoots: [] }), '--', ...argv]
     const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'workspace-write', cols: 80, rows: 24, confine, env: { ...process.env, SHELL: '/bin/sh' } })
-    if (info === 'limit') return assert.fail('limit')
+    if (typeof info === 'string') return assert.fail(info)
     const out = watch(terminals, 's1', info.id)
     terminals.input('s1', info.id, `echo in > ${s.workspace}/in.txt; echo out > ${s.outside}/out.txt; ( echo child > ${s.outside}/child.txt ); echo WRITES-$((40+2))\n`)
     await out.until(/WRITES-42/)
@@ -236,6 +236,38 @@ test('under workspace-write the shell writes inside the workspace and is refused
     assert.match(out.text(), /Operation not permitted/)
   } finally {
     await terminals.closeAll()
+    s.done()
+  }
+})
+
+test('a job that left the tree for init still ends with its terminal (developer-ten’s review, E)', { skip }, async () => {
+  const s = scratch()
+  const terminals = registry()
+  try {
+    const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
+    if (typeof info === 'string') return assert.fail(info)
+    const out = watch(terminals, 's1', info.id)
+    // `$!` before a space: an interactive sh would read `!)` as a history event.
+    terminals.input('s1', info.id, '(sleep 300 & echo ESC=$! )\n')
+    const pid = Number((await out.until(/ESC=(\d+)\r?\n/))[1])
+    assert.ok(alive(pid), 'the escaped job is running')
+    assert.equal(await terminals.close('s1', info.id), true)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(alive(pid), false, 'the job reparented to init ended with its terminal')
+  } finally {
+    await terminals.closeAll()
+    s.done()
+  }
+})
+
+test('once every terminal is closed for shutdown, none can start', { skip }, async () => {
+  const s = scratch()
+  const terminals = registry()
+  try {
+    await terminals.closeAll()
+    const after = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
+    assert.equal(after, 'closed')
+  } finally {
     s.done()
   }
 })

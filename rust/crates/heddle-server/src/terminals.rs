@@ -106,6 +106,8 @@ pub enum CreateRefusal {
     Sandbox(String),
     /// The PTY could not be started.
     Spawn(String),
+    /// The server is stopping, so no terminal may start.
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +194,7 @@ pub fn pty_argv(bsd: bool, confined: &[OsString]) -> Vec<OsString> {
     } else {
         let command = confined.iter().map(sh_quote).collect::<Vec<_>>().join(" ");
         vec![
-            OsString::from("script"),
+            linux_script(),
             OsString::from("-qfec"),
             OsString::from(command),
             OsString::from("/dev/null"),
@@ -213,14 +215,24 @@ impl ProcessRow {
     }
 }
 
+/// The search path for the helpers this module runs (`ps`, `stty`), so an ambient PATH cannot pick them.
+const HELPER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// How long a helper may take before it is given up on, as the TypeScript build's 5 s.
+const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Output smaller than this is appended to the previous replay chunk, so many tiny reads do not cost one string each.
+const SMALL_CHUNK: usize = 4096;
+
 async fn process_table() -> Vec<ProcessRow> {
     let output = Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,tty="])
+        .env("PATH", HELPER_PATH)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
-        .await;
-    let Ok(output) = output else {
+        .kill_on_drop(true)
+        .output();
+    let Ok(Ok(output)) = tokio::time::timeout(HELPER_TIMEOUT, output).await else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
@@ -257,6 +269,15 @@ fn descendants_in(root: u32, table: &[ProcessRow]) -> Vec<ProcessRow> {
 
 async fn descendants(root: u32) -> Vec<ProcessRow> {
     descendants_in(root, &process_table().await)
+}
+
+/// util-linux `script`, found in the system directories rather than through PATH.
+fn linux_script() -> OsString {
+    ["/usr/bin/script", "/bin/script"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .unwrap_or("script")
+        .into()
 }
 
 #[cfg(unix)]
@@ -365,8 +386,45 @@ struct State {
     truncated: bool,
     last_activity: Instant,
     tty: Option<String>,
-    listeners: HashMap<u64, mpsc::UnboundedSender<TerminalEvent>>,
+    listeners: HashMap<u64, Listener>,
     stderr_line: String,
+}
+
+/// One stream's queue: its events, and the output bytes queued that the stream has not taken yet.
+struct Listener {
+    sender: mpsc::UnboundedSender<TerminalEvent>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Listener {
+    /// Queue an event, or answer `false` when the stream is gone or has fallen more than `budget` bytes behind (a
+    /// `yes` read slowly): that stream is let go rather than buffered without bound, and the page reconnects to a
+    /// snapshot.
+    fn offer(&self, event: &TerminalEvent, budget: usize) -> bool {
+        if let TerminalEvent::Output { data, .. } = event {
+            let queued = self.queued.fetch_add(data.len(), Ordering::SeqCst) + data.len();
+            if queued > budget {
+                return false;
+            }
+        }
+        self.sender.send(event.clone()).is_ok()
+    }
+}
+
+/// A stream's end of its queue: each event taken counts its bytes off the budget.
+pub struct TerminalEvents {
+    receiver: mpsc::UnboundedReceiver<TerminalEvent>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl TerminalEvents {
+    pub async fn recv(&mut self) -> Option<TerminalEvent> {
+        let event = self.receiver.recv().await?;
+        if let TerminalEvent::Output { data, .. } = &event {
+            self.queued.fetch_sub(data.len(), Ordering::SeqCst);
+        }
+        Some(event)
+    }
 }
 
 /// One shell in one PTY, owned by one session.
@@ -416,7 +474,10 @@ impl Terminal {
         let mut state = lock(&self.state);
         state.seq += text.len() as u64;
         state.last_activity = Instant::now();
-        state.chunks.push_back(text.to_owned());
+        match state.chunks.back_mut() {
+            Some(last) if last.len() < SMALL_CHUNK => last.push_str(text),
+            _ => state.chunks.push_back(text.to_owned()),
+        }
         state.held += text.len();
         while state.held > self.limits.replay_bytes && state.chunks.len() > 1 {
             let dropped = state.chunks.pop_front().map_or(0, |chunk| chunk.len());
@@ -440,9 +501,10 @@ impl Terminal {
             seq: state.seq,
             data: text.to_owned(),
         };
+        let budget = self.limits.replay_bytes;
         state
             .listeners
-            .retain(|_, listener| listener.send(event.clone()).is_ok());
+            .retain(|_, listener| listener.offer(&event, budget));
     }
 
     /// A stderr line from `script` itself (its own failure, say) joins the output, as the TypeScript build does.
@@ -473,9 +535,10 @@ impl Terminal {
         state.exit_code = code;
         state.last_activity = Instant::now();
         let event = TerminalEvent::Exit { code };
+        let budget = self.limits.replay_bytes;
         state
             .listeners
-            .retain(|_, listener| listener.send(event.clone()).is_ok());
+            .retain(|_, listener| listener.offer(&event, budget));
     }
 
     async fn input(&self, data: &str) -> InputResult {
@@ -513,12 +576,14 @@ impl Terminal {
                 "rows",
                 &rows.to_string(),
             ])
+            .env("PATH", HELPER_PATH)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .await;
-        if !status.is_ok_and(|status| status.success()) {
+            .kill_on_drop(true)
+            .status();
+        if !matches!(tokio::time::timeout(HELPER_TIMEOUT, status).await, Ok(Ok(status)) if status.success())
+        {
             return ResizeResult::Unavailable;
         }
         let mut state = lock(&self.state);
@@ -562,11 +627,32 @@ impl Terminal {
         let Some(leader) = self.pid else {
             return;
         };
+        // A terminal that ended on its own is not swept: once its PTY is gone the tty name can be reused by another
+        // terminal, and DSH, too, leaves a shell's nohup jobs running after the shell exits by itself.
         if lock(&self.state).exited {
             let _ = tokio::time::timeout(grace * 2, self.wait_done()).await;
             return;
         }
-        let tree = descendants(leader).await;
+        let known = lock(&self.state).tty.clone();
+        let tty = match known {
+            Some(tty) => Some(tty),
+            None => self.tty_path().await,
+        };
+        let table = process_table().await;
+        // The tree, plus every process on this terminal's tty: a job started as `(cmd &)` or `nohup cmd &` leaves the
+        // tree for init but keeps the tty while the PTY is still this terminal's.
+        let mut tree = descendants_in(leader, &table);
+        if let Some(tty) = &tty {
+            let own = std::process::id();
+            for row in &table {
+                if format!("/dev/{}", row.tty) == *tty
+                    && row.pid != own
+                    && !tree.iter().any(|seen| seen.pid == row.pid)
+                {
+                    tree.push(row.clone());
+                }
+            }
+        }
         let mut groups = vec![leader];
         groups.extend(tree.iter().filter(|row| row.has_tty()).map(|row| row.pid));
         for row in &tree {
@@ -638,11 +724,40 @@ async fn pump(pipe: Option<impl AsyncRead + Unpin>, terminal: Arc<Terminal>, std
     }
 }
 
+/// What the registry's one lock guards: the terminals, the slots being started, and whether the server is stopping.
+#[derive(Default)]
+struct Held {
+    sessions: Vec<(String, Vec<Arc<Terminal>>)>,
+    /// Slots reserved by creates still spawning, per session, so concurrent creates cannot pass the cap.
+    pending: HashMap<String, usize>,
+    /// Set by `close_all`: a server that is stopping starts no terminal, so none outlives the shutdown.
+    closed: bool,
+}
+
+impl Held {
+    fn count(&self, session: &str) -> usize {
+        self.sessions
+            .iter()
+            .find(|(owner, _)| owner == session)
+            .map_or(0, |(_, terminals)| terminals.len())
+            + self.pending.get(session).copied().unwrap_or(0)
+    }
+
+    fn release(&mut self, session: &str) {
+        if let Some(pending) = self.pending.get_mut(session) {
+            *pending = pending.saturating_sub(1);
+            if *pending == 0 {
+                self.pending.remove(session);
+            }
+        }
+    }
+}
+
 struct Inner {
     limits: TerminalLimits,
     bsd: bool,
     poll: Duration,
-    sessions: Mutex<Vec<(String, Vec<Arc<Terminal>>)>>,
+    held: Mutex<Held>,
     reaper: AtomicBool,
     next_listener: AtomicU64,
 }
@@ -675,6 +790,23 @@ impl Drop for Attachment {
     }
 }
 
+fn new_state(cols: u32, rows: u32) -> State {
+    State {
+        cols,
+        rows,
+        exited: false,
+        exit_code: None,
+        chunks: VecDeque::new(),
+        held: 0,
+        seq: 0,
+        truncated: false,
+        last_activity: Instant::now(),
+        tty: None,
+        listeners: HashMap::new(),
+        stderr_line: String::new(),
+    }
+}
+
 impl TerminalRegistry {
     pub fn new(limits: TerminalLimits, poll: Duration) -> Self {
         TerminalRegistry {
@@ -687,7 +819,7 @@ impl TerminalRegistry {
                     target_os = "netbsd"
                 )),
                 poll,
-                sessions: Mutex::new(Vec::new()),
+                held: Mutex::new(Held::default()),
                 reaper: AtomicBool::new(false),
                 next_listener: AtomicU64::new(1),
             }),
@@ -699,14 +831,16 @@ impl TerminalRegistry {
     }
 
     fn find(&self, session: &str, id: &str) -> Option<Arc<Terminal>> {
-        lock(&self.inner.sessions)
+        lock(&self.inner.held)
+            .sessions
             .iter()
             .find(|(owner, _)| owner == session)
             .and_then(|(_, terminals)| terminals.iter().find(|terminal| terminal.id == id).cloned())
     }
 
     pub fn list(&self, session: &str) -> Vec<TerminalInfo> {
-        let terminals: Vec<Arc<Terminal>> = lock(&self.inner.sessions)
+        let terminals: Vec<Arc<Terminal>> = lock(&self.inner.held)
+            .sessions
             .iter()
             .find(|(owner, _)| owner == session)
             .map(|(_, terminals)| terminals.clone())
@@ -714,23 +848,53 @@ impl TerminalRegistry {
         terminals.iter().map(|terminal| terminal.info()).collect()
     }
 
-    fn held_by(&self, session: &str) -> usize {
-        lock(&self.inner.sessions)
-            .iter()
-            .find(|(owner, _)| owner == session)
-            .map_or(0, |(_, terminals)| terminals.len())
-    }
-
-    /// Start a terminal. The cap is judged before `confine`, so a full session is told so even on a host that
-    /// cannot confine.
+    /// Start a terminal. The slot is reserved under the registry's one lock before anything is spawned, so
+    /// concurrent creates cannot pass the cap, and the cap is judged before `confine`. A PTY that cannot be
+    /// started is still a terminal, already exited, whose output says why, as the TypeScript build reports it.
     pub fn create(
         &self,
         spec: TerminalSpawn,
         confine: impl FnOnce(&[OsString]) -> Result<Vec<OsString>, String>,
     ) -> Result<TerminalInfo, CreateRefusal> {
-        if self.held_by(&spec.session) >= self.inner.limits.max_terminals {
-            return Err(CreateRefusal::Limit);
+        {
+            let mut held = lock(&self.inner.held);
+            if held.closed {
+                return Err(CreateRefusal::Closed);
+            }
+            if held.count(&spec.session) >= self.inner.limits.max_terminals {
+                return Err(CreateRefusal::Limit);
+            }
+            *held.pending.entry(spec.session.clone()).or_insert(0) += 1;
         }
+        let made = self.spawn(&spec, confine);
+        let mut held = lock(&self.inner.held);
+        held.release(&spec.session);
+        let terminal = made?;
+        if held.closed {
+            drop(held);
+            let closing = terminal.clone();
+            tokio::spawn(async move { closing.close().await });
+            return Err(CreateRefusal::Closed);
+        }
+        let info = terminal.info();
+        match held
+            .sessions
+            .iter_mut()
+            .find(|(owner, _)| *owner == spec.session)
+        {
+            Some((_, terminals)) => terminals.push(terminal),
+            None => held.sessions.push((spec.session.clone(), vec![terminal])),
+        }
+        drop(held);
+        self.start_reaper();
+        Ok(info)
+    }
+
+    fn spawn(
+        &self,
+        spec: &TerminalSpawn,
+        confine: impl FnOnce(&[OsString]) -> Result<Vec<OsString>, String>,
+    ) -> Result<Arc<Terminal>, CreateRefusal> {
         let shell = spec
             .shell
             .clone()
@@ -743,43 +907,41 @@ impl TerminalRegistry {
             .args(&argv[1..])
             .current_dir(&spec.cwd)
             .env("TERM", "xterm-256color")
+            // util-linux script runs its command through $SHELL -c; the shell's own wrapper exports the real one.
+            .env("SHELL", "/bin/sh")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|error| CreateRefusal::Spawn(error.to_string()))?;
         let (done_tx, done_rx) = watch::channel(false);
+        let (mut child, failure) = match command.spawn() {
+            Ok(child) => (Some(child), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         let terminal = Arc::new(Terminal {
             id: new_terminal_id(),
             session: spec.session.clone(),
             shell,
             cwd: spec.cwd.display().to_string(),
-            mode: spec.mode,
+            mode: spec.mode.clone(),
             created: now_iso(),
-            pid: child.id(),
+            pid: child.as_ref().and_then(tokio::process::Child::id),
             bsd: self.inner.bsd,
             limits: self.inner.limits,
-            state: Mutex::new(State {
-                cols: spec.cols,
-                rows: spec.rows,
-                exited: false,
-                exit_code: None,
-                chunks: VecDeque::new(),
-                held: 0,
-                seq: 0,
-                truncated: false,
-                last_activity: Instant::now(),
-                tty: None,
-                listeners: HashMap::new(),
-                stderr_line: String::new(),
-            }),
-            stdin: tokio::sync::Mutex::new(child.stdin.take()),
+            state: Mutex::new(new_state(spec.cols, spec.rows)),
+            stdin: tokio::sync::Mutex::new(child.as_mut().and_then(|child| child.stdin.take())),
             done: done_rx,
             closing: OnceCell::new(),
         });
+        let Some(mut child) = child else {
+            if let Some(failure) = failure {
+                terminal.push(&format!("{failure}\r\n"));
+            }
+            terminal.finish(None);
+            let _ = done_tx.send(true);
+            return Ok(terminal);
+        };
         let stdout = tokio::spawn(pump(child.stdout.take(), terminal.clone(), false));
         let stderr = tokio::spawn(pump(child.stderr.take(), terminal.clone(), true));
         let watched = terminal.clone();
@@ -794,19 +956,22 @@ impl TerminalRegistry {
             watched.finish(status.ok().and_then(|status| status.code()));
             let _ = done_tx.send(true);
         });
-        let info = terminal.info();
-        {
-            let mut sessions = lock(&self.inner.sessions);
-            match sessions
-                .iter_mut()
-                .find(|(owner, _)| *owner == spec.session)
-            {
-                Some((_, terminals)) => terminals.push(terminal),
-                None => sessions.push((spec.session, vec![terminal])),
+        // The tty is learned while the PTY is surely this terminal's, so a close can sweep jobs that left the tree.
+        // It is retried a few times, because a loaded host can take a while to start the shell.
+        let early = Arc::downgrade(&terminal);
+        tokio::spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let Some(terminal) = early.upgrade() else {
+                    return;
+                };
+                let exited = lock(&terminal.state).exited;
+                if exited || terminal.tty_path().await.is_some() {
+                    return;
+                }
             }
-        }
-        self.start_reaper();
-        Ok(info)
+        });
+        Ok(terminal)
     }
 
     /// The unattended sweep, started with the first terminal so a registry built outside a runtime never spawns.
@@ -851,17 +1016,20 @@ impl TerminalRegistry {
         &self,
         session: &str,
         id: &str,
-    ) -> Option<(
-        TerminalSnapshot,
-        mpsc::UnboundedReceiver<TerminalEvent>,
-        Attachment,
-    )> {
+    ) -> Option<(TerminalSnapshot, TerminalEvents, Attachment)> {
         let terminal = self.find(session, id)?;
         let (sender, receiver) = mpsc::unbounded_channel();
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = self.inner.next_listener.fetch_add(1, Ordering::SeqCst);
         let snapshot = {
             let mut state = lock(&terminal.state);
-            state.listeners.insert(listener, sender);
+            state.listeners.insert(
+                listener,
+                Listener {
+                    sender,
+                    queued: queued.clone(),
+                },
+            );
             state.last_activity = Instant::now();
             TerminalSnapshot {
                 seq: state.seq,
@@ -873,7 +1041,7 @@ impl TerminalRegistry {
         };
         Some((
             snapshot,
-            receiver,
+            TerminalEvents { receiver, queued },
             Attachment {
                 terminal: Arc::downgrade(&terminal),
                 listener,
@@ -882,41 +1050,67 @@ impl TerminalRegistry {
     }
 
     /// Close one terminal and wait for its processes to end.
+    ///
+    /// The work runs in its own task and the caller awaits it, so a handler dropped by a client that went away
+    /// cannot abandon a close between the soft signals and the hard ones (developer-ten's review).
     pub async fn close(&self, session: &str, id: &str) -> bool {
+        let this = self.clone();
+        let (session, id) = (session.to_owned(), id.to_owned());
+        tokio::spawn(async move { this.close_now(&session, &id).await })
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn close_now(&self, session: &str, id: &str) -> bool {
         let Some(terminal) = self.find(session, id) else {
             return false;
         };
         terminal.close().await;
-        let mut sessions = lock(&self.inner.sessions);
-        if let Some(index) = sessions.iter().position(|(owner, _)| owner == session) {
-            sessions[index].1.retain(|held| held.id != id);
-            if sessions[index].1.is_empty() {
-                sessions.remove(index);
+        let mut held = lock(&self.inner.held);
+        if let Some(index) = held.sessions.iter().position(|(owner, _)| owner == session) {
+            held.sessions[index].1.retain(|kept| kept.id != id);
+            if held.sessions[index].1.is_empty() {
+                held.sessions.remove(index);
             }
         }
         true
     }
 
-    /// Close every terminal a session holds: archiving a session ends its terminals.
+    /// Close every terminal a session holds: archiving a session, or changing its mode, ends its terminals.
     pub async fn close_session(&self, session: &str) -> usize {
-        let ids: Vec<String> = self.list(session).into_iter().map(|info| info.id).collect();
-        futures::future::join_all(ids.iter().map(|id| self.close(session, id))).await;
-        ids.len()
+        let this = self.clone();
+        let session = session.to_owned();
+        tokio::spawn(async move {
+            let ids: Vec<String> = this
+                .list(&session)
+                .into_iter()
+                .map(|info| info.id)
+                .collect();
+            futures::future::join_all(ids.iter().map(|id| this.close_now(&session, id))).await;
+            ids.len()
+        })
+        .await
+        .unwrap_or(0)
     }
 
-    /// Close everything, for server shutdown, so a restart leaves no orphan shells.
+    /// Close everything, for server shutdown, so a restart leaves no orphan shells; no terminal starts after it.
     pub async fn close_all(&self) {
-        let sessions: Vec<String> = lock(&self.inner.sessions)
-            .iter()
-            .map(|(owner, _)| owner.clone())
-            .collect();
+        let sessions: Vec<String> = {
+            let mut held = lock(&self.inner.held);
+            held.closed = true;
+            held.sessions
+                .iter()
+                .map(|(owner, _)| owner.clone())
+                .collect()
+        };
         futures::future::join_all(sessions.iter().map(|session| self.close_session(session))).await;
     }
 
     /// Close terminals nobody is watching that have been quiet for `unattended_ms`.
     pub async fn reclaim(&self) -> usize {
         let limit = Duration::from_millis(self.inner.limits.unattended_ms);
-        let due: Vec<(String, String)> = lock(&self.inner.sessions)
+        let due: Vec<(String, String)> = lock(&self.inner.held)
+            .sessions
             .iter()
             .flat_map(|(owner, terminals)| {
                 terminals.iter().filter_map(move |terminal| {
@@ -989,6 +1183,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_that_falls_a_budget_behind_is_let_go() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = Listener {
+            sender,
+            queued: queued.clone(),
+        };
+        let output = |data: &str| TerminalEvent::Output {
+            seq: 0,
+            data: data.to_owned(),
+        };
+        assert!(listener.offer(&output("abcd"), 8));
+        assert!(
+            listener.offer(&output("efgh"), 8),
+            "exactly the budget is kept"
+        );
+        assert!(!listener.offer(&output("i"), 8), "one byte more is let go");
+        assert!(receiver.try_recv().is_ok());
+        assert!(
+            listener.offer(&TerminalEvent::Exit { code: None }, 8),
+            "an exit is never counted"
+        );
+    }
+
+    #[test]
     fn the_default_shell_is_an_executable_absolute_shell_or_bin_sh() {
         assert_eq!(default_shell(Some("zsh")), "/bin/sh");
         assert_eq!(default_shell(Some("/no/such/shell")), "/bin/sh");
@@ -1023,11 +1242,7 @@ mod tests {
                 .expect("a terminal starts")
         }
 
-        async fn until(
-            receiver: &mut mpsc::UnboundedReceiver<TerminalEvent>,
-            seen: &mut String,
-            needle: &str,
-        ) {
+        async fn until(receiver: &mut TerminalEvents, seen: &mut String, needle: &str) {
             let deadline = Instant::now() + Duration::from_secs(8);
             while !seen.contains(needle) {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -1093,6 +1308,121 @@ mod tests {
             assert!(!signals::alive(job), "the job ended with its terminal");
             assert!(registry.list("a").is_empty());
             let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        #[tokio::test]
+        async fn a_job_that_left_the_tree_still_ends_with_its_terminal() {
+            // developer-ten's review, E: `(sleep 300 &)` is reparented to init but keeps the PTY's tty.
+            let cwd = scratch("escaped");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+            let mut seen = String::new();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            registry
+                .input("a", &info.id, "(sleep 300 & echo ESC=$! )\n")
+                .await;
+            until(&mut events, &mut seen, "ESC=").await;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut job = None;
+            while job.is_none() && Instant::now() < deadline {
+                let tail = seen.split("ESC=").last().unwrap_or("");
+                let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+                if tail.len() > digits.len() && !digits.is_empty() {
+                    job = digits.parse::<u32>().ok();
+                } else if let Ok(Some(TerminalEvent::Output { data, .. })) =
+                    tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+                {
+                    seen.push_str(&data);
+                }
+            }
+            let job = job.expect("the escaped job's pid");
+            assert!(signals::alive(job));
+            assert!(registry.close("a", &info.id).await);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                !signals::alive(job),
+                "the escaped job ended with its terminal"
+            );
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_creates_cannot_pass_the_cap_and_none_start_after_shutdown() {
+            let cwd = scratch("race");
+            let registry = TerminalRegistry::default();
+            let creates: Vec<_> = (0..16)
+                .map(|_| {
+                    let registry = registry.clone();
+                    let cwd = cwd.clone();
+                    tokio::task::spawn_blocking(move || {
+                        registry
+                            .create(
+                                TerminalSpawn {
+                                    session: "a".to_owned(),
+                                    cwd,
+                                    mode: "danger-full-access".to_owned(),
+                                    cols: 80,
+                                    rows: 24,
+                                    shell: Some("/bin/sh".to_owned()),
+                                },
+                                |argv| Ok(argv.to_vec()),
+                            )
+                            .is_ok()
+                    })
+                })
+                .collect();
+            let mut started = 0;
+            for create in creates {
+                if create.await.expect("the create ran") {
+                    started += 1;
+                }
+            }
+            assert_eq!(started, TERMINAL_LIMITS.max_terminals);
+            assert_eq!(registry.list("a").len(), TERMINAL_LIMITS.max_terminals);
+            registry.close_all().await;
+            assert!(registry.list("a").is_empty());
+            let after = registry.create(
+                TerminalSpawn {
+                    session: "b".to_owned(),
+                    cwd: cwd.clone(),
+                    mode: "danger-full-access".to_owned(),
+                    cols: 80,
+                    rows: 24,
+                    shell: None,
+                },
+                |argv| Ok(argv.to_vec()),
+            );
+            assert_eq!(
+                after,
+                Err(CreateRefusal::Closed),
+                "no terminal starts once the server is stopping"
+            );
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        #[tokio::test]
+        async fn a_pty_that_cannot_start_is_an_exited_terminal_saying_why() {
+            let registry = TerminalRegistry::default();
+            let gone =
+                std::env::temp_dir().join(format!("heddle-terminal-gone-{}", new_terminal_id()));
+            let info = registry
+                .create(
+                    TerminalSpawn {
+                        session: "a".to_owned(),
+                        cwd: gone,
+                        mode: "danger-full-access".to_owned(),
+                        cols: 80,
+                        rows: 24,
+                        shell: None,
+                    },
+                    |argv| Ok(argv.to_vec()),
+                )
+                .expect("answered as a terminal, as the TypeScript build answers 201");
+            assert!(info.exited);
+            let (snapshot, _, _hold) = registry.attach("a", &info.id).expect("attached");
+            assert!(snapshot.exited && !snapshot.data.is_empty(), "{snapshot:?}");
+            assert!(registry.close("a", &info.id).await);
         }
 
         #[tokio::test]

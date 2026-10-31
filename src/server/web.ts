@@ -1612,6 +1612,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const written = ctx.session.setMode(handle, decision.mode, ctx.sandbox.mode)
+    /**
+     * A terminal is confined by the mode it was opened under, and a mode change (a narrowing above all) must not
+     * leave a wider shell running, so the session's terminals end with the change (#85, developer-ten's review).
+     */
+    if (written.changed) await state.terminals.closeSession(id)
     respond(
       response,
       200,
@@ -2636,7 +2641,8 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
     json(404, { error: `no session ${session}` })
     return
   }
-  if (ctx.workspace !== undefined && ctx.workspace.owner(meta.cwd) === undefined) {
+  // Listing and closing stay open to a session whose workspace was removed, so its terminals can still be ended.
+  if (ctx.workspace !== undefined && ctx.workspace.owner(meta.cwd) === undefined && route !== 'list' && route !== 'close') {
     json(403, { error: `session ${session} is not under any workspace root of this server`, code: 'not-owned' })
     return
   }
@@ -2697,6 +2703,19 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
         json(409, { error: `session ${session} already holds ${registry.limits.maxTerminals} terminals; close one first`, code: 'limit' })
         return
       }
+      if (created === 'closed') {
+        json(503, { error: 'the server is shutting down', code: 'shutting-down' })
+        return
+      }
+      /**
+       * An archive that landed while this request was being read found nothing to close, so the archive is read
+       * again now that the terminal exists, and a terminal on an archived session is ended at once.
+       */
+      if (ctx.session.list().find((entry) => entry.id === session)?.archived === true) {
+        await registry.close(session, created.id)
+        json(409, { error: `session ${session} is archived`, code: 'archived' })
+        return
+      }
       json(201, { terminal: created })
     } catch (error) {
       if (error instanceof SandboxUnavailableError || (error instanceof Error && error.name === 'SandboxUnavailableError')) {
@@ -2716,6 +2735,7 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
     if (result === 'ok') json(200, { ok: true })
     else if (result === 'missing') json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
     else if (result === 'exited') json(409, { error: 'the terminal has exited', code: 'exited' })
+    else if (result === 'busy') json(503, { error: 'the terminal has too much input waiting; try again', code: 'busy' })
     else json(413, { error: `input is limited to ${registry.limits.maxInputBytes} bytes per request` })
     return
   }
@@ -2747,11 +2767,17 @@ function streamTerminal(request: IncomingMessage, response: ServerResponse, regi
   const send = (event: TerminalEvent): void => {
     if (response.writableEnded || response.destroyed) return
     response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-    if (event.type === 'exit') {
+    /**
+     * A reader that falls more than the replay size behind is let go rather than buffered without bound (a `yes`
+     * read slowly). Its stream ends; the page reconnects and gets the current tail as a snapshot.
+     */
+    if (event.type === 'exit' || response.writableLength > registry.limits.replayBytes) {
       clearInterval(beat)
+      attached?.detach()
       response.end()
     }
   }
+  // `send` reads `attached`; it runs only after `attach` has returned, because events arrive from I/O callbacks.
   const attached = registry.attach(session, terminal, (event) => (ready ? send(event) : frames.push(event)))
   if (attached === undefined) {
     respond(response, 404, 'application/json', `${JSON.stringify({ error: `no terminal ${terminal} in session ${session}` })}\n`)
@@ -2760,13 +2786,14 @@ function streamTerminal(request: IncomingMessage, response: ServerResponse, regi
   respondSse(response)
   request.on('close', () => {
     clearInterval(beat)
-    attached.detach()
+    attached?.detach()
   })
-  response.write(`event: snapshot\ndata: ${JSON.stringify(attached.snapshot)}\n\n`)
+  const snapshot = attached.snapshot
+  response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`)
   ready = true
   for (const event of frames) send(event)
-  if (attached.snapshot.exited) {
-    send({ type: 'exit', code: attached.snapshot.exitCode })
+  if (snapshot.exited) {
+    send({ type: 'exit', code: snapshot.exitCode })
     return
   }
   beat = setInterval(() => {

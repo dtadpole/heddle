@@ -1267,6 +1267,11 @@ async fn permission_session(
         ),
         Ok(mode) => match sessions.set_mode(id.as_str(), &mode, &fallback) {
             Ok(written) => {
+                // A terminal is confined by the mode it was opened under, and a mode change (a narrowing above all)
+                // must not leave a wider shell running, so the session's terminals end with the change (#85).
+                if written.changed {
+                    state.terminals().close_session(id.as_str()).await;
+                }
                 let mut body = Map::new();
                 body.insert("session".into(), Value::String(id.to_string()));
                 body.insert("mode".into(), Value::String(written.mode));
@@ -2042,11 +2047,14 @@ fn not_json_write() -> Response {
 /// The checks every terminal route makes after the door, in web.ts's order:
 /// - the session id's shape (`400`);
 /// - the session is this server's (`404`) and its folder sits under one of its workspace roots (`403`);
-/// - an archived session is refused (`409`) unless the route lists or closes.
+/// - an archived session is refused (`409`).
+///
+/// `lenient` is for listing and closing, which stay open to an archived session and to one whose workspace was
+/// removed, so its terminals can still be ended.
 fn terminal_session(
     state: &AppState,
     raw: &str,
-    allow_archived: bool,
+    lenient: bool,
 ) -> Result<(SessionId, SessionMeta), Box<Response>> {
     let id = SessionId::parse(raw).ok_or_else(|| Box::new(respond::not_a_session_id()))?;
     let meta = state
@@ -2055,6 +2063,7 @@ fn terminal_session(
         .meta(id.as_str())
         .ok_or_else(|| Box::new(respond::no_session(id.as_str())))?;
     if let Some(workspaces) = &state.harness().workspaces
+        && !lenient
         && !workspaces.owns(&canonical_path(meta.cwd.as_deref().unwrap_or("")))
     {
         return Err(Box::new(respond::error_with_code(
@@ -2063,8 +2072,7 @@ fn terminal_session(
             "not-owned",
         )));
     }
-    let archived = meta.rest.get("archived").and_then(Value::as_bool) == Some(true);
-    if archived && !allow_archived {
+    if is_archived(&meta) && !lenient {
         return Err(Box::new(respond::error_with_code(
             StatusCode::CONFLICT,
             format!("session {id} is archived"),
@@ -2074,13 +2082,23 @@ fn terminal_session(
     Ok((id, meta))
 }
 
-/// A write's JSON body, read after the checks as web.ts reads it: empty is `{}`, a non-object is `{}`, and
-/// anything else is `400 the body must be JSON`.
-fn terminal_body(bytes: &[u8]) -> Result<Map<String, Value>, Box<Response>> {
+fn is_archived(meta: &SessionMeta) -> bool {
+    meta.rest.get("archived").and_then(Value::as_bool) == Some(true)
+}
+
+/// A write's JSON body, read after the checks as web.ts reads it: over `MAX_JSON_BODY` is `413 request too large`,
+/// empty is `{}`, a non-object is `{}`, and anything else is `400 the body must be JSON`.
+async fn terminal_body(body: Body) -> Result<Map<String, Value>, Box<Response>> {
+    let Ok(bytes) = axum::body::to_bytes(body, respond::MAX_JSON_BODY).await else {
+        return Err(Box::new(respond::text(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request too large\n",
+        )));
+    };
     if bytes.is_empty() {
         return Ok(Map::new());
     }
-    match serde_json::from_slice::<Value>(bytes) {
+    match serde_json::from_slice::<Value>(&bytes) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Ok(Map::new()),
         Err(_) => Err(Box::new(respond::text(
@@ -2129,7 +2147,7 @@ async fn create_terminal(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(raw): axum::extract::Path<String>,
-    body: bytes::Bytes,
+    body: Body,
 ) -> Response {
     if !json_write(&headers) {
         return not_json_write();
@@ -2138,7 +2156,7 @@ async fn create_terminal(
         Ok(found) => found,
         Err(refusal) => return *refusal,
     };
-    let body = match terminal_body(&body) {
+    let body = match terminal_body(body).await {
         Ok(body) => body,
         Err(refusal) => return *refusal,
     };
@@ -2181,7 +2199,29 @@ async fn create_terminal(
         .terminals()
         .create(spawn, |argv| sandbox.confine(argv, &mode, &root))
     {
-        Ok(info) => respond::json_compact(StatusCode::CREATED, &json!({ "terminal": info })),
+        Ok(info) => {
+            // An archive that landed while this request was in flight found nothing to close, so the archive is
+            // read again now that the terminal exists, and a terminal on an archived session is ended at once.
+            let archived_now = state
+                .harness()
+                .sessions
+                .meta(id.as_str())
+                .is_some_and(|meta| is_archived(&meta));
+            if archived_now {
+                state.terminals().close(id.as_str(), &info.id).await;
+                return respond::error_with_code(
+                    StatusCode::CONFLICT,
+                    format!("session {id} is archived"),
+                    "archived",
+                );
+            }
+            respond::json_compact(StatusCode::CREATED, &json!({ "terminal": info }))
+        }
+        Err(CreateRefusal::Closed) => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the server is shutting down",
+            "shutting-down",
+        ),
         Err(CreateRefusal::Limit) => respond::error_with_code(
             StatusCode::CONFLICT,
             format!(
@@ -2224,7 +2264,7 @@ async fn input_terminal(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
-    body: bytes::Bytes,
+    body: Body,
 ) -> Response {
     if !json_write(&headers) {
         return not_json_write();
@@ -2233,7 +2273,7 @@ async fn input_terminal(
         Ok(found) => found,
         Err(refusal) => return *refusal,
     };
-    let body = match terminal_body(&body) {
+    let body = match terminal_body(body).await {
         Ok(body) => body,
         Err(refusal) => return *refusal,
     };
@@ -2260,7 +2300,7 @@ async fn resize_terminal(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
-    body: bytes::Bytes,
+    body: Body,
 ) -> Response {
     if !json_write(&headers) {
         return not_json_write();
@@ -2269,7 +2309,7 @@ async fn resize_terminal(
         Ok(found) => found,
         Err(refusal) => return *refusal,
     };
-    let body = match terminal_body(&body) {
+    let body = match terminal_body(body).await {
         Ok(body) => body,
         Err(refusal) => return *refusal,
     };

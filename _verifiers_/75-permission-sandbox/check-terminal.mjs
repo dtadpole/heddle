@@ -319,3 +319,122 @@ test('the cap answers 409, and close, archive and shutdown each end the terminal
     f.done()
   }
 })
+
+/** A create whose JSON body arrives in two parts with `between()` run in the gap, as a slow client would send it. */
+function slowCreate(api, session, between) {
+  const url = new URL(`/api/sessions/${session}/terminals`, api.origin)
+  return new Promise((resolvePromise, reject) => {
+    const req = httpRequest(
+      { host: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { cookie: api.cookie, 'content-type': 'application/json' } },
+      (response) => {
+        let text = ''
+        response.on('data', (chunk) => (text += chunk))
+        response.on('end', () => resolvePromise({ status: response.statusCode, body: text }))
+      },
+    )
+    req.on('error', reject)
+    req.write('{')
+    setTimeout(async () => {
+      try {
+        await between()
+      } finally {
+        req.end('}')
+      }
+    }, 300)
+  })
+}
+
+test('an archive that lands while a create is still being read ends that terminal and answers 409 (review A)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  const f = await fixture('race')
+  try {
+    const raced = await slowCreate(f.api, f.b, async () => {
+      const archived = await f.api.post(`/api/sessions/${f.b}/flags`, { archived: true })
+      assert.equal(archived.status, 200, 'the archive landed mid-create')
+    })
+    assert.equal(raced.status, 409, `the create is refused (${raced.body})`)
+    assert.equal(JSON.parse(raced.body).code, 'archived')
+    await settle()
+    assert.equal((await f.api.call(`/api/sessions/${f.b}/terminals`)).body.terminals.length, 0, 'and no terminal is left on the archived session')
+  } finally {
+    f.done()
+  }
+})
+
+test('a change of the session’s mode ends its terminals, so none keeps a wider confinement (review B)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  const f = await fixture('mode')
+  try {
+    const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+    assert.equal(created.body.terminal.mode, 'workspace-write')
+    const out = await run(f.api, `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`, 'sleep 300 & echo BG=$!', /BG=(\d+)\r?\n/)
+    const job = Number(/BG=(\d+)/.exec(out)[1])
+    const narrowed = await f.api.post(`/api/sessions/${f.a}/permission`, { mode: 'read-only' })
+    assert.equal(narrowed.status, 200, `the mode changes (${JSON.stringify(narrowed.body)})`)
+    await settle()
+    assert.equal(alive(job), false, 'the terminal opened under the wider mode is gone, job and all')
+    assert.equal((await f.api.call(`/api/sessions/${f.a}/terminals`)).body.terminals.length, 0)
+    const again = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+    assert.equal(again.body.terminal.mode, 'read-only', 'a new terminal runs under the new mode')
+  } finally {
+    f.done()
+  }
+})
+
+test('closing a terminal also ends a job that left its process tree for init (review E)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  const f = await fixture('escaped')
+  try {
+    const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+    const base = `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`
+    const out = await run(f.api, base, '(sleep 300 & echo ESC=$! )', /ESC=(\d+)\r?\n/)
+    const job = Number(/ESC=(\d+)/.exec(out)[1])
+    assert.ok(alive(job), 'the escaped job runs')
+    assert.equal((await f.api.call(base, { method: 'DELETE' })).status, 200)
+    await settle()
+    assert.equal(alive(job), false, 'and ends with the terminal')
+  } finally {
+    f.done()
+  }
+})
+
+test('a stream that falls far behind is ended rather than buffered without bound, and a new one starts from a snapshot (review F)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  const f = await fixture('backpressure')
+  try {
+    const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+    const base = `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`
+    const url = new URL(`${base}/stream`, f.api.origin)
+    const stream = await new Promise((resolvePromise, reject) => {
+      const req = httpRequest({ host: url.hostname, port: url.port, path: url.pathname, headers: { cookie: f.api.cookie } }, resolvePromise)
+      req.on('error', reject)
+      req.end()
+    })
+    assert.equal(stream.statusCode, 200)
+    let received = 0
+    let ended = false
+    stream.on('data', (chunk) => (received += chunk.length))
+    stream.on('end', () => (ended = true))
+    stream.on('error', () => (ended = true))
+    await settle(300)
+    stream.pause()
+    const sent = await f.api.post(`${base}/input`, { data: "head -c 24000000 /dev/zero | tr '\\0' x; echo; echo FLOOD-$((40+2))\n" })
+    assert.equal(sent.status, 200)
+    const deadline = Date.now() + 20_000
+    let replay
+    while (Date.now() < deadline) {
+      await settle(500)
+      replay = await readStream(f.api, `${base}/stream`, /FLOOD-42/, 1500)
+      if (/FLOOD-42/.test(replay.snapshot?.data ?? '')) break
+    }
+    assert.match(replay?.snapshot?.data ?? '', /FLOOD-42/, 'the flood finished')
+    stream.resume()
+    const until = Date.now() + 15_000
+    while (!ended && Date.now() < until) await settle(200)
+    assert.equal(ended, true, 'the paused stream was ended by the server')
+    assert.ok(received < 24_000_000, `it did not carry the whole flood (${received} bytes)`)
+    assert.equal(replay.snapshot.truncated, true, 'and a new stream starts from the retained tail')
+  } finally {
+    f.done()
+  }
+})

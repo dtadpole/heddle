@@ -92,11 +92,20 @@ export interface TerminalSpawn {
   readonly shell?: string
 }
 
-export type InputResult = 'ok' | 'missing' | 'exited' | 'too-large'
+export type InputResult = 'ok' | 'missing' | 'exited' | 'too-large' | 'busy'
 export type ResizeResult = 'ok' | 'missing' | 'exited' | 'out-of-range' | 'unavailable'
 
 /** The line the wrapper prints on stderr when the PTY ends, with the shell's exit status. */
 const EXIT_MARK = 'heddle-terminal-exit:'
+
+/** Input bytes a terminal may have waiting for the PTY before more input is refused as busy. */
+const MAX_PENDING_INPUT_BYTES = 1024 * 1024
+
+/** The search path for the helpers this module runs (`ps`, `stty`), so an ambient PATH cannot pick them. */
+const HELPER_ENV = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
+
+/** Output smaller than this is appended to the previous replay chunk, so many tiny reads do not cost one string each. */
+const SMALL_CHUNK = 4096
 
 /** The shell a new terminal runs: `$SHELL` when it names an executable by absolute path, else `/bin/sh`. */
 export function defaultShell(env: NodeJS.ProcessEnv = process.env): string {
@@ -150,7 +159,7 @@ interface ProcessRow {
 
 function processTable(): readonly ProcessRow[] {
   try {
-    const out = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 })
+    const out = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, env: HELPER_ENV })
     const rows: ProcessRow[] = []
     for (const line of out.split('\n')) {
       const [pid, ppid, tty] = line.trim().split(/\s+/)
@@ -178,6 +187,11 @@ export function descendants(root: number, table: readonly ProcessRow[] = process
     frontier = next
   }
   return found
+}
+
+/** Whether a `ps` tty column names a real terminal. */
+function hasTty(row: ProcessRow): boolean {
+  return row.tty !== '' && !row.tty.startsWith('?') && row.tty !== '-'
 }
 
 function signal(pid: number, name: NodeJS.Signals): void {
@@ -237,6 +251,14 @@ class Terminal {
     child.stdin?.on('error', () => {
       // The PTY ended while input was in flight; the exit event reports it.
     })
+    // The tty is learned while the PTY is surely this terminal's, so a close can sweep jobs that left the tree. It
+    // is retried a few times, because a loaded host can take a while to start the shell.
+    let tries = 0
+    const learn = setInterval(() => {
+      tries += 1
+      if (this.exited || this.ttyPath() !== undefined || tries >= 6) clearInterval(learn)
+    }, 500)
+    learn.unref()
     this.done = new Promise((resolve) => {
       child.on('error', (error) => {
         this.push(`${error.message}\r\n`)
@@ -276,6 +298,7 @@ class Terminal {
   input(data: string): InputResult {
     if (Buffer.byteLength(data, 'utf8') > this.limits.maxInputBytes) return 'too-large'
     if (this.exited || this.child.stdin === null || this.child.stdin.destroyed) return 'exited'
+    if (this.child.stdin.writableLength > MAX_PENDING_INPUT_BYTES) return 'busy'
     this.lastActivity = Date.now()
     this.child.stdin.write(data)
     return 'ok'
@@ -287,7 +310,7 @@ class Terminal {
     if (tty === undefined) return 'unavailable'
     const flag = this.platform === 'darwin' ? '-f' : '-F'
     const ok = await new Promise<boolean>((resolve) => {
-      execFile('stty', [flag, tty, 'cols', String(cols), 'rows', String(rows)], { timeout: 5000 }, (error) => resolve(error === null))
+      execFile('stty', [flag, tty, 'cols', String(cols), 'rows', String(rows)], { timeout: 5000, env: HELPER_ENV }, (error) => resolve(error === null))
     })
     if (!ok) return 'unavailable'
     this.cols = cols
@@ -312,9 +335,18 @@ class Terminal {
    */
   private async terminate(): Promise<void> {
     const leader = this.child.pid
+    // A terminal that ended on its own is not swept: once its PTY is gone the tty name can be reused by another
+    // terminal, and DSH, too, leaves a shell's nohup jobs running after the shell exits by itself.
     if (leader === undefined || this.exited) return this.done
-    const tree = descendants(leader)
-    const groups = [leader, ...tree.filter((row) => row.tty !== '' && !row.tty.startsWith('?') && row.tty !== '-').map((row) => row.pid)]
+    const tty = this.tty ?? this.ttyPath()
+    const table = processTable()
+    // The tree, plus every process on this terminal's tty: a job started as `(cmd &)` or `nohup cmd &` leaves the
+    // tree for init but keeps the tty while the PTY is still this terminal's.
+    const tree = [...descendants(leader, table)]
+    if (tty !== undefined) {
+      for (const row of table) if (`/dev/${row.tty}` === tty && row.pid !== process.pid && !tree.some((seen) => seen.pid === row.pid)) tree.push(row)
+    }
+    const groups = [leader, ...tree.filter(hasTty).map((row) => row.pid)]
     for (const row of tree) {
       signal(row.pid, 'SIGHUP')
       signal(row.pid, 'SIGTERM')
@@ -332,7 +364,7 @@ class Terminal {
     if (this.tty !== undefined) return this.tty
     const leader = this.child.pid
     if (leader === undefined) return undefined
-    const row = descendants(leader).find((candidate) => candidate.tty !== '' && !candidate.tty.startsWith('?') && candidate.tty !== '-')
+    const row = descendants(leader).find(hasTty)
     if (row === undefined) return undefined
     this.tty = `/dev/${row.tty}`
     return this.tty
@@ -360,7 +392,9 @@ class Terminal {
     const bytes = Buffer.byteLength(text, 'utf8')
     this.seq += bytes
     this.lastActivity = Date.now()
-    this.chunks.push(text)
+    const last = this.chunks.length - 1
+    if (last >= 0 && (this.chunks[last] as string).length < SMALL_CHUNK) this.chunks[last] = `${this.chunks[last] as string}${text}`
+    else this.chunks.push(text)
     this.held += bytes
     while (this.held > this.limits.replayBytes && this.chunks.length > 1) {
       this.held -= Buffer.byteLength(this.chunks.shift() as string, 'utf8')
@@ -407,6 +441,8 @@ export class TerminalRegistry {
   private readonly platform: string
   private readonly sessions = new Map<string, Map<string, Terminal>>()
   private readonly timer: NodeJS.Timeout
+  /** Set by `closeAll`: a server that is stopping starts no terminal, so none outlives the shutdown. */
+  private closed = false
 
   constructor(options: { readonly limits?: Partial<TerminalLimits>; readonly platform?: string; readonly pollMs?: number } = {}) {
     this.limits = { ...TERMINAL_LIMITS, ...options.limits }
@@ -419,15 +455,21 @@ export class TerminalRegistry {
     return [...(this.sessions.get(session)?.values() ?? [])].map((terminal) => terminal.info())
   }
 
-  /** Start a terminal, or answer `limit` when the session already holds `maxTerminals` (exited ones count, as in DSH). */
-  create(spec: TerminalSpawn): TerminalInfo | 'limit' {
+  /**
+   * Start a terminal. Answers `limit` when the session already holds `maxTerminals` (exited ones count, as in DSH),
+   * and `closed` once the server is stopping.
+   */
+  create(spec: TerminalSpawn): TerminalInfo | 'limit' | 'closed' {
+    if (this.closed) return 'closed'
     const owned = this.sessions.get(spec.session) ?? new Map<string, Terminal>()
     if (owned.size >= this.limits.maxTerminals) return 'limit'
     const shell = spec.shell ?? defaultShell(spec.env)
     const argv = terminalArgv(this.platform, spec.confine(shellArgv(shell, spec.cols, spec.rows)))
     const child = spawn(argv[0] as string, argv.slice(1), {
       cwd: spec.cwd,
-      env: { ...spec.env, TERM: 'xterm-256color' },
+      // SHELL=/bin/sh for util-linux script, which runs its command through $SHELL -c; the shell's own wrapper
+      // exports the real shell again.
+      env: { ...spec.env, TERM: 'xterm-256color', SHELL: '/bin/sh' },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -493,6 +535,7 @@ export class TerminalRegistry {
 
   /** Close everything, for server shutdown, so a restart leaves no orphan shells. */
   async closeAll(): Promise<void> {
+    this.closed = true
     clearInterval(this.timer)
     await Promise.all([...this.sessions.keys()].map((session) => this.closeSession(session)))
   }
