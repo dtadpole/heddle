@@ -10,7 +10,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -312,6 +312,8 @@ async function fragmentingChatDouble(answers) {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not one of the turns this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(body)
       const fragments = answers[Math.min(requests.length, answers.length) - 1]
       response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -729,6 +731,120 @@ test('a file under a root reads, and what cannot be shown is refused with a reas
   } finally {
     removeDir(h.home)
     removeDir(h.work)
+    removeDir(outside)
+  }
+})
+
+test('a symlink to a folder lists as a folder at its own path, and opening it lists its target, as DSH lists one', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * DSH's workspace listing reports what a child resolves to and keeps it at its own path (dsh-api-workspace-files: a
+   * symlink reports the type of its destination, a size only for a regular file, a child's path is the listing's joined
+   * with its name; list follows a final directory link inside the root). Measured on both builds before this check
+   * (live-testing draft developer-six-2): the link was a file of 0 bytes (TS) or of the folder entry's size (Rust) at
+   * its target's path, so it could not be expanded and two rows shared one path.
+   */
+  const h = harness('symlink')
+  try {
+    entry(join(h.work, 'nest', 'a.txt'), 'hello\n')
+    entry(join(h.work, 'plain.txt'), 'x\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync('nest', join(h.work, 'nest-link'))
+    symlinkSync('plain.txt', join(h.work, 'file-link'))
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    const root = realpathSync(h.work)
+
+    const { result, tree } = await treeAt(h, h.work)
+    assert.equal(result.code, 0, `the tree ran\n${result.stdout}${result.stderr}`)
+    const link = childOf(tree, 'nest-link')
+    assert.ok(link, `the link is listed\nsaw: ${(tree.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder is a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.children, null, 'which can be expanded, like any folder nobody opened yet')
+    assert.equal(link.bytes, undefined, 'and carries no size, as a folder does not')
+    assert.equal(link.path, join(root, 'nest-link'), 'at its own path')
+    const paths = (tree.children ?? []).map((node) => node.path)
+    assert.equal(new Set(paths).size, paths.length, `no two rows share one path\nsaw: ${paths.join(', ')}`)
+    const fileLink = childOf(tree, 'file-link')
+    assert.equal(fileLink?.kind, 'file', 'a link to a file is a file row')
+    assert.equal(fileLink?.bytes, 2, "with its target's size")
+
+    const opened = await treeAt(h, link.path)
+    assert.equal(opened.result.code, 0, `opening the link ran\n${opened.result.stdout}${opened.result.stderr}`)
+    assert.deepEqual(
+      (opened.tree.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['file:a.txt'],
+      'and lists what its target holds',
+    )
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a symlink that leads out of every root lists at its own path, and opening it is refused, through the Web API and the CLI', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * The row of a link stays at the link's own path (the check above), so opening it asks for a path inside the root. What
+   * refuses a link whose target no root owns is the containment check on the canonical path, the one the Web API and
+   * the CLI make before they list anything ("the Web API's tree lists only what a workspace root holds"). DSH's list
+   * confines the resolved path to the workspace root the same way (dsh-api-workspace-files list and confine,
+   * workspace-file/outside-workspace). Judged here end to end: the row a person would click, then the click.
+   */
+  const h = harness('symlink-out')
+  const root = fixtureDir('symlink-out-root')
+  const outside = fixtureDir('symlink-out-target')
+  let live
+  try {
+    entry(join(root, 'kept.txt'), 'inside\n')
+    entry(join(outside, 'not-yours.txt'), 'outside\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(outside, join(root, 'out-link'))
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const level = await treeOf(root)
+    assert.equal(level.status, 200, `the root lists (${JSON.stringify(level.body)})`)
+    const link = childOf(level.body, 'out-link')
+    assert.ok(link, `the link is listed\nsaw: ${(level.body.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder outside is still a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.path, join(realpathSync(root), 'out-link'), 'at its own path, inside the root')
+
+    const opened = await treeOf(link.path)
+    const listed = Array.isArray(opened.body?.children) ? opened.body.children.map((node) => node.label).join(', ') : ''
+    assert.equal(opened.status, 400, `opening it through the Web API is refused, not listed (${opened.status}${listed ? `, listed: ${listed}` : ''})`)
+    assert.deepEqual(opened.body, { error: `${realpathSync(outside)} is not under any workspace root` }, 'naming where the link lands')
+
+    const cli = await treeAt(h, link.path, { cwd: root })
+    assert.notEqual(cli.result.code, 0, `opening it through the CLI is refused too\n${cli.result.stdout}`)
+    assert.match(`${cli.result.stdout}${cli.result.stderr}`, /not under any workspace root/, 'with the same rule')
+    assert.doesNotMatch(cli.result.stdout, /not-yours\.txt/, 'and nothing of the target is printed')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
     removeDir(outside)
   }
 })
@@ -1235,6 +1351,118 @@ test('a session one process is writing refuses a second writer, so its log never
       ['started on the command line', 'the command line again', 'the server continues it'],
       'and the server\'s turn continued the history on disk rather than the one it had read',
     )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a turn cut by a server restart reads as interrupted at once, and is closed in the log before the next turn', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #5, reproduced without a model: the scripted turn calls bash with a long sleep, and the server is killed
+   * while the call runs (SIGKILL, the hardest form of a restart; the SIGTERM the issue used leaves the same log on both
+   * builds). The log then ends at the call: no tool result, no answer record, no turn end. Before the fix the view drew
+   * the call as running for good, after the restart and after every later turn.
+   *
+   * DSH closes such a turn when the session is next opened for writing, before anything else is appended: an
+   * interrupted result for each open call, then the step's end and the turn's end (dsh-agent-loop, on attach for
+   * writing; dsh-session openTurnClosers). Its cold read shows the same closers without writing them, so the page is
+   * right from the first read after the restart (dsh-session-query readColdSessionLog).
+   */
+  const h = harness('turn-closers')
+  const { script } = scriptedConfig({
+    home: h.home,
+    steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 20' } } }, { text: 'never reached' }],
+  })
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const id = parseJson(made.stdout)?.session
+    assert.ok(typeof id === 'string', `the session has an id\n${made.stdout}`)
+    const sessionDir = join(h.home, 'sessions', id)
+    const connect = async () => {
+      live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      return String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    }
+    const isCall = (event) => event.type === 'assistant/chunk' && event.chunk?.type === 'tool-call' && event.chunk?.name === 'bash'
+
+    /** The turn is started and not awaited: its request stays open while bash sleeps. */
+    let cookie = await connect()
+    const cut = fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: 'run the slow command, then say done' }),
+    }).then((response) => response.text()).catch(() => '')
+    let crashed = []
+    for (let waited = 0; waited < 15_000; waited += 100) {
+      crashed = readTranscript(sessionDir)
+      if (crashed.some(isCall)) break
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const callAt = crashed.findIndex(isCall)
+    assert.ok(callAt >= 0, `the turn reached its bash call\n${crashed.map((event) => event.type).join(' ')}`)
+    const callId = crashed[callAt].chunk.id
+    live.kill()
+    live = undefined
+    await cut
+    await new Promise((done) => setTimeout(done, 300))
+
+    /** The fixture is the issue's log: it ends inside the turn, with the call unanswered. */
+    crashed = readTranscript(sessionDir)
+    const answered = (events) => events.some((event) => event.type === 'message' && event.message?.role === 'tool' && event.message.toolCallId === callId)
+    assert.ok(!answered(crashed), `the killed server left the call unanswered\n${crashed.map((event) => event.type).join(' ')}`)
+    assert.ok(!crashed.slice(callAt).some((event) => event.type === 'turn/completed'), 'and the turn without an end')
+    const crashedBytes = readFileSync(transcriptFile(sessionDir))
+
+    /** After the restart, the first read already shows the call interrupted and the turn ended, and writes nothing. */
+    cookie = await connect()
+    const view = async () => {
+      const response = await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })
+      assert.equal(response.status, 200, 'the session is served')
+      return (await response.json()).turns ?? []
+    }
+    const describe = (turns) => turns.map((turn) => `${turn.kind}:${turn.state ?? ''}`).join(' ')
+    const first = await view()
+    const row = first.find((turn) => turn.kind === 'tool' && turn.toolCallId === callId)
+    assert.equal(row?.state, 'error', `after the restart the cut call is drawn as interrupted, not running\n${describe(first)}\n${JSON.stringify(row)}`)
+    assert.match(String(row?.result ?? ''), /^error \(INTERRUPTED\)/, 'and its result says the turn ended before it answered')
+    assert.ok(!first.some((turn) => turn.state === 'running'), `nothing is drawn as running\n${describe(first)}`)
+    assert.ok(first.some((turn) => Array.isArray(turn.ended) && turn.ended.length > 0), `the turn is drawn as ended, with its reason\n${describe(first)}`)
+    assert.ok(readFileSync(transcriptFile(sessionDir)).equals(crashedBytes), 'and reading the session wrote nothing to its log')
+
+    /** The next turn opens the session for writing: the closers are appended first, then the turn. */
+    writeFileSync(script, JSON.stringify({ steps: [{ text: 'it was interrupted' }] }))
+    const next = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: 'did the command finish?' }),
+    })
+    const stream = await next.text()
+    assert.equal(next.status, 200, `the follow-up turn ran\n${stream}`)
+    assert.ok(!stream.includes('event: error'), `and did not fail\n${stream}`)
+    const after = readTranscript(sessionDir)
+    assert.deepEqual(after.map((event) => event.seq), after.map((_, index) => index), 'every seq is written once, in order')
+    const closers = after.slice(crashed.length, crashed.length + 3)
+    assert.deepEqual(
+      closers.map((event) => event.type),
+      ['message', 'assistant/completed', 'turn/completed'],
+      `the log is closed right after the cut turn, before anything else\n${after.slice(crashed.length).map((event) => event.type).join(' ')}`,
+    )
+    assert.equal(closers[0].message?.role, 'tool', 'the first closer answers the call')
+    assert.equal(closers[0].message?.toolCallId, callId)
+    assert.match((closers[0].message?.content ?? []).map((part) => part.text ?? '').join(''), /^error \(INTERRUPTED\)/)
+    const asked = after.findIndex((event, index) => index >= crashed.length && event.type === 'message' && event.message?.role === 'user')
+    assert.ok(asked >= crashed.length + 3, 'and the follow-up prompt comes after the closers')
+    assert.equal(after.filter((event) => event.type === 'message' && event.message?.role === 'tool' && event.message.toolCallId === callId).length, 1, 'the call has one answer')
+
+    const later = await view()
+    assert.equal(later.find((turn) => turn.kind === 'tool' && turn.toolCallId === callId)?.state, 'error', `after a later turn the cut call is still drawn as interrupted\n${describe(later)}`)
+    assert.ok(!later.some((turn) => turn.state === 'running'), `and nothing as running\n${describe(later)}`)
   } finally {
     live?.kill()
     removeDir(h.home)
@@ -1970,6 +2198,68 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
     removeDir(h.work)
     removeDir(top)
     removeDir(loose)
+  }
+})
+
+test('a workspace added through the Web API with a ~ path is the folder under the home, stored canonical', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * GitHub issue #1. The route accepts a path that starts with `~` and expands it to the home folder; what it stores
+   * is the canonical path of that folder, so `~/x`, its expanded spelling, a trailing slash and (on a
+   * case-insensitive volume) a letter-case variant are one workspace. Measured on the TypeScript build: it checked
+   * the expanded path and stored the raw string, which resolved against the server's working folder — a record at
+   * `<server folder>/~/x`, a folder that does not exist, answered `200 created: true`. The Rust build stored the
+   * real folder. heddle keeps this `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path
+   * that is not fully qualified instead (dsh-workspace `realpathNormalize`), so this judges the two builds alike.
+   *
+   * `HOME` is the check's own scratch folder for the server, on either build, so nothing is read or written under a
+   * real home.
+   */
+  const h = harness('web-tilde')
+  const home = fixtureDir('web-tilde-home')
+  const folder = join(home, 'tilde-probe')
+  let live
+  try {
+    mkdirSync(folder, { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (body) => {
+      const response = await fetch(`${origin}/api/workspaces`, { method: 'POST', body: JSON.stringify(body), headers: { cookie, 'content-type': 'application/json' } })
+      return { status: response.status, body: await response.json() }
+    }
+    const canonical = realpathSync(folder)
+
+    const added = await post({ path: '~/tilde-probe', name: 'tilde-probe' })
+    assert.equal(added.status, 200, `a ~ path is added (${JSON.stringify(added.body)})`)
+    assert.equal(added.body.created, true, 'and this call created it')
+    assert.equal(added.body.record.path, canonical, 'as the canonical path of the folder under the home, not one under the server folder')
+    const views = (await (await fetch(`${origin}/api/workspaces`, { headers: { cookie } })).json()).workspaces ?? []
+    assert.deepEqual(views.map((view) => view.path), [canonical], `the listing holds that folder and nothing else\nsaw: ${JSON.stringify(views)}`)
+
+    for (const [what, path] of [
+      ['its expanded spelling', folder],
+      ['a trailing slash after ~', '~/tilde-probe/'],
+      ...(existsSync(join(home, 'TILDE-PROBE')) ? [['a letter-case variant', '~/TILDE-PROBE']] : []),
+    ]) {
+      const again = await post({ path })
+      assert.equal(again.status, 200, `${what} is not an error (${JSON.stringify(again.body)})`)
+      assert.equal(again.body.created, false, `${what} is the workspace already there`)
+      assert.equal(again.body.record.id, added.body.record.id, `${what} names the same record`)
+    }
+
+    const missing = await post({ path: '~/nowhere' })
+    assert.equal(missing.status, 400, `a ~ path that does not exist is refused (${JSON.stringify(missing.body)})`)
+    assert.equal(missing.body.error, '~/nowhere does not exist', 'naming the path as it was written')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(home)
   }
 })
 
@@ -2880,6 +3170,79 @@ test("a session's first prompt is titled by the session's own model, not by the 
   }
 })
 
+test("a conversation started through the turn route is titled by the session's own model too", async (context) => {
+  /**
+   * #68, the twin of the check above for a session no blank row opened first: `POST /api/turn {prompt, folder, new: true}`,
+   * a turn with no session and no folder (the page's send with nothing selected), and the CLI's `--new --turn`. DSH
+   * writes no title when a session is created; dsh-session-title writes the fallback from the first eligible human
+   * message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session with no title yet
+   * (:387). Measured before on both builds: the turn route and the CLI opened the session titled with the prompt cut to
+   * 60 characters, so no title call started and `Please summarise the quarterly revenue figures for the north` stayed.
+   * The CLI is judged with a title step that fails, because a one-shot process may end before an answer lands: what it
+   * leaves is the fallback the first message wrote, cut at a word.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  const h = harness('turn-route-title')
+  const generated = 'Northern revenue year on year'
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  const fallback = 'Please summarise the quarterly revenue figures…'
+  scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: 'a scripted answer' }] })
+  const folder = join(h.work, 'ws-turn-title')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const listed = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    const turnOpens = async (body) => {
+      const before = new Set((await listed()).map((meta) => meta.id))
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const stream = await turn.text()
+      assert.equal(turn.status, 200, `the turn ran\n${stream}`)
+      assert.match(stream, /a scripted answer/, 'the turn was answered by the turn step, not the title step')
+      const made = (await listed()).filter((meta) => !before.has(meta.id))
+      assert.equal(made.length, 1, `the turn opened one new session\n${JSON.stringify(made)}`)
+      return made[0].id
+    }
+    const titleSettles = async (id) => {
+      let title
+      for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+        if (attempt > 0) await new Promise((done) => setTimeout(done, 250))
+        title = (await listed()).find((meta) => meta.id === id)?.title
+      }
+      return title
+    }
+
+    const fresh = await turnOpens({ prompt, folder, new: true })
+    const freshTitle = await titleSettles(fresh)
+    assert.notEqual(freshTitle, prompt.slice(0, 60), 'the title is not the prompt cut mid-word at 60 characters')
+    assert.equal(freshTitle, generated, `new: true in a folder: the model's title replaces the fallback\nsaw: ${JSON.stringify(freshTitle)}`)
+
+    const loose = await turnOpens({ prompt })
+    const looseTitle = await titleSettles(loose)
+    assert.equal(looseTitle, generated, `no session and no folder: the same\nsaw: ${JSON.stringify(looseTitle)}`)
+
+    scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', error: { message: 'the title model is down' } }, { text: 'a scripted answer' }] })
+    const cli = await runCli(adminArgs(h, ['--new', '--turn', prompt, '--json']), { env: h.env, cwd: folder })
+    assert.equal(cli.code, 0, `the CLI turn ran\n${cli.stdout}${cli.stderr}`)
+    const made = parseJson(cli.stdout)
+    const cliTitle = (await sessionsOf(h)).find((meta) => meta.id === made.session)?.title
+    assert.equal(cliTitle, fallback, `--new --turn: the first message wrote the fallback at a word, which a failed call leaves\nsaw: ${JSON.stringify(cliTitle)}`)
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session is pinned and archived in the store, and the tree follows both', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -3732,7 +4095,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.menuChrome.position, 'fixed', `a menu floats in viewport coordinates\nsaw: ${JSON.stringify(reading.menuChrome)}`)
     assert.equal(reading.menuChrome.insideViewport, true, 'and is entirely on screen')
     assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
-    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
+    /**
+     * Eight items since C17 added DSH's `Manual` (dsh-client-ui-workspace/lib/client.js:2914-2918, with its chevrons
+     * glyph): Workspace Tree, Workspace, In one list, Manual, Last updated, and the archive trio.
+     */
+    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
 
     /** **A session's glyph is a conversation**, not a folder: the reference's bubble artwork, distinct from the folder path. */
     const glyphs = JSON.parse(
@@ -3822,8 +4189,9 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      */
     /**
      * DSH's View options, read from its own menu on 2026-10-17, is four groups: a `WorkSpace` heading, the grouping pair,
-     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, `Last updated` (the only
-     * order it has) and the archive trio, in DSH's order — asserted as the list, because the order is the claim.
+     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, the ordering pair
+     * (`Manual` / `Last updated`, since C17) and the archive trio, in DSH's order — asserted as the list, because the
+     * order is the claim.
      */
     assert.deepEqual(
       reading.viewItems.filter((item) => item.label !== null).map((item) => item.label),
@@ -3831,7 +4199,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
        * The grouping is DSH's three since the workspace tree (owner goal, 2026-10-28; DSH 0.2.1's `SessionGroupBy` is
        * `workspace-tree | workspace | flat`): `Workspace Tree`, `Workspace` (sibling sections) and `In one list`.
        */
-      ['Workspace Tree', 'Workspace', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
+      ['Workspace Tree', 'Workspace', 'In one list', 'Manual', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
       `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
     )
     assert.deepEqual(
@@ -5539,18 +5907,26 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
   }
 })
 
-test('the later pin leads, and the tree and the flat list put the same sessions in the same order', async (context) => {
+test('pins follow DSH in both orders: prompt time under Last updated, the later pin first under Manual, the flat list like the tree', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
-   * R-developer-eight-17 (DSH parity C13), measured on both builds: two pins showed in one order in the tree and in the
-   * other order in In one list, because the tree ordered pins by when they were pinned and the flat list by when the
-   * sessions were created. DSH keeps one registry-global pin list, most recent pin first, and fronts a new pin in both the
-   * group and the flat list. The flat list also ordered the unpinned rows by creation while the tree and the View options
-   * item (Last updated) order them by the last write.
+   * R-developer-eight-17 (DSH parity C13) with C17 and issue #63. Two pins read one way in the tree and the other way in
+   * In one list, which sorted by creation. Since C17 the flat list follows the tree's rule in the **selected order**,
+   * as DSH's flat list partitions its own account's order (dsh-client-ui-workspace/lib/client.js:1146-1154,
+   * 3583-3584). The rule, from DSH's README (*Reordering and view options*):
+   * - **Last updated** sorts each partition by the latest prompt or steer, and pin time does not affect it.
+   * - **Manual** keeps a saved sequence. Entering it freezes the order on screen.
+   * - Pinning "moves the Session to the front of its complete saved sequence without changing the selected mode. It
+   *   leads the pinned partition in Manual but need not lead it in Last updated. Unpinning leaves the saved position
+   *   unchanged."
+   * DSH fronts a pin in the group's account and the flat list's (`pinSessionOrder` / `pinOrderAccounts`,
+   * client.js:1303-1309, 1343-1345). This check judged "the later pin leads" in the only order main had, and is
+   * rewritten to that rule.
    *
-   * The fixture makes every one of those rules disagree with creation order: four sessions in one workspace, the third
-   * pinned before the second, and the first written to last.
+   * The fixture: four sessions in one workspace, prompted first..fourth, then first again, so it has the latest prompt.
+   * The third is pinned before the second, so the second is the later pin and the third has the later prompt. Manual is
+   * entered from a freshly loaded In one list, so the tree has not been drawn in that page load.
    */
   const h = harness('session-pin-order')
   let live
@@ -5577,15 +5953,15 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const handshake = await fetch(live.url, { redirect: 'manual' })
     const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
     assert.ok(cookie.length > 0, 'the server issued a cookie')
-    /** The first session is written to last, so it is the most recently updated of the unpinned two. */
+    /** The first session is prompted again, so it has the latest prompt of the unpinned two. */
     const written = await fetch(new URL('/api/turn', live.url), {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest written', folder: h.work }),
+      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest prompted', folder: h.work }),
     })
     assert.equal(written.status, 200, `the follow-up turn runs\n${await written.clone().text()}`)
     await written.text()
-    /** The third session is pinned, then the second: the second is the later pin, though it was created earlier. */
+    /** The third session is pinned, then the second: the second is the later pin, the third the later prompt. */
     const pin = (id) =>
       fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
         method: 'POST',
@@ -5598,53 +5974,127 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const metas = await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json()
     const metaOf = (id) => metas.find((meta) => meta.id === id)
     assert.ok(String(metaOf(second)?.pinnedAt) > String(metaOf(third)?.pinnedAt), `the store says which pin is later\nsaw: ${JSON.stringify(metas)}`)
-    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which session was written last\nsaw: ${JSON.stringify(metas)}`)
-    const expected = [second, third, first, fourth]
+    assert.ok(String(metaOf(third)?.updated) > String(metaOf(second)?.updated), `and which pinned session was prompted later\nsaw: ${JSON.stringify(metas)}`)
+    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which unpinned session was prompted last\nsaw: ${JSON.stringify(metas)}`)
+
+    /**
+     * Page helpers, installed once per page load: read the rows of whichever view is drawn, choose a View options item,
+     * and press a row's pin control. Each read waits until it sees four rows, opening the workspace if it is closed.
+     */
+    const helpers = `(() => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const sessionLis = () => [...document.querySelectorAll('#tree li[data-kind="session"]')]
+      window.__pinOrder = {
+        async read() {
+          for (let attempt = 0; attempt < 40; attempt += 1) {
+            const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
+            if (workspaceLi !== null && workspaceLi.dataset.open !== 'true' && attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
+            if (sessionLis().length >= 4 && (workspaceLi === null || workspaceLi.dataset.open === 'true')) break
+            await wait(150)
+          }
+          await wait(400)
+          return {
+            view: document.querySelector('#tree li[data-kind="workspace"]') === null ? 'flat' : 'tree',
+            ids: sessionLis().map((li) => li.dataset.sessionId ?? null),
+            pinned: sessionLis().map((li) => li.dataset.pinned === 'true'),
+          }
+        },
+        async choose(label) {
+          document.querySelector('#view-options button').click()
+          await wait(250)
+          const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === label)
+          if (item === undefined) return false
+          item.click()
+          await wait(1200)
+          return true
+        },
+        async pin(id) {
+          const button = document.querySelector('#tree li[data-kind="session"][data-session-id="' + id + '"] > .row button.pin-action')
+          if (button === null) return false
+          button.click()
+          await wait(1500)
+          return true
+        },
+        stored() {
+          return localStorage.getItem('heddle.tree.order.v1')
+        },
+      }
+      return true
+    })()`
+    const page = async (call) => JSON.parse(await browser.evaluate(`(async () => JSON.stringify(await window.__pinOrder.${call}))()`, 30_000))
+    const name = (ids) => (ids ?? []).map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
+    const byPrompt = [third, second, first, fourth]
 
     browser = await openBrowser()
     await browser.goto(live.url)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
-    const reading = JSON.parse(
-      await browser.evaluate(`(async () => {
-        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
-        const rows = () => [...document.querySelectorAll('#tree .row')]
-        const sessionIds = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId ?? null)
-        /** The workspace is opened only if closed: a first visit opens the first workspace on its own. */
-        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
-        const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
-        if (workspaceLi === null) return JSON.stringify({ error: 'no workspace row' })
-        for (let attempt = 0; attempt < 30 && workspaceLi.dataset.open !== 'true'; attempt += 1) {
-          if (attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
-          await wait(200)
-        }
-        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
-        const tree = sessionIds()
-        const treePinned = [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.pinned === 'true')
-        document.querySelector('#view-options button').click()
-        await wait(250)
-        const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === 'In one list')
-        if (item === undefined) return JSON.stringify({ error: 'no In one list item', tree })
-        item.click()
-        for (let attempt = 0; attempt < 30 && document.querySelector('#tree li[data-kind="workspace"]') !== null; attempt += 1) await wait(150)
-        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
-        await wait(300)
-        const flat = sessionIds()
-        const ages = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .age')].map((age) => age.textContent)
-        return JSON.stringify({ tree, treePinned, flat, ages })
-      })()`, 30_000),
-    )
-    assert.equal(reading.error, undefined, `the page drew the workspace and offered In one list\nsaw: ${JSON.stringify(reading)}`)
-    const name = (ids) => ids.map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
-    /** The tree: the later pin first, then the earlier pin, then the rest by their last write. */
-    assert.deepEqual(name(reading.tree), name(expected), `the tree puts the later pin first, then the latest written\nsaw: ${JSON.stringify(name(reading.tree))}`)
-    assert.deepEqual(reading.treePinned, [true, true, false, false], 'and draws the two leading rows as pinned')
-    /** The flat list: the same rule, so the same order — which is the regression this check was written for. */
+    await browser.evaluate(helpers)
+
+    /** Last updated (the default): the pinned part by prompt time, so the later pin does not lead, in both views. */
+    const treeUpdated = await page('read()')
+    assert.equal(treeUpdated.view, 'tree', `the page opens on the tree\nsaw: ${JSON.stringify(treeUpdated)}`)
+    assert.deepEqual(name(treeUpdated.ids), name(byPrompt), `Last updated: the pin prompted later leads, not the later pin\nsaw: ${JSON.stringify(name(treeUpdated.ids))}`)
+    assert.deepEqual(treeUpdated.pinned, [true, true, false, false], 'and the two leading rows are drawn as pinned')
+    assert.equal(await page(`choose('In one list')`), true, 'View options offers In one list')
+    const flatUpdated = await page('read()')
+    assert.equal(flatUpdated.view, 'flat', `In one list drew no workspace rows\nsaw: ${JSON.stringify(flatUpdated)}`)
+    assert.deepEqual(name(flatUpdated.ids), name(treeUpdated.ids), `In one list reads as the tree does under Last updated\nsaw: ${JSON.stringify(name(flatUpdated.ids))}`)
+
+    /** Reload into the flat list, choose Manual there, and the tree keeps the order on screen rather than pin time. */
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    await browser.evaluate(helpers)
+    assert.equal(await page(`choose('Manual')`), true, 'View options offers Manual')
+    const flatManual = await page('read()')
+    assert.equal(flatManual.view, 'flat', 'the reload kept In one list')
+    assert.deepEqual(name(flatManual.ids), name(byPrompt), `entering Manual freezes the flat list as it was\nsaw: ${JSON.stringify(name(flatManual.ids))}`)
+    assert.equal(JSON.parse(String(await page('stored()'))).orderBy, 'manual', 'the browser stores Manual')
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'View options offers Workspace Tree')
+    const treeManual = await page('read()')
     assert.deepEqual(
-      name(reading.flat),
-      name(expected),
-      `In one list puts the later pin first and orders the rest by their last write, as the tree does\nsaw: ${JSON.stringify({ flat: name(reading.flat), tree: name(reading.tree) })}`,
+      name(treeManual.ids),
+      name(byPrompt),
+      `Manual chosen in the flat list froze the tree's order too, rather than putting the later pin first\nsaw: ${JSON.stringify(name(treeManual.ids))}`,
     )
-    assert.equal(reading.ages.length, 4, `every flat row says where it lives and when\nsaw: ${JSON.stringify(reading.ages)}`)
+
+    /**
+     * Under Manual an unpin moves nothing in the saved sequence. Manual froze Last updated's sequence, in which the second
+     * (the oldest prompt) is last, so the row returns to that slot.
+     */
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control')
+    const unpinned = await page('read()')
+    assert.deepEqual(name(unpinned.ids), name([third, first, fourth, second]), `the unpinned row goes back to its saved slot\nsaw: ${JSON.stringify(name(unpinned.ids))}`)
+    assert.deepEqual(unpinned.pinned, [true, false, false, false], 'and only the third is drawn as pinned')
+
+    /** Pinning it again under Manual fronts it: the later pin leads, in the tree and in the flat list alike. */
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control again')
+    const repinned = await page('read()')
+    const latestPinFirst = [second, third, first, fourth]
+    assert.deepEqual(name(repinned.ids), name(latestPinFirst), `under Manual the later pin leads the pinned part\nsaw: ${JSON.stringify(name(repinned.ids))}`)
+    assert.deepEqual(repinned.pinned, [true, true, false, false], 'and both pins are drawn')
+    assert.equal(await page(`choose('In one list')`), true, 'back to In one list')
+    const flatRepinned = await page('read()')
+    assert.deepEqual(name(flatRepinned.ids), name(latestPinFirst), `the pin fronted the flat list as well\nsaw: ${JSON.stringify(name(flatRepinned.ids))}`)
+
+    /** Unpinned again, it keeps the front slot the pin gave it: it heads the rest, ahead of later prompts. */
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'back to Workspace Tree')
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control a third time')
+    const kept = [third, second, first, fourth]
+    const unpinnedAgain = await page('read()')
+    assert.deepEqual(name(unpinnedAgain.ids), name(kept), `an unpin leaves the saved position under Manual\nsaw: ${JSON.stringify(name(unpinnedAgain.ids))}`)
+    assert.deepEqual(unpinnedAgain.pinned, [true, false, false, false], 'with only the third pinned')
+    assert.equal(await page(`choose('In one list')`), true, 'In one list once more')
+    const flatKept = await page('read()')
+    assert.deepEqual(name(flatKept.ids), name(kept), `and the flat list keeps it there too\nsaw: ${JSON.stringify(name(flatKept.ids))}`)
+
+    /** Last updated discards the layout: every part by prompt time again, in either view. */
+    assert.equal(await page(`choose('Last updated')`), true, 'View options offers Last updated')
+    const backByPrompt = [third, first, fourth, second]
+    const flatBack = await page('read()')
+    assert.deepEqual(name(flatBack.ids), name(backByPrompt), `Last updated orders by prompt time again\nsaw: ${JSON.stringify(name(flatBack.ids))}`)
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'back to Workspace Tree')
+    const treeBack = await page('read()')
+    assert.deepEqual(name(treeBack.ids), name(flatBack.ids), `and the tree reads as the flat list does\nsaw: ${JSON.stringify(name(treeBack.ids))}`)
   } finally {
     browser?.close()
     live?.kill()
@@ -5826,6 +6276,48 @@ test('opening a session that holds long answers leaves the server answering: /he
     }
   } finally {
     live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a session is Last updated by a person's latest prompt, not by the answer or the tool work written after it", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * R-developer-eight-20 (DSH parity C17), DSH's Last updated: a row is dated by the latest prompt or steer a person
+   * wrote. DSH's list takes lastPromptAt from a user-sourced user/message, as that event's own time
+   * (dsh-api-session-controller/lib/index.js:1872-1879), and dates the row max(createdAt, lastPromptAt) (index.js:2124-2125).
+   * heddle dated it by its last write, so the answer and the turn boundary re-dated it. The turn here runs one scripted
+   * bash call that sleeps, so everything written after the prompt is measurably later than the prompt itself.
+   */
+  const h = harness('last-prompt')
+  scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 0.4' } } }, { text: 'answered after the pause' }] })
+  try {
+    const first = await runCli([...h.args, '--turn', 'the prompt that dates this row'], { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `the turn ran\n${first.stdout}${first.stderr}`)
+    const id = sessionsUnder(join(h.home, 'sessions'))[0]
+    assert.ok(id, 'the turn left a session')
+    /** The prompt is a user message with no source: a message the harness wrote carries one. */
+    const lastPrompt = () =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user' && event.message?.source === undefined)
+        .at(-1)
+    const events = readTranscript(join(h.home, 'sessions', id))
+    const prompt = lastPrompt()
+    const answered = events.filter((event) => event.type === 'assistant/completed' || event.type === 'turn/completed').at(-1)
+    assert.ok(prompt !== undefined && answered !== undefined, `the log holds the prompt and the answer\nsaw: ${events.map((event) => event.type).join(', ')}`)
+    assert.ok(Date.parse(answered.at) - Date.parse(prompt.at) >= 300, `the answer was written well after the prompt\nprompt ${prompt.at}, answer ${answered.at}`)
+    const listed = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(listed?.updated, prompt.at, `the session is dated by its prompt, not by what was written after it\nsaw: ${JSON.stringify(listed)}`)
+
+    /** The next prompt moves it. */
+    const second = await runCli([...h.args, '--turn', 'a second prompt', '--resume', id], { env: h.env, cwd: h.work })
+    assert.equal(second.code, 0, `the resumed turn ran\n${second.stdout}${second.stderr}`)
+    const again = lastPrompt()
+    assert.notEqual(again?.at, prompt.at, 'the second prompt is a new event')
+    const relisted = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(relisted?.updated, again?.at, `the next prompt re-dates it\nsaw: ${JSON.stringify(relisted)}`)
+  } finally {
     removeDir(h.home)
     removeDir(h.work)
   }
