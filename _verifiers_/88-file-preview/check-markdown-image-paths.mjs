@@ -136,6 +136,20 @@ test('Markdown encoded image URLs serve distinct exact PNG bytes behind cookie a
       const denied = await request(url)
       assert.equal(denied.status, 401, 'raw bytes require the session cookie')
     }
+    // A malformed escape in a link is a literal filename, not permission to navigate away from the app.
+    writeFileSync(join(work, '100%.md'), 'literal-percent link target\n')
+    writeFileSync(documentPath, '[budget](100%.md)')
+    const linkPreview = await request(`${origin}/api/file?path=${encodeURIComponent(documentPath)}`, { headers: { cookie } })
+    assert.equal(linkPreview.status, 200)
+    const linkHtml = String((await linkPreview.json()).html)
+    const linkAddress = /<a[^>]*\bhref="([^"]+)"/.exec(linkHtml)?.[1]
+    assert.ok(linkAddress, linkHtml)
+    assert.ok(linkHtml.includes('data-heddle-path='), 'local link retains in-panel routing metadata')
+    const linked = new URL(linkAddress.replaceAll('&amp;', '&'), origin)
+    assert.equal(linked.searchParams.get('path'), join(work, '100%.md'))
+    const linkResponse = await request(linked, { headers: { cookie } })
+    assert.equal(linkResponse.status, 200)
+    assert.equal(await linkResponse.text(), 'literal-percent link target\n')
     const unsafePath = join(home, 'outside.png')
     writeFileSync(unsafePath, png([20, 30, 40]))
     const outside = await request(`${origin}/api/raw?path=${encodeURIComponent(unsafePath)}`, { headers: { cookie } })
