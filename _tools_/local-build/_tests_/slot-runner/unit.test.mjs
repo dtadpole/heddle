@@ -95,11 +95,11 @@ function args(sb) {
 }
 
 // Poll `status` until it prints the wanted substring, or the deadline passes.
-async function waitForStatus(sb, wanted, timeoutMs = 10000) {
+async function waitForStatus(sb, wanted, timeoutMs = 10000, statusArgs = ['status']) {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    last = run(sb, ['status']).stdout
+    last = run(sb, statusArgs).stdout
     if (last.includes(wanted)) return last
     await new Promise((r) => setTimeout(r, 100))
   }
@@ -154,10 +154,10 @@ test('a caller\'s own -j is kept, in every spelling, and no -j is added to fmt',
 
 // Concurrency is proven by holding every fake cargo until released, not by timing: on a
 // loaded Mac short sleeps can run one after another and a peak of three never happen.
-async function holdAndRelease(sb, { runners, expectBusy, extra = {} }) {
+async function holdAndRelease(sb, { runners, expectBusy, extra = {}, cmd = ['check'], statusArgs = ['status'] }) {
   const release = join(sb.dir, 'release')
-  const runs = Array.from({ length: runners }, () => start(sb, ['check'], { FAKE_HOLD: release, ...extra }))
-  await waitForStatus(sb, `summary: busy=${expectBusy} `)
+  const runs = Array.from({ length: runners }, () => start(sb, cmd, { FAKE_HOLD: release, ...extra }))
+  await waitForStatus(sb, `summary: busy=${expectBusy} `, 10000, statusArgs)
   // One full retry cycle of the waiting runners (they poll every 3 s): none may get in.
   await new Promise((done) => setTimeout(done, 3500))
   const startedWhileHeld = logLines(sb).filter((line) => line.startsWith('+')).length
@@ -461,4 +461,86 @@ test('a dead holder\'s lock is reclaimed; a live one makes the run wait, then gi
   assert.match(blocked.stderr, /stayed locked by \/x\/live/)
   assert.deepEqual(args(sb), [], 'cargo never ran')
   assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), `${process.pid} ${now} 0 /x/live\n`, 'a live lock is untouched')
+})
+
+// TypeScript test runs: a pool of their own and a capped node test concurrency.
+const tsSlotDirs = (sb) => (existsSync(sb.root) ? readdirSync(sb.root).filter((n) => n.startsWith('ts-slot-')) : [])
+const EXEC_ARGV = ['node', '-e', 'console.log(process.execArgv.join(" "))']
+
+test('a --ts command runs in a ts slot, not through cargo, and every node it starts gets --test-concurrency=4', (t) => {
+  const sb = sandbox(t)
+  const r = run(sb, ['--ts', '--', ...EXEC_ARGV])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /--test-concurrency=4/)
+  assert.match(r.stderr, /ts slot 0, cap 2 of 4, node test concurrency 4/)
+  assert.deepEqual(args(sb), [], 'cargo never ran')
+  assert.deepEqual(tsSlotDirs(sb), [], 'the ts slot, and the node shim in it, go with the command')
+
+  const shell = run(sb, ['--ts', 'sh', '-c', 'command -v node'], { LOCAL_BUILD_TS_CONCURRENCY: '2' })
+  assert.equal(shell.status, 0, shell.stderr)
+  assert.match(shell.stdout, /ts-slot-0\/bin\/node$/m, 'the -- is optional, and the shim is first on PATH')
+  const two = run(sb, ['--ts', '--', ...EXEC_ARGV], { LOCAL_BUILD_TS_CONCURRENCY: '2' })
+  assert.match(two.stdout, /--test-concurrency=2/)
+  const bad = run(sb, ['--ts', '--', ...EXEC_ARGV], { LOCAL_BUILD_TS_CONCURRENCY: 'many' })
+  assert.match(bad.stdout, /--test-concurrency=4/)
+  assert.match(bad.stderr, /LOCAL_BUILD_TS_CONCURRENCY must be a whole number/)
+})
+
+test('the ts pool holds two by default, apart from the cargo slots, and a third ts run waits', async (t) => {
+  const sb = sandbox(t)
+  const tsCmd = ['--ts', '--', sb.cargo]
+  const { results, startedWhileHeld, peak, started } = await holdAndRelease(sb, {
+    runners: 4,
+    expectBusy: 2,
+    cmd: tsCmd,
+    statusArgs: ['--ts', 'status'],
+  })
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  assert.equal(startedWhileHeld, 2, 'two ts slots filled, and a third never got in while they were held')
+  assert.ok(peak <= 2, `two at most (peak ${peak})`)
+  assert.equal(started, 4)
+
+  writeFileSync(sb.log, '')
+  const release = join(sb.dir, 'release-2')
+  const held = [start(sb, tsCmd, { FAKE_HOLD: release }), start(sb, tsCmd, { FAKE_HOLD: release })]
+  const busy = await waitForStatus(sb, 'summary: busy=2 ', 10000, ['--ts', 'status'])
+  assert.match(busy, /^class: ts {2}slots: 4 {2}node test concurrency: 4$/m)
+  assert.match(busy, /ts slot 0: busy pid=\d+ cmd=\d+ /)
+  assert.match(busy, /cap: 2 of 4 slots \(default; no cap file\)/)
+  const cargo = run(sb, ['check'], { LOCAL_BUILD_WAIT_SECONDS: '5' })
+  assert.equal(cargo.status, 0, 'a cargo command is not held up by the ts pool')
+  assert.match(run(sb, ['status']).stdout, /summary: busy=0 stale=0 free=3/)
+  const third = run(sb, tsCmd, { LOCAL_BUILD_WAIT_SECONDS: '2' })
+  assert.equal(third.status, 75, 'a third ts run waits, then gives up')
+  writeFileSync(release, '')
+  for (const r of await Promise.all(held.map((h) => h.done))) assert.equal(r.code, 0, r.stderr)
+  assert.deepEqual(tsSlotDirs(sb), [])
+})
+
+test('ts-cap sets the ts pool alone, and an unreadable one is ignored', (t) => {
+  const sb = sandbox(t)
+  mkdirSync(sb.root, { recursive: true })
+  writeFileSync(join(sb.root, 'ts-cap'), '1\n')
+  assert.match(run(sb, ['--ts', 'status']).stdout, /cap: 1 of 4 slots \(set by .*\/ts-cap\)/)
+  assert.match(run(sb, ['status']).stdout, /cap: 3 of 3 slots \(default; no cap file\)/)
+  writeFileSync(join(sb.root, 'ts-cap'), '9\n')
+  const ignored = run(sb, ['--ts', 'status'])
+  assert.match(ignored.stderr, /ignoring .*ts-cap: it must hold a whole number from 1 to 4/)
+  assert.match(ignored.stdout, /cap: 2 of 4 slots \(cap file ignored/)
+})
+
+test('a ts run adds no -j, leaves a CARGO_TARGET_DIR alone, and needs a command that exists', (t) => {
+  const sb = sandbox(t)
+  const td = join(sb.dir, 'shared-target')
+  const r = run(sb, ['--ts', '--', sb.cargo, 'build'], { CARGO_TARGET_DIR: td })
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(args(sb), ['build'], 'the command\'s arguments are its own')
+  assert.ok(!existsSync(td), 'no target lock or stamp')
+  assert.equal(run(sb, ['--ts', '--', 'test', '-n', 'x']).status, 0, 'a command named like a cargo subcommand gets no -j either')
+  assert.equal(run(sb, ['--ts']).status, 64)
+  assert.equal(run(sb, ['--ts', '--']).status, 64)
+  const missing = run(sb, ['--ts', '--', 'no-such-command-xyz'])
+  assert.equal(missing.status, 127)
+  assert.match(missing.stderr, /command not found: no-such-command-xyz/)
+  assert.deepEqual(tsSlotDirs(sb), [])
 })
