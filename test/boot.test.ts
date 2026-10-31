@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -47,8 +47,23 @@ test('the daemon plist names the profile, so a wrong working directory cannot hi
    * absent and the panel said so — while the source, the build and the checks were all correct. The agent now names
    * `--config <checkout>/cordis.yml`, which keeps the profile a property of the installation rather than of the shell
    * that happened to start it.
+   *
+   * Since live-deploy's 8d13568d (the supervisor that keeps the server up where launchd does not), the template
+   * carries `@PROGRAM_ARGUMENTS@` and `install.sh` writes the argument list into it, so the claim is judged on what
+   * `install.sh --print` renders for this checkout rather than on the template's text. The binary stands in for the
+   * build, so no `dist/` is needed, and the render changes nothing on the machine.
    */
-  const template = readFileSync(join(import.meta.dirname, '..', '_tools_', 'web-daemon', 'heddle-web.plist.template'), 'utf8')
-  assert.match(template, /<string>--config<\/string>\s*<string>@REPO@\/cordis\.yml<\/string>/, 'the profile is passed explicitly')
-  assert.match(template, /<key>WorkingDirectory<\/key>\s*<string>@REPO@<\/string>/, 'and the checkout is still the working directory')
+  const repo = join(import.meta.dirname, '..')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HEDDLE_')))
+  const render = spawnSync('sh', [join(repo, '_tools_', 'web-daemon', 'install.sh'), '--print'], {
+    encoding: 'utf8',
+    env: { ...env, HEDDLE_WEB_PLATFORM: 'darwin', HEDDLE_ALLOW_DIRTY_INSTALL: '1', HEDDLE_BIN: process.execPath, HEDDLE_NODE: process.execPath },
+  })
+  assert.equal(render.status, 0, `install.sh --print renders the plist: ${render.stderr}`)
+  const programArguments = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(render.stdout)?.[1] ?? ''
+  const args = [...programArguments.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => match[1])
+  const config = args.indexOf('--config')
+  assert.ok(config >= 0, `the profile is passed explicitly: ${JSON.stringify(args)}`)
+  assert.equal(args[config + 1], `${repo}/cordis.yml`, 'and it is the cordis.yml beside this checkout')
+  assert.equal(/<key>WorkingDirectory<\/key>\s*<string>([^<]*)<\/string>/.exec(render.stdout)?.[1], repo, 'and the checkout is still the working directory')
 })

@@ -432,7 +432,7 @@ async function runTurnBody(
        * for one message. What the rule is about is a message that arrives *while the model is answering*.
        */
       inputBefore = userInputSeqs(ctx, options.session)
-      const request = {
+      const asked = {
         endpoint: options.endpoint,
         messages: prepared.messages,
         ...(options.model !== undefined ? { model: options.model } : {}),
@@ -443,13 +443,26 @@ async function runTurnBody(
         sessionId: options.session.id,
         round,
       }
+      /**
+       * The record names the request this step **sends**, not the one the turn started with (issue #14).
+       *
+       * The `model/request` waterfall is where a selection policy rewrites a call: the server's running-turn rule
+       * moves a step to the session's current endpoint, model and level, so a switch made mid-turn lands on the next
+       * step, as DSH's does. The record used to be written from the turn's options before that rewrite, so a step that
+       * went to the new model was logged under the old one, and the log read as if the switch had been ignored. DSH's
+       * request header names the provider, model and effort actually used. So the request is resolved here, **once**:
+       * the record (its endpoint, model, level, message and tool counts) and the call both take that answer, and the
+       * call goes out through `streamResolved`, which does not run the waterfall again. A listener may rewrite freely or
+       * have effects; running it twice could send something other than what was recorded.
+       */
+      const request = ctx.model.resolve(asked)
 
       ctx.session.store.modelRequest(options.session, {
-        endpoint: options.endpoint,
-        ...(options.model !== undefined ? { model: options.model } : {}),
-        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-        messages: prepared.messages.length,
-        tools: prepared.tools.map((tool) => tool.name),
+        endpoint: request.endpoint,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        messages: request.messages.length,
+        tools: (request.tools ?? []).map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,
         thresholdTokens: report.thresholdTokens,
         pruned: report.pruned,
@@ -459,7 +472,7 @@ async function runTurnBody(
       })
 
       try {
-        for await (const chunk of ctx.model.stream(request, signal)) {
+        for await (const chunk of ctx.model.streamResolved(request, signal)) {
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
