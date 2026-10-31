@@ -31,6 +31,8 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`definition.rs`](definition.rs) | `_sessions_/<name>/{session.json, INDEX.md}` | `definition.ts` |
 | [`service.rs`](service.rs) | `SessionService`, `title_from`, `fork_title` | `service.ts`, `src/plugins/session.ts` |
 | [`error.rs`](error.rs) | `SessionError`, `SessionFlagError` | the thrown messages |
+| [`search.rs`](search.rs) | content search: DSH's `session.search` over the current user and assistant messages — FTS5 `unicode61` phrase matching, DSH's ranking and 240-code-point snippet, and `SessionSearchIndex`, a scan cached per log (R-developer-eight-19) | `search.ts` |
+| [`unicode61.rs`](unicode61.rs) | the tokenizer's tables, generated from SQLite by `src/session/unicode61-generate.ts`; do not edit | `unicode61.ts` |
 
 ## Read next
 
