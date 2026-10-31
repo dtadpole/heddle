@@ -15,6 +15,30 @@
 # from a ticket queue, not by whoever polls first (queue.md).
 set -eu
 
+# The shell reads a script while it runs it. A run can wait half an hour in the queue, and a
+# worktree sync or an edit of this file meanwhile made it resume at its old byte offset in
+# the new text ("line 502: eep: command not found", exit 127). So a run first copies itself
+# to a private file and runs that copy, which deletes itself at once: the open script stays
+# readable to the shell, and nothing is left behind even after a kill -9.
+if [ "${LOCAL_BUILD_PRIVATE_COPY:-}" != "$0" ]; then
+    lb_copy=$(mktemp "${TMPDIR:-/tmp}/local-build-run.XXXXXX" 2>/dev/null) || lb_copy=
+    if [ -n "$lb_copy" ] && cp "$0" "$lb_copy" 2>/dev/null; then
+        LOCAL_BUILD_PRIVATE_COPY=$lb_copy
+        LOCAL_BUILD_SELF=$0
+        export LOCAL_BUILD_PRIVATE_COPY LOCAL_BUILD_SELF
+        exec /bin/sh "$lb_copy" "$@"
+    fi
+    # No private copy could be made: run in place, as before.
+    [ -z "$lb_copy" ] || rm -f "$lb_copy"
+    LOCAL_BUILD_SELF=$0
+else
+    case "$0" in
+        */local-build-run.*) rm -f "$0" ;;
+    esac
+fi
+SELF=${LOCAL_BUILD_SELF:-$0}
+unset LOCAL_BUILD_PRIVATE_COPY LOCAL_BUILD_SELF
+
 SLOTS=${LOCAL_BUILD_SLOTS:-3}
 JOBS=${LOCAL_BUILD_JOBS:-3}
 ROOT=${LOCAL_BUILD_SLOT_ROOT:-$HOME/.hd-build-slots}
@@ -66,7 +90,7 @@ export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_RELEASE_DEBUG CARGO_INCREMENTAL
 stamp() { date +%s; }
 
 usage() {
-    echo "usage: $0 <cargo args...> | $0 status | $0 --ts -- <command...> | $0 --ts status" >&2
+    echo "usage: $SELF <cargo args...> | $SELF status | $SELF --ts -- <command...> | $SELF --ts status" >&2
     echo "  LOCAL_BUILD_SLOTS=$SLOTS LOCAL_BUILD_JOBS=$JOBS LOCAL_BUILD_SLOT_ROOT=$ROOT" >&2
     exit 64
 }
@@ -101,7 +125,7 @@ read_cap() {
             ;;
     esac
     CAP_SOURCE=ignored
-    echo "local-build: ignoring $capfile: it must hold a whole number from 1 to $SLOTS" >&2
+    [ "${1-}" = quiet ] || echo "local-build: ignoring $capfile: it must hold a whole number from 1 to $SLOTS" >&2
 }
 read_cap
 
@@ -217,6 +241,9 @@ HEAD_GRACE=${LOCAL_BUILD_HEAD_GRACE_SECONDS:-60}
 TICKET_STALE=${LOCAL_BUILD_TICKET_SECONDS:-300}
 NEXT_STALE=${LOCAL_BUILD_NEXT_SECONDS:-1800}
 POLL=${LOCAL_BUILD_POLL_SECONDS:-3}
+# The head polls faster: a copy of run from before the queue takes a free slot on its own
+# 3 s poll, and the head should get there first while such copies remain.
+HEAD_POLL=${LOCAL_BUILD_HEAD_POLL_SECONDS:-1}
 TICKET=
 SEAT=${HD_SEAT:--}
 case "$SEAT" in '' | *[!a-z0-9-]*) SEAT=- ;; esac
@@ -315,6 +342,8 @@ try_acquire() {
         fi
         i=$((i + 1))
     done
+    # The coordinator may change the cap while runs wait; a raised cap serves them at once.
+    read_cap quiet
     touch -c "$TICKET" 2>/dev/null || true
     [ -f "$TICKET" ] || join_queue
     scan_queue
@@ -497,7 +526,11 @@ while ! try_acquire; do
         fi
         said_pos=$POS
     fi
-    sleep "$POLL"
+    if [ "$POS" = 1 ]; then
+        sleep "$HEAD_POLL"
+    else
+        sleep "$POLL"
+    fi
 done
 # The slot is ours: give up the ticket, and a .next turn that named this run is used.
 leave_queue
@@ -655,6 +688,6 @@ done
 # After a successful build, drop the superseded heddle artifacts it left in target/*/deps (deps-sweep.md).
 # A failed or skipped sweep never changes the build's status.
 if [ "$CLASS" = cargo ] && [ "$rc" = 0 ] && [ "${LOCAL_BUILD_DEPS_SWEEP:-1}" != 0 ]; then
-    node "$(dirname "$0")/deps-sweep.mjs" --quiet --after-build -- "$@" >&2 || true
+    node "$(dirname "$SELF")/deps-sweep.mjs" --quiet --after-build -- "$@" >&2 || true
 fi
 exit "$rc"

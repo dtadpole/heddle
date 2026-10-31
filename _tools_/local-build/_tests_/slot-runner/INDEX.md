@@ -1,11 +1,11 @@
 ---
 title: Local build slot runner
-version: 1.3.0
+version: 1.4.0
 description: Unit tests for the slot runner — who holds a slot, when it is released, and what status reports.
 grounded_in:
   - source: _tools_/local-build/run
 created: 2026-10-23T03:21:31Z
-modified: 2026-10-31T04:20:00Z
+modified: 2026-10-31T05:00:00Z
 ---
 
 # `slot-runner`
@@ -23,7 +23,10 @@ target alone and needs a command that exists. The queue serves the waiter that c
 polls thirty times as often; a live waiter ahead holds a free slot from a newcomer (75, the newcomer's ticket
 gone); a dead waiter or one silent past 300 s is dropped and one silent past 60 s passed over; `.next` puts the
 seat or tree it names first once and an hour-old one is ignored; `status` lists the queue in serving order and
-changes nothing; a waiter stopped by `TERM` exits 143 and leaves the queue. Concurrency is proven by holding each fake cargo until released, not by timing, and a holder
+changes nothing; a waiter stopped by `TERM` exits 143 and leaves the queue; a raised cap serves a waiter at once, and the head
+takes a freed slot within seconds though the others poll every 30 s. A run whose script is rewritten in place
+while it waits still runs the text it started with, leaves no private copy in `TMPDIR`, and its usage names
+the script. Concurrency is proven by holding each fake cargo until released, not by timing, and a holder
 whose folder is gone exits, so a failed test leaves no process behind.
 
 ```bash

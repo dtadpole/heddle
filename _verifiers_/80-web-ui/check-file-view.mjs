@@ -343,6 +343,76 @@ test('an SVG opened directly runs no script and cannot reach the API, while the 
   }
 })
 
+
+test('an old HTML response cannot replace the latest file under its newer title', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('html-selection-ticket')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'old.html'), '<!doctype html><html><head></head><body><h1>OLD HTML</h1></body></html>')
+    writeFileSync(join(server.work, 'latest.md'), '# LATEST FILE\n\nLatest selected document.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('old.html')} !== undefined && ${row('latest.md')} !== undefined`, 15000)
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.__htmlWaiting = false
+      window.fetch = async (input, options) => {
+        const response = await real(input, options)
+        if (String(input).startsWith('/api/html?')) {
+          window.__htmlWaiting = true
+          await new Promise((resolve) => { window.__releaseHtml = resolve })
+        }
+        return response
+      }
+    })()`)
+    await browser.evaluate(`${row('old.html')}.click()`)
+    await browser.waitFor('window.__htmlWaiting === true', 10000)
+    await browser.evaluate(`${row('latest.md')}.click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('LATEST FILE')`, 10000)
+    await browser.evaluate('window.__releaseHtml()')
+    // Let both the resumed network continuation and potential lazy sanitizer settle before checking publication.
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const displayed = JSON.parse(await browser.evaluate(`JSON.stringify({
+      title: document.getElementById('file-head').textContent,
+      text: document.getElementById('file-body').textContent,
+      textHidden: document.getElementById('file-body').hidden,
+      htmlHidden: document.getElementById('file-html').hidden,
+    })`))
+    assert.ok(displayed.text.includes('LATEST FILE'), JSON.stringify(displayed))
+    assert.equal(displayed.textHidden, false, 'Refs #110: latest file remains visible')
+    assert.equal(displayed.htmlHidden, true, 'stale HTML cannot take over the pane')
+  } finally { browser.close(); await server.close() }
+})
+
+
+test('an invalid file refusal is visible after a settled HTML preview', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('preview-refusal-visible')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'old.html'), '<!doctype html><html><head></head><body><h1>OLD PREVIEW</h1></body></html>')
+    writeFileSync(join(server.work, 'invalid.txt'), Buffer.from([0xff, 0xfe, 0x41]))
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('old.html')} !== undefined && ${row('invalid.txt')} !== undefined`, 15000)
+    await browser.evaluate(`${row('old.html')}.click()`)
+    await browser.waitFor(`!document.getElementById('file-html').hidden && document.getElementById('html-view').srcdoc.includes('OLD PREVIEW')`, 15000)
+    await browser.evaluate(`${row('invalid.txt')}.click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('not UTF-8')`, 10000)
+    assert.equal(await browser.evaluate(`document.getElementById('file-body').hidden`), false, 'Refs #113: refusal is visible')
+    assert.equal(await browser.evaluate(`document.getElementById('file-html').hidden`), true, 'old preview is hidden under failed filename')
+  } finally { browser.close(); await server.close() }
+})
+
 test('a file named beyond ASCII downloads whole under its real name, with only ASCII in its disposition', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   /**
