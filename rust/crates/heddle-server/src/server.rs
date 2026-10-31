@@ -1659,6 +1659,28 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    // A folder that is gone (#141) is judged before it is read, as web.ts does: under a root it is `404` with DSH's
+    // `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the
+    // folder is gone instead of listing it empty; outside every root it is the `400` below. It is placed through
+    // the real path of what still exists, so a spelling through a link (`/tmp/x/w` for `/private/tmp/x/w`) is the
+    // same folder.
+    if let Some(raw) = query.get("path").filter(|path| !path.is_empty()) {
+        let located = heddle_config::canonical_path_through_ancestors(std::path::Path::new(raw));
+        if !located.exists() {
+            return if workspaces.owns(&located) {
+                respond::error_with_code(
+                    StatusCode::NOT_FOUND,
+                    format!("no entry at \"{}\"", located.display()),
+                    "workspace-file/not-found",
+                )
+            } else {
+                respond::error(
+                    StatusCode::BAD_REQUEST,
+                    format!("{} is not under any workspace root", located.display()),
+                )
+            };
+        }
+    }
     let path = query
         .get("path")
         .filter(|path| !path.is_empty())
@@ -1846,8 +1868,19 @@ async fn insert_workspace_before(State(state): State<AppState>, body: JsonBody) 
             );
         }
     };
-    match workspaces.insert_before(id, before) {
-        Ok(order) => respond::json(StatusCode::OK, &json!({"workspaceIds": order})),
+    match workspaces.reorder(id, before) {
+        Ok((order, moved)) => {
+            // Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an
+            // added, renamed or removed workspace is; a move that changes nothing is not announced, as DSH's
+            // registry writes nothing then (dsh-workspace lib/index.js:484, :492). web.ts pushes the same frame.
+            if moved {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/reordered", "workspaceIds": order}),
+                );
+            }
+            respond::json(StatusCode::OK, &json!({"workspaceIds": order}))
+        }
         Err(error) if error.code.as_deref() == Some("workspace/not-found") => {
             service_refusal(error, StatusCode::NOT_FOUND)
         }
@@ -3904,6 +3937,121 @@ mod tests {
         );
     }
 
+    /// A registry double that keeps an order and says whether a move moved it, as `heddle_workspace`'s
+    /// `reorder` does.
+    struct KeptOrder {
+        order: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::WorkspaceService for KeptOrder {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn reorder(
+            &self,
+            id: &str,
+            before: Option<&str>,
+        ) -> Result<(Vec<String>, bool), ServiceError> {
+            let mut order = self.order.lock().unwrap();
+            if before == Some(id) {
+                return Ok((order.clone(), false));
+            }
+            let mut moved: Vec<String> = order.iter().filter(|each| *each != id).cloned().collect();
+            let at = before
+                .and_then(|anchor| moved.iter().position(|each| each == anchor))
+                .unwrap_or(moved.len());
+            moved.insert(at, id.to_owned());
+            let changed = moved != *order;
+            *order = moved.clone();
+            Ok((moved, changed))
+        }
+    }
+
+    /// A move is pushed to every open page as a `workspace` frame naming the order (#136), as an added, renamed
+    /// or removed workspace is; a move that changes nothing pushes nothing, as DSH's registry writes nothing then
+    /// (dsh-workspace lib/index.js:484, :492).
+    #[tokio::test]
+    async fn a_workspace_move_is_pushed_and_a_move_that_moves_nothing_is_not() {
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(KeptOrder {
+            order: std::sync::Mutex::new(vec!["w-1".into(), "w-2".into(), "w-3".into()]),
+        }));
+        let (router, state) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-order-push")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let post = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            async move {
+                let (status, _) =
+                    post_json(&router, "/api/workspaces/insertBefore", &cookie, body).await;
+                status
+            }
+        };
+
+        assert_eq!(
+            post(r#"{"workspaceId":"w-3","beforeWorkspaceId":"w-1"}"#).await,
+            StatusCode::OK
+        );
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "workspace");
+        assert_eq!(
+            data,
+            json!({"type": "workspace/reordered", "workspaceIds": ["w-3", "w-1", "w-2"]})
+        );
+        assert!(id.is_some(), "numbered, so a reconnecting page is given it");
+
+        // Itself as the anchor, then the last one last: answered, and nothing pushed for either.
+        for body in [
+            r#"{"workspaceId":"w-2","beforeWorkspaceId":"w-2"}"#,
+            r#"{"workspaceId":"w-2"}"#,
+        ] {
+            assert_eq!(post(body).await, StatusCode::OK, "{body}");
+        }
+        assert_eq!(post(r#"{"workspaceId":"w-3"}"#).await, StatusCode::OK);
+        let (_, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            data["workspaceIds"],
+            json!(["w-1", "w-2", "w-3"]),
+            "the next frame is the next real move: the two that moved nothing pushed nothing"
+        );
+    }
+
     /// A registry with one root: it owns what is at or under that folder, and records every tree it
     /// is asked for, so a test can tell a refusal from a listing that was read and then dropped.
     struct OneRoot {
@@ -4028,6 +4176,119 @@ mod tests {
                 "{uri}"
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A folder that is gone (#141): under a root it is web.ts's `404 workspace-file/not-found`, DSH's code
+    /// (dsh-api-workspace-files lib/index.js:568), however it is spelled — the stored path, or one through a link,
+    /// which the lexical fallback of `canonical_path` keeps once the folder is gone; behind a link out of every root,
+    /// or outside them, it is the `400` naming where it lands. Nothing is handed to the tree.
+    #[tokio::test]
+    async fn the_tree_route_says_a_folder_that_is_gone_is_not_found_under_its_root() {
+        let base = std::env::temp_dir().join(format!(
+            "heddle-tree-gone-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("real").join("root").join("inner")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("alias")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("elsewhere"),
+            base.join("real").join("root").join("way-out"),
+        )
+        .unwrap();
+        let canonical = std::fs::canonicalize(&base).unwrap();
+        let root = canonical.join("real").join("root");
+        let registry = Arc::new(OneRoot {
+            root: root.clone(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_root = harness();
+        with_root.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_root,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("tree-gone")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let tree = |path: &Path| format!("/api/tree?path={}", query_value(path));
+
+        for (what, asked, at) in [
+            (
+                "a folder never made inside the root",
+                root.join("never-made"),
+                root.join("never-made"),
+            ),
+            (
+                "the same spelled through a link",
+                base.join("alias").join("root").join("never-made"),
+                root.join("never-made"),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &tree(&asked), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{what}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"no entry at \\\"{}\\\"\",\"code\":\"workspace-file/not-found\"}}\n",
+                    at.display()
+                ),
+                "{what} gets DSH's code and web.ts's sentence"
+            );
+        }
+        for (what, asked, at) in [
+            (
+                "a folder that is gone behind a link out of the root",
+                root.join("way-out").join("never-made"),
+                canonical.join("elsewhere").join("never-made"),
+            ),
+            (
+                "a folder that is gone outside every root",
+                canonical.join("nowhere").join("deeper"),
+                canonical.join("nowhere").join("deeper"),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &tree(&asked), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{what}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"{} is not under any workspace root\"}}\n",
+                    at.display()
+                ),
+                "{what} is judged where it lands"
+            );
+        }
+        assert!(
+            registry.asked.lock().unwrap().is_empty(),
+            "a folder that is gone is never handed to the tree"
+        );
+
+        // The root's own folder, gone: still the root's, and not found.
+        std::fs::remove_dir_all(&root).unwrap();
+        let (status, _, bytes) = call(&router, Method::GET, &tree(&root), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("workspace-file/not-found"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
